@@ -6,7 +6,7 @@ Open-source Sigma detection rules for AI agent security, maintained by [Netzilo]
 
 **AIDR** (AI Detection and Response) is Netzilo's behavioral security engine for AI agent deployments. It monitors every action every AI agent takes — tool calls, file reads, HTTP requests, LLM calls, process spawns, skill acquisitions — and evaluates Sigma rules against that traffic in real time.
 
-AIDR is not a content filter. It is a **behavioral analysis engine** backed by a live graph of agent activity. Every action is recorded as a node and edge in a behaviour graph that persists for the session. Rules can traverse that graph to detect multi-step attack patterns that no single-event rule could catch.
+AIDR is not a simple content filter. It is a **behavioral analysis engine** backed by a live graph of agent activity. Every action is recorded as a node and edge in a behaviour graph that persists for the session. Rules can traverse that graph to detect multi-step attack patterns that no single-event rule could catch.
 
 ![AIDR — AI Detection and Response](graph.png)
 
