@@ -8,6 +8,8 @@ Open-source Sigma detection rules for AI agent security, maintained by [Netzilo]
 
 AIDR is not a content filter. It is a **behavioral analysis engine** backed by a live graph of agent activity. Every action is recorded as a node and edge in a behaviour graph that persists for the session. Rules can traverse that graph to detect multi-step attack patterns that no single-event rule could catch.
 
+![AIDR — AI Detection and Response](graph.png)
+
 ---
 
 ## What Is in This Repository?
