@@ -61,6 +61,9 @@ detection:
   # Known base64-encoded injection payloads. These are the literal base64 strings that
   # attackers embed in tool responses or documents to evade text-based scanners.
   selection_base64_payloads:
+    event_type:
+      - llm_request
+      - tool_response
     content|contains:
       # "ignore previous instructions"
       - 'aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw=='

@@ -30,10 +30,11 @@ detection:
       - '?track='
     content|re: '!\[.*?\]\(https?://[^)]+\?[^)]*[A-Za-z0-9+/]{20,}={0,2}[^)]*\)'
   selection_img_tag_exfil:
+    event_type: llm_response
     content|contains:
       - '<img '
       - 'src='
-    content|re: '<img[^>]+src=.https?://[^>]*\?[^>]*[A-Za-z0-9+/]{20,}={0,2}[^>]*[>]'
+    content|re: '<img[^>]+src=.https?://[^\s>]*\?[^\s>]*[A-Za-z0-9+/]{20,}={0,2}'
   filter_known_good:
     content|contains:
       - 'microsoft.com'

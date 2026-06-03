@@ -18,8 +18,9 @@ logsource:
   product: ai_agent
   category: agent_events
 detection:
-  # Fire on every tool call — the script counts accumulated calls from the graph.
+  # Scope to tool_call — velocity is measured in tool calls, not HTTP events.
   sel_trigger:
+    event_type: tool_call
     content|re: '.'
   condition: sel_trigger
 level: medium

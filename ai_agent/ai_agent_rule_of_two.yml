@@ -24,8 +24,10 @@ logsource:
   category: agent_events
 
 detection:
-  # Fire on every tool call — the Starlark script decides via graph traversal
+  # Scope to tool_call so HTTP request/response events bypass this rule.
+  # The graph traversal in the script only needs to run when agent tool activity occurs.
   sel_trigger:
+    event_type: tool_call
     content|re: '.'
   condition: sel_trigger
 

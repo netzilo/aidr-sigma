@@ -21,8 +21,10 @@ logsource:
   product: ai_agent
   category: agent_events
 detection:
-  # Fire on every tool call — the script decides by inspecting graph history.
+  # Scope to tool_call — the graph query only needs to run when tool activity occurs,
+  # not on every HTTP request/response.
   sel_trigger:
+    event_type: tool_call
     content|re: '.'
   condition: sel_trigger
 level: high

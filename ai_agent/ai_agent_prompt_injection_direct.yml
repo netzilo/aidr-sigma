@@ -37,12 +37,14 @@ detection:
       - 'forget everything'
       - 'new instructions'
   selection_base64_injection:
+    event_type: llm_request
     content|contains:
       - 'aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw=='
       - 'eW91IGFyZSBub3c='
       - 'ZGV2ZWxvcGVyIG1vZGU='
       - 'c3lzdGVtIG92ZXJyaWRl'
   selection_policy_puppetry:
+    event_type: llm_request
     content|contains:
       - '<policy>'
       - '</policy>'
@@ -53,9 +55,9 @@ detection:
       - '[CONFIG]'
       - 'system.policy'
   selection_role_switching:
+    event_type: llm_request
     content|contains:
       - 'act as if you are'
-      - 'pretend you are'
       - 'roleplay as'
       - 'simulate being'
       - 'behave like'
