@@ -1,0 +1,50 @@
+title: Unusual Tool Call Velocity in Session
+id: a1b2c3d4-e5f6-7890-abcd-session-vel01
+status: stable
+description: >
+  Detects sessions with an unusually high number of tool calls (20+), which may
+  indicate automated probing or scripted attack sequences.
+  Adapted from AgentShield: original used session.tool_count field; this version
+  queries the behavior graph TOOL_CALL edge count directly.
+references:
+  - https://attack.mitre.org/techniques/T1046/
+  - https://arxiv.org/abs/2403.04783
+author: AgentShield (adapted by Netzilo)
+date: "2026-03-18"
+tags:
+  - attack.discovery
+  - attack.t1046
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Fire on every tool call — the script counts accumulated calls from the graph.
+  sel_trigger:
+    content|re: '.'
+  condition: sel_trigger
+level: medium
+falsepositives:
+  - Legitimate batch operations
+  - Automated testing sessions
+
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  THRESHOLD = 20
+
+  def run():
+      aid = meta.get("agent_name", "")
+      if aid == "":
+          return "allow"
+
+      tool_calls = edges(aid, dir="out", kind="TOOL_CALL")
+      count = len(tool_calls)
+
+      if count >= THRESHOLD:
+          print("Session velocity anomaly: " + str(count) + " tool calls (threshold=" + str(THRESHOLD) + ")")
+          return "report"
+
+      return "allow"
+
+  result = run()

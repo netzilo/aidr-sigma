@@ -1,0 +1,134 @@
+title: CVE-2026-44113/44112 Sandbox Escape File Access
+id: netzilo-cve-2026-44113-44112-001
+status: stable
+description: >
+  Detects CVE-2026-44113/44112: TOCTOU race condition allowing reads (44113) or writes
+  (44112) outside the OpenClaw sandbox mount root. Checks both direct tool-based file
+  access and subprocess (sh) file access via the behavior graph.
+author: Netzilo
+date: "2026-04-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44113
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44112
+tags:
+  - attack.defense-evasion
+  - attack.t1036
+  - attack.credential-access
+level: critical
+falsepositives:
+  - None expected for out-of-sandbox access to sensitive paths
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # Fire on any tool_call or tool_response — script decides via graph traversal
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+  condition: sel_trigger
+
+action: execute
+on_timeout: block
+on_error: allow
+script: |
+  # Behavior threat — two detection paths:
+  #
+  # Path A (event-level, tool-based):
+  #   Fires when the current tool_request calls a file-reading or file-writing
+  #   tool. The path is parsed from meta.content (tool arguments JSON).
+  #
+  # Path B (graph-based, subprocess):
+  #   The TOCTOU exploit is performed by the sh subprocess spawned via CVE-44115.
+  #   sh does not go through MCP tools — its file ops appear as READ_FILE/WRITE_FILE
+  #   edges on the Process node in the behavior graph.
+
+  # FileSystem nodes do NOT store individual file paths — they are aggregated
+  # per process executable path. To detect which files were accessed, use
+  # search_in(fs["id"] + "$READ" / "$WRITE", pattern) against the indexed content.
+  # fs["id"] format: "filesystem:///bin/sh"
+
+  SENSITIVE_PATTERNS = [
+      "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+      "/.ssh/id_rsa", "/.ssh/id_ed25519", "/.ssh/authorized_keys", "/.ssh/config",
+      ".aws/credentials", ".aws/config",
+      ".kube/config",
+      "/.env", "/.netrc",
+      "/root/", "/var/lib/secrets",
+      "/proc/self/environ", "/proc/1/environ",
+  ]
+
+  def check_file_edges(actor_id):
+      # CVE-2026-44113: sensitive file read via any operation outside MCP tools.
+      # search_in checks the indexed content for that process's READ_FILE events.
+      for e in edges(actor_id, dir="out", kind="READ_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          source = fs["id"] + "$READ"
+          for pattern in SENSITIVE_PATTERNS:
+              if search_in(source, pattern):
+                  print("CVE-2026-44113: sensitive READ — actor=" + actor_id + " pattern=" + pattern)
+                  return "block"
+
+      # CVE-2026-44112: any file write outside the sandbox by a subprocess.
+      for e in edges(actor_id, dir="out", kind="WRITE_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          source = fs["id"] + "$WRITE"
+          for pattern in SENSITIVE_PATTERNS:
+              if search_in(source, pattern):
+                  print("CVE-2026-44112: sensitive WRITE — actor=" + actor_id + " pattern=" + pattern)
+                  return "block"
+
+      return "allow"
+
+  SANDBOX_ROOT = "/openclaw/sandbox/mounts/"
+
+  def path_is_sensitive(path):
+      # Plain substring match — path is a real string from JSON, not a source label.
+      for pattern in SENSITIVE_PATTERNS:
+          if pattern in path:
+              return True
+      return False
+
+  def run():
+      # Path A: parse path from tool call JSON arguments (meta.content is available).
+      content  = meta.get("content", "")
+      tool     = meta.get("tool_name", "").lower()
+      is_read  = "read" in tool or "open" in tool or "get_file" in tool or "fetch_file" in tool
+      is_write = "write" in tool or "save" in tool or "create_file" in tool or "append" in tool
+
+      if is_read or is_write:
+          m = re.find(r'"(?:path|file|filename|filepath)"\s*:\s*"([^"]*)"', content)
+          if m != None:
+              parts = m.split('"')
+              if len(parts) >= 4:
+                  path = parts[3]
+                  outside = not path.startswith(SANDBOX_ROOT)
+                  if is_write and outside:
+                      print("CVE-2026-44112: tool write outside sandbox — path: " + path)
+                      return "block"
+                  if is_read and outside and path_is_sensitive(path):
+                      print("CVE-2026-44113: tool read outside sandbox — path: " + path)
+                      return "block"
+
+      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          aid = a["id"]
+          verdict = check_file_edges(aid)
+          if verdict == "block":
+              return "block"
+          for ee in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              verdict = check_file_edges(ee["to"])
+              if verdict == "block":
+                  return "block"
+
+      return "allow"
+
+  result = run()

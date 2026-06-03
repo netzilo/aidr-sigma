@@ -1,0 +1,54 @@
+title: Shell Configuration Modification
+id: 1e785c77-6d77-5c79-ae24-6a389f9ef7f1
+related:
+  - id: d12c1b8c-4ee7-5548-947b-a1627bdc98dc
+    type: similar
+  - id: 1e785c77-6d77-5c79-ae24-6a389f9ef7f1-p
+    type: companion
+status: stable
+description: |
+  Detects writes to shell startup files and SSH authorized_keys via Bash append
+  commands and Write/Edit tool file_path. Companion periodic rule covers EDR-level
+  writes via graph traversal.
+references:
+  - https://attack.mitre.org/techniques/T1546/
+author: AgentShield
+date: "2026-02-04"
+modified: "2026-06-02"
+tags:
+  - attack.persistence
+  - attack.t1546
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Bash append/redirect commands
+  sel_shell_append:
+    event_type: tool_call
+    command|contains:
+      - '>> ~/.bashrc'
+      - '>> ~/.zshrc'
+      - '>> ~/.profile'
+      - '>> ~/.bash_profile'
+  sel_ssh_keys_cmd:
+    event_type: tool_call
+    command|contains:
+      - '>> ~/.ssh/authorized_keys'
+      - '> ~/.ssh/authorized_keys'
+  # Write/Edit tool calls — file_path field populated from tool args
+  sel_write_tool_path:
+    event_type: tool_call
+    file_path|endswith:
+      - '.bashrc'
+      - '.zshrc'
+      - '.profile'
+      - '.bash_profile'
+      - '.zprofile'
+      - '.zshenv'
+      - 'authorized_keys'
+  condition: sel_shell_append or sel_ssh_keys_cmd or sel_write_tool_path
+falsepositives:
+  - Legitimate shell customisation by developers adding aliases or PATH entries
+  - Package managers that update shell profiles during installation
+  - Development environment setup tools like nvm, pyenv, or rbenv
+level: high

@@ -1,0 +1,42 @@
+title: PII Credit Card and SSN Redaction
+id: netzilo-pii-cc-ssn-redact-001
+status: stable
+description: >
+  Redacts credit card numbers (Visa/Mastercard/Amex/Discover) and US Social Security
+  Numbers from all content, preserving only the last 4 digits for context.
+author: Netzilo
+date: "2026-03-01"
+tags:
+  - attack.exfiltration
+  - pii.credit_card
+  - pii.ssn
+level: critical
+falsepositives:
+  - Test data with example card numbers (mitigated by filter)
+  - Documentation with placeholder SSNs
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  selection:
+    content|re:
+      # Visa, Mastercard, Discover
+      - '\b(?:4[0-9]{3}|5[1-5][0-9]{2}|6011|65[0-9]{2})[- ]?[0-9]{4}[- ]?[0-9]{4}[- ]?[0-9]{4}\b'
+      # Amex 15-digit
+      - '\b3[47][0-9]{13}\b'
+      # US SSN — excludes invalid prefixes 000, 666, 900-999
+      - '\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})[- ]\d{2}[- ]\d{4}\b'
+      # Labeled SSN
+      - '(?i)\b(?:SSN|S\.S\.N|Social\s+Security)\s*(?:Number|No\.?|#)?\s*[:=]?\s*\d{3}[- ]\d{2}[- ]\d{4}\b'
+  filter_placeholders:
+    content|re:
+      - '(?i)(?:xxxx|0000|test|sample|example|placeholder|\*{4,})'
+      - '\b000-00-0000\b'
+      - '\b0000[- ]?0000[- ]?0000[- ]?0000\b'
+  condition: selection and not filter_placeholders
+
+action: redact
+replace: "[PII_REDACTED]"
+keep_last: 4

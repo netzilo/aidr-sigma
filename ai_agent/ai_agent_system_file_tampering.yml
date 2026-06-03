@@ -1,0 +1,47 @@
+title: System File Modification
+id: 89404989-df81-5ae1-9b23-d9e845e9be65
+related:
+  - id: 89404989-df81-5ae1-9b23-d9e845e9be65-p
+    type: companion
+status: stable
+description: |
+  Detects writes to critical system directories via Bash redirect commands and
+  Write/Edit tool file_path. Companion periodic rule covers EDR-level writes
+  via AIDR graph traversal.
+references:
+  - https://attack.mitre.org/techniques/T1543/
+author: AgentShield
+date: "2026-02-04"
+modified: "2026-06-02"
+tags:
+  - attack.persistence
+  - attack.t1543
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Bash redirect commands
+  sel_bash_etc:
+    event_type: tool_call
+    command|contains:
+      - '> /etc/'
+      - 'tee /etc/'
+  sel_bash_bin:
+    event_type: tool_call
+    command|contains:
+      - '> /usr/bin/'
+      - '> /usr/local/bin/'
+  # Write/Edit tool calls — file_path field populated from tool args
+  sel_write_tool_etc:
+    event_type: tool_call
+    file_path|startswith: '/etc/'
+  sel_write_tool_bin:
+    event_type: tool_call
+    file_path|startswith:
+      - '/usr/bin/'
+      - '/usr/local/bin/'
+  condition: sel_bash_etc or sel_bash_bin or sel_write_tool_etc or sel_write_tool_bin
+falsepositives:
+  - Package managers writing to /etc/ or /usr/local/bin/ during legitimate installation
+  - System configuration management tools updating /etc/ files
+level: critical

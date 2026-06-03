@@ -1,0 +1,124 @@
+title: Prompt Injection Evasion Technique Detection
+id: f2e8d341-7b9a-4c6f-a1e3-0d8b5c7f2e91
+status: stable
+description: |
+  Detects high-confidence prompt injection evasion techniques that do not require AI
+  analysis to classify. These patterns are structurally unambiguous: benign content
+  does not fragment instruction keywords across whitespace boundaries, embed LLM chat
+  format delimiters in application data, or use known base64-encoded injection payloads.
+  Complements ai_agent_ai_prompt_injection.yml (AI scanner for ambiguous keyword cases)
+  and ai_agent_prompt_injection_direct.yml (direct jailbreak phrases).
+references:
+  - https://arxiv.org/abs/2403.04783
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: Netzilo
+date: "2026-06-03"
+related:
+  - id: a7f3c891-42d1-4e8b-b6f2-9c0d5e2a1f83
+    type: companion
+  - id: eddcdc94-698c-577f-900d-28b1b5491a80
+    type: similar
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.initial-access
+  - attack.t1190
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # LLM chat-format role delimiters injected into tool content or user messages.
+  # These tokens exist only inside model tokenizers — no legitimate app payload contains them.
+  selection_delimiter_injection:
+    event_type:
+      - llm_request
+      - tool_response
+    content|re:
+      - '(?i)---+\s*(system|assistant|user)\s*[:\n]'
+      - '(?i)<\|system\|>|<\|user\|>|<\|assistant\|>|<\|endoftext\|>'
+      - '(?i)\[INST\].*\[/INST\]'
+      - '(?i)<<SYS>>|<</SYS>>'
+      - '(?i)#{3,}\s*(SYSTEM|INSTRUCTION|OVERRIDE)\s*[:#\n]'
+      - '(?i)<im_start>\s*(system|user|assistant)'
+      - '(?i)<\|im_start\|>\s*(system|user|assistant)'
+
+  # Injection keywords fractured by whitespace or newlines to bypass substring detectors.
+  # Reassembling the fragments produces an unambiguous injection directive.
+  selection_token_split:
+    event_type:
+      - llm_request
+      - tool_response
+    content|re:
+      - '(?i)ig[\s\t\n\r]{1,8}nore[\s\t\n\r]{0,15}(all[\s\t\n\r]+)?(prev|instruct|safe|guide)'
+      - '(?i)dis[\s\t\n\r]{1,5}re[\s\t\n\r]{1,5}gard[\s\t\n\r]{0,15}(all[\s\t\n\r]+)?instruct'
+      - '(?i)sys[\s\t\n\r]{1,8}tem[\s\t\n\r]{1,8}pro[\s\t\n\r]{1,8}mpt'
+      - '(?i)by[\s\t\n\r]{1,5}pass[\s\t\n\r]{0,15}(the[\s\t\n\r]+)?(safe|guard|filter|restrict)'
+      - '(?i)jail[\s\t\n\r]{1,5}break'
+      - '(?i)you[\s\t\n\r]+are[\s\t\n\r]+now[\s\t\n\r]+(DAN|unres|without\s+restrict)'
+      - '(?i)for[\s\t\n\r]{1,5}get[\s\t\n\r]{0,10}(all[\s\t\n\r]+)?(prev|instruct|your\s+rule)'
+
+  # Known base64-encoded injection payloads. These are the literal base64 strings that
+  # attackers embed in tool responses or documents to evade text-based scanners.
+  selection_base64_payloads:
+    content|contains:
+      # "ignore previous instructions"
+      - 'aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw=='
+      # "ignore all instructions"
+      - 'aWdub3JlIGFsbCBpbnN0cnVjdGlvbnM='
+      # "you are now"
+      - 'eW91IGFyZSBub3c='
+      # "developer mode"
+      - 'ZGV2ZWxvcGVyIG1vZGU='
+      # "system override"
+      - 'c3lzdGVtIG92ZXJyaWRl'
+      # "no restrictions"
+      - 'bm8gcmVzdHJpY3Rpb25z'
+      # "you must now"
+      - 'eW91IG11c3Qgbm93'
+      # "forget everything"
+      - 'Zm9yZ2V0IGV2ZXJ5dGhpbmc='
+      # "ignore your instructions"
+      - 'aWdub3JlIHlvdXIgaW5zdHJ1Y3Rpb25z'
+      # "disregard all previous instructions"
+      - 'ZGlzcmVnYXJkIGFsbCBwcmV2aW91cyBpbnN0cnVjdGlvbnM='
+      # "you have no restrictions"
+      - 'eW91IGhhdmUgbm8gcmVzdHJpY3Rpb25z'
+      # "jailbreak"
+      - 'amFpbGJyZWFr'
+
+  # XML/bracket policy tags injecting synthetic system context.
+  # These structures exist solely to impersonate privileged instruction frames.
+  selection_policy_puppetry:
+    event_type:
+      - llm_request
+      - tool_response
+    content|re:
+      - '(?i)<\s*/?\s*(policy|POLICY)\s*>'
+      - '(?i)<\s*/?\s*system[-_]?instructions?\s*>'
+      - '(?i)<\s*/?\s*override[-_]?rules?\s*>'
+      - '(?i)<\s*/?\s*new[-_]?instructions?\s*>'
+      - '(?i)<\s*/?\s*ai[-_]?directives?\s*>'
+      - '(?i)\[/?POLICY\]|\[/?OVERRIDE\]|\[/?NEWRULE\]|\[/?DIRECTIVE\]'
+
+  # Zero-width and bidirectional Unicode control characters used to hide injected text.
+  # Scoped to tool_response (external content) only, and must appear near instruction verbs.
+  selection_unicode_injection:
+    event_type: tool_response
+    content|re: '(?i)[​-‏‪-‮⁠﻿].{0,100}(instruct|comply|obey|execute|ignore|override|forget|bypass|disregard)'
+
+  condition: >-
+    selection_delimiter_injection
+    or selection_token_split
+    or selection_base64_payloads
+    or selection_policy_puppetry
+    or selection_unicode_injection
+
+falsepositives:
+  - LLM prompt template files stored in repositories that use chat-format markers for legitimate
+    offline assembly (delimiter_injection) — exclude via path-scoped allow rule if needed
+  - Multilingual documents with zero-width joiners that happen to precede instruction-related words
+    (unicode_injection) — extremely unlikely given the proximity constraint
+  - Internal base64 content that collides with a known payload string (base64_payloads) — probability
+    is negligible given the full-string match on specific known encodings
+level: critical

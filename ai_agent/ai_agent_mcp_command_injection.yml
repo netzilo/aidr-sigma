@@ -1,0 +1,56 @@
+title: MCP Server Command Injection via Shell Metacharacters
+id: ae6e3887-4265-5882-b550-31a2386cfab8
+status: stable
+description: |
+  Detects shell metacharacters in MCP tool call input parameters, indicative
+  of command injection attempts against MCP servers that pass user-supplied
+  input unsanitised to system commands (e.g. CVE-2026-4192 in
+  quip-mcp-server 1.0.0).
+references:
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://www.sentinelone.com/vulnerability-database/cve-2026-4192/
+author: AgentShield (adapted by Netzilo)
+date: "2026-03-23"
+modified: "2026-03-23"
+tags:
+  - attack.execution
+  - attack.t1059.004
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Adapted: original used tool_input and tool_source fields not present in LogEntry.
+  # Matches shell metacharacters anywhere in tool call body (content field).
+  selection_shell_metachar:
+    event_type: tool_call
+    content|contains:
+      - '; '
+      - '&&'
+      - '||'
+      - '`'
+      - '$('
+      - '${IFS}'
+      - ' | '
+  # Shell execution tools (Bash, shell, terminal, etc.) are designed to run commands
+  # containing pipes and semicolons — exclude them to avoid false positives.
+  # The injection signal only applies to non-shell tools (read_file, search, fetch, etc.)
+  # where metacharacters should never appear in parameters.
+  filter_shell_tools:
+    event_type: tool_call
+    tool|contains:
+      - 'bash'
+      - 'shell'
+      - 'terminal'
+      - 'powershell'
+      - 'cmd'
+      - 'execute'
+      - 'run_command'
+      - 'run_bash'
+      - 'Edit'
+      - 'Write'
+      - 'edit'
+      - 'write'
+  condition: selection_shell_metachar and not filter_shell_tools
+falsepositives:
+  - Non-shell MCP tools whose parameters legitimately include pipe characters (e.g. data formatting strings)
+level: critical

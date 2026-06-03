@@ -1,0 +1,69 @@
+title: MCP STDIO Config Shell Injection
+id: netzilo-mcp-stdio-config-injection-001
+status: stable
+description: >
+  Blocks MCP STDIO configs where 'command' is a shell binary — root cause of MCP
+  supply-chain RCE (CVE-2026-30623/30624/30616/30617/30618/33224 Family 1;
+  CVE-2026-26015 Family 4 transport-type downgrade). Shells are never legitimate
+  MCP launchers.
+author: Netzilo
+date: "2026-03-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-30623
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-26015
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.initial-access
+level: critical
+falsepositives:
+  - Security research discussing CVEs or the attack pattern
+  - Test fixtures containing these patterns as data
+  - Documentation explaining the attack
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # Shell binary as the MCP command value
+  sel_shell_binary:
+    event_type: tool_call
+    content|re:
+      - '(?i)"command"\s*:\s*"(/usr/bin/|/bin/)?(bash|sh|zsh|dash|ksh|csh|fish|ash)\s*"'
+      - '(?i)"command"\s*:\s*"(powershell(\.exe)?|cmd\.exe|wscript\.exe|mshta\.exe)\s*"'
+
+  # Family 4: transport-type downgrade — stdio + command injected into an HTTP/SSE config
+  sel_transport_stdio:
+    event_type: tool_call
+    content|re: '(?i)"transport_type"\s*:\s*"stdio"'
+  sel_transport_cmd:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"[^"]{1,300}"'
+
+  # Reverse shell / RCE in args array
+  sel_rce_args:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*(/dev/tcp/|bash\s+-i\s*>&|nc\s+-[ec]\s|mkfifo\s|ncat\s+--sh-exec|python[23]?\s+.*pty\.spawn)[^\]]*\]'
+
+  # Piped download-and-execute as the command value
+  sel_pipe_exec:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"[^"]{0,100}(curl|wget)\s+[^"]*\|\s*(bash|sh|python|perl|ruby)[^"]*"'
+
+  # Exclusions
+  filter_research:
+    event_type: tool_call
+    content|re: '(?i)(CVE-2026-3062[3-9]|CVE-2026-30615|CVE-2026-26015|transport.type.downgrade)\b'
+  filter_fixtures:
+    event_type: tool_call
+    content|re: '(?i)(test_payload|attack_sample|fixture|blocklist|denylist)\s*[:=]\s*[\[\{]'
+  filter_docs:
+    event_type: tool_call
+    content|re: '(?i)(how\s+to\s+(prevent|detect|fix|patch)|mitigation\s+for|vulnerable\s+to)\s+.{0,40}(stdio|command.injection|transport.type)'
+
+  condition: >
+    (sel_shell_binary or (sel_transport_stdio and sel_transport_cmd) or sel_rce_args or sel_pipe_exec)
+    and not (filter_research or filter_fixtures or filter_docs)
+
+action: block

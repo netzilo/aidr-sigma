@@ -1,0 +1,50 @@
+title: Auto-Approve Configuration Changes
+id: 440a1431-0683-58c2-83b5-ccad310b764f
+related:
+  - id: 440a1431-0683-58c2-83b5-ccad310b764f-p
+    type: companion
+status: stable
+description: |
+  Detects modifications to IDE/agent config files that disable safety confirmations
+  or enable dangerous auto-execute settings. Covers Write/Edit tool calls by
+  file_path and content patterns. Companion periodic rule covers EDR-level writes.
+references:
+  - https://attack.mitre.org/techniques/T1548/
+  - https://attack.mitre.org/techniques/T1112/
+author: AgentShield and Netzilo
+date: "2026-02-16"
+modified: "2026-06-02"
+tags:
+  - attack.privilege-escalation
+  - attack.t1548
+  - attack.defense-evasion
+  - attack.t1112
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Write/Edit tool targeting known IDE config paths
+  sel_path_vscode:
+    event_type: tool_call
+    file_path|contains: '.vscode/settings.json'
+  sel_path_cursor:
+    event_type: tool_call
+    file_path|contains: '.cursor/mcp.json'
+  sel_path_codex:
+    event_type: tool_call
+    file_path|contains: '.codex/config.toml'
+  # Content patterns indicating safety bypass (content field = full serialized args)
+  sel_content_bypass:
+    event_type: tool_call
+    content|contains:
+      - 'disableSandbox'
+      - 'allowDangerousOperations'
+      - 'safeMode.*false'
+      - 'confirmations.*false'
+      - 'auto_approve = true'
+      - 'skip_confirmation = true'
+  condition: sel_path_vscode or sel_path_cursor or sel_path_codex or sel_content_bypass
+falsepositives:
+  - Legitimate development environment configuration
+  - Authorised productivity optimisations
+level: critical

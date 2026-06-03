@@ -1,0 +1,94 @@
+title: Persistence Mechanism Installation
+id: d12c1b8c-4ee7-5548-947b-a1627bdc98dc
+related:
+  - id: 1e785c77-6d77-5c79-ae24-6a389f9ef7f1
+    type: similar
+  - id: d12c1b8c-4ee7-5548-947b-a1627bdc98dc-p
+    type: companion
+status: stable
+description: |
+  Detects persistence via cron, launchd, systemd, and shell profile modifications.
+  Covers Bash command patterns and Write/Edit tool file_path. Companion periodic
+  rule covers EDR-level file writes via graph traversal.
+references:
+  - https://attack.mitre.org/techniques/T1053/
+  - https://attack.mitre.org/techniques/T1543/
+  - https://attack.mitre.org/techniques/T1546/
+author: AgentShield
+date: "2026-01-25"
+modified: "2026-06-02"
+tags:
+  - attack.persistence
+  - attack.t1053
+  - attack.t1543
+  - attack.t1546
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Cron — command-based
+  sel_crontab:
+    event_type: tool_call
+    command|contains:
+      - 'crontab -e'
+      - 'crontab -'
+  # Cron — Write tool file_path
+  sel_cron_path:
+    event_type: tool_call
+    file_path|contains:
+      - '/etc/cron'
+      - '/var/spool/cron'
+      - '/cron.d/'
+      - '/cron.daily/'
+      - '/cron.hourly/'
+  # macOS launchd — command
+  sel_launchctl:
+    event_type: tool_call
+    command|contains:
+      - 'launchctl load'
+      - 'launchctl bootstrap'
+  # macOS launchd — Write tool file_path
+  sel_launchd_path:
+    event_type: tool_call
+    file_path|contains:
+      - 'LaunchAgents/'
+      - 'LaunchDaemons/'
+  # Systemd — command
+  sel_systemctl:
+    event_type: tool_call
+    command|contains:
+      - 'systemctl enable'
+      - 'systemctl --user enable'
+  # Systemd — Write tool file_path
+  sel_systemd_path:
+    event_type: tool_call
+    file_path|contains:
+      - '/systemd/system/'
+      - '.config/systemd/user/'
+  # Shell profiles — Write tool file_path
+  sel_shell_profile_path:
+    event_type: tool_call
+    file_path|endswith:
+      - '.bashrc'
+      - '.bash_profile'
+      - '.profile'
+      - '.zshrc'
+      - '.zprofile'
+      - '.zshenv'
+  # Init.d and rc.local
+  sel_init_path:
+    event_type: tool_call
+    file_path|contains: '/etc/init.d/'
+  sel_rclocal_path:
+    event_type: tool_call
+    file_path|endswith: '/etc/rc.local'
+  condition: >
+    sel_crontab or sel_cron_path or
+    sel_launchctl or sel_launchd_path or
+    sel_systemctl or sel_systemd_path or
+    sel_shell_profile_path or sel_init_path or sel_rclocal_path
+falsepositives:
+  - Legitimate cron job setup for scheduled tasks
+  - System administrators configuring launch agents for authorised services
+  - Developers adding shell aliases and PATH entries to startup files
+level: high

@@ -1,0 +1,48 @@
+title: Zero-Click RAG Exfiltration via Image URL
+id: 30d14136-6ae1-5194-bc34-ed23d62c8fdc
+status: stable
+description: |
+  Detects AI-generated responses that embed sensitive data inside image URL query
+  strings as a covert exfiltration channel — the EchoLeak/GeminiJack pattern.
+  A prompt-injected RAG document instructs the model to encode internal content
+  as base64 or URL-encoded parameters in a markdown image tag.
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://airia.com/ai-security-in-2026-prompt-injection-the-lethal-trifecta-and-how-to-defend/
+author: AgentShield (adapted by Netzilo)
+date: "2026-03-16"
+modified: "2026-03-16"
+tags:
+  - attack.exfiltration
+  - attack.t1048
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Adapted: original used response_text field; Netzilo LogEntry uses content for llm_response.
+  selection_markdown_image_exfil:
+    event_type: llm_response
+    content|contains:
+      - '?d='
+      - '?data='
+      - '?q='
+      - '?payload='
+      - '?track='
+    content|re: '!\[.*?\]\(https?://[^)]+\?[^)]*[A-Za-z0-9+/]{20,}={0,2}[^)]*\)'
+  selection_img_tag_exfil:
+    content|contains:
+      - '<img '
+      - 'src='
+    content|re: '<img[^>]+src=.https?://[^>]*\?[^>]*[A-Za-z0-9+/]{20,}={0,2}[^>]*[>]'
+  filter_known_good:
+    content|contains:
+      - 'microsoft.com'
+      - 'github.com'
+      - 'amazonaws.com'
+      - 'azure.com'
+      - 'openai.com'
+  condition: (selection_markdown_image_exfil or selection_img_tag_exfil) and not filter_known_good
+falsepositives:
+  - Legitimate image CDNs using long base64 tokens as signed URL parameters
+  - Analytics or telemetry image pixels from approved marketing tools
+level: critical

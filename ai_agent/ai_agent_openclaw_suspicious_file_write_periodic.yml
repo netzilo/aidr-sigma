@@ -1,0 +1,56 @@
+title: OpenClaw Suspicious File Write to Sensitive Paths (EDR Graph)
+id: db43664e-2408-5e70-9b63-dcb0fabc8c5f-p
+related:
+  - id: db43664e-2408-5e70-9b63-dcb0fabc8c5f
+    type: companion
+status: stable
+description: |
+  Periodic companion to the real-time rule. Checks WRITE_FILE edges in the AIDR
+  behaviour graph every 30 seconds for sensitive path writes that arrived via EDR
+  (syscall level) rather than through the hook or MITM proxy.
+  Covers writes by subprocesses that the tool_call path cannot see.
+references:
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1053/
+author: Netzilo
+date: "2026-06-02"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.t1053
+logsource:
+  product: ai_agent
+  category: periodic
+detection:
+  sel:
+    content|re: '.'
+  condition: sel
+action: execute
+on_error: allow
+script: |
+  SENSITIVE = [
+      "/etc/", ".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile",
+      "/cron.d/", "/crontab", "/cron.daily/", "/cron.hourly/",
+      "/systemd/system/", "/systemd/user/",
+      "/LaunchAgents/", "/LaunchDaemons/",
+      "authorized_keys",
+  ]
+
+  def run():
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              src = fs["id"] + "$WRITE"
+              for path in SENSITIVE:
+                  if search_in(src, path):
+                      print("Suspicious write — path: " + path +
+                            " process: " + fs.get("proc_name", "?") +
+                            " agent: " + a.get("name", "?"))
+                      return "block"
+      return "allow"
+
+  result = run()

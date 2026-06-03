@@ -1,0 +1,182 @@
+title: Claw Chain Full Sequence Correlator
+id: netzilo-claw-chain-full-sequence-001
+status: stable
+description: >
+  Correlates the full Claw Chain (CVE-2026-44115 → 44113 → 44112 → 44118) across a
+  single agent session. Uses graph accumulation to detect the combination with high
+  confidence. 2+ stages = report; 3+ stages = block.
+author: Netzilo
+date: "2026-04-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44115
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44113
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44112
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44118
+tags:
+  - attack.execution
+  - attack.lateral-movement
+  - attack.credential-access
+level: critical
+falsepositives:
+  - None expected — the full 4-stage chain has no legitimate analogue
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+  condition: sel_trigger
+
+action: execute
+on_timeout: block
+on_error: allow
+script: |
+  # FileSystem nodes do NOT store individual file paths — they aggregate by process path.
+  # To detect which files were accessed use search_in(fs["id"] + "$READ"/"$WRITE", pattern).
+  # fs["id"] format: "filesystem:///bin/sh"
+
+  SENSITIVE_PATTERNS = [
+      "/etc/passwd", "/etc/shadow", "/etc/sudoers",
+      "/.ssh/id_rsa", "/.ssh/id_ed25519", "/.ssh/authorized_keys",
+      ".aws/credentials", ".aws/config",
+      ".kube/config",
+      "/.env", "/.netrc",
+      "/root/", "/proc/self/environ",
+  ]
+
+  TRUSTED_HOSTS = [
+      "api.openai.com", "api.anthropic.com", "api.netzilo.com",
+      "openai.com", "anthropic.com", "netzilo.com", "netzilo.network",
+      "github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org",
+      "npmjs.org", "npmjs.com", "pypi.org", "pkg.go.dev", "proxy.golang.org",
+      "amazonaws.com", "azure.com", "microsoft.com", "visualstudio.com",
+      "datadoghq.com", "datadog.com", "newrelic.com", "sentry.io",
+      "telemetry.visualstudio.com", "vortex.data.microsoft.com",
+      "chatgpt.com", "gemini.google", "mistral.ai", "groq.com",
+      "cloudflare.com", "fastly.com",
+  ]
+
+  def heredoc_expansion(cmd):
+      return "<<" in cmd and ("$(" in cmd or "`" in cmd)
+
+  def host_trusted(host):
+      for t in TRUSTED_HOSTS:
+          if t in host:
+              return True
+      return False
+
+  def actor_has_sensitive_read(actor_id):
+      # search_in(source_label, pattern) — checks indexed file-read content for this process.
+      for e in edges(actor_id, dir="out", kind="READ_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          source = fs["id"] + "$READ"
+          for pattern in SENSITIVE_PATTERNS:
+              if search_in(source, pattern):
+                  return pattern
+      return None
+
+  def actor_has_write(actor_id):
+      # Detects any write outside known safe locations via indexed file-write content.
+      for e in edges(actor_id, dir="out", kind="WRITE_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          source = fs["id"] + "$WRITE"
+          for pattern in SENSITIVE_PATTERNS:
+              if search_in(source, pattern):
+                  return pattern
+      return None
+
+  def run():
+      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid    = agent["id"]
+          stages = []
+
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              if u.get("is_private", "0") == "1":
+                  continue
+              host = u.get("host", "")
+              if host and not host_trusted(host):
+                  stages.append("stage0:untrusted-fetch:" + host)
+                  break
+
+          found_stage1 = False
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              cmd = e.get("cmd", "")
+              if heredoc_expansion(cmd):
+                  stages.append("stage1:heredoc-exec-bypass")
+                  found_stage1 = True
+                  break
+          if not found_stage1:
+              has_s0 = False
+              for s in stages:
+                  if "stage0" in s:
+                      has_s0 = True
+                      break
+              if has_s0 and len(edges(aid, dir="out", kind="EXECUTE_PROCESS")) > 0:
+                  stages.append("stage1:subprocess-spawn")
+
+          procs_l1 = []
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              procs_l1.append(e["to"])
+          procs_l2 = []
+          for pid in procs_l1:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  procs_l2.append(e["to"])
+
+          all_file_actors    = [aid] + procs_l1
+          all_network_actors = [aid] + procs_l1 + procs_l2
+
+          found_s2 = False
+          found_s3 = False
+          for actor_id in all_file_actors:
+              if not found_s2:
+                  matched = actor_has_sensitive_read(actor_id)
+                  if matched != None:
+                      stages.append("stage2:toctou-read:" + matched)
+                      found_s2 = True
+              if not found_s3:
+                  matched = actor_has_write(actor_id)
+                  if matched != None:
+                      stages.append("stage3:toctou-write:" + matched)
+                      found_s3 = True
+
+          found_s4 = False
+          for actor_id in all_network_actors:
+              if found_s4:
+                  break
+              for e in edges(actor_id, dir="out", kind="CONNECTS"):
+                  h = node(e["to"])
+                  if h != None and h.get("is_private", "0") == "1":
+                      stages.append("stage4:loopback-connect:" + h.get("host", "?"))
+                      found_s4 = True
+                      break
+              if found_s4:
+                  break
+              for e in edges(actor_id, dir="out", kind="HTTP_REQUEST"):
+                  u = node(e["to"])
+                  if u != None and u.get("is_private", "0") == "1":
+                      stages.append("stage4:loopback-http:" + u.get("host", "?"))
+                      found_s4 = True
+                      break
+
+          count = len(stages)
+          if count >= 3:
+              print("Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages))
+              return "block"
+
+      return "allow"
+
+  result = run()

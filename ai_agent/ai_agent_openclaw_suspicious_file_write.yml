@@ -1,0 +1,83 @@
+title: OpenClaw Suspicious File Write to Sensitive Paths
+id: db43664e-2408-5e70-9b63-dcb0fabc8c5f
+related:
+  - id: db43664e-2408-5e70-9b63-dcb0fabc8c5f-p
+    type: companion
+status: stable
+description: |
+  Detects write operations targeting sensitive system paths (persistence, shell config,
+  cron, systemd, LaunchAgents, SSH authorized_keys). Fires on Write/Edit tool calls
+  (file_path field) and Bash redirect commands (command field). Companion periodic
+  rule covers EDR-level writes via graph traversal.
+references:
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1053/
+author: AgentShield (adapted by Netzilo)
+date: "2026-02-07"
+modified: "2026-06-02"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.t1053
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Write/Edit tool calls — file_path field is populated from tool args
+  sel_write_tool_etc:
+    event_type: tool_call
+    file_path|contains: '/etc/'
+  sel_write_tool_shell:
+    event_type: tool_call
+    file_path|contains:
+      - '.bashrc'
+      - '.bash_profile'
+      - '.zshrc'
+      - '.zprofile'
+      - '.profile'
+      - '.ssh/authorized_keys'
+  sel_write_tool_cron:
+    event_type: tool_call
+    file_path|contains:
+      - '/cron.d/'
+      - '/crontab'
+      - '/cron.daily/'
+      - '/cron.hourly/'
+  sel_write_tool_systemd:
+    event_type: tool_call
+    file_path|contains:
+      - '/systemd/system/'
+      - '/systemd/user/'
+      - '/LaunchAgents/'
+      - '/LaunchDaemons/'
+  # Bash redirect commands writing to sensitive paths (command field)
+  sel_bash_etc:
+    event_type: tool_call
+    command|contains:
+      - '> /etc/'
+      - 'tee /etc/'
+  sel_bash_shell_profile:
+    event_type: tool_call
+    command|re: '(>>|>)\s*[~$]?\/?(?:home\/[^/]+\/)?\.(?:bashrc|zshrc|profile|bash_profile|zprofile)'
+  sel_bash_cron:
+    event_type: tool_call
+    command|contains:
+      - 'crontab'
+      - '> /etc/cron'
+      - '> /var/spool/cron'
+  sel_bash_launchd:
+    event_type: tool_call
+    command|contains:
+      - '/LaunchAgents/'
+      - '/LaunchDaemons/'
+  sel_bash_authorized_keys:
+    event_type: tool_call
+    command|contains: 'authorized_keys'
+  condition: >
+    sel_write_tool_etc or sel_write_tool_shell or sel_write_tool_cron or
+    sel_write_tool_systemd or sel_bash_etc or sel_bash_shell_profile or
+    sel_bash_cron or sel_bash_launchd or sel_bash_authorized_keys
+falsepositives:
+  - Legitimate system configuration management by authorised tools
+  - Development scripts that modify shell profiles during environment setup
+level: high

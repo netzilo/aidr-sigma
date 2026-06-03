@@ -1,0 +1,49 @@
+title: Auto-Approve Configuration Changes (EDR Graph)
+id: 440a1431-0683-58c2-83b5-ccad310b764f-p
+related:
+  - id: 440a1431-0683-58c2-83b5-ccad310b764f
+    type: companion
+status: stable
+description: |
+  Periodic companion. Checks WRITE_FILE graph edges for writes to IDE/agent config
+  files that control safety settings. Runs every 30s via EDR graph traversal.
+author: Netzilo
+date: "2026-06-02"
+tags:
+  - attack.privilege-escalation
+  - attack.t1548
+logsource:
+  product: ai_agent
+  category: periodic
+detection:
+  sel:
+    content|re: '.'
+  condition: sel
+action: execute
+on_error: allow
+script: |
+  CONFIG_PATHS = [
+      ".vscode/settings.json",
+      ".cursor/mcp.json",
+      ".codex/config.toml",
+      ".cursor/rules",
+      ".github/copilot",
+  ]
+
+  def run():
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              src = fs["id"] + "$WRITE"
+              for path in CONFIG_PATHS:
+                  if search_in(src, path):
+                      print("Config write detected: " + path +
+                            " by " + fs.get("proc_name", "?"))
+                      return "block"
+      return "allow"
+
+  result = run()

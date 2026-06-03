@@ -1,0 +1,86 @@
+title: MCP Launcher Exec-Flag Bypass
+id: netzilo-mcp-launcher-exec-bypass-001
+status: stable
+description: >
+  Blocks MCP Family-2 allowlist bypass (CVE-2026-30625 Upsonic, CVE-2026-40933 Flowise).
+  Approved launchers (npx, node, python, npm) are subverted via code-execution flags
+  (-c, -e, --eval) to run arbitrary payloads.
+author: Netzilo
+date: "2026-03-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-30625
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-40933
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1027
+level: critical
+falsepositives:
+  - Security research discussing the bypass technique
+  - Test fixtures that include these patterns as data
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # python -c "..." — command is python, args contains -c flag
+  sel_python_cmd:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"python[23]?"'
+  sel_python_cflag:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*"-c"[^\]]*\]'
+
+  # node -e "..." — command is node, args contains -e/--eval flag
+  sel_node_cmd:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"node(js)?"'
+  sel_node_eflag:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*"(-e|--eval|--exec)"[^\]]*\]'
+
+  # npm/npx -- bash — shell redirect after double-dash
+  sel_npm_cmd:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"(npm|npx)"'
+  sel_npm_shell_flag:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*"--"[^\]]*"(bash|sh|zsh|python|perl|ruby)"'
+  sel_npm_exec_flag:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*"(exec|run)"[^\]]*"(bash|sh|zsh|dash)"'
+
+  # uv/uvx/deno with eval/exec flags
+  sel_uv_cmd:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"(uv|uvx|deno)"'
+  sel_uv_flag:
+    event_type: tool_call
+    content|re: '(?i)"args"\s*:\s*\[[^\]]*"(-c|eval|--eval|run\s+-c)"[^\]]*\]'
+
+  # Exclusions: legitimate MCP package launches
+  filter_legit_npx:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"(npx|npm)"\s*,\s*"args"\s*:\s*\[\s*"(@[\w\-]+\/|mcp-server-|@anthropic|@aws)'
+  filter_legit_python:
+    event_type: tool_call
+    content|re: '(?i)"command"\s*:\s*"python[23]?"\s*,\s*"args"\s*:\s*\[\s*"[^-][^"]*\.(py|pyc)"'
+  filter_research:
+    event_type: tool_call
+    content|re: '(?i)(allowlist.bypass|exec.flag.injection|CVE-2026-30625|CVE-2026-40933)\b'
+  filter_fixtures:
+    event_type: tool_call
+    content|re: '(?i)(test_payload|attack_sample|blocklist|denylist)\s*[:=]\s*[\[\{]'
+
+  condition: >
+    (
+      (sel_python_cmd and sel_python_cflag) or
+      (sel_node_cmd and sel_node_eflag) or
+      (sel_npm_cmd and (sel_npm_shell_flag or sel_npm_exec_flag)) or
+      (sel_uv_cmd and sel_uv_flag)
+    )
+    and not (filter_legit_npx or filter_legit_python or filter_research or filter_fixtures)
+
+action: block

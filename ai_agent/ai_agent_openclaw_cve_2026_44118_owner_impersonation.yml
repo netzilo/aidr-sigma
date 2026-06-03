@@ -1,0 +1,76 @@
+title: CVE-2026-44118 Owner Impersonation via senderIsOwner
+id: netzilo-cve-2026-44118-001
+status: stable
+description: >
+  Detects CVE-2026-44118: unpatched OpenClaw (<2026.4.22) accepts senderIsOwner=true on
+  loopback connections without verification, granting gateway-owner privileges to any local
+  process. Detects the flag in payload content and loopback connections from any actor.
+author: Netzilo
+date: "2026-04-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2026-44118
+tags:
+  - attack.privilege-escalation
+  - attack.t1548
+  - attack.lateral-movement
+level: critical
+falsepositives:
+  - None expected — senderIsOwner=true has no legitimate use in external content
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+      - http_request
+  condition: sel_trigger
+
+action: execute
+on_timeout: block
+on_error: allow
+script: |
+  def run():
+      content = meta.get("content", "")
+      if re.find(r'(?i)senderIsOwner\s*[:=]\s*["\']?true', content) != None:
+          print("CVE-2026-44118: senderIsOwner=true in payload — direct flag abuse")
+          return "block"
+
+      if meta.get("context_type", "") == "http_request":
+          host = meta.get("host", "")
+          if host in ["127.0.0.1", "::1", "localhost"]:
+              print("CVE-2026-44118: HTTP request to loopback host " + host + " — owner API impersonation")
+              return "block"
+
+      for agent in graph(type="Agent"):
+          aid = agent["id"]
+          level1 = []
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              level1.append(e["to"])
+          level2 = []
+          for pid in level1:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  level2.append(e["to"])
+          all_actors = [aid] + level1 + level2
+          for actor_id in all_actors:
+              for e in edges(actor_id, dir="out", kind="CONNECTS"):
+                  h = node(e["to"])
+                  if h == None:
+                      continue
+                  if h.get("is_private", "0") == "1":
+                      print("CVE-2026-44118: loopback CONNECTS from " + actor_id + " to " + h.get("host", "?"))
+                      return "block"
+              for e in edges(actor_id, dir="out", kind="HTTP_REQUEST"):
+                  u = node(e["to"])
+                  if u == None:
+                      continue
+                  if u.get("is_private", "0") == "1":
+                      print("CVE-2026-44118: loopback HTTP_REQUEST from " + actor_id + " to " + u.get("host", "?"))
+                      return "block"
+
+      return "allow"
+
+  result = run()

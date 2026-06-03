@@ -1,0 +1,75 @@
+title: Reconnaissance Tools Followed by Data Exfiltration
+id: a1b2c3d4-e5f6-7890-abcd-recon-exfil1
+status: stable
+description: >
+  Detects sessions where reconnaissance tools (ls, find, cat, head, env) were used
+  before data exfiltration tools (curl, wget, nc), suggesting a staged attack
+  where the agent first probes with benign calls then chains into exfiltration.
+  Adapted from AgentShield: original used session.recent_tools field; this version
+  traverses the behavior graph TOOL_CALL edges to check accumulated tool history.
+references:
+  - https://attack.mitre.org/techniques/T1041/
+  - https://arxiv.org/abs/2403.04783
+author: AgentShield (adapted by Netzilo)
+date: "2026-03-18"
+tags:
+  - attack.exfiltration
+  - attack.t1041
+  - attack.discovery
+  - attack.t1046
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Fire on every tool call — the script decides by inspecting graph history.
+  sel_trigger:
+    content|re: '.'
+  condition: sel_trigger
+level: high
+falsepositives:
+  - Normal development workflows that browse filesystem then download packages
+
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  RECON_TOOLS = ["ls", "find", "cat", "head", "tail", "env", "printenv", "grep",
+                  "stat", "file", "du", "df", "ps", "who", "whoami", "id", "uname"]
+  EXFIL_TOOLS = ["curl", "wget", "nc", "ncat", "netcat", "scp", "rsync",
+                  "sftp", "ftp", "tftp", "python", "python3", "node"]
+
+  def tool_matches(name, patterns):
+      low = name.lower() if name else ""
+      for p in patterns:
+          if p in low:
+              return True
+      return False
+
+  def run():
+      # Check if the current tool call is an exfil tool.
+      # If not, no need to check history — allow immediately.
+      current_tool = meta.get("tool_name", "").lower()
+      if not tool_matches(current_tool, EXFIL_TOOLS):
+          return "allow"
+
+      aid = meta.get("agent_name", "")
+      if aid == "":
+          return "allow"
+
+      # Walk all prior TOOL_CALL edges from this agent.
+      # If any recon tool was called before the current exfil call, block.
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          t = node(e["to"])
+          if t == None:
+              continue
+          prior_tool = t.get("name", "")
+          if tool_matches(prior_tool, RECON_TOOLS):
+              print(
+                  "Recon-then-exfil chain: prior recon=" + prior_tool +
+                  " current exfil=" + current_tool
+              )
+              return "block"
+
+      return "allow"
+
+  result = run()

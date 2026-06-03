@@ -1,0 +1,79 @@
+title: Suspicious Process Execution by Agent
+id: a8b3c4d5-e6f7-5891-b2c3-d4e5f6a7b8c9
+status: stable
+description: |
+  Detects suspicious process executions reported by the EDR extension when a
+  monitored agent spawns known attack tools or runs dangerous command patterns.
+  This rule fires on real syscall-level exec events — it catches what the
+  hook/MITM layers miss when a Bash command actually executes and spawns child
+  processes.
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1573/
+author: Netzilo
+date: "2026-06-02"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.command-and-control
+  - attack.t1573
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Reverse shell and interactive shell spawning
+  selection_reverse_shell:
+    event_type: execute_process
+    command|contains:
+      - '/dev/tcp/'
+      - '/dev/udp/'
+      - 'bash -i'
+      - 'bash -c'
+      - 'sh -i'
+  # Netcat / socat for remote access
+  selection_nc_shell:
+    event_type: execute_process
+    command|contains:
+      - 'nc -e'
+      - 'ncat -e'
+      - 'nc -c'
+      - 'socat exec:'
+      - 'socat TCP:'
+  # Download and execute patterns (child process)
+  selection_download_exec:
+    event_type: execute_process
+    command|contains|all:
+      - 'curl'
+      - '| bash'
+  selection_download_exec_wget:
+    event_type: execute_process
+    command|contains|all:
+      - 'wget'
+      - '| sh'
+  # Python/Perl reverse shells spawned as subprocesses
+  selection_scripted_shell:
+    event_type: execute_process
+    command|contains:
+      - 'import socket,subprocess'
+      - 'socket.AF_INET'
+      - 'IO::Socket::INET'
+  # Encoded payload execution at process level
+  selection_encoded_exec:
+    event_type: execute_process
+    command|contains|all:
+      - 'base64'
+      - '| bash'
+  selection_encoded_exec2:
+    event_type: execute_process
+    command|contains|all:
+      - 'base64'
+      - '| sh'
+  condition: >
+    selection_reverse_shell or selection_nc_shell or
+    selection_download_exec or selection_download_exec_wget or
+    selection_scripted_shell or
+    selection_encoded_exec or selection_encoded_exec2
+falsepositives:
+  - Legitimate curl pipelines in authorised developer workflows
+  - Security testing and penetration testing exercises
+level: critical

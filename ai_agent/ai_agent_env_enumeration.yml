@@ -1,0 +1,70 @@
+title: Environment Variable Enumeration for Secrets
+id: 65ed67cc-3366-5d03-a5cf-cbd15cc5c266
+status: stable
+description: |
+  Detects commands that enumerate environment variables, which commonly
+  contain API keys, tokens, and credentials. Attackers use this to
+  harvest secrets from the agent's runtime environment.
+references:
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://attack.mitre.org/techniques/T1082/
+author: AgentShield
+date: "2026-02-17"
+modified: "2026-04-09"
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.discovery
+  - attack.t1082
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # env/printenv piped to grep for secret-related keywords
+  selection_env_grep:
+    event_type: tool_call
+    command|contains:
+      - 'env | grep'
+      - 'env |grep'
+      - 'printenv | grep'
+      - 'printenv |grep'
+      - 'set | grep'
+  # Standalone grep for secret keywords (may target files or pipes)
+  selection_env_secret_keywords:
+    event_type: tool_call
+    command|contains:
+      - 'grep -i key'
+      - 'grep -i token'
+      - 'grep -i secret'
+      - 'grep -i password'
+      - 'grep -i credential'
+      - 'grep -i api_key'
+      - 'grep -i apikey'
+      - 'grep API_KEY'
+      - 'grep SECRET'
+      - 'grep TOKEN'
+  # Full environment dump — bare printenv (no args) or export -p
+  # Note: "printenv VAR_NAME" is a single-variable lookup (benign), excluded via filter.
+  selection_full_env_dump:
+    event_type: tool_call
+    command|re: '(^|\s|;|&&|\|)(printenv\s*$|printenv\s*\||export\s+-p)'
+  selection_env_bare:
+    event_type: tool_call
+    command|re: '(^|\s|;|&&|\|)env(\s*$|\s*\||\s+[^=])'
+  # env piped to any post-processor (sort, tee, less, head, etc.)
+  selection_env_piped:
+    event_type: tool_call
+    command|contains:
+      - 'env | sort'
+      - 'env |sort'
+      - 'env | less'
+      - 'env | head'
+      - 'env | tail'
+      - 'env | tee'
+      - 'env | cat'
+      - 'env | wc'
+  condition: selection_env_grep or selection_env_secret_keywords or selection_full_env_dump or selection_env_bare or selection_env_piped
+falsepositives:
+  - Developers debugging environment variable configuration
+  - CI/CD pipelines that inspect environment for configuration validation
+level: high

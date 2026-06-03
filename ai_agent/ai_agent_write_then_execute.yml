@@ -1,0 +1,66 @@
+title: Write-Then-Execute Script in Temporary Directory
+id: 2564f91e-155e-5d1c-afda-718922bb8a5f
+related:
+  - id: a935a04a-61b2-5b55-a608-407a2048949a
+    type: similar
+  - id: 2564f91e-155e-5d1c-afda-718922bb8a5f-p
+    type: companion
+status: stable
+description: |
+  Detects scripts written to /tmp, /var/tmp, /dev/shm then executed. The tool_call
+  path catches Write tool calls and Bash execution commands. The companion
+  execute_process rule detects at syscall level when the written script is actually
+  spawned and verifies the agent previously wrote to that path.
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1027/
+author: AgentShield
+date: "2026-02-26"
+modified: "2026-06-02"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Write/Edit tool calls to temp dirs — file_path field populated from tool args
+  sel_write_tool_tmp:
+    event_type: tool_call
+    file_path|startswith:
+      - '/tmp/'
+      - '/var/tmp/'
+      - '/dev/shm/'
+    file_path|endswith:
+      - '.py'
+      - '.sh'
+      - '.js'
+      - '.rb'
+      - '.pl'
+      - '.php'
+  # chmod on temp scripts
+  sel_chmod_tmp:
+    event_type: tool_call
+    command|contains|all:
+      - 'chmod'
+      - '/tmp/'
+  # Direct execution of scripts from temp dirs
+  sel_exec_tmp:
+    event_type: tool_call
+    command|contains:
+      - 'python /tmp/'
+      - 'python3 /tmp/'
+      - 'bash /tmp/'
+      - 'sh /tmp/'
+      - 'node /tmp/'
+      - 'ruby /tmp/'
+      - 'perl /tmp/'
+      - 'python /var/tmp/'
+      - 'bash /var/tmp/'
+  condition: sel_write_tool_tmp or sel_chmod_tmp or sel_exec_tmp
+falsepositives:
+  - Build systems that compile and execute test scripts in /tmp during CI/CD pipelines
+  - Package managers that extract and run post-install scripts from temporary directories
+level: high

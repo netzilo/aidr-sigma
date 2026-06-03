@@ -1,0 +1,69 @@
+title: Write-Then-Execute Script in Temporary Directory (EDR Graph)
+id: 2564f91e-155e-5d1c-afda-718922bb8a5f-p
+related:
+  - id: 2564f91e-155e-5d1c-afda-718922bb8a5f
+    type: companion
+status: stable
+description: |
+  execute_process companion. Fires when a process is spawned from /tmp, /var/tmp,
+  or /dev/shm and verifies the agent previously wrote a script to that location.
+  Uses execute_process trigger (not periodic) so detection is immediate at exec time
+  and the WRITE_FILE edge is guaranteed to exist before the spawn.
+author: Netzilo
+date: "2026-06-02"
+tags:
+  - attack.execution
+  - attack.t1059
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec_from_tmp:
+    event_type: execute_process
+    command|contains:
+      - '/tmp/'
+      - '/var/tmp/'
+      - '/dev/shm/'
+  condition: sel_exec_from_tmp
+action: execute
+on_error: allow
+script: |
+  TMP_DIRS = ["/tmp/", "/var/tmp/", "/dev/shm/"]
+  SCRIPT_EXTS = [".sh", ".py", ".js", ".rb", ".pl", ".php"]
+
+  def run():
+      cmd = meta.get("command", "")
+      # Confirm the executed command references a temp path with script extension
+      found_tmp = False
+      for d in TMP_DIRS:
+          if d in cmd:
+              found_tmp = True
+              break
+      if not found_tmp:
+          return "allow"
+
+      found_ext = False
+      for ext in SCRIPT_EXTS:
+          if ext in cmd:
+              found_ext = True
+              break
+      if not found_ext:
+          return "allow"
+
+      # Verify agent previously wrote a script to a temp dir (write-then-execute pattern)
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              src = fs["id"] + "$WRITE"
+              for d in TMP_DIRS:
+                  if search_in(src, d):
+                      print("Write-then-execute: agent wrote script to " + d +
+                            " then spawned: " + cmd)
+                      return "block"
+      return "allow"
+
+  result = run()

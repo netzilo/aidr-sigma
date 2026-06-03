@@ -1,0 +1,318 @@
+title: Rule of Two — Exfiltration Chain Detection
+id: netzilo-rule-of-two-001
+status: experimental
+description: >
+  Detects the AI-agent exfiltration chain by classifying every session event as
+  A (external data intake), B (private data read), or C (external write/send).
+  Blocks when all three classes appear within a 30-second sliding window.
+  A, B and C can appear in any order.
+  Spawned child processes contribute A/B/C based on what they actually do —
+  not merely by existing. LLM requests to the agent's own provider are NOT A.
+author: Netzilo
+date: "2026-03-01"
+modified: "2026-06-02"
+tags:
+  - attack.exfiltration
+  - attack.collection
+  - attack.t1048
+level: critical
+falsepositives:
+  - Legitimate batch operations combining web search, file read, and file write
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # Fire on every tool call — the Starlark script decides via graph traversal
+  sel_trigger:
+    content|re: '.'
+  condition: sel_trigger
+
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  def run():
+      WINDOW_NS = 30000000000
+
+      def has(s, patterns):
+          sl = s.lower() if s else ""
+          for p in patterns:
+              if p.lower() in sl:
+                  return True
+          return False
+
+      def matches(s, alts):
+          sl = s.lower() if s else ""
+          for p in alts:
+              p = p.lower()
+              if p.startswith("(") and p.endswith(")"):
+                  for alt in p[1:-1].split("|"):
+                      if alt and alt in sl:
+                          return True
+              elif p in sl:
+                  return True
+          return False
+
+      def classify_tool(server, tool):
+          props = {}
+          sv = server.lower() if server else ""
+          tl = tool.lower() if tool else ""
+
+          if has(tl, ["web_search","search_web","internet_search","brave_search","exa_search",
+                       "tavily_search","serper_search","search_results","web_browse","search_google",
+                       "search_bing","duckduckgo_search","google_search","bing_search","serpapi_search",
+                       "browse_web","navigate_to","get_webpage","read_url","visit_url","fetch_url",
+                       "web_fetch","url_fetch","http_get","scrape_web","crawl_web","scrape_url",
+                       "firecrawl_scrape","jina_reader","get_page_content","read_webpage",
+                       "playwright_navigate","puppeteer_goto","rss","feed_read","read_feed","fetch_feed",
+                       "git_clone","git_pull","git_fetch"]):
+              props["A"] = True
+          elif has(sv, ["brave","serpapi","tavily","serper","perplexity","exa.one","you.com",
+                        "duckduckgo","kagi.com","firecrawl","jina.ai"]) and \
+               has(tl, ["search","query","results","find","lookup"]):
+              props["A"] = True
+          elif has(sv, ["github","gitlab","bitbucket"]) and \
+               matches(tl, ["(search|get_|fetch|list_|read_|clone|pull_|browse|view_|show_|diff|log|blame)"]):
+              props["A"] = True
+
+          if has(tl, ["read_file","open_file","fetch_file","load_file","view_file","get_file",
+                       "file_read","file_open","cat_file","show_file","get_file_content","file_content",
+                       "list_file","list_dir","list_directory","ls_dir","browse_dir","show_files",
+                       "enumerate_files","read_dir","list_folder","find_files","walk_dir","tree"]):
+              props["B"] = True
+          elif has(sv, ["drive","dropbox","onedrive","box.com","s3","storage","sharepoint",
+                        "blob","gcs","minio","backblaze"]) and \
+               has(tl, ["list_file","list_folder","search_file","get_file","read_file",
+                        "download_file","fetch_file","get_content","get_object","get_blob"]):
+              props["B"] = True
+          elif has(sv, ["database","db","postgres","mysql","mongo","redis","mariadb","sqlite",
+                        "supabase","neon","cockroach","dynamo","firestore","airtable","prisma"]) and \
+               matches(tl, ["(query|select|find|get|search|read|fetch|lookup|aggregate|count|list)"]):
+              props["B"] = True
+          elif has(sv, ["vault","secrets","keychain","ssm","kms","bitwarden","1password",
+                        "onepassword","keeper","secretsmanager","doppler","infisical","conjur","cyberark"]):
+              props["B"] = True
+          elif has(sv, ["gmail","outlook","mail","smtp","imap","exchange","proton","fastmail"]) and \
+               has(tl, ["read_email","list_email","get_email","list_messages","get_message",
+                        "read_message","list_threads","get_thread","search_messages","get_inbox"]):
+              props["B"] = True
+          elif "slack" in sv and has(tl, ["get_message","list_messages","read_message","get_channel",
+                                           "list_channels","get_thread","search_messages","get_history"]):
+              props["B"] = True
+          elif matches(tl, ["(get_env|read_env|list_env|env_var|get_secret|read_secret|fetch_secret)"]):
+              props["B"] = True
+          elif matches(tl, ["(screenshot|screen_capture|take_screenshot|read_clipboard|get_clipboard)"]):
+              props["B"] = True
+          elif has(sv, ["notion","confluence","wiki","coda","gitbook","outline"]) and \
+               matches(tl, ["(get|read|search|list|fetch|find|query|export)"]):
+              props["B"] = True
+
+          if has(tl, ["write_file","save_file","create_file","update_file","append_file",
+                       "overwrite_file","file_write","file_save","file_create",
+                       "delete_file","remove_file","unlink_file","erase_file","file_delete",
+                       "move_file","rename_file","copy_file",
+                       "http_post","http_put","http_patch","http_delete","post_request","put_request",
+                       "patch_request","api_post","api_put","webhook_send","notify_webhook",
+                       "send_webhook","publish_event","emit_event","call_webhook"]):
+              props["C"] = True
+          elif has(sv, ["gmail","outlook","smtp","mail","sendgrid","ses","mailgun","postmark",
+                        "resend","brevo","mailchimp"]) and \
+               has(tl, ["send_email","send_draft","send_mail","send_message","reply_email",
+                        "forward_email","create_draft","gmail_send","reply_to","forward_message"]):
+              props["C"] = True
+          elif "slack" in sv and has(tl, ["post_message","send_message","chat_post","send_notification",
+                                           "create_channel","update_message","delete_message","post_reply"]):
+              props["C"] = True
+          elif has(sv, ["drive","dropbox","onedrive","box.com","s3","storage","sharepoint",
+                        "blob","gcs","minio","backblaze"]) and \
+               has(tl, ["upload_file","create_file","update_file","delete_file","move_file",
+                        "put_object","delete_object","create_document","update_document","share_file"]):
+              props["C"] = True
+          elif has(sv, ["github","gitlab","bitbucket"]) and \
+               matches(tl, ["(create|push|commit|merge|update|delete|fork|write|approve|close|comment)"]):
+              props["C"] = True
+          elif matches(tl, ["(trigger_pipeline|dispatch_workflow|run_workflow|start_build|deploy|trigger_build|workflow_dispatch)"]):
+              props["C"] = True
+          elif has(sv, ["zapier","ifttt","make.com","n8n","pipedream","workato"]) and \
+               matches(tl, ["(trigger|run|execute|send|fire|invoke|dispatch|activate|webhook)"]):
+              props["C"] = True
+          elif has(sv, ["jira","linear","asana","trello","clickup","monday","shortcut"]) and \
+               matches(tl, ["(create|update|delete|assign|move|close|reopen|comment|transition)"]):
+              props["C"] = True
+          elif has(sv, ["database","db","postgres","mysql","mongo","redis","mariadb","sqlite",
+                        "supabase","neon","cockroach","dynamo","firestore","airtable","prisma"]) and \
+               matches(tl, ["(insert|update|delete|create_table|drop|truncate|upsert|write|put_item|batch_write|alter|migrate)"]):
+              props["C"] = True
+          elif has(sv, ["notion","confluence","wiki","coda","gitbook","outline"]) and \
+               matches(tl, ["(create|update|delete|edit|append|publish|archive|move|share)"]):
+              props["C"] = True
+          elif "discord" in sv and matches(tl, ["(send|post|create|update|delete|reply|react|edit|pin)"]):
+              props["C"] = True
+          elif has(sv, ["teams","microsoft_graph"]) and \
+               matches(tl, ["(send_message|post_message|reply|create_channel|send_chat|create_meeting)"]):
+              props["C"] = True
+          elif "telegram" in sv and matches(tl, ["(send|post|forward|reply|edit_message|delete_message)"]):
+              props["C"] = True
+
+          # Shell execution tools are B+C only when invoked as dedicated shell tools
+          # (tool name IS the shell, e.g. server="shell" tool="execute"), NOT when
+          # the tool is a generic "Bash" wrapper that runs arbitrary commands.
+          # Bare "Bash"/"sh" tool names are intentionally excluded here — their
+          # classification comes from child-process graph edges (HTTP/file ops)
+          # rather than the tool name alone, which would cause every shell call to
+          # trivially satisfy B+C.
+          if matches(tl, ["(execute_command|run_command|exec_command|run_shell|shell_exec|bash_exec|run_bash|execute_shell|system_exec|subprocess|spawn_process)"]):
+              props["B"] = True
+              props["C"] = True
+          if matches(tl, ["(python_exec|node_exec|eval_code|run_code|execute_code|run_script|exec_script|run_python|run_node|run_javascript|execute_python|code_execute|repl|jupyter_execute|sandbox_exec|code_interpreter)"]):
+              props["B"] = True
+              props["C"] = True
+
+          return props
+
+      # Hosts always safe to communicate with — excluded from A and C classification.
+      safe_hosts = ["claude.ai","anthropic.com","openai.com","chatgpt.com","mozilla.org",
+                    "google.com","google-analytics.com","googletagmanager.com","gemini.google",
+                    "mistral.ai","groq.com","perplexity.ai","exa.one","tavily.com","serper.dev",
+                    "firecrawl.dev","jina.ai","you.com","googleapis.com","gstatic.com",
+                    "cloudflare.com","fastly.com","akamai.net",
+                    # Developer infrastructure — not exfiltration destinations
+                    "github.com","githubusercontent.com","githubassets.com",
+                    "gitlab.com","bitbucket.org",
+                    "npmjs.org","npmjs.com","registry.npmjs.org","yarnpkg.com",
+                    "pypi.org","files.pythonhosted.org",
+                    "pkg.go.dev","proxy.golang.org","sum.golang.org",
+                    "crates.io","static.crates.io",
+                    "rubygems.org","registry.yarnpkg.com",
+                    "docker.io","hub.docker.com","registry-1.docker.io",
+                    "azure.com","microsoft.com","visualstudio.com",
+                    "amazonaws.com","s3.amazonaws.com",
+                    "netzilo.com","netzilo.network","pkg.netzilo.com",
+                    "sentry.io","segment.com","posthog.com",
+                    "stackoverflow.com","stackexchange.com",
+                    # Telemetry/analytics — common in dev tools, not exfiltration
+                    "datadoghq.com","datadog.com",
+                    "mixpanel.com","amplitude.com","heap.io",
+                    "newrelic.com","nr-data.net",
+                    "bugsnag.com","rollbar.com","logrocket.com",
+                    "telemetry.visualstudio.com","vortex.data.microsoft.com"]
+
+      def is_safe(host):
+          for s in safe_hosts:
+              if s in host:
+                  return True
+          return False
+
+      # Collect ABC events from a single process node (agent or child).
+      # dir_filter limits which ABC classes to collect:
+      #   "ABC" = all three, "BC" = skip A, "AC" = skip B, etc.
+      def collect_events(pid_node, ts_override, dir_filter, out):
+          pid_id = pid_node["id"]
+
+          # A: HTTP_REQUEST to external (non-safe) hosts.
+          if "A" in dir_filter:
+              for e in edges(pid_id, dir="out", kind="HTTP_REQUEST"):
+                  url_node = node(e["to"])
+                  if url_node != None:
+                      h = url_node.get("host", "")
+                      ts = ts_override if ts_override else int(e.get("ts") or e.get("first_ts") or "0")
+                      if h and not is_safe(h):
+                          out.append([ts, "A", "http_in@" + h])
+
+          # A: Skill acquired from external HTTP source.
+          if "A" in dir_filter:
+              for e in edges(pid_id, dir="out", kind="ACQUIRED_SKILL"):
+                  skill_node = node(e["to"])
+                  if skill_node != None and skill_node.get("source", "") == "http":
+                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      out.append([ts, "A", "skill@" + skill_node.get("host", "")])
+
+          # B: Direct file reads.
+          if "B" in dir_filter:
+              for e in edges(pid_id, dir="out", kind="READ_FILE"):
+                  f = node(e["to"])
+                  if f != None:
+                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      out.append([ts, "B", "read:" + f.get("proc_path", f.get("proc_name", "?"))])
+
+          # C: Direct file writes.
+          if "C" in dir_filter:
+              for e in edges(pid_id, dir="out", kind="WRITE_FILE"):
+                  f = node(e["to"])
+                  if f != None:
+                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      out.append([ts, "C", "write:" + f.get("proc_path", f.get("proc_name", "?"))])
+
+      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid    = agent["id"]
+          events = []
+
+          # Collect A/B/C from the agent process itself.
+          collect_events(agent, None, "ABC", events)
+
+          # NOTE: LLM_REQUEST edges are intentionally excluded from A.
+          # The agent calling its own LLM provider is normal operation, not
+          # suspicious external data intake. Only non-safe HTTP requests and
+          # tool calls classified as A (web_search, git_fetch, etc.) count.
+
+          # MCP TOOL_CALL edges: classify each tool call as A / B / C.
+          mcp_call_list = []
+          for e in edges(aid, dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t != None:
+                  mcp_call_list.append([int(e.get("ts") or "0"), t.get("server", ""), t.get("name", "")])
+
+          for mc in mcp_call_list:
+              p = classify_tool(mc[1], mc[2])
+              for cls in ["A", "B", "C"]:
+                  if cls in p:
+                      events.append([mc[0], cls, "mcp@" + mc[1] + "/" + mc[2]])
+
+          # EXECUTE_PROCESS: inspect what the child process actually did.
+          # A bare process spawn is not itself A/B/C — only the child's observed
+          # behaviour (HTTP requests, file reads, file writes) contributes.
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              child = node(e["to"])
+              if child == None:
+                  continue
+              # Use the spawn timestamp so child activity anchors to when the
+              # parent launched it, keeping events within the 30-second window.
+              ts_spawn = int(e.get("ts") or "0")
+              collect_events(child, ts_spawn, "ABC", events)
+
+          if len(events) == 0:
+              continue
+
+          # Sort events by timestamp (bubble sort — no sorted() in Starlark).
+          n = len(events)
+          for i in range(n):
+              for j in range(0, n - i - 1):
+                  if events[j][0] > events[j+1][0]:
+                      tmp = events[j]; events[j] = events[j+1]; events[j+1] = tmp
+
+          # Sliding 30-second window: block on first A+B+C combination.
+          # Order within the window does not matter — any interleaving triggers.
+          window = []
+          for ev in events:
+              window.append(ev)
+              cutoff = ev[0] - WINDOW_NS
+              front = 0
+              for i in range(len(window)):
+                  if window[i][0] >= cutoff:
+                      front = i
+                      break
+              window = window[front:]
+              w_props = {}
+              for w in window:
+                  w_props[w[1]] = True
+              if "A" in w_props and "B" in w_props and "C" in w_props:
+                  return "block"
+
+      return "allow"
+
+  result = run()
