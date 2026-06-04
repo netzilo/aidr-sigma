@@ -1,0 +1,61 @@
+title: Sensitive File Read Followed by External Data Transmission
+id: 55e6f7a8-b9c0-4d12-3456-e7f8a9b0c1d2
+status: experimental
+description: |
+  Detects when an agent reads any sensitive file and then transmits data externally —
+  the behavior graph equivalent of SkillSpector TT4 (file read taint to network output).
+  Broader than TT3 (which targets credential files specifically): catches exfiltration
+  of source code, configs, documents, and other sensitive assets.
+author: Netzilo (SkillSpector TT4)
+date: "2026-06-03"
+tags:
+  - attack.exfiltration
+  - attack.t1041
+  - attack.collection
+  - attack.t1005
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: tool_call
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  SAFE_HOSTS = [
+      "github.com", "gitlab.com", "pypi.org", "npmjs.com", "api.anthropic.com",
+      "api.openai.com", "127.0.0.1", "localhost", "pkg.netzilo.com",
+  ]
+  SUSPICIOUS_UPLOAD_TOOLS = [
+      "curl", "wget", "requests.post", "requests.put", "httpx.post",
+      "upload", "send_file", "transmit",
+  ]
+
+  def run():
+      for proc in graph(type="Process"):
+          if proc.get("agent", "0") != "1":
+              continue
+          pid = proc["id"]
+          # Need both READ_FILE and outbound HTTP_REQUEST
+          reads = edges(pid, dir="out", kind="READ_FILE")
+          if not reads:
+              continue
+          http_out = edges(pid, dir="out", kind="HTTP_REQUEST")
+          for e in http_out:
+              url_node = node(e.get("to", ""))
+              if not url_node:
+                  continue
+              host = url_node.get("host", url_node.get("id", ""))
+              method = e.get("method", "GET").upper()
+              # Only flag POST/PUT as exfiltration (not GET)
+              if method in ("POST", "PUT", "PATCH") and not any(s in host for s in SAFE_HOSTS):
+                  return "report"
+      return "allow"
+  result = run()
+falsepositives:
+  - Legitimate file upload features sending user-selected files to authorized services
+  - CI/CD pipelines uploading build artifacts to configured endpoints
+level: high

@@ -1,0 +1,52 @@
+title: Unbounded Resource Access in Agent Instructions
+id: c2e6b190-3d0c-4e7f-c2e1-6d4c5b2e1d83
+status: stable
+description: |
+  Detects instructions that configure the agent to make unlimited API calls, retry
+  indefinitely, or consume unbounded compute/memory resources without timeout or quota.
+  Unbounded resource access enables denial-of-service attacks against backend APIs or
+  runaway cost accumulation (EA4 — SkillSpector Excessive Agency).
+author: Netzilo (SkillSpector EA4)
+date: "2026-06-03"
+tags:
+  - attack.impact
+  - attack.t1498
+  - attack.resource-development
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_unlimited_calls:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|contains:
+      - 'unlimited api calls'
+      - 'no rate limit'
+      - 'no timeout'
+      - 'no budget'
+      - 'no quota'
+      - 'loop indefinitely'
+      - 'loop forever'
+      - 'retry indefinitely'
+      - 'retry forever'
+      - 'retry without limit'
+      - 'unlimited retries'
+  selection_infinite_code:
+    event_type:
+      - tool_call
+    content|re: '(?i)(?:loop|iterate|repeat)\s+(?:indefinitely|forever|infinitely|endlessly)'
+  selection_no_timeout:
+    event_type:
+      - tool_call
+      - skill_acquired
+    content|re: '(?i)timeout\s*=\s*(?:None|0|float\s*\(\s*["'']inf["'']|math\.inf)'
+  selection_max_retries_none:
+    event_type:
+      - tool_call
+    content|re: '(?i)max[_-]?retries?\s*=\s*(?:None|float\s*\(\s*["'']inf["'']|math\.inf)'
+  condition: selection_unlimited_calls or selection_infinite_code or selection_no_timeout or selection_max_retries_none
+falsepositives:
+  - Long-running batch processing jobs with explicit operator approval
+  - Development debugging sessions where timeouts are intentionally removed
+level: medium

@@ -1,0 +1,50 @@
+title: Persistent Context Injection in Agent Instructions
+id: b1d5a089-2c9b-4d6e-b1d0-5c3b4a1d0c72
+status: stable
+description: |
+  Detects instructions that attempt to make context injections persist across all future
+  interactions — asking the agent to "always remember this," treating injected content
+  as a permanent rule, or modifying core behavior going forward. These patterns enable
+  long-lasting behavioral hijacking beyond a single session (MP1 — SkillSpector Memory Poisoning).
+author: Netzilo (SkillSpector MP1)
+date: "2026-06-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.defense-evasion
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_always_remember:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|re: '(?i)(?:always\s+)?remember\s+(?:this|that|the following)\s+(?:for|in)\s+(?:all|every|future)\s+(?:interactions?|conversations?|sessions?|responses?)'
+  selection_permanent_rule:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|contains:
+      - 'permanent instruction'
+      - 'permanent rule'
+      - 'persistent directive'
+      - 'treat this as a permanent'
+      - 'treat this as a core rule'
+      - 'fundamental rule'
+      - 'core instruction'
+      - 'from now on you must'
+      - 'henceforth you will'
+      - 'going forward always'
+  selection_modify_core:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|re: '(?i)(?:update|modify|change|alter)\s+(?:your\s+)?(?:core|base|fundamental|default)\s+(?:behavior|personality|instructions?|rules?)'
+  filter_authorized_config:
+    content|re: '(?i)(system\s+prompt|admin|configuration|settings|setup|onboarding)'
+  condition: (selection_always_remember or selection_permanent_rule or selection_modify_core) and not filter_authorized_config
+falsepositives:
+  - Legitimate system prompt configuration at startup
+  - Authorized persona setup for specialized assistant roles
+level: high

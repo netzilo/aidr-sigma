@@ -1,0 +1,43 @@
+title: Known Vulnerable Package Installation
+id: b1e2f3a4-b5c6-4d78-9012-e3f4a5b6c7d8
+status: experimental
+description: |
+  Detects installation of packages with known CVEs via pip or npm. Uses SkillSpector SC4
+  static fallback list — covers the highest-severity known-vulnerable packages when live
+  OSV.dev lookup is not available. Static snapshot; does not catch newly-disclosed CVEs.
+author: Netzilo (SkillSpector SC4)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.supply-chain
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_pypi_cve:
+    event_type: tool_call
+    content|re: '(?i)pip\s+install'
+    content|contains:
+      - 'pycrypto'
+      - 'event-stream'
+      - 'flatmap-stream'
+      - 'ua-parser-js'
+      - 'node-ipc'
+  selection_npm_malicious:
+    event_type: tool_call
+    content|re: '(?i)npm\s+(?:install|i)\s'
+    content|contains:
+      - 'event-stream'
+      - 'flatmap-stream'
+      - 'ua-parser-js'
+      - 'coa@2.0.2'
+      - 'rc@1.2.8'
+      - 'colors@1.4.0'
+      - 'faker@5.5.3'
+      - 'node-ipc@10.1.0'
+  condition: selection_pypi_cve or selection_npm_malicious
+falsepositives:
+  - Security researchers intentionally installing vulnerable packages for testing
+  - Legacy projects pinned to these versions for compatibility
+level: high

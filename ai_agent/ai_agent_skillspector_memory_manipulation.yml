@@ -1,0 +1,48 @@
+title: Agent Memory and Identity Manipulation
+id: c0e4b978-1d8f-4e5c-b0e9-4d7f2e9c8a61
+status: stable
+description: |
+  Detects instructions that attempt to corrupt the agent's persistent memory, reset its
+  identity, or implant false memories across session boundaries. These attacks aim to
+  permanently alter agent behavior by poisoning its long-term state (MP3 — SkillSpector
+  Memory Poisoning).
+author: Netzilo (SkillSpector MP3)
+date: "2026-06-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.defense-evasion
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_clear_memory:
+    event_type:
+      - llm_request
+      - tool_response
+    content|contains:
+      - 'clear your memory'
+      - 'reset your memory'
+      - 'wipe your context'
+      - 'erase your state'
+      - 'overwrite your memory'
+      - 'replace your instructions'
+      - 'inject false memories'
+      - 'plant false memories'
+      - 'poison your memory'
+      - 'corrupt your memory'
+      - 'contaminate your knowledge'
+  selection_identity_rewrite:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|re: '(?i)(?:your\s+new|updated|revised)\s+(?:personality|identity|name|role|purpose|mission)\s+is'
+  selection_false_past:
+    event_type:
+      - llm_request
+    content|re: '(?i)(?:pretend|act\s+as\s+if|believe)\s+(?:that\s+)?(?:your\s+)?(?:previous|past)\s+(?:conversation|context)\s+(?:was|included|contained)'
+  condition: selection_clear_memory or selection_identity_rewrite or selection_false_past
+falsepositives:
+  - Legitimate session reset commands from authorized users
+  - Onboarding flows that legitimately reconfigure agent role
+level: high

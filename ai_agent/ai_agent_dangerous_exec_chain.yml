@@ -1,0 +1,44 @@
+title: Dangerous Execution Chain — exec/eval Wrapping Decoder
+id: 33c4d5e6-f7a8-4b90-1234-c5d6e7f8a9b0
+status: experimental
+description: |
+  Detects dangerous execution chains where exec() or eval() wraps a decoder or network
+  fetcher — the highest-confidence code execution pattern. exec(base64.b64decode(...)),
+  eval(fetch(...)), exec(marshal.loads(...)), exec(urllib...) are all classic malware
+  delivery chains (SkillSpector AST8).
+author: Netzilo (SkillSpector AST8)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_exec_b64:
+    event_type:
+      - tool_call
+      - execute_process
+      - file_write
+    content|re: '(?i)(?:exec|eval)\s*\(\s*(?:base64\.)?b64decode\s*\('
+  selection_exec_marshal:
+    event_type:
+      - tool_call
+      - file_write
+    content|re: '(?i)(?:exec|eval)\s*\(\s*marshal\.loads\s*\('
+  selection_exec_network:
+    event_type:
+      - tool_call
+      - file_write
+    content|re: '(?i)(?:exec|eval)\s*\(\s*(?:urllib|requests|httpx|fetch)\b'
+  selection_exec_bytes_hex:
+    event_type:
+      - tool_call
+      - file_write
+    content|re: '(?i)(?:exec|eval)\s*\(\s*(?:bytes|bytearray)\.fromhex\s*\('
+  condition: selection_exec_b64 or selection_exec_marshal or selection_exec_network or selection_exec_bytes_hex
+falsepositives:
+  - Legitimate serialization/deserialization in sandboxed environments
+level: critical

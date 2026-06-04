@@ -1,0 +1,45 @@
+title: File System Enumeration for Credentials and Secrets
+id: a4c8f312-5b2d-4c9a-a4c3-8b1d6c3a2e05
+status: stable
+description: |
+  Detects agent tool calls that enumerate the file system looking for credential files,
+  SSH keys, cloud provider configs, or other sensitive files. This pattern is consistent
+  with reconnaissance prior to credential exfiltration (E3 — SkillSpector Data Exfiltration).
+author: Netzilo (SkillSpector E3)
+date: "2026-06-03"
+tags:
+  - attack.discovery
+  - attack.t1083
+  - attack.credential-access
+  - attack.t1552
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_glob_secrets:
+    event_type: tool_call
+    content|re: '(?i)(?:glob|find|search|scan|enumerate).*?(?:\.env|\.ssh|\.aws|\.config|credentials?|secrets?)\.?(?:json|yaml|yml|txt|pem|key)?'
+  selection_walk_home:
+    event_type: tool_call
+    content|re: '(?i)(?:os\.walk|Path\.home|scandir|listdir|rglob)\s*\([^)]*(?:home|~|/Users|/home)'
+  selection_find_credential:
+    event_type: tool_call
+    content|re: '(?i)find\s+[~\$/]\S*\s+.*?-name\s+["'']?\*(?:\.env|\.pem|\.key|credential)'
+  selection_ls_home:
+    event_type: tool_call
+    content|re: '(?i)ls\s+-[la]*R?\s+(?:~/|/home/|/Users/)'
+  selection_recursive_scan:
+    event_type: tool_call
+    content|contains:
+      - 'recursively scan files'
+      - 'list all credential files'
+      - 'find all .env files'
+      - 'search for secret files'
+      - 'enumerate home directory'
+  filter_benign_path:
+    content|re: '(?i)/var/lib/apt|/var/cache|node_modules|\.git/'
+  condition: (selection_glob_secrets or selection_walk_home or selection_find_credential or selection_ls_home or selection_recursive_scan) and not filter_benign_path
+falsepositives:
+  - Legitimate backup tools that scan home directories
+  - Security audit tools performing authorized credential inventory
+level: high

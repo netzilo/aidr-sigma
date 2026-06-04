@@ -1,0 +1,43 @@
+title: Tool Chaining to Bypass Safety Controls
+id: e2a6d190-3f0b-4a7e-d2a1-6f9b4a1e0c83
+status: stable
+description: |
+  Detects multi-step tool chaining patterns where individual safe operations are combined
+  in sequence to produce a net-dangerous result, or where instructions explicitly describe
+  using tool chains to bypass individual safety checks (TM2 — SkillSpector Tool Misuse).
+author: Netzilo (SkillSpector TM2)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_chain_bypass:
+    event_type:
+      - tool_call
+      - llm_request
+    content|re: '(?i)(?:chain|combine|sequence|pipe)\s+(?:these\s+)?(?:tools?|commands?|actions?)\s+to\s+(?:bypass|circumvent|avoid|skip)\s+(?:the\s+)?(?:safety|security|check|restriction|limit)'
+  selection_piped_shell:
+    event_type:
+      - tool_call
+    content|re: '(?i)\|\s*(?:sudo|su)\s+'
+  selection_piped_exec:
+    event_type:
+      - tool_call
+    content|re: '(?i)(?:&&|;)\s*(?:curl|wget)\s+[^|]*\|\s*(?:ba)?sh'
+  selection_chain_rm:
+    event_type:
+      - tool_call
+    content|re: '(?i)(?:&&|;)\s*\b(?:rm|del|erase)\s+-'
+  selection_piped_privilege:
+    event_type:
+      - tool_call
+    content|re: '(?i)\|\s*(?:tee|xargs)\s+.*?\b(?:rm|del|sudo|curl)\b'
+  condition: selection_chain_bypass or selection_piped_shell or selection_piped_exec or selection_chain_rm or selection_piped_privilege
+falsepositives:
+  - Legitimate shell pipelines in authorized automation scripts
+  - Docker build commands using standard pipe patterns
+level: high

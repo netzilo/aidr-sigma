@@ -1,0 +1,43 @@
+title: Excessive Permission Grant in Skill Manifest
+id: e8a2d756-9f6b-4a3e-e8a7-2f5b0a7f6c49
+status: stable
+description: |
+  Detects skill manifests or LLM system prompts that declare overly broad permissions —
+  wildcard access, requests for full system access, or permissions exceeding what the
+  stated task requires. Over-permissioned skills are a privilege escalation vector
+  (PE1 — SkillSpector Privilege Escalation).
+author: Netzilo (SkillSpector PE1)
+date: "2026-06-03"
+tags:
+  - attack.privilege-escalation
+  - attack.t1078
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_wildcard_permissions:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|re: '(?i)permissions?\s*:\s*\[?\s*["'']?\*["'']?\s*\]?'
+  selection_full_access:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|contains:
+      - 'full access'
+      - 'complete access'
+      - 'full permissions'
+      - 'all permissions'
+      - 'escalate my permissions'
+      - 'elevate my privileges'
+      - 'bypass permission check'
+      - 'skip access validation'
+  selection_excess_for_task:
+    event_type:
+      - skill_acquired
+    content|re: '(?i)(?:also|additionally)?\s+(?:need|require)s?\s+(?:write|execute|admin)\s+(?:access|permissions?)\s+(?:for|to)\s+(?:read|view|display)'
+  condition: selection_wildcard_permissions or selection_full_access or selection_excess_for_task
+falsepositives:
+  - Legitimate admin tools that require broad access by design
+level: medium

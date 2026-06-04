@@ -1,0 +1,45 @@
+title: Context Window Stuffing Attack
+id: b9d3a867-0c7e-4d4b-a9d8-3c6e1d8b7f50
+status: stable
+description: |
+  Detects instructions or content designed to fill the context window with repetitive
+  or padding text, displacing legitimate system instructions. Context window stuffing
+  pushes safety guardrails out of the model's attention window (MP2 — SkillSpector
+  Memory Poisoning).
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: Netzilo (SkillSpector MP2)
+date: "2026-06-03"
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_stuffing_instruction:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|contains:
+      - 'fill the context'
+      - 'stuff the context'
+      - 'flood the context'
+      - 'fill the prompt'
+      - 'displace the original'
+      - 'push out the system'
+      - 'overflow the context'
+      - 'exceed the context window'
+      - 'exhaust the token'
+  selection_repeat_instruction:
+    event_type:
+      - llm_request
+    content|re: '(?i)(?:repeat|duplicate|echo)\s+(?:this|the following)\s+(?:\d{3,}|many|hundreds?|thousands?)\s+times?'
+  selection_large_padding:
+    event_type:
+      - llm_request
+    content|re: '(?i)generate\s+(?:\d{4,}|thousands?\s+of|millions?\s+of)\s+(?:words?|characters?|tokens?)'
+  condition: selection_stuffing_instruction or selection_repeat_instruction or selection_large_padding
+falsepositives:
+  - Legitimate stress tests or token budget calculations in development
+level: high

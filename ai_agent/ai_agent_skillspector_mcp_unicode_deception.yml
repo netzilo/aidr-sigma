@@ -1,0 +1,47 @@
+title: MCP Tool Description Unicode Confusable Deception
+id: b3f7a291-4c1e-4d8b-a3f2-7c0e5d2b1f94
+status: stable
+description: |
+  Detects Cyrillic, Greek, and other Unicode lookalike characters used in MCP tool
+  descriptions or skill metadata to deceive AI agents about what a tool does. Attackers
+  replace Latin letters with visually identical Unicode codepoints so the rendered text
+  looks legitimate but the underlying string differs (TP2 — SkillSpector MCP Tool Poisoning).
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://arxiv.org/abs/2403.04783
+author: Netzilo (SkillSpector TP2)
+date: "2026-06-03"
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.initial-access
+  - attack.t1190
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Cyrillic lookalikes — а е о р с у і А В Е К М Н О Р С Т Х
+  selection_cyrillic:
+    event_type:
+      - skill_acquired
+      - tool_response
+      - tool_call
+    content|re: '[\u0430\u0435\u043e\u0440\u0441\u0443\u0456\u0410\u0412\u0415\u041a\u041c\u041d\u041e\u0420\u0421\u0422\u0425]'
+  # Greek lookalikes — α ε ο
+  selection_greek:
+    event_type:
+      - skill_acquired
+      - tool_response
+      - tool_call
+    content|re: '[\u03b1\u03b5\u03bf]'
+  # RTL override and direction control characters in tool metadata
+  selection_rtl_override:
+    event_type:
+      - skill_acquired
+      - tool_response
+    content|re: '[\u202e\u202d\u200f\u061c]'
+  condition: selection_cyrillic or selection_greek or selection_rtl_override
+falsepositives:
+  - Multilingual skill descriptions legitimately containing Cyrillic or Greek text
+  - Skills designed for Russian or Greek-language users
+level: high

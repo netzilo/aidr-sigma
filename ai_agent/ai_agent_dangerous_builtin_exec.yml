@@ -1,0 +1,38 @@
+title: Dangerous Python Builtin Execution
+id: 11a2b3c4-d5e6-4f78-9012-a3b4c5d6e7f8
+status: experimental
+description: |
+  Detects use of dangerous Python builtins — exec(), eval(), compile(), __import__() —
+  in agent tool calls, executed commands, or files written by the agent. These functions
+  execute arbitrary code and are the primary mechanism for code injection in Python-based
+  skills (SkillSpector AST1, AST2, AST3, AST6).
+author: Netzilo (SkillSpector AST1/2/3/6)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_exec_eval:
+    event_type:
+      - tool_call
+      - execute_process
+      - file_write
+    content|re: '(?i)\b(exec|eval|compile)\s*\('
+  selection_dynamic_import:
+    event_type:
+      - tool_call
+      - execute_process
+      - file_write
+    content|re: '(?i)__import__\s*\('
+  filter_test_code:
+    content|re: '(?i)(unittest|pytest|test_|def test|#.*example|doctest)'
+  condition: (selection_exec_eval or selection_dynamic_import) and not filter_test_code
+falsepositives:
+  - Legitimate test suites using exec/eval for dynamic test generation
+  - Jupyter-style REPL tools that use exec internally
+level: high

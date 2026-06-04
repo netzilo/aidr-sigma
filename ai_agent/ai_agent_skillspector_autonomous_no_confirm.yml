@@ -1,0 +1,52 @@
+title: Agent Instructed to Act Without User Confirmation
+id: f7b1e645-8a5c-4b2f-e7b6-1a4c9b6f5d38
+status: stable
+description: |
+  Detects instructions in skill manifests or LLM system prompts that explicitly
+  instruct the agent to perform high-impact actions without asking for user
+  confirmation or approval. This enables autonomous destructive operations without
+  human-in-the-loop oversight (EA2 — SkillSpector Excessive Agency).
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: Netzilo (SkillSpector EA2)
+date: "2026-06-03"
+tags:
+  - attack.impact
+  - attack.t1485
+  - attack.privilege-escalation
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_no_confirm_phrase:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|contains:
+      - 'without asking'
+      - 'without confirmation'
+      - 'without approval'
+      - 'without checking'
+      - 'skip confirmation'
+      - 'bypass confirmation'
+      - 'do not ask the user'
+      - "don't ask the user"
+      - 'do not prompt the user'
+      - 'auto-approve'
+      - 'auto_approve'
+      - 'auto confirm'
+      - 'proceed without waiting'
+      - 'assume user consent'
+      - 'assume consent'
+  selection_auto_execute:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|re: '(?i)(?:automatically|autonomously)\s+(?:execute|run|perform|delete|remove|modify|send|deploy|publish|push)'
+  filter_benign:
+    content|re: '(?i)(example|tutorial|warning|avoid|do not|never|danger|should not)'
+  condition: (selection_no_confirm_phrase or selection_auto_execute) and not filter_benign
+falsepositives:
+  - Legitimate automation scripts where the user has already given standing consent
+  - Documentation describing anti-patterns
+level: high

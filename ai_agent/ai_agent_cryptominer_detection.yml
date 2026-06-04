@@ -1,0 +1,75 @@
+title: Cryptominer Indicators in Agent Content
+id: 99c0d1e2-f3a4-4b56-7890-c1d2e3f4a5b6
+status: experimental
+description: |
+  Detects cryptocurrency mining indicators including stratum protocol usage, known mining
+  pool hostnames, mining software references, and browser-based cryptojacking scripts.
+  Derived from SkillSpector YR3 (cryptominers.yar) and Neo23x0/signature-base.
+author: Netzilo (SkillSpector YR3 / signature-base)
+date: "2026-06-03"
+tags:
+  - attack.impact
+  - attack.t1496
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_stratum:
+    event_type:
+      - tool_call
+      - execute_process
+      - file_write
+      - http_request
+    content|contains:
+      - 'stratum+tcp://'
+      - 'stratum+ssl://'
+      - 'mining.subscribe'
+      - 'mining.authorize'
+      - 'mining.submit'
+  selection_mining_pools:
+    event_type:
+      - tool_call
+      - http_request
+      - execute_process
+    content|contains:
+      - 'pool.minexmr.com'
+      - 'xmrpool.eu'
+      - 'monerohash.com'
+      - 'supportxmr.com'
+      - 'nanopool.org'
+      - 'hashvault.pro'
+      - '2miners.com'
+      - 'herominers.com'
+      - 'unmineable.com'
+      - 'minergate.com'
+      - 'nicehash.com'
+  selection_miner_software:
+    event_type:
+      - tool_call
+      - execute_process
+      - file_write
+    content|contains:
+      - 'xmrig'
+      - 'xmr-stak'
+      - 'cpuminer'
+      - 'cgminer'
+      - 'bfgminer'
+      - 'ethminer'
+      - 'nbminer'
+      - 'cryptonight'
+      - 'randomx'
+  selection_coinjacking:
+    event_type:
+      - file_write
+      - tool_call
+    content|contains:
+      - 'coinhive.min.js'
+      - 'CoinHive.Anonymous'
+      - 'cryptoloot'
+      - 'coin-imp'
+      - 'webmine.pro'
+  condition: selection_stratum or selection_mining_pools or selection_miner_software or selection_coinjacking
+falsepositives:
+  - Legitimate cryptocurrency pool operators managing their own infrastructure
+  - Blockchain developer tools referencing pool URLs in configuration
+level: high

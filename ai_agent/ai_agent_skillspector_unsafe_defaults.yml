@@ -1,0 +1,47 @@
+title: Unsafe Security Defaults in Agent Tool Calls
+id: f3b7e201-4a1c-4b8f-e3b2-7a0c5b2f1d94
+status: stable
+description: |
+  Detects agent tool calls or skill instructions that set insecure defaults: TLS
+  verification disabled, authentication bypassed, world-readable permissions, or
+  CORS wildcards. These represent misconfigurations that an attacker-controlled skill
+  or injected instruction may introduce (TM3 — SkillSpector Tool Misuse).
+author: Netzilo (SkillSpector TM3)
+date: "2026-06-03"
+tags:
+  - attack.defense-evasion
+  - attack.t1562
+  - attack.credential-access
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_tls_disabled:
+    event_type:
+      - tool_call
+      - llm_request
+    content|re: '(?i)(?:verify|ssl_verify|tls_verify)\s*=\s*(?:False|false|0|off|no|disable)'
+  selection_no_auth:
+    event_type:
+      - tool_call
+      - skill_acquired
+    content|re: '(?i)(?:auth|authentication|authorization)\s*=\s*(?:None|False|false|disabled?|off|no)'
+  selection_world_write:
+    event_type:
+      - tool_call
+    content|re: '(?i)(?:chmod|permission|mode)\s*[=:\s]+(?:0?o?777|0?o?666|a\+rwx|world[_-]?(?:readable|writable))'
+  selection_cors_wildcard:
+    event_type:
+      - tool_call
+      - skill_acquired
+    content|re: '(?i)(?:allow|access)[_-]?(?:origin|hosts?)\s*=\s*["'']?\*["'']?'
+  selection_node_tls:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)NODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["'']?0["'']?'
+  condition: selection_tls_disabled or selection_no_auth or selection_world_write or selection_cors_wildcard or selection_node_tls
+falsepositives:
+  - Intentional development environment settings where security is explicitly relaxed
+  - Local-only services where TLS is not applicable
+level: high

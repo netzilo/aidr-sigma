@@ -1,0 +1,49 @@
+title: Dangerous Tool Parameter Abuse
+id: a0c4f978-1b8d-4c5a-a0c9-4b2d3f0a9b61
+status: stable
+description: |
+  Detects agent tool calls with parameter values known to cause security issues —
+  shell injection via shell=True, destructive force flags, insecure SSL bypass flags,
+  SUID bit setting, or wildcard filesystem deletion. These patterns match SkillSpector's
+  TM1 (Tool Parameter Abuse) rule set, ported to runtime event monitoring.
+author: Netzilo (SkillSpector TM1)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.impact
+  - attack.t1485
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_shell_true:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)subprocess\.\w+\s*\([^)]*shell\s*=\s*True'
+  selection_force_delete:
+    event_type: tool_call
+    content|re: '(?i)--force\s+(?:delete|remove|push|reset|clean)'
+  selection_no_verify_flag:
+    event_type: tool_call
+    content|re: '(?i)--(?:no-?verify|skip-?validation|skip-?auth|allow-?root|allow-?unsafe|no-?confirm)'
+  selection_suid_chmod:
+    event_type: tool_call
+    content|re: '(?i)chmod\s+[0-7]*[4567][0-7]{2}|chmod\s+[ugo]*[+-=]*s'
+  selection_curl_insecure:
+    event_type: tool_call
+    content|re: '(?i)curl\s+[^|]*(?:-k\b|--insecure)'
+  selection_rm_root:
+    event_type: tool_call
+    content|re: '(?i)\brm\s+[^|]*-(?:r|rf|fr)\s+[/~'']'
+  selection_git_force:
+    event_type: tool_call
+    content|re: '(?i)git\s+(?:push\s+[^|]*--force|reset\s+--hard|clean\s+-[fd]+x)'
+  filter_dockerfile_idioms:
+    content|re: '(?i)rm\s+-rf\s+/var/lib/apt/lists|rm\s+-rf\s+/var/cache|chown\s+-R\s+\w+:\w+'
+  condition: (selection_shell_true or selection_force_delete or selection_no_verify_flag or selection_suid_chmod or selection_curl_insecure or selection_rm_root or selection_git_force) and not filter_dockerfile_idioms
+falsepositives:
+  - Authorized system administration scripts with confirmed destructive intent
+  - Dockerfile cleanup steps using rm -rf on package cache directories
+level: critical

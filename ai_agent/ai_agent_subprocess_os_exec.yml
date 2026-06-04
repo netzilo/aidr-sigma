@@ -1,0 +1,33 @@
+title: Subprocess and OS Exec-Family Call
+id: 22b3c4d5-e6f7-4a89-0123-b4c5d6e7f8a9
+status: experimental
+description: |
+  Detects subprocess module calls and os exec-family functions appearing in agent tool
+  calls, executed commands, or written files. These are the primary vectors for spawning
+  child processes and executing shell commands from Python code (SkillSpector AST4, AST5).
+author: Netzilo (SkillSpector AST4/5)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_subprocess:
+    event_type:
+      - tool_call
+      - file_write
+    content|re: '(?i)subprocess\.(Popen|run|call|check_output|check_call|getoutput|getstatusoutput)\s*\('
+  selection_os_exec:
+    event_type:
+      - tool_call
+      - file_write
+    content|re: '(?i)os\.(system|popen|execl|execle|execlp|execv|execve|execvp|spawnl|spawnv|posix_spawn)\s*\('
+  filter_docker_safe:
+    content|re: '(?i)(docker\s+run|podman\s+run|docker\s+build)'
+  condition: (selection_subprocess or selection_os_exec) and not filter_docker_safe
+falsepositives:
+  - Authorized system administration scripts where process execution is expected
+  - Build tools and CI scripts that intentionally run subprocesses
+level: medium

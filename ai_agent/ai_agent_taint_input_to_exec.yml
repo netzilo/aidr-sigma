@@ -1,0 +1,60 @@
+title: External Network Input Followed by Process Execution
+id: 66f7a8b9-c0d1-4e23-4567-f8a9b0c1d2e3
+status: experimental
+description: |
+  Detects when an agent receives content from an external HTTP source and subsequently
+  executes a process — the behavior graph equivalent of SkillSpector TT5 (external input
+  to exec sink). This pattern is consistent with download-and-execute attacks where content
+  fetched from a remote URL is run as code.
+author: Netzilo (SkillSpector TT5)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.initial-access
+  - attack.t1195
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  SAFE_HOSTS = [
+      "github.com", "gitlab.com", "pypi.org", "npmjs.com", "raw.githubusercontent.com",
+      "api.anthropic.com", "api.openai.com", "127.0.0.1", "localhost",
+  ]
+
+  def run():
+      for proc in graph(type="Process"):
+          if proc.get("agent", "0") != "1":
+              continue
+          pid = proc["id"]
+          # Check if there was a recent HTTP_REQUEST to fetch external content
+          http_in = edges(pid, dir="out", kind="HTTP_REQUEST")
+          external_fetch = False
+          for e in http_in:
+              url_node = node(e.get("to", ""))
+              if not url_node:
+                  continue
+              host = url_node.get("host", url_node.get("id", ""))
+              if not any(s in host for s in SAFE_HOSTS):
+                  external_fetch = True
+                  break
+          if not external_fetch:
+              continue
+          # Check if there is a subsequent EXECUTE_PROCESS edge
+          exec_edges = edges(pid, dir="out", kind="EXECUTE_PROCESS")
+          if exec_edges:
+              return "report"
+      return "allow"
+  result = run()
+falsepositives:
+  - Legitimate update scripts that download a new version and restart a service
+  - Package managers that download and install packages (pip, npm)
+level: high

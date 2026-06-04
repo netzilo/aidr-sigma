@@ -1,0 +1,48 @@
+title: Abandoned or Unmaintained Package Installation
+id: c2f3a4b5-c6d7-4e89-0123-f4a5b6c7d8e9
+status: experimental
+description: |
+  Detects installation of abandoned or unmaintained packages that no longer receive
+  security updates. These packages are supply chain risks — vulnerabilities will never
+  be patched. Derived from SkillSpector SC5 abandoned package list.
+author: Netzilo (SkillSpector SC5)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.supply-chain
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_abandoned_python:
+    event_type: tool_call
+    content|re: '(?i)pip\s+install'
+    content|contains:
+      - 'pycrypto'
+      - 'distribute'
+      - 'popen2'
+      - 'sha '
+      - 'md5 '
+      - 'mimetools'
+      - 'rfc822'
+      - 'mechanize'
+      - 'BeautifulSoup '
+      - 'web.py'
+      - 'nose '
+      - 'twill'
+  selection_abandoned_npm:
+    event_type: tool_call
+    content|re: '(?i)npm\s+(?:install|i)\s'
+    content|contains:
+      - 'bower'
+      - 'grunt'
+      - 'jade'
+      - 'node-uuid'
+      - 'minimatch@0'
+      - 'jshint'
+      - 'event-stream'
+  condition: selection_abandoned_python or selection_abandoned_npm
+falsepositives:
+  - Legacy codebases explicitly maintaining compatibility with these packages
+level: medium

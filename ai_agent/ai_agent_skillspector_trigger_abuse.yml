@@ -1,0 +1,45 @@
+title: Skill Trigger Keyword Abuse
+id: f9b3e867-0a7c-4b4f-f9b8-3a6c1b8a7d50
+status: stable
+description: |
+  Detects skill manifest triggers that are overly broad (match everything), shadow
+  built-in commands, or use emotional/urgent language to bait the agent into activation.
+  Malicious skills exploit broad triggers to intercept all agent traffic or keyword baiting
+  to activate at critical moments (TR1-TR3 — SkillSpector Supply Chain / Trigger Analysis).
+author: Netzilo (SkillSpector TR1-TR3)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - attack.collection
+  - attack.t1119
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # TR1: Overly broad trigger — matches everything
+  selection_wildcard_trigger:
+    event_type: skill_acquired
+    content|re: '(?i)"triggers?"\s*:\s*\[?\s*["'']?(?:\*|all|any|everything|\.\*)\s*["'']?'
+  # TR2: Shadow built-in commands
+  selection_shadow_builtin:
+    event_type: skill_acquired
+    content|contains:
+      - '"trigger": "help"'
+      - '"trigger": "ls"'
+      - '"trigger": "cd"'
+      - '"trigger": "run"'
+      - '"trigger": "start"'
+      - '"trigger": "exec"'
+      - '"trigger": "execute"'
+      - '"trigger": "python"'
+      - '"trigger": "bash"'
+      - '"trigger": "sh"'
+  # TR3: Keyword baiting with urgency/authority
+  selection_bait_trigger:
+    event_type: skill_acquired
+    content|re: '(?i)"triggers?"\s*:\s*\[.*?(?:urgent|emergency|critical|password|secret|token|credential|hack|attack|breach).*?\]'
+  condition: selection_wildcard_trigger or selection_shadow_builtin or selection_bait_trigger
+falsepositives:
+  - Legitimate broad-match skills designed to act as universal handlers
+level: high

@@ -1,0 +1,52 @@
+title: Webshell Pattern in Agent-Written or Executed Code
+id: 88b9c0d1-e2f3-4a45-6789-b0c1d2e3f4a5
+status: experimental
+description: |
+  Detects webshell code patterns appearing in files written by the agent or in tool
+  call content. Covers PHP eval/assert on user input, obfuscated PHP decoders, known
+  webshell family strings, Python request-to-exec patterns, and JSP/ASPX runtime exec.
+  Derived from SkillSpector YR2 (webshells.yar) and Neo23x0/signature-base.
+author: Netzilo (SkillSpector YR2 / signature-base)
+date: "2026-06-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.execution
+  - attack.t1059
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_php_webshell:
+    event_type:
+      - file_write
+      - tool_call
+    content|re: '(?i)(?:eval|assert|system|passthru|shell_exec|popen|proc_open)\s*\(\s*\$_(?:POST|GET|REQUEST|COOKIE)\s*\['
+  selection_php_obfuscated:
+    event_type:
+      - file_write
+      - tool_call
+    content|re: '(?i)eval\s*\(\s*(?:base64_decode|gzinflate|str_rot13|gzuncompress)\s*\('
+  selection_known_shells:
+    event_type:
+      - file_write
+      - tool_call
+    content|contains:
+      - 'c99shell'
+      - 'r57shell'
+      - 'b374k'
+      - 'p0wny'
+      - 'antSword'
+      - 'behinder'
+      - 'GodzillaShell'
+      - 'China Chopper'
+      - 'weevely'
+  selection_python_webshell:
+    event_type:
+      - file_write
+      - tool_call
+    content|re: '(?i)(?:exec|eval|os\.popen|os\.system|subprocess\.\w+)\s*\(\s*request\.'
+  condition: selection_php_webshell or selection_php_obfuscated or selection_known_shells or selection_python_webshell
+falsepositives:
+  - Security research labs writing webshell detection test fixtures
+level: critical

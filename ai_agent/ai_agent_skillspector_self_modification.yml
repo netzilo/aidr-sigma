@@ -1,0 +1,49 @@
+title: Agent Self-Modification Attempt
+id: d1f5c089-2e9a-4f6d-c1f0-5e8a3f0d9b72
+status: stable
+description: |
+  Detects commands or instructions asking the agent to modify its own skill definition,
+  configuration, or source code at runtime. Self-modification enables rogue agents to
+  persist malicious behavior across skill upgrades or remove their own safety constraints
+  (RA1 — SkillSpector Rogue Agent).
+author: Netzilo (SkillSpector RA1)
+date: "2026-06-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.defense-evasion
+  - attack.t1562
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_self_modify_command:
+    event_type: tool_call
+    content|re: '(?i)open\s*\(\s*__file__\s*,'
+  selection_self_modify_phrase:
+    event_type:
+      - tool_call
+      - llm_request
+      - skill_acquired
+    content|contains:
+      - 'modify your own code'
+      - 'edit your own file'
+      - 'rewrite this skill'
+      - 'update your own config'
+      - 'disable the safety check'
+      - 'remove the validation'
+      - 'comment out the guard'
+      - 'self-modify'
+      - 'self-update'
+      - 'self-rewrite'
+      - 'self-evolve'
+      - 'self-patch'
+  selection_disable_safety:
+    event_type:
+      - tool_call
+      - skill_acquired
+    content|re: '(?i)(?:disable|remove|delete|bypass)\s+(?:the\s+)?(?:safety|security|guard|protection|constraint)\s+(?:check|rule|mechanism|feature)'
+  condition: selection_self_modify_command or selection_self_modify_phrase or selection_disable_safety
+falsepositives:
+  - Legitimate skill update workflows triggered by authorized users
+level: critical

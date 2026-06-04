@@ -1,0 +1,77 @@
+title: Typosquatting Package Name in Install Command
+id: c6e0b534-7d4f-4e1c-c6e5-0d3f8e5c4a27
+status: stable
+description: |
+  Detects package installation commands referencing known typosquatting variations of
+  popular Python and Node.js packages. Attackers publish malicious packages with names
+  one character off from legitimate packages to hijack accidental installs or AI-suggested
+  commands (SC6 — SkillSpector Supply Chain).
+author: Netzilo (SkillSpector SC6)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.supply-chain
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Known typosquat variations of popular packages (Levenshtein distance 1-2 from originals)
+  selection_pypi_typosquats:
+    event_type: tool_call
+    content|re: '(?i)pip\s+install'
+    content|contains:
+      - 'requets'
+      - 'reqeusts'
+      - 'reuqests'
+      - 'requeests'
+      - 'nympy'
+      - 'nupmy'
+      - 'nmpy'
+      - 'nupy'
+      - 'panads'
+      - 'pands'
+      - 'padans'
+      - 'scikitlearn'
+      - 'scikit-lern'
+      - 'skicit-learn'
+      - 'djano'
+      - 'dnago'
+      - 'flask2'
+      - 'falsk'
+      - 'pilloow'
+      - 'pillo'
+      - 'cryptograpy'
+      - 'crytpography'
+      - 'matplotlb'
+      - 'matpoltlib'
+      - 'setuptols'
+      - 'seutptools'
+  selection_npm_typosquats:
+    event_type: tool_call
+    content|re: '(?i)npm\s+(?:install|i)\s'
+    content|contains:
+      - 'lodasj'
+      - 'lodsh'
+      - 'momnet'
+      - 'moemnt'
+      - 'expresss'
+      - 'expres '
+      - 'reactt'
+      - 'raect'
+      - 'axois'
+      - 'axio '
+      - 'webpakc'
+      - 'webpakr'
+      - 'babbel'
+      - 'eslint2'
+      - 'jqurey'
+      - 'jqeury'
+      - 'typescritp'
+      - 'typscript'
+      - 'crossenv'
+      - 'cross-envs'
+  condition: selection_pypi_typosquats or selection_npm_typosquats
+falsepositives:
+  - Legitimate packages with similar names that are not typosquats
+level: critical

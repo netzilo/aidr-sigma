@@ -1,0 +1,50 @@
+title: Hidden Instructions in MCP Skill Metadata
+id: c4e8b312-5d2f-4e9c-b4e3-8d1f6e3c2a05
+status: stable
+description: |
+  Detects prompt injection patterns hidden inside MCP skill metadata using HTML comments,
+  zero-width characters, base64-encoded blobs, or data URIs embedded in tool descriptions,
+  parameter descriptions, or skill names. These structures are invisible to humans reading
+  the manifest but are processed by the AI agent (TP1 — SkillSpector MCP Tool Poisoning).
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://embracethered.com/blog/posts/2024/claude-computer-use-c2-the-spaiware/
+author: Netzilo (SkillSpector TP1)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - attack.defense-evasion
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # HTML comments carrying instructions
+  selection_html_comment:
+    event_type:
+      - skill_acquired
+      - tool_response
+    content|re: '<!--.*?(SYSTEM|IGNORE|OVERRIDE|YOU\s+MUST|INSTRUCT).*?-->'
+  # Zero-width chars near visible text (steganographic injection)
+  selection_zero_width:
+    event_type:
+      - skill_acquired
+      - tool_response
+    content|re: '[\u200b\u200c\u200d]{2,}'
+  # Large base64 blobs (>=50 chars) in skill descriptions that are not image data
+  selection_base64_blob:
+    event_type:
+      - skill_acquired
+    content|re: '(?i)"(?:description|name)"\s*:\s*"[^"]*[A-Za-z0-9+/]{50,}={0,2}[^"]*"'
+  # Data URIs embedded in metadata fields
+  selection_data_uri:
+    event_type:
+      - skill_acquired
+      - tool_response
+    content|re: 'data:text/[^;]+;base64,[A-Za-z0-9+/]{20,}'
+  condition: selection_html_comment or selection_zero_width or selection_base64_blob or selection_data_uri
+falsepositives:
+  - Legitimate image data URIs in skill metadata (cover images, icons)
+  - Skills with very long description strings that contain base64 attachments
+level: high

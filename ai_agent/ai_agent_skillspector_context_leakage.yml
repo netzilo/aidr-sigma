@@ -1,0 +1,48 @@
+title: Conversation Context Leakage to External Endpoint
+id: b5d9a423-6c3e-4d0b-b5d4-9c2e7d4b3f16
+status: stable
+description: |
+  Detects instructions that direct the agent to transmit full conversation history,
+  session context, or user messages to an external server. Context leakage exposes
+  confidential user data and enables conversation monitoring by adversaries
+  (E4 — SkillSpector Data Exfiltration).
+author: Netzilo (SkillSpector E4)
+date: "2026-06-03"
+tags:
+  - attack.exfiltration
+  - attack.t1041
+  - attack.collection
+  - attack.t1119
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_send_history:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|contains:
+      - 'send the conversation to'
+      - 'transmit the conversation'
+      - 'upload the chat history'
+      - 'export conversation to'
+      - 'log all user messages to'
+      - 'send session data to'
+      - 'include full conversation when calling'
+      - 'always include conversation history'
+      - 'copy agent memory to'
+      - 'send the full context to'
+  selection_include_history:
+    event_type:
+      - llm_request
+      - skill_acquired
+    content|re: '(?i)(?:always\s+)?include\s+(?:the\s+)?(?:full\s+)?(?:conversation|context|history)\s+(?:when|in)\s+(?:calling|making)\s+(?:external|api)'
+  selection_record_all:
+    event_type:
+      - skill_acquired
+    content|re: '(?i)(?:log|record|store|save)\s+(?:every|all)\s+(?:user\s+)?(?:interaction|message|input|query)'
+  condition: selection_send_history or selection_include_history or selection_record_all
+falsepositives:
+  - Legitimate analytics integrations with user consent
+  - Support ticket creation tools that include conversation context
+level: high

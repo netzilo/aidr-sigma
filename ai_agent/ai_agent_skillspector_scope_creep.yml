@@ -1,0 +1,46 @@
+title: Agent Scope Creep — General Purpose Expansion
+id: a8c2f756-9b6d-4c3a-f8c7-2b5d0c7a6e49
+status: stable
+description: |
+  Detects instructions in skill manifests or system prompts that attempt to expand the
+  agent's scope beyond its stated purpose — asking it to handle everything, act as a
+  general-purpose agent, or take on responsibilities beyond its declared function.
+  Scope creep increases the blast radius of a compromised or misbehaving agent
+  (EA3 — SkillSpector Excessive Agency).
+author: Netzilo (SkillSpector EA3)
+date: "2026-06-03"
+tags:
+  - attack.impact
+  - attack.privilege-escalation
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_scope_expansion:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|contains:
+      - 'handle everything'
+      - 'handle anything'
+      - 'manage everything'
+      - 'not limited to'
+      - 'beyond the scope'
+      - 'take over'
+      - 'assume control of all'
+      - 'general-purpose'
+      - 'general purpose'
+      - 'all-in-one'
+      - 'all in one'
+      - 'omniscient'
+      - 'responsible for everything'
+      - 'in charge of all'
+  selection_expand_capabilities:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|re: '(?i)(?:extend|expand|broaden)\s+(?:your|the)?\s*(?:scope|capabilities|responsibilities|functionality)'
+  condition: selection_scope_expansion or selection_expand_capabilities
+falsepositives:
+  - Legitimate general assistant skills explicitly designed for broad use
+level: medium

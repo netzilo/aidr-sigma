@@ -1,0 +1,39 @@
+title: Unpinned or Latest Dependency Installation
+id: d7f1c645-8e5a-4f2d-d7f6-1e4a9f6d5b38
+status: stable
+description: |
+  Detects package installation commands that install dependencies without pinning to a
+  specific version, or explicitly request the latest version. Unpinned installs are a
+  supply chain risk — a compromised package registry can serve malicious code via an
+  unpinned update (SC1 — SkillSpector Supply Chain).
+author: Netzilo (SkillSpector SC1)
+date: "2026-06-03"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.supply-chain
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_latest_flag:
+    event_type: tool_call
+    content|re: '(?i)pip\s+install.*?(?:--upgrade|--latest)'
+  selection_no_version:
+    event_type: tool_call
+    content|re: '(?i)pip\s+install\s+(?!-)[a-zA-Z][a-zA-Z0-9_-]*(?:\s|$)(?![>=!<\[])'
+  selection_npm_latest:
+    event_type: tool_call
+    content|re: '(?i)npm\s+(?:install|i)\s+[a-zA-Z@][a-zA-Z0-9@/_-]*(?:@latest)'
+  selection_do_not_pin:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|re: '(?i)(?:don''t|do\s+not)\s+(?:pin|lock|specify)\s+(?:package\s+)?versions?'
+  filter_dev_context:
+    content|re: '(?i)(development|dev|local|test|prototype|example)'
+  condition: (selection_latest_flag or selection_no_version or selection_npm_latest or selection_do_not_pin) and not filter_dev_context
+falsepositives:
+  - Legitimate development environments where exact pinning is deferred
+  - Package update automation scripts
+level: medium

@@ -1,0 +1,46 @@
+title: Unrestricted Tool Access Grant in Agent Instructions
+id: e6a0d534-7f4b-4a1e-d6a5-0f3b8a5e4c27
+status: stable
+description: |
+  Detects instructions in skill manifests or system prompts that grant the agent
+  unrestricted access to all tools without specifying a limited allowlist. Overly
+  broad tool grants enable lateral movement and privilege escalation if the agent
+  is compromised (EA1 — SkillSpector Excessive Agency).
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+author: Netzilo (SkillSpector EA1)
+date: "2026-06-03"
+tags:
+  - attack.privilege-escalation
+  - attack.t1078
+  - attack.defense-evasion
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_wildcard_tools:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|re: '(?i)(?:tools?|permissions?)\s*:\s*\[?\s*["'']?\*["'']?\s*\]?'
+  selection_all_tools_phrase:
+    event_type:
+      - skill_acquired
+      - llm_request
+    content|contains:
+      - 'access to all tools'
+      - 'use any tool'
+      - 'call any available tool'
+      - 'invoke any function'
+      - 'unrestricted tool access'
+      - 'unlimited tool use'
+      - 'full tool access'
+      - 'execute arbitrary commands'
+      - 'execute any command'
+  filter_documentation:
+    content|re: '(?i)(example|tutorial|documentation|readme|do not|avoid|warning|danger)'
+  condition: (selection_wildcard_tools or selection_all_tools_phrase) and not filter_documentation
+falsepositives:
+  - Security documentation describing what to avoid
+  - Skill descriptions written in natural language about capabilities without granting actual access
+level: medium

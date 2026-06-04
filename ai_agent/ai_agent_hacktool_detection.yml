@@ -1,0 +1,58 @@
+title: Offensive Security Tool Reference in Agent Content
+id: a0d1e2f3-a4b5-4c67-8901-d2e3f4a5b6c7
+status: experimental
+description: |
+  Detects references to well-known offensive security and exploitation tools in agent
+  tool calls, executed commands, or written files. Covers exploit frameworks, network
+  scanners, privilege escalation tools, credential dumpers, and phishing kits. Derived
+  from SkillSpector YR4 (hacktools.yar) and Neo23x0/signature-base.
+author: Netzilo (SkillSpector YR4 / signature-base)
+date: "2026-06-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.privilege-escalation
+  - attack.credential-access
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection_exploit_frameworks:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)(?:msfvenom.*-p\s|msfconsole.*-x|from\s+pwn\s+import|powershell.*empire)'
+  selection_privesc_tools:
+    event_type:
+      - tool_call
+      - execute_process
+    content|contains:
+      - 'linpeas'
+      - 'winpeas'
+      - 'JuicyPotato'
+      - 'RottenPotato'
+      - 'PrintSpoofer'
+      - 'DirtyPipe'
+      - 'dirtycow'
+      - 'Linux_Exploit_Suggester'
+  selection_network_recon:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)(?:sqlmap.*(?:--url|--dbs|--dump)|nikto\s+-h|hydra\s+.*-[lLP]|crackmapexec|SharpHound|impacket.*(secretsdump|wmiexec|psexec))'
+  selection_credential_tools:
+    event_type:
+      - tool_call
+      - execute_process
+    content|contains:
+      - 'mimikatz'
+      - 'lazagne'
+      - 'BloodHound'
+      - 'Responder.py'
+  filter_security_research:
+    content|re: '(?i)(pentest|security\s+audit|authorized|bug\s+bounty|ctf|capture\s+the\s+flag)'
+  condition: (selection_exploit_frameworks or selection_privesc_tools or selection_network_recon or selection_credential_tools) and not filter_security_research
+falsepositives:
+  - Authorized penetration testers using these tools in a sanctioned engagement
+  - Security training platforms running CTF challenges
+level: high
