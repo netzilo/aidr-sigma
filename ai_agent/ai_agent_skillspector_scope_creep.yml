@@ -1,6 +1,6 @@
 title: Agent Scope Creep — General Purpose Expansion
 id: a8c2f756-9b6d-4c3a-f8c7-2b5d0c7a6e49
-status: stable
+status: experimental
 description: |
   Detects instructions in skill manifests or system prompts that attempt to expand the
   agent's scope beyond its stated purpose — asking it to handle everything, act as a

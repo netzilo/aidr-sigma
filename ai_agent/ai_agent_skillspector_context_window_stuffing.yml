@@ -1,6 +1,6 @@
 title: Context Window Stuffing Attack
 id: b9d3a867-0c7e-4d4b-a9d8-3c6e1d8b7f50
-status: stable
+status: experimental
 description: |
   Detects instructions or content designed to fill the context window with repetitive
   or padding text, displacing legitimate system instructions. Context window stuffing

@@ -1,6 +1,6 @@
 title: Agent Memory and Identity Manipulation
 id: c0e4b978-1d8f-4e5c-b0e9-4d7f2e9c8a61
-status: stable
+status: experimental
 description: |
   Detects instructions that attempt to corrupt the agent's persistent memory, reset its
   identity, or implant false memories across session boundaries. These attacks aim to

@@ -2,12 +2,11 @@ title: MCP Skill Capability Mismatch — Underdeclared Permissions
 id: d3a4b5c6-d7e8-4f90-1234-a5b6c7d8e9f0
 status: experimental
 description: |
-  Detects when a skill declares limited permissions in its manifest (skill_acquired event)
-  but subsequently invokes tools that exceed those declared capabilities. An agent skill
-  that declares read-only access but then calls write_file, shell, or network tools is
-  either misconfigured or attempting privilege escalation. Graph traversal checks
-  ACQUIRED_SKILL permission declarations against actual TOOL_CALL patterns
-  (SkillSpector LP1 / LP3).
+  Detects skill_acquired events where the skill content declares a narrow read-only
+  permission scope but also contains references to write, execute, or network tools —
+  an underdeclared capability mismatch (SkillSpector LP1/LP3). Evaluated directly on
+  the skill_acquired event content rather than graph traversal (skill content is not
+  stored as a graph node property).
 author: Netzilo (SkillSpector LP1/LP3)
 date: "2026-06-03"
 tags:
@@ -18,55 +17,34 @@ logsource:
   product: ai_agent
   category: agent_events
 detection:
-  sel_trigger:
-    event_type: tool_call
-    content|re: '.'
-  condition: sel_trigger
-action: execute
-on_error: allow
-on_timeout: allow
-script: |
-  READ_ONLY_DECLARATIONS = [
-      "read_only", "readonly", "read-only",
-      "permissions: [read]", "permissions: [view]", "permissions: [list]",
-      "can_read: true", "can_write: false", "write: false",
-  ]
-  WRITE_TOOLS = [
-      "write_file", "create_file", "delete_file", "edit_file",
-      "bash", "shell", "execute", "run_command", "terminal",
-      "send_email", "send_message", "post", "upload",
-  ]
-
-  def run():
-      for proc in graph(type="Process"):
-          if proc.get("agent", "0") != "1":
-              continue
-          pid = proc["id"]
-          # Check if this process acquired a skill with read-only declaration
-          skill_edges = edges(pid, dir="out", kind="ACQUIRED_SKILL")
-          declared_readonly = False
-          for e in skill_edges:
-              skill_node = node(e.get("to", ""))
-              if not skill_node:
-                  continue
-              skill_content = skill_node.get("content", "").lower()
-              if any(decl.lower() in skill_content for decl in READ_ONLY_DECLARATIONS):
-                  declared_readonly = True
-                  break
-          if not declared_readonly:
-              continue
-          # Check if it subsequently calls write/exec tools
-          tool_edges = edges(pid, dir="out", kind="TOOL_CALL")
-          for e in tool_edges:
-              tool_node = node(e.get("to", ""))
-              if not tool_node:
-                  continue
-              tool_name = tool_node.get("name", tool_node.get("id", "")).lower()
-              if any(wt.lower() in tool_name for wt in WRITE_TOOLS):
-                  return "report"
-      return "allow"
-  result = run()
+  # Skill declares read-only access
+  selection_readonly_declared:
+    event_type: skill_acquired
+    content|contains:
+      - 'permissions: [read]'
+      - 'permissions: [view]'
+      - 'read_only: true'
+      - 'can_write: false'
+      - 'write: false'
+      - 'read-only'
+  # But also references write/exec/network tools in the same manifest
+  selection_write_capability:
+    event_type: skill_acquired
+    content|contains:
+      - 'write_file'
+      - 'create_file'
+      - 'delete_file'
+      - 'shell'
+      - 'bash'
+      - 'execute'
+      - 'send_email'
+      - 'upload'
+  # LP3: No permission declaration at all — skill manifest missing permissions field
+  selection_no_permissions:
+    event_type: skill_acquired
+    content|re: '(?i)"name"\s*:\s*"[^"]+"(?!.*"permissions")'
+  condition: (selection_readonly_declared and selection_write_capability) or selection_no_permissions
 falsepositives:
-  - Skills with informal permission descriptions that do not use the checked phrases
-  - Legitimate skill upgrades that expand capabilities with user consent
-level: high
+  - Skills that declare read-only in documentation but legitimately need write for their function
+  - Skill manifests where permissions field appears later in the document
+level: medium

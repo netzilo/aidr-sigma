@@ -20,16 +20,12 @@ detection:
     content|re: '(?i)pip\s+install'
     content|contains:
       - 'pycrypto'
-      - 'distribute'
+      - 'distribute=='
       - 'popen2'
-      - 'sha '
-      - 'md5 '
       - 'mimetools'
       - 'rfc822'
       - 'mechanize'
-      - 'BeautifulSoup '
-      - 'web.py'
-      - 'nose '
+      - 'BeautifulSoup=='
       - 'twill'
   selection_abandoned_npm:
     event_type: tool_call

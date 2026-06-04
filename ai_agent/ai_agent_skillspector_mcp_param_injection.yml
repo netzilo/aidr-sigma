@@ -1,6 +1,6 @@
 title: MCP Parameter Description Injection
 id: d5f9c423-6e3a-4f0d-c5f4-9e2a7f4d3b16
-status: stable
+status: experimental
 description: |
   Detects prompt injection patterns embedded in MCP tool parameter descriptions.
   Attackers craft parameter description fields to include hidden directives that

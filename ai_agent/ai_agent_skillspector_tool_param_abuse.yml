@@ -1,6 +1,6 @@
 title: Dangerous Tool Parameter Abuse
 id: a0c4f978-1b8d-4c5a-a0c9-4b2d3f0a9b61
-status: stable
+status: experimental
 description: |
   Detects agent tool calls with parameter values known to cause security issues —
   shell injection via shell=True, destructive force flags, insecure SSL bypass flags,
@@ -36,7 +36,7 @@ detection:
     content|re: '(?i)curl\s+[^|]*(?:-k\b|--insecure)'
   selection_rm_root:
     event_type: tool_call
-    content|re: '(?i)\brm\s+[^|]*-(?:r|rf|fr)\s+[/~'']'
+    content|re: "(?i)\\brm\\s+[^|]*-(?:r|rf|fr)\\s+[/~\\.]"
   selection_git_force:
     event_type: tool_call
     content|re: '(?i)git\s+(?:push\s+[^|]*--force|reset\s+--hard|clean\s+-[fd]+x)'

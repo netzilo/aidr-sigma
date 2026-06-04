@@ -1,6 +1,6 @@
 title: Unrestricted Tool Access Grant in Agent Instructions
 id: e6a0d534-7f4b-4a1e-d6a5-0f3b8a5e4c27
-status: stable
+status: experimental
 description: |
   Detects instructions in skill manifests or system prompts that grant the agent
   unrestricted access to all tools without specifying a limited allowlist. Overly

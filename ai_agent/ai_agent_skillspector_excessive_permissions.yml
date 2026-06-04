@@ -1,6 +1,6 @@
 title: Excessive Permission Grant in Skill Manifest
 id: e8a2d756-9f6b-4a3e-e8a7-2f5b0a7f6c49
-status: stable
+status: experimental
 description: |
   Detects skill manifests or LLM system prompts that declare overly broad permissions —
   wildcard access, requests for full system access, or permissions exceeding what the

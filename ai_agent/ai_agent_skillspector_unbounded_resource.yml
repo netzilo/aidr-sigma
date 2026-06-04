@@ -1,6 +1,6 @@
 title: Unbounded Resource Access in Agent Instructions
 id: c2e6b190-3d0c-4e7f-c2e1-6d4c5b2e1d83
-status: stable
+status: experimental
 description: |
   Detects instructions that configure the agent to make unlimited API calls, retry
   indefinitely, or consume unbounded compute/memory resources without timeout or quota.

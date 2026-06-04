@@ -21,22 +21,18 @@ detection:
     event_type:
       - tool_call
       - execute_process
-      - file_write
     content|re: '(?i)(?:exec|eval)\s*\(\s*(?:base64\.)?b64decode\s*\('
   selection_exec_marshal:
     event_type:
       - tool_call
-      - file_write
     content|re: '(?i)(?:exec|eval)\s*\(\s*marshal\.loads\s*\('
   selection_exec_network:
     event_type:
       - tool_call
-      - file_write
     content|re: '(?i)(?:exec|eval)\s*\(\s*(?:urllib|requests|httpx|fetch)\b'
   selection_exec_bytes_hex:
     event_type:
       - tool_call
-      - file_write
     content|re: '(?i)(?:exec|eval)\s*\(\s*(?:bytes|bytearray)\.fromhex\s*\('
   condition: selection_exec_b64 or selection_exec_marshal or selection_exec_network or selection_exec_bytes_hex
 falsepositives:

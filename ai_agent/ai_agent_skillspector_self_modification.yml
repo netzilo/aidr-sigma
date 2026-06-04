@@ -1,6 +1,6 @@
 title: Agent Self-Modification Attempt
 id: d1f5c089-2e9a-4f6d-c1f0-5e8a3f0d9b72
-status: stable
+status: experimental
 description: |
   Detects commands or instructions asking the agent to modify its own skill definition,
   configuration, or source code at runtime. Self-modification enables rogue agents to

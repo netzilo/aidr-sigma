@@ -1,6 +1,6 @@
 title: Persistent Context Injection in Agent Instructions
 id: b1d5a089-2c9b-4d6e-b1d0-5c3b4a1d0c72
-status: stable
+status: experimental
 description: |
   Detects instructions that attempt to make context injections persist across all future
   interactions — asking the agent to "always remember this," treating injected content
@@ -42,7 +42,7 @@ detection:
       - skill_acquired
     content|re: '(?i)(?:update|modify|change|alter)\s+(?:your\s+)?(?:core|base|fundamental|default)\s+(?:behavior|personality|instructions?|rules?)'
   filter_authorized_config:
-    content|re: '(?i)(system\s+prompt|admin|configuration|settings|setup|onboarding)'
+    content|re: '(?i)(initial\s+system\s+prompt|admin\s+panel|onboarding\s+flow|setup\s+wizard)'
   condition: (selection_always_remember or selection_permanent_rule or selection_modify_core) and not filter_authorized_config
 falsepositives:
   - Legitimate system prompt configuration at startup

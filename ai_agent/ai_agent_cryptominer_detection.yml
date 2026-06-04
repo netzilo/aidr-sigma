@@ -18,7 +18,6 @@ detection:
     event_type:
       - tool_call
       - execute_process
-      - file_write
       - http_request
     content|contains:
       - 'stratum+tcp://'
@@ -26,10 +25,10 @@ detection:
       - 'mining.subscribe'
       - 'mining.authorize'
       - 'mining.submit'
-  selection_mining_pools:
+  # Mining pool hostnames in tool_call/execute_process content (URLs passed as arguments)
+  selection_mining_pools_cmd:
     event_type:
       - tool_call
-      - http_request
       - execute_process
     content|contains:
       - 'pool.minexmr.com'
@@ -43,11 +42,26 @@ detection:
       - 'unmineable.com'
       - 'minergate.com'
       - 'nicehash.com'
+  # HTTP requests directly to mining pools — checked via `host` field (WhenFilter)
+  selection_mining_pool_http_minexmr:
+    event_type: http_request
+    host|contains: 'minexmr.com'
+  selection_mining_pool_http_xmrpool:
+    event_type: http_request
+    host|contains: 'xmrpool.eu'
+  selection_mining_pool_http_nanopool:
+    event_type: http_request
+    host|contains: 'nanopool.org'
+  selection_mining_pool_http_nicehash:
+    event_type: http_request
+    host|contains: 'nicehash.com'
+  selection_mining_pool_http_minergate:
+    event_type: http_request
+    host|contains: 'minergate.com'
   selection_miner_software:
     event_type:
       - tool_call
       - execute_process
-      - file_write
     content|contains:
       - 'xmrig'
       - 'xmr-stak'
@@ -60,7 +74,6 @@ detection:
       - 'randomx'
   selection_coinjacking:
     event_type:
-      - file_write
       - tool_call
     content|contains:
       - 'coinhive.min.js'
@@ -68,7 +81,11 @@ detection:
       - 'cryptoloot'
       - 'coin-imp'
       - 'webmine.pro'
-  condition: selection_stratum or selection_mining_pools or selection_miner_software or selection_coinjacking
+  condition: >-
+    selection_stratum or selection_mining_pools_cmd or selection_miner_software
+    or selection_coinjacking or selection_mining_pool_http_minexmr
+    or selection_mining_pool_http_xmrpool or selection_mining_pool_http_nanopool
+    or selection_mining_pool_http_nicehash or selection_mining_pool_http_minergate
 falsepositives:
   - Legitimate cryptocurrency pool operators managing their own infrastructure
   - Blockchain developer tools referencing pool URLs in configuration

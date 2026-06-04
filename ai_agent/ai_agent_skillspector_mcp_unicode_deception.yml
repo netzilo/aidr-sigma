@@ -1,6 +1,6 @@
 title: MCP Tool Description Unicode Confusable Deception
 id: b3f7a291-4c1e-4d8b-a3f2-7c0e5d2b1f94
-status: stable
+status: experimental
 description: |
   Detects Cyrillic, Greek, and other Unicode lookalike characters used in MCP tool
   descriptions or skill metadata to deceive AI agents about what a tool does. Attackers

@@ -51,7 +51,7 @@ script: |
               host = url_node.get("host", url_node.get("id", ""))
               method = e.get("method", "GET").upper()
               # Only flag POST/PUT as exfiltration (not GET)
-              if method in ("POST", "PUT", "PATCH") and not any(s in host for s in SAFE_HOSTS):
+              if method in ("POST", "PUT", "PATCH") and not any(host == s or host.endswith('.' + s) for s in SAFE_HOSTS):
                   return "report"
       return "allow"
   result = run()

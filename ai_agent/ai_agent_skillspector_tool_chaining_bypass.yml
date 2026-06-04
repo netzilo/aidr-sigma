@@ -1,6 +1,6 @@
 title: Tool Chaining to Bypass Safety Controls
 id: e2a6d190-3f0b-4a7e-d2a1-6f9b4a1e0c83
-status: stable
+status: experimental
 description: |
   Detects multi-step tool chaining patterns where individual safe operations are combined
   in sequence to produce a net-dangerous result, or where instructions explicitly describe

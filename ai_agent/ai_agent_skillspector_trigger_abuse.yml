@@ -1,6 +1,6 @@
 title: Skill Trigger Keyword Abuse
 id: f9b3e867-0a7c-4b4f-f9b8-3a6c1b8a7d50
-status: stable
+status: experimental
 description: |
   Detects skill manifest triggers that are overly broad (match everything), shadow
   built-in commands, or use emotional/urgent language to bait the agent into activation.

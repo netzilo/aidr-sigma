@@ -1,6 +1,6 @@
 title: Hidden Instructions in MCP Skill Metadata
 id: c4e8b312-5d2f-4e9c-b4e3-8d1f6e3c2a05
-status: stable
+status: experimental
 description: |
   Detects prompt injection patterns hidden inside MCP skill metadata using HTML comments,
   zero-width characters, base64-encoded blobs, or data URIs embedded in tool descriptions,
@@ -25,7 +25,7 @@ detection:
     event_type:
       - skill_acquired
       - tool_response
-    content|re: '<!--.*?(SYSTEM|IGNORE|OVERRIDE|YOU\s+MUST|INSTRUCT).*?-->'
+    content|re: '(?s)<!--.*?(SYSTEM|IGNORE|OVERRIDE|YOU\s+MUST|INSTRUCT).*?-->'
   # Zero-width chars near visible text (steganographic injection)
   selection_zero_width:
     event_type:

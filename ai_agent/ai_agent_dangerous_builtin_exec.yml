@@ -21,13 +21,11 @@ detection:
     event_type:
       - tool_call
       - execute_process
-      - file_write
     content|re: '(?i)\b(exec|eval|compile)\s*\('
   selection_dynamic_import:
     event_type:
       - tool_call
       - execute_process
-      - file_write
     content|re: '(?i)__import__\s*\('
   filter_test_code:
     content|re: '(?i)(unittest|pytest|test_|def test|#.*example|doctest)'

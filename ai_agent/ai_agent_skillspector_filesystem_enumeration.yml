@@ -1,6 +1,6 @@
 title: File System Enumeration for Credentials and Secrets
 id: a4c8f312-5b2d-4c9a-a4c3-8b1d6c3a2e05
-status: stable
+status: experimental
 description: |
   Detects agent tool calls that enumerate the file system looking for credential files,
   SSH keys, cloud provider configs, or other sensitive files. This pattern is consistent

@@ -1,6 +1,6 @@
 title: Unpinned or Latest Dependency Installation
 id: d7f1c645-8e5a-4f2d-d7f6-1e4a9f6d5b38
-status: stable
+status: experimental
 description: |
   Detects package installation commands that install dependencies without pinning to a
   specific version, or explicitly request the latest version. Unpinned installs are a

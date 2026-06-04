@@ -1,6 +1,6 @@
 title: Conversation Context Leakage to External Endpoint
 id: b5d9a423-6c3e-4d0b-b5d4-9c2e7d4b3f16
-status: stable
+status: experimental
 description: |
   Detects instructions that direct the agent to transmit full conversation history,
   session context, or user messages to an external server. Context leakage exposes

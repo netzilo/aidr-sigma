@@ -43,7 +43,7 @@ script: |
               if not url_node:
                   continue
               host = url_node.get("host", url_node.get("id", ""))
-              if not any(s in host for s in SAFE_HOSTS):
+              if not any(host == s or host.endswith('.' + s) for s in SAFE_HOSTS):
                   external_fetch = True
                   break
           if not external_fetch:

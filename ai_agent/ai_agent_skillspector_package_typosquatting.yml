@@ -1,6 +1,6 @@
 title: Typosquatting Package Name in Install Command
 id: c6e0b534-7d4f-4e1c-c6e5-0d3f8e5c4a27
-status: stable
+status: experimental
 description: |
   Detects package installation commands referencing known typosquatting variations of
   popular Python and Node.js packages. Attackers publish malicious packages with names

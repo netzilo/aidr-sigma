@@ -19,17 +19,14 @@ logsource:
 detection:
   selection_php_webshell:
     event_type:
-      - file_write
       - tool_call
     content|re: '(?i)(?:eval|assert|system|passthru|shell_exec|popen|proc_open)\s*\(\s*\$_(?:POST|GET|REQUEST|COOKIE)\s*\['
   selection_php_obfuscated:
     event_type:
-      - file_write
       - tool_call
     content|re: '(?i)eval\s*\(\s*(?:base64_decode|gzinflate|str_rot13|gzuncompress)\s*\('
   selection_known_shells:
     event_type:
-      - file_write
       - tool_call
     content|contains:
       - 'c99shell'
@@ -43,7 +40,6 @@ detection:
       - 'weevely'
   selection_python_webshell:
     event_type:
-      - file_write
       - tool_call
     content|re: '(?i)(?:exec|eval|os\.popen|os\.system|subprocess\.\w+)\s*\(\s*request\.'
   condition: selection_php_webshell or selection_php_obfuscated or selection_known_shells or selection_python_webshell

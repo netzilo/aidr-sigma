@@ -17,12 +17,10 @@ detection:
   selection_subprocess:
     event_type:
       - tool_call
-      - file_write
     content|re: '(?i)subprocess\.(Popen|run|call|check_output|check_call|getoutput|getstatusoutput)\s*\('
   selection_os_exec:
     event_type:
       - tool_call
-      - file_write
     content|re: '(?i)os\.(system|popen|execl|execle|execlp|execv|execve|execvp|spawnl|spawnv|posix_spawn)\s*\('
   filter_docker_safe:
     content|re: '(?i)(docker\s+run|podman\s+run|docker\s+build)'

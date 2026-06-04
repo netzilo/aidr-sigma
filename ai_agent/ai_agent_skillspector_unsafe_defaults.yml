@@ -1,6 +1,6 @@
 title: Unsafe Security Defaults in Agent Tool Calls
 id: f3b7e201-4a1c-4b8f-e3b2-7a0c5b2f1d94
-status: stable
+status: experimental
 description: |
   Detects agent tool calls or skill instructions that set insecure defaults: TLS
   verification disabled, authentication bypassed, world-readable permissions, or
