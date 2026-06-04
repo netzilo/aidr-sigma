@@ -817,24 +817,48 @@ result = run()
 
 The script **must assign** to the top-level variable named `result`. Any other variable name is ignored.
 
-`result` can be a **string** or a **dict**:
+`result` can be a **plain string** or a **dict** with `"action"` as the key.
+
+**Plain string verdicts** (apply to all context types):
 
 | `result` value | Effect |
 |---|---|
-| `"block"` | Request/response is blocked; reason is logged |
-| `"allow"` | Traffic continues; no further rules are evaluated for this event |
+| `"block"` | Request/response is blocked |
+| `"allow"` | Traffic continues; rule is invisible (no dashboard event) |
 | `"report"` | Traffic continues; event is recorded in the audit log |
-| `"redact"` | Ignored unless paired with `replace` in the dict form (see below) |
 
 Any other value (or no assignment) → **allow**.
 
-#### Returning redacted content from a script
+**Dict verdicts** — use when the action needs parameters. All support an optional `"reason"` key for the audit log.
 
 ```python
-return {"action": "redact", "replace": result_content}
-# Optional reason for audit log:
-return {"action": "redact", "replace": result_content, "reason": "Credit card masked"}
+# Redact — replace the full content with a new string.
+# The script has full access to meta["content"] to compute the replacement.
+return {"action": "redact", "replace": "<redacted text>"}
+
+# Redirect — return an HTTP redirect response (http_request context only).
+return {"action": "redirect", "url": "https://example.com/logout", "status_code": 302}
+
+# Inject — add or overwrite headers on the outgoing request (http_request context only).
+return {"action": "inject", "headers": {"X-Tenant-ID": "corp", "X-Policy": "enforced"}}
+
+# Replace — relay the request to a different upstream with header rewriting (http_request context only).
+# base_url: relay target; set_headers: add/overwrite; delete_headers: strip before forwarding.
+return {
+    "action": "replace",
+    "base_url": "https://proxy.internal",
+    "set_headers": {"Authorization": "Bearer internal-token"},
+    "delete_headers": ["X-Original-Secret"],
+}
 ```
+
+**What is NOT returnable from scripts** (these require static rules):
+
+| Action | Why |
+|---|---|
+| `blockmodel` / `allowmodel` | Model policy runs before scripts — use a static `action: blockmodel` rule |
+| `replacemodel` | Same execution-order constraint |
+| `scan` | Orthogonal pipeline — scripts cannot trigger the scan flow |
 
 ---
 
