@@ -150,6 +150,106 @@ def run():
 result = run()
 ```
 
+**Kill chain — single evidence edge** (simplest case: one suspicious action):
+```python
+def run():
+    for agent in graph(type="Process"):
+        if agent.get("agent", "0") != "1":
+            continue
+        aid   = agent["id"]
+        chain = new_chain(aid)
+
+        for e in edges(aid, dir="out", kind="CONNECTS"):
+            h = node(e["to"])
+            if h == None or h.get("is_private", "0") == "1":
+                continue
+            chain.append(step(e, "subprocess connected to public host: " + h.get("host", "")))
+            return {
+                "action": "block",
+                "reason": "Agent connected to unexpected public endpoint",
+                "chain":  chain,
+            }
+    return "allow"
+
+result = run()
+```
+
+**Kill chain — multi-stage sequence** (skill acquisition → exfiltration):
+```python
+TRUSTED_SKILLS = ["docs.internal.example.com", "api.openai.com"]
+
+def run():
+    for agent in graph(type="Process"):
+        if agent.get("agent", "0") != "1":
+            continue
+        aid   = agent["id"]
+        chain = new_chain(aid)
+        skill_edge = None
+        http_edge  = None
+
+        for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+            s = node(e["to"])
+            if s == None:
+                continue
+            h = s.get("host", "")
+            ok = False
+            for t in TRUSTED_SKILLS:
+                if t in h:
+                    ok = True
+            if not ok:
+                skill_edge = e
+                break
+
+        for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+            u = node(e["to"])
+            if u != None and u.get("is_private", "0") == "0":
+                http_edge = e
+                break
+
+        if skill_edge != None and http_edge != None:
+            u = node(http_edge["to"])
+            s = node(skill_edge["to"])
+            chain.append(step(skill_edge, "untrusted skill loaded from: " + s.get("host", "")))
+            chain.append(step(http_edge,  "data sent to external host: " + u.get("host", "")))
+            return {
+                "action": "block",
+                "reason": "Exfiltration chain: skill acquired then HTTP to public host",
+                "chain":  chain,
+            }
+    return "allow"
+
+result = run()
+```
+
+**Kill chain — file credential access with resolved paths** (using `fs_activity`):
+```python
+SENSITIVE = ['"aws credentials"', '"ssh id rsa"', '"etc passwd"', '"etc shadow"']
+
+def run():
+    for agent in graph(type="Process"):
+        if agent.get("agent", "0") != "1":
+            continue
+        aid   = agent["id"]
+        chain = new_chain(aid)
+
+        for e in edges(aid, dir="out", kind="READ_FILE"):
+            fs = node(e["to"])
+            if fs == None:
+                continue
+            for pat in SENSITIVE:
+                paths = fs_activity(fs["id"], "READ", pat)
+                if paths:
+                    chain.append(step(e, "read sensitive file: " + paths[0]))
+                    return {
+                        "action": "block",
+                        "reason": "Sensitive credential file accessed: " + paths[0],
+                        "chain":  chain,
+                    }
+    return "allow"
+
+result = run()
+```
+
 ## False Positive Prevention — Non-Negotiables
 
 Before shipping any `block` rule, you must be able to answer **all** of the following:
@@ -802,6 +902,7 @@ script: |
 - **Print output:** `print()` statements are captured and stored as the `execute_reason` field on the security event that is published to the management audit log. They do **not** write to the netzilo client log file, do not appear in the debug UI, and do not affect the verdict. Use `print()` to annotate why a verdict was reached — the text is visible in the management dashboard alongside the rule name, verdict, and severity.
 - **Fail-open by default:** If the script raises an exception, does not assign `result`, or `result` is not a recognised verdict string, the engine defaults to `"allow"`. Use `on_error: block` for fail-closed enforcement.
 - **Script structure:** All logic should live inside a `def run():` function to avoid top-level `for`-loop restrictions. Assign `result = run()` at the bottom.
+- **Kill chain is required for every graph-based detection.** Any script that traverses the graph and returns `"block"` or `"report"` **must** build a kill chain and include it as `"chain"` in the dict result. This is how the dashboard, audit log, and downstream systems show investigators what happened. A plain string `"block"` is only acceptable for trivial content-matching rules that do not touch the graph.
 
 ```python
 def run():
@@ -809,6 +910,13 @@ def run():
     return "allow"   # or "block" / "report" / "redact"
 
 result = run()
+
+# ─── For graph-based detections — always return a dict with "chain" ───────
+# def run():
+#     chain = new_chain(agent_id)
+#     # ... detect ...
+#     chain.append(step(edge, "why this edge is evidence"))
+#     return {"action": "block", "reason": "...", "chain": chain}
 ```
 
 ---
@@ -829,9 +937,21 @@ The script **must assign** to the top-level variable named `result`. Any other v
 
 Any other value (or no assignment) → **allow**.
 
-**Dict verdicts** — use when the action needs parameters. All support an optional `"reason"` key for the audit log.
+**Dict verdicts** — use when the action needs parameters. All support optional `"reason"` and **`"chain"`** keys.
+
+| Key | Type | Purpose |
+|---|---|---|
+| `"action"` | string | Required — `"block"`, `"report"`, `"redact"`, `"redirect"`, `"inject"`, `"replace"` |
+| `"reason"` | string | Human-readable explanation written to the audit log |
+| `"chain"` | chain | Kill chain produced by `new_chain()` — **always include this for graph-based detections** |
 
 ```python
+# Block with kill chain (recommended pattern for all graph-based rules)
+return {"action": "block", "reason": "...", "chain": chain}
+
+# Report with kill chain
+return {"action": "report", "reason": "...", "chain": chain}
+
 # Redact — replace the full content with a new string.
 # The script has full access to meta["content"] to compute the replacement.
 return {"action": "redact", "replace": "<redacted text>"}
@@ -862,6 +982,42 @@ return {
 
 ---
 
+#### Kill chain requirement
+
+**Every Starlark script that traverses the graph and returns a non-allow verdict MUST return a kill chain.** This is not optional — a block or report result without a chain gives investigators nothing to work with.
+
+Rules:
+1. Call `new_chain(agent_id)` at the start of each agent loop iteration.
+2. For each evidence edge found, call `chain.append(step(edge, "description"))`. The description explains *why* this edge is significant — not just what it is.
+3. Return a dict: `{"action": "block", "reason": "...", "chain": chain}` — never a plain `"block"` string when graph analysis was performed.
+4. The chain auto-prepends structural context (ancestry from user → agent → subprocess) before your first evidence step. You do not need to add those manually.
+5. If no suspicious signal is found and the script returns `"allow"`, no chain is needed.
+
+```python
+def run():
+    for agent in graph(type="Process"):
+        if agent.get("agent", "0") != "1":
+            continue
+        aid   = agent["id"]
+        chain = new_chain(aid)          # one chain per agent
+
+        # ... detection logic ...
+        # when you find evidence:
+        chain.append(step(edge, "untrusted external fetch: " + host))
+
+        if len(stages) >= THRESHOLD:
+            return {
+                "action": "block",
+                "reason": "Attack detected — " + ", ".join(stages),
+                "chain":  chain,        # always include the chain
+            }
+    return "allow"                      # no chain needed on allow
+
+result = run()
+```
+
+---
+
 #### Builtins
 
 | Builtin | Signature | Returns | Notes |
@@ -882,6 +1038,106 @@ return {
 | `webhook` | `webhook(url, payload)` | `dict` | JSON-encodes payload, POSTs to url; returns `{status, body, error}` |
 | `meta` | — (read-only dict) | — | Request metadata injected before execution; see keys below |
 | `netzilo` | — (read-only dict) | — | Local peer identity: `username`, `email`, `ip`, `fqdn`, `hostname`, `deviceid` (strings), `groups` (list of `{id, name}` dicts — groups the peer belongs to) |
+| `new_chain` | `new_chain(agent_id)` | `chain` | Creates a kill-chain collector rooted at `agent_id`. See **Kill chain builtins** below. |
+| `step` | `step(edge, desc="")` | `dict` | Annotates an existing graph edge with an optional description for inclusion in a kill chain. |
+| `fs_activity` | `fs_activity(node_id, op, pattern="")` | `list[str]` | Returns actual file paths accessed by a FileSystem node for a given operation. See **FileSystem nodes** section. |
+
+---
+
+#### Kill chain builtins
+
+A **kill chain** is an ordered, flat sequence of annotated graph edges that shows the attack path from the agent process down to the final impact. It is not a subgraph — it is a list of existing edges extracted from the graph, each optionally annotated with a human-readable description.
+
+##### `new_chain(agent_id)`
+
+Creates a kill-chain collector rooted at the agent node identified by `agent_id`.
+
+```python
+chain = new_chain(aid)
+```
+
+**Auto-prefix behaviour:** when the first `chain.append(step(e, ...))` call is made, the chain automatically prepends the structural context path from the agent node down to the source process of edge `e`, using BFS over `EXECUTE_PROCESS` edges. This gives every chain a self-describing ancestry prefix (typically 2–4 context edges) with no explicit code required.
+
+**Frozen after return:** once the script returns a dict with `"chain": chain`, the chain is frozen and cannot be modified.
+
+##### `step(edge, desc="")`
+
+Wraps an existing graph edge dict (returned by `edges()`) with an optional description.
+
+```python
+s = step(e, "read /home/user/.aws/credentials")
+```
+
+- `edge` — a dict returned by `edges()`; all its fields are preserved unchanged.
+- `desc` — optional human-readable string explaining why this edge is significant. **Presence of `desc` marks the step as script-intentional evidence**; absence means structural context auto-added by `new_chain`.
+- Returns a dict: all edge fields plus `"desc"` if provided.
+
+Steps with no `desc` are structural context (ancestry prefix). Steps with `desc` are evidence steps — the script author decided these edges matter.
+
+##### `fs_activity(node_id, op, pattern="")`
+
+Returns the list of actual file paths accessed by a FileSystem node under a given operation, optionally filtered by an FTS5 phrase pattern.
+
+```python
+paths = fs_activity(fs["id"], "READ", '"aws credentials"')
+# e.g. → ["/home/user/.aws/credentials"]
+```
+
+- `node_id` — the `id` field of a `FileSystem` node (e.g. `"filesystem:///usr/bin/cat"`).
+- `op` — operation type: `"READ"`, `"WRITE"`, `"CREATE"`, `"DELETE"`, or `"RENAME"`.
+- `pattern` — optional FTS5 match expression (same syntax as `search_in()`). If empty, returns all paths for that operation. Returns at most 500 paths.
+- Returns `list[str]` of file paths, or `[]` if none match.
+
+**FTS5 phrase quoting for paths:** the FTS5 tokenizer (`unicode61`) splits on `/`, `.`, and `_`. A path like `.aws/credentials` tokenises to `["aws", "credentials"]`. Use adjacent-token phrases: `'"aws credentials"'` (a Starlark string whose value is `"aws credentials"` — the double-quotes are part of the FTS5 query syntax, not the Starlark string delimiters).
+
+```python
+# Correct — FTS5 phrase query
+files = fs_activity(fs["id"], "READ", '"aws credentials"')
+
+# Wrong — bare token, will miss paths that have other tokens between
+files = fs_activity(fs["id"], "READ", "credentials")
+```
+
+##### Kill chain wire format
+
+The `"chain"` key in the script return dict must be the chain object returned by `new_chain()`. The daemon serialises it as a JSON array. Each element is an edge dict (all standard edge fields: `from`, `to`, `kind`, `first_ts`, `last_ts`, …) with an optional `"desc"` string appended. The chain is published to the management audit log as the `execute_meta_chain` field on the security event.
+
+**Context steps** (auto-prepended, no `"desc"`) show the structural ancestry from agent → subprocess chain to the first evidence node.
+
+**Evidence steps** (have `"desc"`) show the specific edges the rule author identified as proof of malicious intent.
+
+##### Complete example
+
+```python
+chain = new_chain(aid)
+
+# Evidence step — HTTP_REQUEST to untrusted host
+chain.append(step(e, "untrusted external fetch: " + host))
+
+# Evidence step — sensitive file read (with resolved path from fs_activity)
+files = fs_activity(fs["id"], "READ", '"aws credentials"')
+detail = files[0] if files else '"aws credentials"'
+chain.append(step(e, "read " + detail))
+
+# Evidence step — cloud metadata access
+chain.append(step(e, "cloud metadata service contacted: " + host))
+
+return {
+    "action": "block",
+    "reason": "Claw Chain CONFIRMED — " + str(count) + " stages",
+    "chain": chain,
+}
+```
+
+This produces a chain like:
+
+```
+[context] Agent (Code Helper) → spawn-helper       EXECUTE_PROCESS  (no desc)
+[context] spawn-helper → curl                      EXECUTE_PROCESS  (no desc)
+[evidence] curl → httpbin.org                      HTTP_REQUEST     desc="untrusted external fetch: httpbin.org"
+[evidence] cat → filesystem://cat                  READ_FILE        desc="read /home/user/.aws/credentials"
+[evidence] curl → 169.254.169.254                  CONNECTS         desc="cloud metadata service contacted: 169.254.169.254"
+```
 
 ---
 
@@ -922,30 +1178,51 @@ Use `on_error: block` for fail-closed enforcement of critical rules. Default `al
 #### Examples
 
 ```yaml
-# Block if the agent has read more than 5 files in this session
-title: Excessive File Reads
-id: netzilo-file-read-rate-001
-level: high
+# Block if the agent read a sensitive credential file — with kill chain
+title: Sensitive Credential File Access
+id: netzilo-file-cred-access-001
+level: critical
 logsource:
   product: ai_agent
-  category: file_read
+  category: agent_events
 detection:
   sel_trigger:
-    content|re: '.'
+    event_type:
+      - tool_call
+      - tool_response
   condition: sel_trigger
 action: execute
 on_timeout: block
 on_error:   allow
 script: |
+  SENSITIVE = ['"aws credentials"', '"ssh id rsa"', '"etc passwd"', '"etc shadow"', '"kube config"']
+
   def run():
-      aid = meta.get("agent_name", "")
-      n = len(edges(aid, dir="out", kind="READ_FILE"))
-      return "block" if n > 5 else "allow"
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid   = agent["id"]
+          chain = new_chain(aid)
+          for e in edges(aid, dir="out", kind="READ_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              for pat in SENSITIVE:
+                  paths = fs_activity(fs["id"], "READ", pat)
+                  if paths:
+                      chain.append(step(e, "read sensitive file: " + paths[0]))
+                      return {
+                          "action": "block",
+                          "reason": "Sensitive credential file accessed: " + paths[0],
+                          "chain":  chain,
+                      }
+      return "allow"
+
   result = run()
 ```
 
 ```yaml
-# Block if the process called more than 2 distinct LLM providers
+# Block if the process called more than 2 distinct LLM providers — with kill chain
 title: Multi-Provider LLM Pivoting
 id: netzilo-llm-pivot-001
 level: high
@@ -964,22 +1241,33 @@ script: |
       for a in graph(type="Process"):
           if a.get("agent", "0") != "1":
               continue
-          llm_edges = edges(a["id"], dir="out", kind="LLM_REQUEST")
-          providers = set()
-          for e in llm_edges:
+          aid       = a["id"]
+          chain     = new_chain(aid)
+          providers = {}   # provider -> first edge
+          for e in edges(aid, dir="out", kind="LLM_REQUEST"):
               l = node(e["to"])
-              if l != None:
-                  providers.add(l.get("provider", ""))
+              if l == None:
+                  continue
+              p = l.get("provider", "")
+              if p and p not in providers:
+                  providers[p] = e
           if len(providers) > 2:
-              return "block"
+              for p, e in providers.items():
+                  chain.append(step(e, "LLM request to provider: " + p))
+              return {
+                  "action": "block",
+                  "reason": "Agent used " + str(len(providers)) + " LLM providers (possible data pivoting)",
+                  "chain":  chain,
+              }
       return "allow"
+
   result = run()
 ```
 
 ```yaml
-# Block requests to external webhooks not on the approved list
-title: Unapproved Webhook Destination
-id: netzilo-webhook-allowlist-001
+# Block untrusted external HTTP — with kill chain
+title: Unapproved External HTTP Request
+id: netzilo-http-untrusted-001
 level: critical
 logsource:
   product: ai_agent
@@ -991,9 +1279,141 @@ detection:
 action: execute
 on_error: block
 script: |
-  approved = ["hooks.slack.com", "api.pagerduty.com", "alerts.internal.example.com"]
-  host = meta.get("host", "")
-  result = "allow" if host in approved else "block"
+  APPROVED = ["hooks.slack.com", "api.pagerduty.com", "alerts.internal.example.com",
+              "api.openai.com", "api.anthropic.com"]
+
+  def run():
+      host = meta.get("host", "")
+      approved = False
+      for a in APPROVED:
+          if a in host:
+              approved = True
+      if approved:
+          return "allow"
+
+      # Graph is available — find the agent and build a chain
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          chain = new_chain(aid)
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u != None and host in u.get("host", ""):
+                  chain.append(step(e, "HTTP request to unapproved host: " + host))
+                  return {
+                      "action": "block",
+                      "reason": "Unapproved external HTTP destination: " + host,
+                      "chain":  chain,
+                  }
+      return "block"   # block even if graph lookup fails
+
+  result = run()
+```
+
+```yaml
+# Skill acquisition followed by public HTTP — exfiltration chain — with kill chain
+title: Skill-to-Exfil Chain
+id: netzilo-skill-exfil-chain-001
+level: critical
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  TRUSTED_SKILL_HOSTS = ["docs.internal.example.com", "api.openai.com", "api.anthropic.com"]
+
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid        = agent["id"]
+          chain      = new_chain(aid)
+          skill_edge = None
+          http_edge  = None
+
+          for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              s = node(e["to"])
+              if s == None:
+                  continue
+              h = s.get("host", "")
+              trusted = False
+              for t in TRUSTED_SKILL_HOSTS:
+                  if t in h:
+                      trusted = True
+              if not trusted:
+                  skill_edge = e
+                  break
+
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u != None and u.get("is_private", "0") == "0":
+                  http_edge = e
+                  break
+
+          if skill_edge != None and http_edge != None:
+              s = node(skill_edge["to"])
+              u = node(http_edge["to"])
+              chain.append(step(skill_edge, "untrusted skill from: " + s.get("host", "?")))
+              chain.append(step(http_edge,  "data sent to: " + u.get("host", "?")))
+              return {
+                  "action": "block",
+                  "reason": "Exfiltration chain: untrusted skill loaded then HTTP to public host",
+                  "chain":  chain,
+              }
+      return "allow"
+
+  result = run()
+```
+
+```yaml
+# Subprocess dials out — shell escape to C2 — with kill chain
+title: Subprocess External Connection
+id: netzilo-subprocess-c2-001
+level: critical
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid   = agent["id"]
+          chain = new_chain(aid)
+
+          for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              for ce in edges(pe["to"], dir="out", kind="CONNECTS"):
+                  h = node(ce["to"])
+                  if h == None or h.get("is_private", "0") == "1":
+                      continue
+                  chain.append(step(pe, "agent spawned subprocess: " + pe.get("cmdline", "?")))
+                  chain.append(step(ce, "subprocess connected to: " + h.get("host", "") + ":" + h.get("port", "")))
+                  return {
+                      "action": "block",
+                      "reason": "Subprocess made external connection — possible C2",
+                      "chain":  chain,
+                  }
+      return "allow"
+
+  result = run()
 ```
 
 ---
@@ -1099,29 +1519,97 @@ The `id` is `scheme://host` only — path and query are NOT stored in the node.
 
 **`"FileSystem"` — file activity aggregated by process path**
 
-One `FileSystem` node is created per unique process executable path. It aggregates **all** file operations (reads, writes, creates, deletes, renames) from that process into a single node. **It does NOT store individual file paths** — it only knows which process did I/O.
+One `FileSystem` node is created per unique process executable path. It aggregates **all** file operations (reads, writes, creates, deletes, renames) from that process into a single node.
 
-To find out *which specific files* were accessed, use `search_in(fs["id"] + "$READ", pattern)` (or `"$WRITE"`, `"$CREATE"`, `"$DELETE"`, `"$RENAME"`). This searches the indexed content for that process's file events.
+**Critical: the node itself does NOT contain file paths.** The node only identifies which process performed I/O. The actual file paths accessed are stored in the BM25 full-text index and retrieved with `search_in` or `search`, not from node properties.
+
+```
+FileSystem node:
+  id         → "filesystem:///usr/bin/cat"   ← the PROCESS executable path
+  proc_name  → "cat"
+  proc_path  → "/usr/bin/cat"
+
+  ❌ No property for which files cat read — that is in the FTS index.
+```
+
+**How to work with FileSystem nodes:**
+
+The FTS index stores one document per `(process, operation)` pair. The source label is `fs["id"] + "$READ"` (or `$WRITE`, `$CREATE`, `$DELETE`, `$RENAME`). Each document contains the file paths accessed by that process for that operation.
+
+**Searching file paths uses FTS5 token phrases, not raw substrings.** The unicode61 tokenizer splits paths on `/` and `.`, so `/Users/eg/.aws/credentials` becomes tokens `Users eg aws credentials`. Use adjacent-token phrases:
+
+| File path | FTS5 query |
+|---|---|
+| `.aws/credentials` | `'"aws credentials"'` |
+| `.ssh/id_rsa` | `'"ssh id rsa"'` |
+| `/etc/passwd` | `'"etc passwd"'` |
+| `.kube/config` | `'"kube config"'` |
+
+**Example 1 — resolve actual file paths from a FileSystem node (use `fs_activity`):**
 
 ```python
-# Correct: use search_in with the process source label
-for e in edges(aid, dir="out", kind="READ_FILE"):
-    fs = node(e["to"])
-    if fs == None:
-        continue
-    source = fs["id"] + "$READ"       # e.g. "filesystem:///bin/sh$READ"
-    if search_in(source, "/etc/passwd"):
-        return "block"
+def run():
+    for fs in graph(type="FileSystem"):
+        # Get all files read by this process, filtered by FTS5 phrase
+        paths = fs_activity(fs["id"], "READ", '"aws credentials"')
+        if paths:
+            name = fs.get("proc_path", "").split("/")[-1]
+            print("credentials read by: " + name + " → " + paths[0])
+    return "allow"
 
-# WRONG: proc_path is the process executable, NOT the file that was accessed
-# p = fs.get("proc_path", "")  ← always the binary path, never the file path
+result = run()
+# Output: credentials read by: cat → /home/user/.aws/credentials
 ```
+
+**Example 2 — list all files accessed by a specific process:**
+
+```python
+def run():
+    ops = ["READ", "WRITE", "CREATE", "DELETE", "RENAME"]
+    for fs in graph(type="FileSystem"):
+        if not fs["id"].endswith("/cat"):
+            continue
+        for op in ops:
+            for fp in fs_activity(fs["id"], op):
+                print(op + " | " + fp)
+    return "allow"
+
+result = run()
+# Output:
+# READ | /home/user/.aws/credentials
+# READ | /home/user/.nvm/alias/default
+# WRITE | /dev/ttys003
+# CREATE | /private/var/tmp/sh-thd-3194879450
+# DELETE | /private/var/tmp/sh-thd-3194879450
+```
+
+**Example 3 — enumerate all file activity across all processes:**
+
+```python
+def run():
+    ops = ["READ", "WRITE", "CREATE", "DELETE", "RENAME"]
+    for fs in graph(type="FileSystem"):
+        name = fs.get("proc_path", "").split("/")[-1]
+        for op in ops:
+            for fp in fs_activity(fs["id"], op):
+                print(name + " | " + op + " | " + fp)
+    return "allow"
+
+result = run()
+# Output (excerpt):
+# cat    | READ   | /home/user/.aws/credentials
+# sudo   | READ   | /private/etc/master.passwd
+# python | WRITE  | /tmp/output.json
+# …
+```
+
+> **`fs_activity` vs `search_in`:** Use `fs_activity(node_id, op, pattern)` to resolve actual file paths from a FileSystem node — it handles FTS5 querying, deduplication, and path extraction internally. Use `search_in(fs["id"] + "$READ", pattern)` only when you need a boolean check (is a pattern present?) without needing the actual paths.
 
 | Property | Description | Example |
 |---|---|---|
-| `id` | Unique identifier — used as base for `search_in` source labels | `"filesystem:///usr/bin/cursor"` |
-| `proc_name` | Short process name | `"cursor"` |
-| `proc_path` | Full path of the **process executable** (not the file accessed) | `"/usr/bin/cursor"` |
+| `id` | Unique identifier — used as base for `search_in` source labels | `"filesystem:///usr/bin/cat"` |
+| `proc_name` | Short process name | `"cat"` |
+| `proc_path` | Full path of the **process executable** (not the file accessed) | `"/usr/bin/cat"` |
 | `first_seen` | Unix nanoseconds | |
 | `last_seen` | Unix nanoseconds | |
 
@@ -1951,9 +2439,9 @@ detection:
 action: block
 ```
 
-**Example — Scripted rule using `search_in` to detect file paths via graph:**
+**Example — Scripted rule using `fs_activity` to detect and surface file paths via graph:**
 ```yaml
-title: Sensitive File Read via Graph (search_in)
+title: Sensitive File Read via Graph
 id: netzilo-file-read-graph-001
 level: critical
 logsource:
@@ -1968,11 +2456,11 @@ on_timeout: allow
 on_error:   allow
 script: |
   # FileSystem nodes aggregate by process path and have NO individual file path property.
-  # Use search_in(fs["id"] + "$READ", pattern) to check what was actually read.
-  # fs["id"] format: "filesystem:///bin/sh"  (three slashes for absolute process paths)
+  # Use fs_activity(fs["id"], op, pattern) to resolve actual file paths from the FTS index.
+  # Use search_in(fs["id"] + "$READ", pattern) for a cheaper boolean check only.
   SENSITIVE = [
-      ".aws/credentials", ".ssh/id_rsa", "/.env", ".kube/config",
-      "/etc/passwd", "/etc/shadow", "/proc/self/environ",
+      '"aws credentials"', '"ssh id rsa"', '"kube config"',
+      '"etc passwd"', '"etc shadow"', '"proc self environ"',
   ]
 
   def run():
@@ -1981,11 +2469,11 @@ script: |
           fs = node(e["to"])
           if fs == None:
               continue
-          source = fs["id"] + "$READ"   # source label for indexed file-read content
           for pat in SENSITIVE:
-              if search_in(source, pat):
-                  print("Sensitive file read detected — pattern: " + pat +
-                        " process: " + fs.get("proc_path", "?"))
+              paths = fs_activity(fs["id"], "READ", pat)
+              if paths:
+                  print("Sensitive file read detected — " + paths[0] +
+                        " by: " + fs.get("proc_path", "?"))
                   return "block"
       return "allow"
   result = run()

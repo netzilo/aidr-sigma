@@ -35,17 +35,32 @@ action: execute
 on_timeout: block
 on_error: allow
 script: |
-  # FileSystem nodes do NOT store individual file paths — they aggregate by process path.
-  # To detect which files were accessed use search_in(fs["id"] + "$READ"/"$WRITE", pattern).
-  # fs["id"] format: "filesystem:///bin/sh"
+  # Claw Chain detection — pure behavioral graph signals.
+  # No cmdline pattern matching, no hardcoded tool lists.
+  #
+  # Stage 0: HTTP_REQUEST graph edge to untrusted host (agent or subprocess)
+  #          + tool call content fallback for HTTPS BYPASS connections.
+  # Stage 1: EXECUTE_PROCESS with heredoc pattern OR subprocess spawn after S0.
+  # Stage 2: READ_FILE graph edge + search_in on FTS5 index.
+  #          FTS5 phrases: unicode61 tokenises paths at '/' and '.' so
+  #          ".aws/credentials" → tokens "aws" "credentials" → phrase '"aws credentials"'.
+  # Stage 3: WRITE_FILE graph edge + search_in.
+  # Stage 4: CONNECTS graph edge where is_private="1".
 
+  # FTS5 phrase queries for sensitive file paths.
+  # unicode61 splits on '/', '.', '_' so use quoted adjacent-token phrases.
   SENSITIVE_PATTERNS = [
-      "/etc/passwd", "/etc/shadow", "/etc/sudoers",
-      "/.ssh/id_rsa", "/.ssh/id_ed25519", "/.ssh/authorized_keys",
-      ".aws/credentials", ".aws/config",
-      ".kube/config",
-      "/.env", "/.netrc",
-      "/root/", "/proc/self/environ",
+      '"etc passwd"',
+      '"etc shadow"',
+      '"etc sudoers"',
+      '"ssh id rsa"',
+      '"ssh id ed25519"',
+      '"ssh authorized keys"',
+      '"aws credentials"',
+      '"aws config"',
+      '"kube config"',
+      'netrc',
+      '"proc self environ"',
   ]
 
   TRUSTED_HOSTS = [
@@ -58,10 +73,10 @@ script: |
       "telemetry.visualstudio.com", "vortex.data.microsoft.com",
       "chatgpt.com", "gemini.google", "mistral.ai", "groq.com",
       "cloudflare.com", "fastly.com",
+      "exp-tas.com", "vscode-cdn.net", "vsassets.io", "gallerycdn.vsassets.io",
+      "gallery.vsassets.io", "githubcopilot.com", "copilot.github.com",
+      "127.0.0.1", "localhost", "::1",
   ]
-
-  def heredoc_expansion(cmd):
-      return "<<" in cmd and ("$(" in cmd or "`" in cmd)
 
   def host_trusted(host):
       for t in TRUSTED_HOSTS:
@@ -69,39 +84,45 @@ script: |
               return True
       return False
 
-  def actor_has_sensitive_read(actor_id):
-      # search_in(source_label, pattern) — checks indexed file-read content for this process.
-      for e in edges(actor_id, dir="out", kind="READ_FILE"):
-          fs = node(e["to"])
-          if fs == None:
-              continue
-          source = fs["id"] + "$READ"
-          for pattern in SENSITIVE_PATTERNS:
-              if search_in(source, pattern):
-                  return pattern
-      return None
+  def heredoc_expansion(cmd):
+      if "<<" not in cmd:
+          return False
+      if "$(" not in cmd and "`" not in cmd:
+          return False
+      # << must appear before the first string delimiter to be a shell operator,
+      # not embedded inside a quoted argument (e.g. curl -d '{"script":"<<..."}').
+      arrow = cmd.find("<<")
+      q1 = cmd.find('"')
+      q2 = cmd.find("'")
+      first_quote = len(cmd)
+      if q1 >= 0:
+          first_quote = min(first_quote, q1)
+      if q2 >= 0:
+          first_quote = min(first_quote, q2)
+      return arrow < first_quote
 
-  def actor_has_write(actor_id):
-      # Detects any write outside known safe locations via indexed file-write content.
-      for e in edges(actor_id, dir="out", kind="WRITE_FILE"):
-          fs = node(e["to"])
-          if fs == None:
-              continue
-          source = fs["id"] + "$WRITE"
-          for pattern in SENSITIVE_PATTERNS:
-              if search_in(source, pattern):
-                  return pattern
-      return None
+  def collect_exec_tree(aid):
+      """BFS over the agent's EXECUTE_PROCESS descendants.
+      No path filters — the attack chain is within this tree."""
+      tree = set([aid])
+      frontier = [aid]
+      for _ in range(8):
+          next_f = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  child = e["to"]
+                  if child not in tree:
+                      tree.add(child)
+                      next_f.append(child)
+          if not next_f:
+              break
+          frontier = next_f
+      return tree
 
-  def run():
-      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
-          aid    = agent["id"]
-          stages = []
-
-          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+  def agent_fetched_untrusted(aid, session):
+      """Stage 0: HTTP_REQUEST to untrusted host from agent or any subprocess."""
+      for proc_id in session:
+          for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
               if u == None:
                   continue
@@ -109,73 +130,204 @@ script: |
                   continue
               host = u.get("host", "")
               if host and not host_trusted(host):
-                  stages.append("stage0:untrusted-fetch:" + host)
+                  return host
+      # Tool call content — secondary signal when HTTPS goes via BYPASS
+      # and leaves no HTTP_REQUEST edge.
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          call_id = e.get("call_id", "")
+          source = e["to"] + "#call:" + call_id
+          if not search_in(source, "curl") and not search_in(source, "wget"):
+              continue
+          trusted = False
+          for t in TRUSTED_HOSTS:
+              if search_in(source, t):
+                  trusted = True
                   break
+          if not trusted:
+              return "tool-call"
+      return None
 
-          found_stage1 = False
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
-              cmd = e.get("cmd", "")
-              if heredoc_expansion(cmd):
-                  stages.append("stage1:heredoc-exec-bypass")
-                  found_stage1 = True
-                  break
-          if not found_stage1:
-              has_s0 = False
-              for s in stages:
-                  if "stage0" in s:
-                      has_s0 = True
-                      break
-              if has_s0 and len(edges(aid, dir="out", kind="EXECUTE_PROCESS")) > 0:
-                  stages.append("stage1:subprocess-spawn")
+  def session_has_sensitive_read(session):
+      """Stage 2: READ_FILE edge with sensitive file content in FTS5 index."""
+      for proc_id in session:
+          for e in edges(proc_id, dir="out", kind="READ_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              source = fs["id"] + "$READ"
+              for pattern in SENSITIVE_PATTERNS:
+                  if search_in(source, pattern):
+                      return pattern
+      return None
 
-          procs_l1 = []
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
-              procs_l1.append(e["to"])
-          procs_l2 = []
-          for pid in procs_l1:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
-                  procs_l2.append(e["to"])
+  def session_has_sensitive_write(session):
+      """Stage 3: WRITE_FILE edge with sensitive file content in FTS5 index."""
+      for proc_id in session:
+          for e in edges(proc_id, dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              source = fs["id"] + "$WRITE"
+              for pattern in SENSITIVE_PATTERNS:
+                  if search_in(source, pattern):
+                      return pattern
+      return None
 
-          all_file_actors    = [aid] + procs_l1
-          all_network_actors = [aid] + procs_l1 + procs_l2
+  # Fixed cloud instance metadata service IPs.
+  # These are standardised endpoints with no legitimate use from an agent subprocess:
+  # any connection to them after credential access is a metadata credential theft attempt.
+  CLOUD_METADATA_IPS = [
+      "169.254.169.254",   # AWS, GCP, Azure, DigitalOcean, Hetzner (link-local IMDS)
+      "100.100.100.200",   # Alibaba Cloud ECS metadata
+  ]
 
-          found_s2 = False
-          found_s3 = False
-          for actor_id in all_file_actors:
-              if not found_s2:
-                  matched = actor_has_sensitive_read(actor_id)
-                  if matched != None:
-                      stages.append("stage2:toctou-read:" + matched)
-                      found_s2 = True
-              if not found_s3:
-                  matched = actor_has_write(actor_id)
-                  if matched != None:
-                      stages.append("stage3:toctou-write:" + matched)
-                      found_s3 = True
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid     = agent["id"]
+          stages  = []
+          chain   = new_chain(aid)
+          session = collect_exec_tree(aid)
 
-          found_s4 = False
-          for actor_id in all_network_actors:
-              if found_s4:
-                  break
-              for e in edges(actor_id, dir="out", kind="CONNECTS"):
-                  h = node(e["to"])
-                  if h != None and h.get("is_private", "0") == "1":
-                      stages.append("stage4:loopback-connect:" + h.get("host", "?"))
-                      found_s4 = True
-                      break
-              if found_s4:
-                  break
-              for e in edges(actor_id, dir="out", kind="HTTP_REQUEST"):
+          # Stage 0 — HTTP_REQUEST to untrusted host
+          for proc_id in session:
+              for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
                   u = node(e["to"])
-                  if u != None and u.get("is_private", "0") == "1":
-                      stages.append("stage4:loopback-http:" + u.get("host", "?"))
-                      found_s4 = True
+                  if u == None: continue
+                  if u.get("is_private","0") == "1": continue
+                  host = u.get("host","")
+                  if host and not host_trusted(host):
+                      stages.append("stage0:untrusted-fetch:" + host)
+                      chain.append(step(e, "untrusted external fetch: " + host))
                       break
+              _done = False
+              for _s in stages:
+                  if "stage0" in _s: _done = True
+              if _done: break
+          _has_s0 = False
+          for _s in stages:
+              if "stage0" in _s: _has_s0 = True
+          if not _has_s0:
+              for e in edges(aid, dir="out", kind="TOOL_CALL"):
+                  src = e["to"] + "#call:" + e.get("call_id","")
+                  if search_in(src,"curl") or search_in(src,"wget"):
+                      ok = False
+                      for t in TRUSTED_HOSTS:
+                          if search_in(src, t): ok = True
+                      if not ok:
+                          stages.append("stage0:untrusted-fetch:tool-call")
+                          chain.append(step(e, "tool call with untrusted curl/wget"))
+                          break
+
+          # Stage 1 — heredoc execution bypass OR subprocess spawn after S0
+          found_s1 = False
+          for proc_id in session:
+              for e in edges(proc_id, dir="out", kind="EXECUTE_PROCESS"):
+                  if heredoc_expansion(e.get("cmdline","")):
+                      stages.append("stage1:heredoc-exec-bypass")
+                      chain.append(step(e, "heredoc with command substitution"))
+                      found_s1 = True
+                      break
+              if found_s1: break
+          _has_stage0 = False
+          for _s in stages:
+              if "stage0" in _s: _has_stage0 = True
+          if not found_s1 and _has_stage0:
+              total_exec = 0
+              for p in session:
+                  total_exec += len(edges(p, dir="out", kind="EXECUTE_PROCESS"))
+              if total_exec > 0:
+                  stages.append("stage1:subprocess-spawn")
+                  # No single triggering edge for fallback — stage 1 is inferred
+
+          # Stage 2 — sensitive READ_FILE via graph index
+          for proc_id in session:
+              for e in edges(proc_id, dir="out", kind="READ_FILE"):
+                  fs = node(e["to"])
+                  if fs == None: continue
+                  source = fs["id"] + "$READ"
+                  for pattern in SENSITIVE_PATTERNS:
+                      if search_in(source, pattern):
+                          files = fs_activity(fs["id"], "READ", pattern)
+                          detail = files[0] if files else pattern
+                          stages.append("stage2:toctou-read:" + pattern)
+                          chain.append(step(e, "read " + detail))
+                          break
+                  _has_stage2 = False
+                  for _s in stages:
+                      if "stage2" in _s: _has_stage2 = True
+                  if _has_stage2: break
+              _has_stage2 = False
+              for _s in stages:
+                  if "stage2" in _s: _has_stage2 = True
+              if _has_stage2: break
+
+          # Stage 3 — sensitive WRITE_FILE
+          for proc_id in session:
+              for e in edges(proc_id, dir="out", kind="WRITE_FILE"):
+                  fs = node(e["to"])
+                  if fs == None: continue
+                  source = fs["id"] + "$WRITE"
+                  for pattern in SENSITIVE_PATTERNS:
+                      if search_in(source, pattern):
+                          files = fs_activity(fs["id"], "WRITE", pattern)
+                          detail = files[0] if files else pattern
+                          stages.append("stage3:toctou-write:" + pattern)
+                          chain.append(step(e, "wrote " + detail))
+                          break
+                  _has_stage3 = False
+                  for _s in stages:
+                      if "stage3" in _s: _has_stage3 = True
+                  if _has_stage3: break
+              _has_stage3 = False
+              for _s in stages:
+                  if "stage3" in _s: _has_stage3 = True
+              if _has_stage3: break
+
+          # Stage 4 — CONNECTS to Netzilo peer or cloud metadata service
+          for proc_id in session:
+              for e in edges(proc_id, dir="out", kind="CONNECTS"):
+                  h = node(e["to"])
+                  if h == None: continue
+                  host = h.get("host","")
+                  if h.get("is_private","0") == "1":
+                      stages.append("stage4:private-connect:" + host)
+                      chain.append(step(e, "lateral movement to Netzilo peer: " + host))
+                      break
+                  if host in CLOUD_METADATA_IPS:
+                      stages.append("stage4:metadata-connect:" + host)
+                      chain.append(step(e, "cloud metadata service contacted: " + host))
+                      break
+              _has_stage4 = False
+              for _s in stages:
+                  if "stage4" in _s: _has_stage4 = True
+              if _has_stage4: break
+              for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
+                  u = node(e["to"])
+                  if u == None: continue
+                  host = u.get("host","")
+                  if u.get("is_private","0") == "1":
+                      stages.append("stage4:private-http:" + host)
+                      chain.append(step(e, "HTTP to Netzilo peer: " + host))
+                      break
+                  if host in CLOUD_METADATA_IPS:
+                      stages.append("stage4:metadata-http:" + host)
+                      chain.append(step(e, "HTTP to cloud metadata: " + host))
+                      break
+              _has_stage4 = False
+              for _s in stages:
+                  if "stage4" in _s: _has_stage4 = True
+              if _has_stage4: break
 
           count = len(stages)
           if count >= 3:
               print("Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages))
-              return "block"
+              return {
+                  "action": "block",
+                  "reason": "Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages),
+                  "chain":  chain,
+              }
 
       return "allow"
 
