@@ -163,7 +163,7 @@ def run():
             h = node(e["to"])
             if h == None or h.get("is_private", "0") == "1":
                 continue
-            chain.append(step(e, "subprocess connected to public host: " + h.get("host", "")))
+            chain.append(step(e, stage_id="C2 Connection", stage_desc="subprocess connected to public host: " + h.get("host", "")))
             return {
                 "action": "block",
                 "reason": "Agent connected to unexpected public endpoint",
@@ -209,8 +209,8 @@ def run():
         if skill_edge != None and http_edge != None:
             u = node(http_edge["to"])
             s = node(skill_edge["to"])
-            chain.append(step(skill_edge, "untrusted skill loaded from: " + s.get("host", "")))
-            chain.append(step(http_edge,  "data sent to external host: " + u.get("host", "")))
+            chain.append(step(skill_edge, stage_id="Skill Loaded", stage_desc="untrusted skill loaded from: " + s.get("host", "")))
+            chain.append(step(http_edge,  stage_id="HTTP Exfil",   stage_desc="data sent to external host: " + u.get("host", "")))
             return {
                 "action": "block",
                 "reason": "Exfiltration chain: skill acquired then HTTP to public host",
@@ -237,12 +237,12 @@ def run():
             if fs == None:
                 continue
             for pat in SENSITIVE:
-                paths = fs_activity(fs["id"], "READ", pat)
-                if paths:
-                    chain.append(step(e, "read sensitive file: " + paths[0]))
+                entries = fs_activity(fs["id"], "READ", pat)
+                if entries:
+                    chain.append(step(e, stage_id="Credential Access", stage_desc="read sensitive file: " + entries[0]["path"]))
                     return {
                         "action": "block",
-                        "reason": "Sensitive credential file accessed: " + paths[0],
+                        "reason": "Sensitive credential file accessed: " + entries[0]["path"],
                         "chain":  chain,
                     }
     return "allow"
@@ -894,6 +894,87 @@ script: |
   result = run()
 ```
 
+#### Event relevance pre-filter — required for behavioral rules
+
+**Every behavioral execute-action rule MUST start with an `is_relevant_event()` check.** This is both a correctness requirement and a critical optimization.
+
+**Why it matters:** Behavioral rules fire on broad event types (`execute_process`, `http_request`, `connects`, `file_read`, etc.) so they can detect attacks in real time. But once an attack is in the graph, EVERY subsequent unrelated event (Docker spawns, VS Code telemetry, background processes) re-triggers the rule and runs the full graph traversal — producing duplicate detections and wasting CPU on events that could never be part of the attack chain.
+
+The fix: at the very top of `run()`, check if the **current event** (`meta["context_type"]` + relevant meta fields) is actually relevant to what this rule detects. If not, return `"allow"` immediately — zero graph traversal, zero noise.
+
+**Pattern:**
+
+```python
+def is_relevant_event():
+    ct = meta.get("context_type", "")
+    # Always evaluate on AI-layer events
+    if ct in ("tool_call", "tool_response", "llm_request", "llm_response"):
+        return True
+    # execute_process: only if spawning attack-relevant tools.
+    # Use WORD BOUNDARIES — a bare substring like "cat" in the content matches
+    # "/Applications/...", "wget" matches "widget", etc. Always anchor with \b.
+    if ct == "execute_process":
+        cmd = meta.get("content", "")
+        for t in [r"\bcurl\b", r"\bwget\b", r"\bcat\b", r"\bbash\b",
+                  "/bin/sh", r"\bpython[23]?\b"]:
+            if re.find(t, cmd) != None: return True
+        return False
+    # http_request: only if the host is untrusted (rule-specific check)
+    if ct == "http_request":
+        return not host_trusted(meta.get("host", ""))
+    # connects: only if destination is a metadata/private IP. meta["host"] does
+    # not carry is_private, so check known RFC1918/metadata prefixes explicitly.
+    if ct == "connects":
+        host = meta.get("host", "")
+        if host in CLOUD_METADATA_IPS: return True
+        for pfx in ["10.", "192.168.", "172.16.", "172.17.", "172.18.", "172.19.",
+                    "172.2", "172.30.", "172.31.", "100."]:
+            if host.startswith(pfx): return True
+        return False
+    # file_read/write: only if a sensitive path is involved
+    if ct in ("file_read", "file_write"):
+        path = meta.get("file_path", "")
+        for pfx in ["/.aws/", "/.ssh/", "/etc/passwd", "/.kube/"]:
+            if pfx in path: return True
+        return False
+    return True  # unknown event type — evaluate to be safe
+
+def run():
+    if not is_relevant_event():
+        return "allow"          # ← skip graph traversal entirely
+    # ... full detection logic ...
+```
+
+> **Substring pitfall.** `"cat" in cmd` is true for `/Applications/Docker.app/...`
+> ("Appli**cat**ions"). Process-name and tool checks in `is_relevant_event()`
+> MUST use `re.find(r"\bword\b", s)`, never `in`. The same applies to any
+> command/path keyword matching — anchor it.
+
+**Rules for writing `is_relevant_event()`:**
+
+1. **AI-layer events always pass** — `tool_call`, `tool_response`, `llm_request`, `llm_response` are the orchestration layer; behavioral detections need them.
+2. **Each event type gets its own check** — use `meta["context_type"]` to branch, then check the relevant field (`host`, `file_path`, `content`, etc.).
+3. **Err on the side of inclusion** — if unsure whether an event is relevant, return `True`. False negatives (missed detections) are worse than minor extra work.
+4. **The check must be fast** — no graph calls, no `search_in`, no `fs_activity`. Pure string matching on `meta` fields only.
+5. **The check is rule-specific** — it encodes exactly what events this rule's threat model requires. For a credential-stuffing rule it would be different from a claw-chain rule. This also makes the rule self-documenting.
+
+This pattern has no effect on detection accuracy — it only prevents re-running expensive graph traversal on events that could never advance the attack chain. A second attack in the same timeframe IS detected because its events (curl, file reads, metadata connects) pass the relevance check and trigger fresh graph evaluation.
+
+**Look-back guard — complement to the relevance check**
+
+The relevance check prevents evaluation on unrelated events. The look-back guard prevents re-firing on relevant events that replay old graph state. Once an attack is in the graph, even events that ARE relevant (e.g., another curl invocation) will re-detect the same old stages unless you gate on recency.
+
+Pattern: after confirming N stages, check `event_ts - last_stage_ts > LOOK_BACK_NS`:
+
+```python
+LOOK_BACK_NS = 120_000_000_000  # 2 minutes
+event_ts = int(meta.get("event_ts", "0"))
+if event_ts > 0 and s0_ts > 0 and (event_ts - s0_ts) > LOOK_BACK_NS:
+    continue  # attack is stale — already handled
+```
+
+`event_ts` is injected by the engine as the exact `time.Now()` nanosecond timestamp when the script is invoked. `s0_ts` is the timestamp of the first evidence step (the anchor of the attack window). If the gap exceeds the look-back window, the detection is a re-fire of an old attack. A genuinely new attack will have a fresh `s0_ts` close to `event_ts` and will pass the guard.
+
 #### Execution model
 
 - **Language:** Starlark — a deterministic, sandboxed dialect of Python (version 0.21).
@@ -915,7 +996,7 @@ result = run()
 # def run():
 #     chain = new_chain(agent_id)
 #     # ... detect ...
-#     chain.append(step(edge, "why this edge is evidence"))
+#     chain.append(step(edge, stage_id="Stage Name", stage_desc="why this edge is evidence"))
 #     return {"action": "block", "reason": "...", "chain": chain}
 ```
 
@@ -988,7 +1069,7 @@ return {
 
 Rules:
 1. Call `new_chain(agent_id)` at the start of each agent loop iteration.
-2. For each evidence edge found, call `chain.append(step(edge, "description"))`. The description explains *why* this edge is significant — not just what it is.
+2. For each evidence edge found, call `chain.append(step(edge, stage_id="Stage Name", stage_desc="description"))`. `stage_id` is a short label for the attack stage (e.g. `"Initial"`, `"Credential Access"`); `stage_desc` explains *why* this edge is significant.
 3. Return a dict: `{"action": "block", "reason": "...", "chain": chain}` — never a plain `"block"` string when graph analysis was performed.
 4. The chain auto-prepends structural context (ancestry from user → agent → subprocess) before your first evidence step. You do not need to add those manually.
 5. If no suspicious signal is found and the script returns `"allow"`, no chain is needed.
@@ -1003,7 +1084,7 @@ def run():
 
         # ... detection logic ...
         # when you find evidence:
-        chain.append(step(edge, "untrusted external fetch: " + host))
+        chain.append(step(edge, stage_id="Initial", stage_desc="untrusted external fetch: " + host))
 
         if len(stages) >= THRESHOLD:
             return {
@@ -1039,8 +1120,10 @@ result = run()
 | `meta` | — (read-only dict) | — | Request metadata injected before execution; see keys below |
 | `netzilo` | — (read-only dict) | — | Local peer identity: `username`, `email`, `ip`, `fqdn`, `hostname`, `deviceid` (strings), `groups` (list of `{id, name}` dicts — groups the peer belongs to) |
 | `new_chain` | `new_chain(agent_id)` | `chain` | Creates a kill-chain collector rooted at `agent_id`. See **Kill chain builtins** below. |
-| `step` | `step(edge, desc="")` | `dict` | Annotates an existing graph edge with an optional description for inclusion in a kill chain. |
-| `fs_activity` | `fs_activity(node_id, op, pattern="")` | `list[str]` | Returns actual file paths accessed by a FileSystem node for a given operation. See **FileSystem nodes** section. |
+| `step` | `step(edge, stage_id="", stage_desc="", activity=None)` | `dict` | Annotates an existing graph edge with a stage label and description for inclusion in a kill chain. Pass `activity` (an entry from `fs_activity()`) for FILE edges to replace the aggregated node target with the exact file path and timestamp. |
+| `scan_prompt` | `scan_prompt(text, scan_type="")` | `dict` | Runs the built-in ML prompt-injection scanner on `text`. Returns `{"allowed": bool, "label": str, "confidence": float, "reason": str, "error": str}`. Fast, no AI key required. Returns `allowed=true` on scanner unavailability. |
+| `llm_call` | `llm_call(text, instruction, scan_type="", identifier="")` | `dict` | Sends `text` to the AI scanner (account's OpenAI/Anthropic key) with a custom `instruction`. Same return shape as `scan_prompt`. `instruction` is **required** and must be non-empty — raises an error otherwise (use `scan_prompt` for the ML model). Returns `allowed=true` on IPC error. |
+| `fs_activity` | `fs_activity(node_id, op, pattern="")` | `list[dict]` | Returns file activity entries for a FileSystem node. Each entry is `{"path": str, "ts": str}` where `ts` is the exact nanosecond timestamp of that specific file access. See **FileSystem nodes** section. |
 
 ---
 
@@ -1056,43 +1139,58 @@ Creates a kill-chain collector rooted at the agent node identified by `agent_id`
 chain = new_chain(aid)
 ```
 
-**Auto-prefix behaviour:** when the first `chain.append(step(e, ...))` call is made, the chain automatically prepends the structural context path from the agent node down to the source process of edge `e`, using BFS over `EXECUTE_PROCESS` edges. This gives every chain a self-describing ancestry prefix (typically 2–4 context edges) with no explicit code required.
+**Context prefix behaviour:** structural context (the `EXECUTE_PROCESS` ancestry path from user → agent → subprocess) is built **lazily at serialization time** (when the chain is returned in a dict result). It is not inserted when you call `chain.append()`. The engine scans the process tree, includes only edges whose `ts ≥ agent.first_seen` (current session only, no stale cross-session edges), deduplicates, and sorts by BFS depth. This gives every chain a self-describing ancestry prefix with no explicit code required.
 
 **Frozen after return:** once the script returns a dict with `"chain": chain`, the chain is frozen and cannot be modified.
 
-##### `step(edge, desc="")`
+##### `step(edge, stage_id="", stage_desc="", activity=None)`
 
-Wraps an existing graph edge dict (returned by `edges()`) with an optional description.
+Wraps an existing graph edge dict (returned by `edges()`) with an attack stage label and description.
 
 ```python
-s = step(e, "read /home/user/.aws/credentials")
+# Standard edge
+s = step(e, stage_id="Credential Access", stage_desc="read /home/user/.aws/credentials")
+
+# FILE edge — use activity= to replace the aggregated FileSystem node with the exact file
+files = fs_activity(fs["id"], "READ", '"aws credentials"')
+s = step(e, stage_id="Credential Access", stage_desc="read " + files[0]["path"], activity=files[0])
 ```
 
 - `edge` — a dict returned by `edges()`; all its fields are preserved unchanged.
-- `desc` — optional human-readable string explaining why this edge is significant. **Presence of `desc` marks the step as script-intentional evidence**; absence means structural context auto-added by `new_chain`.
-- Returns a dict: all edge fields plus `"desc"` if provided.
+- `stage_id` — short label for the attack stage (e.g. `"Initial"`, `"Stage 1"`, `"Credential Access"`). User-defined — any string works. **Presence of `stage_id` marks the step as script-intentional evidence**; steps without it are structural context auto-added by the chain serializer.
+- `stage_desc` — human-readable explanation of why this edge is significant. Shown in the dashboard and audit log alongside the stage label.
+- `activity` — optional entry from `fs_activity()` (`{"path": str, "ts": str}`). When provided, overrides two fields in the output: `to` becomes the exact file path and `ts` becomes the per-file timestamp. Use this for all FILE edge kinds (READ_FILE, WRITE_FILE, CREATE_FILE, DELETE_FILE, RENAME_FILE) — these edges point to aggregated FileSystem nodes; `activity` replaces the aggregated node with the real target and gives the correct timestamp for kill chain ordering.
+- Returns a dict: all edge fields plus `"stage_id"` and `"stage_desc"` if provided.
 
-Steps with no `desc` are structural context (ancestry prefix). Steps with `desc` are evidence steps — the script author decided these edges matter.
+Steps with no `stage_id` are structural context (ancestry prefix). Steps with `stage_id` are evidence steps — the script author decided these edges matter.
 
 ##### `fs_activity(node_id, op, pattern="")`
 
-Returns the list of actual file paths accessed by a FileSystem node under a given operation, optionally filtered by an FTS5 phrase pattern.
+Returns file activity entries for a FileSystem node, optionally filtered by an FTS5 phrase pattern. Each entry carries the exact timestamp of that specific file access — not the aggregate edge `first_ts`/`last_ts`.
 
 ```python
-paths = fs_activity(fs["id"], "READ", '"aws credentials"')
-# e.g. → ["/home/user/.aws/credentials"]
+entries = fs_activity(fs["id"], "READ", '"aws credentials"')
+# e.g. → [{"path": "/home/user/.aws/credentials", "ts": "1780936014170885000"}]
+
+path = entries[0]["path"]   # the file path
+ts   = int(entries[0]["ts"]) # nanosecond timestamp of this specific read
 ```
 
 - `node_id` — the `id` field of a `FileSystem` node (e.g. `"filesystem:///usr/bin/cat"`).
 - `op` — operation type: `"READ"`, `"WRITE"`, `"CREATE"`, `"DELETE"`, or `"RENAME"`.
-- `pattern` — optional FTS5 match expression (same syntax as `search_in()`). If empty, returns all paths for that operation. Returns at most 500 paths.
-- Returns `list[str]` of file paths, or `[]` if none match.
+- `pattern` — optional FTS5 match expression (same syntax as `search_in()`). If empty, returns all entries for that operation. Returns at most 500 entries.
+- Returns `list[dict]` — each dict has `"path"` (string) and `"ts"` (nanosecond timestamp string). Returns `[]` if none match.
+
+**Why per-entry `ts` matters:** the READ_FILE edge on a FileSystem node aggregates ALL reads by that process — `first_ts` on the edge is when the process first read ANY file, which may predate the current attack. Use `entry["ts"]` to confirm a specific file was accessed at the right point in the attack sequence.
 
 **FTS5 phrase quoting for paths:** the FTS5 tokenizer (`unicode61`) splits on `/`, `.`, and `_`. A path like `.aws/credentials` tokenises to `["aws", "credentials"]`. Use adjacent-token phrases: `'"aws credentials"'` (a Starlark string whose value is `"aws credentials"` — the double-quotes are part of the FTS5 query syntax, not the Starlark string delimiters).
 
 ```python
-# Correct — FTS5 phrase query
+# Correct — FTS5 phrase query; returns list of {"path":..., "ts":...}
 files = fs_activity(fs["id"], "READ", '"aws credentials"')
+if files:
+    path = files[0]["path"]   # "/home/user/.aws/credentials"
+    ts   = int(files[0]["ts"]) # exact nanosecond of that read
 
 # Wrong — bare token, will miss paths that have other tokens between
 files = fs_activity(fs["id"], "READ", "credentials")
@@ -1100,11 +1198,11 @@ files = fs_activity(fs["id"], "READ", "credentials")
 
 ##### Kill chain wire format
 
-The `"chain"` key in the script return dict must be the chain object returned by `new_chain()`. The daemon serialises it as a JSON array. Each element is an edge dict (all standard edge fields: `from`, `to`, `kind`, `first_ts`, `last_ts`, …) with an optional `"desc"` string appended. The chain is published to the management audit log as the `execute_meta_chain` field on the security event.
+The `"chain"` key in the script return dict must be the chain object returned by `new_chain()`. The daemon serialises it as a JSON array. Each element is an edge dict (all standard edge fields: `from`, `to`, `kind`, `first_ts`, `last_ts`, …) with optional `"stage_id"` and `"stage_desc"` strings appended. The chain is published to the management audit log as the `execute_meta_chain` field on the security event.
 
-**Context steps** (auto-prepended, no `"desc"`) show the structural ancestry from agent → subprocess chain to the first evidence node.
+**Context steps** (auto-prepended, no `"stage_id"`) show the structural ancestry from agent → subprocess chain. Built lazily at serialization; `ts ≥ agent.first_seen` filter removes stale cross-session edges.
 
-**Evidence steps** (have `"desc"`) show the specific edges the rule author identified as proof of malicious intent.
+**Evidence steps** (have `"stage_id"`) show the specific edges the rule author identified as proof of malicious intent. Emitted in rule-append order — the script controls the sequence.
 
 ##### Complete example
 
@@ -1112,15 +1210,15 @@ The `"chain"` key in the script return dict must be the chain object returned by
 chain = new_chain(aid)
 
 # Evidence step — HTTP_REQUEST to untrusted host
-chain.append(step(e, "untrusted external fetch: " + host))
+chain.append(step(e, stage_id="Initial", stage_desc="untrusted external fetch: " + host))
 
-# Evidence step — sensitive file read (with resolved path from fs_activity)
+# Evidence step — sensitive file read (with resolved path and timestamp from fs_activity)
 files = fs_activity(fs["id"], "READ", '"aws credentials"')
-detail = files[0] if files else '"aws credentials"'
-chain.append(step(e, "read " + detail))
+detail = files[0]["path"] if files else '"aws credentials"'
+chain.append(step(e, stage_id="Credential Access", stage_desc="read " + detail))
 
 # Evidence step — cloud metadata access
-chain.append(step(e, "cloud metadata service contacted: " + host))
+chain.append(step(e, stage_id="Lateral Movement", stage_desc="cloud metadata service contacted: " + host))
 
 return {
     "action": "block",
@@ -1132,11 +1230,11 @@ return {
 This produces a chain like:
 
 ```
-[context] Agent (Code Helper) → spawn-helper       EXECUTE_PROCESS  (no desc)
-[context] spawn-helper → curl                      EXECUTE_PROCESS  (no desc)
-[evidence] curl → httpbin.org                      HTTP_REQUEST     desc="untrusted external fetch: httpbin.org"
-[evidence] cat → filesystem://cat                  READ_FILE        desc="read /home/user/.aws/credentials"
-[evidence] curl → 169.254.169.254                  CONNECTS         desc="cloud metadata service contacted: 169.254.169.254"
+[context] Agent (Code Helper) → spawn-helper       EXECUTE_PROCESS  (no stage_id)
+[context] spawn-helper → curl                      EXECUTE_PROCESS  (no stage_id)
+[evidence] curl → httpbin.org                      HTTP_REQUEST     stage_id="Initial"       stage_desc="untrusted external fetch: httpbin.org"
+[evidence] cat → filesystem://cat                  READ_FILE        stage_id="Credential Access" stage_desc="read /home/user/.aws/credentials"
+[evidence] curl → 169.254.169.254                  CONNECTS         stage_id="Lateral Movement"  stage_desc="cloud metadata service contacted: 169.254.169.254"
 ```
 
 ---
@@ -1148,6 +1246,7 @@ This produces a chain like:
 | Key | Available in | Value |
 |---|---|---|
 | `rule_id` | all | ID of the rule being evaluated |
+| `event_ts` | all | Unix nanosecond timestamp of the current triggering event (`time.Now()` when the script is invoked). Use this for look-back guards: `int(meta.get("event_ts","0"))`. |
 | `context_type` | all | The specific context that fired: `tool_input`, `tool_output`, `llm_request`, `llm_response`, `http_request`, `sampling_request`, `sampling_response`, `prompt_request`, `prompt_response`, `execute_process`, `file_read`, `file_write`, `file_create`, `file_delete`, `file_rename` |
 | `server_name` | all | MCP server name or LLM provider host |
 | `server_url` | MCP, LLM | Full URL of the upstream server |
@@ -1210,10 +1309,11 @@ script: |
               for pat in SENSITIVE:
                   paths = fs_activity(fs["id"], "READ", pat)
                   if paths:
-                      chain.append(step(e, "read sensitive file: " + paths[0]))
+                      fpath = paths[0]["path"]
+                      chain.append(step(e, stage_id="Credential Access", stage_desc="read sensitive file: " + fpath))
                       return {
                           "action": "block",
-                          "reason": "Sensitive credential file accessed: " + paths[0],
+                          "reason": "Sensitive credential file accessed: " + fpath,
                           "chain":  chain,
                       }
       return "allow"
@@ -1253,7 +1353,7 @@ script: |
                   providers[p] = e
           if len(providers) > 2:
               for p, e in providers.items():
-                  chain.append(step(e, "LLM request to provider: " + p))
+                  chain.append(step(e, stage_id="LLM Pivot", stage_desc="LLM request to provider: " + p))
               return {
                   "action": "block",
                   "reason": "Agent used " + str(len(providers)) + " LLM providers (possible data pivoting)",
@@ -1300,7 +1400,7 @@ script: |
           for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
               if u != None and host in u.get("host", ""):
-                  chain.append(step(e, "HTTP request to unapproved host: " + host))
+                  chain.append(step(e, stage_id="HTTP Exfil", stage_desc="HTTP request to unapproved host: " + host))
                   return {
                       "action": "block",
                       "reason": "Unapproved external HTTP destination: " + host,
@@ -1362,8 +1462,8 @@ script: |
           if skill_edge != None and http_edge != None:
               s = node(skill_edge["to"])
               u = node(http_edge["to"])
-              chain.append(step(skill_edge, "untrusted skill from: " + s.get("host", "?")))
-              chain.append(step(http_edge,  "data sent to: " + u.get("host", "?")))
+              chain.append(step(skill_edge, stage_id="Skill Loaded", stage_desc="untrusted skill from: " + s.get("host", "?")))
+              chain.append(step(http_edge,  stage_id="HTTP Exfil",   stage_desc="data sent to: " + u.get("host", "?")))
               return {
                   "action": "block",
                   "reason": "Exfiltration chain: untrusted skill loaded then HTTP to public host",
@@ -1404,8 +1504,8 @@ script: |
                   h = node(ce["to"])
                   if h == None or h.get("is_private", "0") == "1":
                       continue
-                  chain.append(step(pe, "agent spawned subprocess: " + pe.get("cmdline", "?")))
-                  chain.append(step(ce, "subprocess connected to: " + h.get("host", "") + ":" + h.get("port", "")))
+                  chain.append(step(pe, stage_id="Shell Escape",   stage_desc="agent spawned subprocess: " + pe.get("cmdline", "?")))
+                  chain.append(step(ce, stage_id="C2 Connection",  stage_desc="subprocess connected to: " + h.get("host", "") + ":" + h.get("port", "")))
                   return {
                       "action": "block",
                       "reason": "Subprocess made external connection — possible C2",
@@ -1550,11 +1650,11 @@ The FTS index stores one document per `(process, operation)` pair. The source la
 ```python
 def run():
     for fs in graph(type="FileSystem"):
-        # Get all files read by this process, filtered by FTS5 phrase
-        paths = fs_activity(fs["id"], "READ", '"aws credentials"')
-        if paths:
+        # Returns list of {"path": ..., "ts": ...}
+        entries = fs_activity(fs["id"], "READ", '"aws credentials"')
+        if entries:
             name = fs.get("proc_path", "").split("/")[-1]
-            print("credentials read by: " + name + " → " + paths[0])
+            print("credentials read by: " + name + " → " + entries[0]["path"])
     return "allow"
 
 result = run()
@@ -1570,17 +1670,15 @@ def run():
         if not fs["id"].endswith("/cat"):
             continue
         for op in ops:
-            for fp in fs_activity(fs["id"], op):
-                print(op + " | " + fp)
+            for entry in fs_activity(fs["id"], op):
+                print(op + " | " + entry["path"] + " @ " + entry["ts"])
     return "allow"
 
 result = run()
 # Output:
-# READ | /home/user/.aws/credentials
-# READ | /home/user/.nvm/alias/default
-# WRITE | /dev/ttys003
-# CREATE | /private/var/tmp/sh-thd-3194879450
-# DELETE | /private/var/tmp/sh-thd-3194879450
+# READ | /home/user/.aws/credentials @ 1780936014170885000
+# READ | /home/user/.nvm/alias/default @ 1780936014172000000
+# WRITE | /dev/ttys003 @ 1780936015000000000
 ```
 
 **Example 3 — enumerate all file activity across all processes:**
@@ -1591,8 +1689,8 @@ def run():
     for fs in graph(type="FileSystem"):
         name = fs.get("proc_path", "").split("/")[-1]
         for op in ops:
-            for fp in fs_activity(fs["id"], op):
-                print(name + " | " + op + " | " + fp)
+            for entry in fs_activity(fs["id"], op):
+                print(name + " | " + op + " | " + entry["path"])
     return "allow"
 
 result = run()
@@ -2470,9 +2568,9 @@ script: |
           if fs == None:
               continue
           for pat in SENSITIVE:
-              paths = fs_activity(fs["id"], "READ", pat)
-              if paths:
-                  print("Sensitive file read detected — " + paths[0] +
+              entries = fs_activity(fs["id"], "READ", pat)
+              if entries:
+                  print("Sensitive file read detected — " + entries[0]["path"] +
                         " by: " + fs.get("proc_path", "?"))
                   return "block"
       return "allow"

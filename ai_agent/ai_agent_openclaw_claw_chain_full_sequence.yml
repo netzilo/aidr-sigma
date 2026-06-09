@@ -29,6 +29,10 @@ detection:
     event_type:
       - tool_call
       - tool_response
+      - http_request
+      - file_read
+      - file_write
+      - connects
   condition: sel_trigger
 
 action: execute
@@ -74,8 +78,10 @@ script: |
       "chatgpt.com", "gemini.google", "mistral.ai", "groq.com",
       "cloudflare.com", "fastly.com",
       "exp-tas.com", "vscode-cdn.net", "vsassets.io", "gallerycdn.vsassets.io",
-      "gallery.vsassets.io", "githubcopilot.com", "copilot.github.com",
+      "gallery.vsassets.io", "vscode-unpkg.net", "githubcopilot.com", "copilot.github.com",
       "127.0.0.1", "localhost", "::1",
+      "posthog.com", "posthog.io",
+      "githubstatus.com", "statuspage.io",
   ]
 
   def host_trusted(host):
@@ -119,60 +125,6 @@ script: |
           frontier = next_f
       return tree
 
-  def agent_fetched_untrusted(aid, session):
-      """Stage 0: HTTP_REQUEST to untrusted host from agent or any subprocess."""
-      for proc_id in session:
-          for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
-              u = node(e["to"])
-              if u == None:
-                  continue
-              if u.get("is_private", "0") == "1":
-                  continue
-              host = u.get("host", "")
-              if host and not host_trusted(host):
-                  return host
-      # Tool call content — secondary signal when HTTPS goes via BYPASS
-      # and leaves no HTTP_REQUEST edge.
-      for e in edges(aid, dir="out", kind="TOOL_CALL"):
-          call_id = e.get("call_id", "")
-          source = e["to"] + "#call:" + call_id
-          if not search_in(source, "curl") and not search_in(source, "wget"):
-              continue
-          trusted = False
-          for t in TRUSTED_HOSTS:
-              if search_in(source, t):
-                  trusted = True
-                  break
-          if not trusted:
-              return "tool-call"
-      return None
-
-  def session_has_sensitive_read(session):
-      """Stage 2: READ_FILE edge with sensitive file content in FTS5 index."""
-      for proc_id in session:
-          for e in edges(proc_id, dir="out", kind="READ_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              source = fs["id"] + "$READ"
-              for pattern in SENSITIVE_PATTERNS:
-                  if search_in(source, pattern):
-                      return pattern
-      return None
-
-  def session_has_sensitive_write(session):
-      """Stage 3: WRITE_FILE edge with sensitive file content in FTS5 index."""
-      for proc_id in session:
-          for e in edges(proc_id, dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              source = fs["id"] + "$WRITE"
-              for pattern in SENSITIVE_PATTERNS:
-                  if search_in(source, pattern):
-                      return pattern
-      return None
-
   # Fixed cloud instance metadata service IPs.
   # These are standardised endpoints with no legitimate use from an agent subprocess:
   # any connection to them after credential access is a metadata credential theft attempt.
@@ -181,33 +133,91 @@ script: |
       "100.100.100.200",   # Alibaba Cloud ECS metadata
   ]
 
+  def is_relevant_event():
+      """Pre-filter: return False if the current event cannot possibly be part of
+      the claw chain. Avoids full graph traversal on every unrelated event
+      (Docker spawns, VS Code telemetry, etc.) once the attack is in the graph."""
+      ct = meta.get("context_type", "")
+
+      # AI-layer events always evaluate — they are the orchestration layer.
+      if ct in ("tool_call", "tool_response", "llm_request", "llm_response"):
+          return True
+
+      # HTTP request: only relevant if the host is untrusted.
+      if ct == "http_request":
+          return not host_trusted(meta.get("host", ""))
+
+      # Network connection: only relevant if metadata IP or private/RFC1918 host.
+      # Stage 4 fires on CLOUD_METADATA_IPS and on is_private="1" (Netzilo peers).
+      # meta["host"] doesn't carry is_private, so check known private prefixes too.
+      if ct == "connects":
+          host = meta.get("host", "")
+          if host in CLOUD_METADATA_IPS:
+              return True
+          for pfx in ["10.", "172.16.", "172.17.", "172.18.", "172.19.",
+                      "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
+                      "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
+                      "172.30.", "172.31.", "192.168.", "100."]:
+              if host.startswith(pfx):
+                  return True
+          return False
+
+      # File read/write: only relevant if a sensitive path is involved.
+      if ct in ("file_read", "file_write", "file_create"):
+          path = meta.get("file_path", "")
+          for pfx in ["/.aws/", "/.ssh/", "/etc/passwd", "/etc/shadow",
+                      "/etc/sudoers", "/.kube/", "/.netrc", "/proc/self"]:
+              if pfx in path:
+                  return True
+          return False
+
+      # Unknown or unhandled event type — evaluate to be safe.
+      return True
+
   def run():
+      if not is_relevant_event():
+          return "allow"
+
       for agent in graph(type="Process"):
           if agent.get("agent", "0") != "1":
               continue
-          aid     = agent["id"]
-          stages  = []
-          chain   = new_chain(aid)
-          session = collect_exec_tree(aid)
+          aid      = agent["id"]
+          stages   = []
+          chain    = new_chain(aid)
+          session  = collect_exec_tree(aid)
+          # Session start time — used to filter stale edges from prior sessions.
+          # Edges whose last_ts < agent_ts are accumulated historical data and
+          # must not trigger stage detections.
+          agent_ts = int(agent.get("first_seen", "0"))
+          s0_ts    = 0    # timestamp of the stage 0 fetch — all later stages must follow it
 
-          # Stage 0 — HTTP_REQUEST to untrusted host
+          # Stage 0 — earliest untrusted HTTP_REQUEST in session.
+          # We scan ALL untrusted requests and pick the one with the smallest
+          # first_ts so that a later unrelated VS Code request cannot steal
+          # s0_ts and cause Stages 2/4 timestamp checks to fail.
+          _s0_edge = None
+          _s0_host = ""
+          _s0_ts   = 0
           for proc_id in session:
               for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
                   u = node(e["to"])
                   if u == None: continue
                   if u.get("is_private","0") == "1": continue
                   host = u.get("host","")
-                  if host and not host_trusted(host):
-                      stages.append("stage0:untrusted-fetch:" + host)
-                      chain.append(step(e, "untrusted external fetch: " + host))
-                      break
-              _done = False
-              for _s in stages:
-                  if "stage0" in _s: _done = True
-              if _done: break
+                  if not host or host_trusted(host): continue
+                  e_ts = int(e.get("first_ts","0"))
+                  if _s0_edge == None or (e_ts > 0 and (_s0_ts == 0 or e_ts < _s0_ts)):
+                      _s0_edge = e
+                      _s0_host = host
+                      _s0_ts   = e_ts
+          if _s0_edge != None:
+              stages.append("Initial:untrusted-fetch:" + _s0_host)
+              chain.append(step(_s0_edge, stage_id="Initial",
+                  stage_desc="Untrusted external fetch from " + _s0_host))
+              s0_ts = _s0_ts
           _has_s0 = False
           for _s in stages:
-              if "stage0" in _s: _has_s0 = True
+              if "Initial" in _s: _has_s0 = True
           if not _has_s0:
               for e in edges(aid, dir="out", kind="TOOL_CALL"):
                   src = e["to"] + "#call:" + e.get("call_id","")
@@ -216,116 +226,179 @@ script: |
                       for t in TRUSTED_HOSTS:
                           if search_in(src, t): ok = True
                       if not ok:
-                          stages.append("stage0:untrusted-fetch:tool-call")
-                          chain.append(step(e, "tool call with untrusted curl/wget"))
+                          stages.append("Initial:untrusted-fetch:tool-call")
+                          chain.append(step(e, stage_id="Initial",
+                              stage_desc="Tool call with untrusted curl/wget"))
                           break
 
-          # Stage 1 — heredoc execution bypass OR subprocess spawn after S0
-          found_s1 = False
+          # Stage 1 — heredoc execution bypass with command substitution.
+          # This is the CVE-2026-44115 pattern: using << heredoc with $() or backtick
+          # to execute commands inside a shell document. Must happen AFTER stage 0
+          # (s0_ts) to be part of the attack chain — we check ts > s0_ts.
           for proc_id in session:
               for e in edges(proc_id, dir="out", kind="EXECUTE_PROCESS"):
+                  e_ts = int(e.get("ts","0"))
+                  if s0_ts > 0 and e_ts > 0 and e_ts <= s0_ts:
+                      continue  # must happen after the untrusted fetch
                   if heredoc_expansion(e.get("cmdline","")):
-                      stages.append("stage1:heredoc-exec-bypass")
-                      chain.append(step(e, "heredoc with command substitution"))
-                      found_s1 = True
+                      stages.append("Stage 1:heredoc-exec-bypass")
+                      chain.append(step(e, stage_id="Stage 1",
+                          stage_desc="Heredoc with command substitution"))
                       break
-              if found_s1: break
-          _has_stage0 = False
-          for _s in stages:
-              if "stage0" in _s: _has_stage0 = True
-          if not found_s1 and _has_stage0:
-              total_exec = 0
-              for p in session:
-                  total_exec += len(edges(p, dir="out", kind="EXECUTE_PROCESS"))
-              if total_exec > 0:
-                  stages.append("stage1:subprocess-spawn")
-                  # No single triggering edge for fallback — stage 1 is inferred
+              _has_s1 = False
+              for _s in stages:
+                  if "Stage 1" in _s: _has_s1 = True
+              if _has_s1: break
 
           # Stage 2 — sensitive READ_FILE via graph index
+          # Uses fs_activity() which now returns {"path":..., "ts":...} entries.
+          # The exact per-file ts from the FTS index is used to validate ordering:
+          # the credential read must have happened AFTER stage 0 (s0_ts).
+          # This eliminates false positives from cat runs earlier in the same session.
           for proc_id in session:
               for e in edges(proc_id, dir="out", kind="READ_FILE"):
+                  if agent_ts > 0 and int(e.get("last_ts","0")) < agent_ts:
+                      continue
                   fs = node(e["to"])
                   if fs == None: continue
                   source = fs["id"] + "$READ"
                   for pattern in SENSITIVE_PATTERNS:
                       if search_in(source, pattern):
                           files = fs_activity(fs["id"], "READ", pattern)
-                          detail = files[0] if files else pattern
-                          stages.append("stage2:toctou-read:" + pattern)
-                          chain.append(step(e, "read " + detail))
+                          if not files: continue
+                          # Find the entry whose exact ts is after s0_ts
+                          matched = None
+                          for f in files:
+                              f_ts = int(f.get("ts","0"))
+                              if s0_ts > 0 and f_ts > 0 and f_ts < s0_ts:
+                                  continue  # this specific read predates the fetch
+                              matched = f
+                              break
+                          if matched == None: continue
+                          detail = matched["path"]
+                          # Guard against FTS false positives: reject paths where
+                          # the sensitive tokens appear only in a filename/dir that
+                          # coincidentally contains the pattern (e.g. read_etc_passwd.yaml).
+                          # Real sensitive paths live in /etc/, ~/.ssh/, ~/.aws/, ~/.kube/,
+                          # /proc/, or home dirs — they never have extensions like .yaml/.json.
+                          ok = False
+                          for pfx in ["/etc/", "/.ssh/", "/.aws/", "/.kube/", "/proc/", "/.netrc", "ssh/authorized_keys"]:
+                              if pfx in detail:
+                                  ok = True
+                          if not ok:
+                              continue
+                          stages.append("Stage 2:toctou-read:" + pattern)
+                          chain.append(step(e, stage_id="Stage 2",
+                              stage_desc="Read " + detail, activity=matched))
                           break
                   _has_stage2 = False
                   for _s in stages:
-                      if "stage2" in _s: _has_stage2 = True
+                      if "Stage 2" in _s: _has_stage2 = True
                   if _has_stage2: break
               _has_stage2 = False
               for _s in stages:
-                  if "stage2" in _s: _has_stage2 = True
+                  if "Stage 2" in _s: _has_stage2 = True
               if _has_stage2: break
 
-          # Stage 3 — sensitive WRITE_FILE
+          # Stage 3 — sensitive WRITE_FILE (same ordering guards as stage 2)
           for proc_id in session:
               for e in edges(proc_id, dir="out", kind="WRITE_FILE"):
+                  edge_ts = int(e.get("last_ts","0"))
+                  if agent_ts > 0 and edge_ts < agent_ts:
+                      continue
+                  if s0_ts > 0 and edge_ts < s0_ts:
+                      continue
                   fs = node(e["to"])
                   if fs == None: continue
                   source = fs["id"] + "$WRITE"
                   for pattern in SENSITIVE_PATTERNS:
                       if search_in(source, pattern):
                           files = fs_activity(fs["id"], "WRITE", pattern)
-                          detail = files[0] if files else pattern
-                          stages.append("stage3:toctou-write:" + pattern)
-                          chain.append(step(e, "wrote " + detail))
+                          matched3 = files[0] if files else None
+                          detail = matched3["path"] if matched3 else pattern
+                          stages.append("Stage 3:toctou-write:" + pattern)
+                          chain.append(step(e, stage_id="Stage 3",
+                              stage_desc="Wrote " + detail, activity=matched3))
                           break
                   _has_stage3 = False
                   for _s in stages:
-                      if "stage3" in _s: _has_stage3 = True
+                      if "Stage 3" in _s: _has_stage3 = True
                   if _has_stage3: break
               _has_stage3 = False
               for _s in stages:
-                  if "stage3" in _s: _has_stage3 = True
+                  if "Stage 3" in _s: _has_stage3 = True
               if _has_stage3: break
 
           # Stage 4 — CONNECTS to Netzilo peer or cloud metadata service
+          # Use last_ts (most recent connection) not first_ts — the edge accumulates
+          # across sessions and first_ts may be from a prior session.
           for proc_id in session:
               for e in edges(proc_id, dir="out", kind="CONNECTS"):
+                  edge_ts = int(e.get("last_ts","0"))
+                  if agent_ts > 0 and edge_ts < agent_ts:
+                      continue
+                  if s0_ts > 0 and edge_ts < s0_ts:
+                      continue
                   h = node(e["to"])
                   if h == None: continue
                   host = h.get("host","")
                   if h.get("is_private","0") == "1":
-                      stages.append("stage4:private-connect:" + host)
-                      chain.append(step(e, "lateral movement to Netzilo peer: " + host))
+                      stages.append("Stage 4:private-connect:" + host)
+                      chain.append(step(e, stage_id="Stage 4",
+                          stage_desc="Lateral movement to private peer: " + host))
                       break
                   if host in CLOUD_METADATA_IPS:
-                      stages.append("stage4:metadata-connect:" + host)
-                      chain.append(step(e, "cloud metadata service contacted: " + host))
+                      stages.append("Stage 4:metadata-connect:" + host)
+                      chain.append(step(e, stage_id="Stage 4",
+                          stage_desc="Cloud metadata service contacted at " + host))
                       break
               _has_stage4 = False
               for _s in stages:
-                  if "stage4" in _s: _has_stage4 = True
+                  if "Stage 4" in _s: _has_stage4 = True
               if _has_stage4: break
               for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
+                  edge_ts = int(e.get("last_ts","0"))
+                  if agent_ts > 0 and edge_ts < agent_ts:
+                      continue
+                  if s0_ts > 0 and edge_ts < s0_ts:
+                      continue
                   u = node(e["to"])
                   if u == None: continue
                   host = u.get("host","")
                   if u.get("is_private","0") == "1":
-                      stages.append("stage4:private-http:" + host)
-                      chain.append(step(e, "HTTP to Netzilo peer: " + host))
+                      stages.append("Stage 4:private-http:" + host)
+                      chain.append(step(e, stage_id="Stage 4",
+                          stage_desc="HTTP to private peer: " + host))
                       break
                   if host in CLOUD_METADATA_IPS:
-                      stages.append("stage4:metadata-http:" + host)
-                      chain.append(step(e, "HTTP to cloud metadata: " + host))
+                      stages.append("Stage 4:metadata-http:" + host)
+                      chain.append(step(e, stage_id="Stage 4",
+                          stage_desc="HTTP to cloud metadata: " + host))
                       break
               _has_stage4 = False
               for _s in stages:
-                  if "stage4" in _s: _has_stage4 = True
+                  if "Stage 4" in _s: _has_stage4 = True
               if _has_stage4: break
 
           count = len(stages)
           if count >= 3:
+              # Look-back guard: skip if the attack is older than LOOK_BACK_NS.
+              # event_ts (injected by engine) is the exact timestamp of the
+              # triggering event. If the last stage (s0_ts being the earliest)
+              # happened more than LOOK_BACK_NS ago relative to now, this is a
+              # stale re-detection — the attack was already handled. A new
+              # attack will have fresh timestamps and will fire again.
+              LOOK_BACK_NS = 120000000000  # 2 minutes in nanoseconds
+              event_ts = int(meta.get("event_ts", "0"))
+              # Only apply look-back when event_ts is injected by the engine.
+              # agent.last_seen is not a safe fallback — it keeps updating with
+              # every activity and would suppress fresh attacks.
+              if event_ts > 0 and s0_ts > 0 and (event_ts - s0_ts) > LOOK_BACK_NS:
+                  continue  # stale — attack already detected, skip re-fire
               print("Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages))
               return {
                   "action": "block",
-                  "reason": "Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages),
+                  "reason": "Claw Chain CONFIRMED — " + str(count) + " Stages: " + ", ".join(stages),
                   "chain":  chain,
               }
 
