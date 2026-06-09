@@ -500,6 +500,7 @@ The `logsource.category` value controls which traffic events the rule evaluates 
 | `logsource.category` | What it detects | `event_type` in LogEntry |
 |---|---|---|
 | `execute_process` | A process spawned a child process; `content` = command line | `execute_process` |
+| `connects` | An outbound TCP/UDP connection intercepted by the SOCKS5 proxy; `host`, `port`, `protocol` in meta. Returning block from an execute rule **closes the connection before it is forwarded**. | `connects` |
 | `file_read` | A process read a file; `file_path` = path read | `file_read` |
 | `file_write` | A process wrote to a file; `file_path` = path written | `file_write` |
 | `file_create` | A process created a new file | `file_create` |
@@ -922,8 +923,8 @@ def is_relevant_event():
     # http_request: only if the host is untrusted (rule-specific check)
     if ct == "http_request":
         return not host_trusted(meta.get("host", ""))
-    # connects: only if destination is a metadata/private IP. meta["host"] does
-    # not carry is_private, so check known RFC1918/metadata prefixes explicitly.
+    # connects: meta["host"], meta["port"], meta["protocol"] are all available.
+    # Block verdict closes the connection before forwarding.
     if ct == "connects":
         host = meta.get("host", "")
         if host in CLOUD_METADATA_IPS: return True
@@ -1255,11 +1256,13 @@ This produces a chain like:
 | `model` | LLM contexts | Model name as sent in the request (e.g. `gpt-4o`, `claude-opus-4-7`) |
 | `content` | all | The data being evaluated: tool arguments JSON, tool result text, LLM message body, capability description, event payload, or HTTP request body |
 | `url` | HTTP contexts | Full request URL including path and query string |
-| `host` | HTTP contexts | Bare request hostname (no port, no scheme) |
+| `host` | HTTP and `connects` contexts | Bare hostname or IP (no port, no scheme). For `connects`: the destination IP/hostname. |
 | `path` | HTTP contexts | URL path component |
 | `method` | HTTP contexts | HTTP method: `GET`, `POST`, `PUT`, `DELETE`, … |
+| `port` | `connects` context | Destination port as a string, e.g. `"80"`, `"443"` |
+| `protocol` | `connects` context | Transport protocol: `"tcp"` or `"udp"` |
 | `header_<name>` | HTTP contexts | Individual request header value, key lowercased (e.g. `meta["header_authorization"]`, `meta["header_x-tenant-id"]`). Synthetic keys: `header_authorization-jwt` (decoded JWT payload) and `header_authorization-basic` (decoded Basic credentials) are also injected when present. |
-| `agent_name` | MCP, LLM | Full executable path of the calling process (e.g. `/usr/bin/cursor`); empty string if unknown |
+| `agent_name` | all | Full executable path of the calling process, resolved to the nearest monitored agent ancestor. Empty string if unknown. |
 
 ---
 
