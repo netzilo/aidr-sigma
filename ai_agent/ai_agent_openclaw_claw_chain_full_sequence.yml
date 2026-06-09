@@ -36,7 +36,12 @@ detection:
   condition: sel_trigger
 
 action: execute
-on_timeout: block
+# Fail OPEN on timeout/error. This is a behavioral correlation rule that runs on
+# high-volume events (every http_request, file op, connect). If the graph traversal
+# is slow, it must NEVER block the unrelated triggering event (e.g. a browser's
+# Google search) — that produces a chain-less block with wrong attribution.
+# Detection still fires the instant the script completes within budget.
+on_timeout: allow
 on_error: allow
 script: |
   # Claw Chain detection — pure behavioral graph signals.
