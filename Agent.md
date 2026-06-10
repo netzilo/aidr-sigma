@@ -161,7 +161,7 @@ def run():
 
         for e in edges(aid, dir="out", kind="CONNECTS"):
             h = node(e["to"])
-            if h == None or h.get("is_private", "0") == "1":
+            if h == None or h.get("is_ztna_host", "0") == "1":
                 continue
             chain.append(step(e, stage_id="C2 Connection", stage_desc="subprocess connected to public host: " + h.get("host", "")))
             return {
@@ -202,7 +202,7 @@ def run():
 
         for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
             u = node(e["to"])
-            if u != None and u.get("is_private", "0") == "0":
+            if u != None and u.get("is_ztna_host", "0") == "0":
                 http_edge = e
                 break
 
@@ -1125,6 +1125,15 @@ result = run()
 | `scan_prompt` | `scan_prompt(text, scan_type="")` | `dict` | Runs the built-in ML prompt-injection scanner on `text`. Returns `{"allowed": bool, "label": str, "confidence": float, "reason": str, "error": str}`. Fast, no AI key required. Returns `allowed=true` on scanner unavailability. |
 | `llm_call` | `llm_call(text, instruction, scan_type="", identifier="")` | `dict` | Sends `text` to the AI scanner (account's OpenAI/Anthropic key) with a custom `instruction`. Same return shape as `scan_prompt`. `instruction` is **required** and must be non-empty — raises an error otherwise (use `scan_prompt` for the ML model). Returns `allowed=true` on IPC error. |
 | `fs_activity` | `fs_activity(node_id, op, pattern="")` | `list[dict]` | Returns file activity entries for a FileSystem node. Each entry is `{"path": str, "ts": str}` where `ts` is the exact nanosecond timestamp of that specific file access. See **FileSystem nodes** section. |
+| `query_events` | `query_events(kind="", actor_pid=0, actor_start=0, actor_path="", target_id="", target_sub="", callid="", since_ns=0, until_ns=0, limit=1000)` | `list[dict]` | Query the **instance-resolved event log** (on-disk provenance). Every filter optional; the time window is the caller's choice. `callid` matches the reporting-call id (see **Call ID** below). Returns event dicts newest-first. See **Event Provenance Log** section. |
+| `proc_instance` | `proc_instance(pid, at_ns=0)` | `dict \| None` | Resolve the **process instance** (the `(pid, start)` identity) active for `pid` at time `at_ns` (`0` = latest). Reuse-proof. Returns `None` if unknown. |
+| `proc_lineage` | `proc_lineage(pid, start=0)` | `list[dict]` | Walk the spawn chain upward from instance `(pid, start)` using the event log. Deterministic. Returns `[self, parent, …, root]`. |
+| `store_set` | `store_set(key, value)` | `True` | Persist a JSON-serializable `value` under `key` in this rule's private store. **Raises an error** (`quota exceeded`) if the write would exceed the rule's 1 MB cap — call `store_usage()` first to avoid it. See **Rule Store** below. |
+| `store_get` | `store_get(key)` | `value \| None` | Read a value previously stored by **this rule**. `None` if absent. Large integers are preserved exactly. |
+| `store_delete` | `store_delete(key)` | `True` | Remove one key (frees its quota). |
+| `store_reset` | `store_reset()` | `True` | Remove **all** of this rule's stored keys (frees the whole quota). |
+| `store_keys` | `store_keys()` | `list[str]` | All keys this rule has stored. |
+| `store_usage` | `store_usage()` | `dict` | `{"bytes": used, "limit": 1048576, "free": remaining}` — check before a large `store_set`. |
 
 ---
 
@@ -1167,7 +1176,7 @@ Steps with no `stage_id` are structural context (ancestry prefix). Steps with `s
 
 ##### `fs_activity(node_id, op, pattern="")`
 
-Returns file activity entries for a FileSystem node, optionally filtered by an FTS5 phrase pattern. Each entry carries the exact timestamp of that specific file access — not the aggregate edge `first_ts`/`last_ts`.
+Returns file activity entries for a FileSystem node from the event log, optionally filtered by a path pattern (every whitespace-separated token must appear in the path, case-insensitive). Each entry carries the exact timestamp of that specific file access — not the aggregate edge `first_ts`/`last_ts`.
 
 ```python
 entries = fs_activity(fs["id"], "READ", '"aws credentials"')
@@ -1263,6 +1272,8 @@ This produces a chain like:
 | `protocol` | `connects` context | Transport protocol: `"tcp"` or `"udp"` |
 | `header_<name>` | HTTP contexts | Individual request header value, key lowercased (e.g. `meta["header_authorization"]`, `meta["header_x-tenant-id"]`). Synthetic keys: `header_authorization-jwt` (decoded JWT payload) and `header_authorization-basic` (decoded Basic credentials) are also injected when present. |
 | `agent_name` | all | Full executable path of the calling process, resolved to the nearest monitored agent ancestor. Empty string if unknown. |
+| `caller_pid` | event-triggered contexts (`connects`, `http_request`, `file_*`, `execute_process`, tool/LLM events) | OS process ID (as a string) of the process that originated the triggering event. The **instance-key anchor** for `proc_instance`/`proc_lineage`/`query_events`. `"0"` or absent for `periodic` rules (no triggering event) and when the PID could not be resolved. Convert with `int(meta.get("caller_pid","0"))`. |
+| `callid` | event-triggered contexts | The **reporting-call id** of the event that triggered this rule run (see **Call ID** below). Empty for `periodic` rules. The graph node/edge that event produced — and its event-log row — carry the same `callid`, so `query_events(callid=meta["callid"])` returns exactly the triggering event. |
 
 ---
 
@@ -1458,7 +1469,7 @@ script: |
 
           for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
-              if u != None and u.get("is_private", "0") == "0":
+              if u != None and u.get("is_ztna_host", "0") == "0":
                   http_edge = e
                   break
 
@@ -1505,7 +1516,7 @@ script: |
           for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
               for ce in edges(pe["to"], dir="out", kind="CONNECTS"):
                   h = node(ce["to"])
-                  if h == None or h.get("is_private", "0") == "1":
+                  if h == None or h.get("is_ztna_host", "0") == "1":
                       continue
                   chain.append(step(pe, stage_id="Shell Escape",   stage_desc="agent spawned subprocess: " + pe.get("cmdline", "?")))
                   chain.append(step(ce, stage_id="C2 Connection",  stage_desc="subprocess connected to: " + h.get("host", "") + ":" + h.get("port", "")))
@@ -1518,6 +1529,466 @@ script: |
 
   result = run()
 ```
+
+---
+
+## Event Provenance Log — Instance-Resolved Attribution
+
+> **This is the most important section for writing correct behavioral rules.** Read it before writing any rule that attributes an action to "who did it" or "what spawned it."
+
+### Why this exists — the path-keyed node problem
+
+The behaviour graph (next section) keeps memory light by **collapsing identity**:
+
+- **`Process` nodes are keyed by executable path.** Every invocation of `/usr/bin/curl` — every PID, every session — becomes the **same** `process:///usr/bin/curl` node.
+- **Behavioral edges are aggregated** (`count`, `first_ts`, `last_ts`). The edge says "this binary connected to this host 30 times since first_ts" — not *which instance* did *which* connection *when*.
+
+This is fine for "has this binary ever done X" questions. It is **wrong** for attribution. A single `com.docker.cli` node can have dozens of parents and be reachable from many agents; walking that graph to answer "which agent owns this connection" is ambiguous and non-deterministic. Two identical attacks produced two different kill chains because the graph walk picked a different parent each run.
+
+**The fix: a second layer.** Alongside the in-memory graph there is now an **on-disk, append-only event log**. One row per behavioral event, stamped with the **exact process instance** that performed it and the instance that spawned it. The graph remains the cheap summary; the log is the source of truth for *what exactly happened, when, by which instance, spawned by whom*.
+
+| Layer | Keyed by | Use it for |
+|---|---|---|
+| **Graph** (`graph`/`node`/`edges`) | logical identity (path, host, model) — collapsed | "does this entity exist / aggregate relationships / has X ever happened" |
+| **Event log** (`query_events`/`proc_instance`/`proc_lineage`) | **instance** `(pid, start_ns)` per event | "which instance did this, in this window, and who spawned it" — **attribution** |
+
+Both are always available in every script. Use the graph for breadth, the log for precise attribution.
+
+### Instance identity — `(pid, start_ns)`
+
+A bare PID is **not** an identity — the OS recycles PIDs. The event log identifies a process instance by the pair **`(actor_pid, actor_start)`** where `actor_start` is the process start time in nanoseconds. Two processes that reuse PID 500 at different times are two distinct instances with two distinct `actor_start` values and two distinct lineages. This is reuse-proof.
+
+`proc_instance(pid, at_ns)` resolves a bare PID to the full instance live at a moment; pass its `actor_start` to `proc_lineage`/`query_events` for exact scoping.
+
+### The new builtins
+
+#### `query_events(...) -> list[dict]`
+
+Query the event log. **Every filter is optional; the time window is yours to choose** — nothing is baked in. Returns event dicts, newest first.
+
+| Arg | Meaning |
+|---|---|
+| `kind` | edge kind: `"EXECUTE_PROCESS"`, `"CONNECTS"`, `"HTTP_REQUEST"`, `"READ_FILE"`, `"WRITE_FILE"`, `"CREATE_FILE"`, `"DELETE_FILE"`, `"RENAME_FILE"` |
+| `actor_pid` | only events performed by this PID |
+| `actor_start` | combined with `actor_pid` → scope to one exact instance |
+| `actor_path` | substring match on the actor's executable path |
+| `target_id` | exact graph node id of the target |
+| `target_sub` | substring match on the target id |
+| `since_ns` / `until_ns` | time window (ns); `0` = unbounded on that side |
+| `limit` | max rows (default 1000, hard cap 10000) |
+
+Each returned **event dict** has these string fields:
+
+| Field | Meaning |
+|---|---|
+| `ts` | event time (unix ns) |
+| `kind` | edge kind |
+| `actor_pid`, `actor_start`, `actor_path` | the instance that performed the event |
+| `parent_pid`, `parent_start` | the instance that spawned the actor |
+| `target_id`, `target_kind` | the graph node the event targeted |
+| `content_id` | FTS source_label of an indexed body, if any (else `""`) |
+| *flattened `attrs`* | event-specific: `host`, `protocol`, `port`, `is_ztna_host` (CONNECTS); `method`, `host`, `path` (HTTP_REQUEST); `path` (file ops); `cmdline`, `parent_path` (EXECUTE_PROCESS) |
+
+#### `proc_instance(pid, at_ns=0) -> dict | None`
+
+Resolves a bare PID to the instance live at `at_ns` (`0` = latest). Returns an event dict for that instance (carrying `actor_pid`, `actor_start`, `actor_path`, `parent_pid`, `parent_start`), or `None` if the PID is not in the log.
+
+#### `proc_lineage(pid, start=0) -> list[dict]`
+
+Walks the spawn chain upward from instance `(pid, start)` purely from the log. Deterministic — no node-shape guessing, no arbitrary parent selection. Returns `[self, parent, …, root]`. With `start=0` it resolves the latest instance for that PID first.
+
+### `caller_pid` — the attribution anchor
+
+A new `meta` key: **`caller_pid`** is the OS PID that originated the triggering event. It is the bridge from "the event happening now" to the event log. The canonical attribution flow:
+
+```python
+def run():
+    cp = int(meta.get("caller_pid", "0"))
+    if cp == 0:
+        return "allow"                                  # periodic rule or unresolved PID
+    inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+    if inst == None:
+        return "allow"                                  # degraded — create row not yet logged
+    lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+    # lineage[0] = the caller instance; lineage[-1] = the owning root
+    ...
+```
+
+`caller_pid` is set for event-triggered contexts (`connects`, `http_request`, `file_*`, `execute_process`, tool/LLM events). It is `"0"`/absent for `periodic` rules (no triggering event) — those scan the graph/log broadly instead.
+
+### When to use which
+
+- **Attribution / "who/what-spawned"** → `proc_instance` + `proc_lineage`. Deterministic, instance-exact.
+- **"what did this exact instance do in this window"** → `query_events(actor_pid=…, actor_start=…, since_ns=…)`. No cross-instance bleed.
+- **Breadth / "has any instance of this binary ever…"** → `graph`/`edges` (the aggregate is fine and cheaper).
+- **File-path content matching** → `fs_activity` (event log, path-targeted) — see gotcha below.
+
+### Gotchas (verified against the live graph)
+
+1. **Take the TRIGGERING event from `meta`, never from a log lookup.** This is the single most important rule for **blocking** (`connects`/`file`/`exec`) triggers. The event log is populated asynchronously; the event that *just* fired the rule is the newest of all and may not be queryable at the synchronous instant you must decide. Its data is already in `meta` (`host`, `caller_pid`, `port`, `file_path`, `event_ts`, …) — use that for the trigger stage. Query the log only for **prior** stages and the caller's **lineage**. A rule that does `query_events(kind="CONNECTS", actor_pid=caller_pid)` to "find" the connection that triggered it will intermittently miss and allow the attack.
+2. **`query_events`/`proc_instance`/`proc_lineage` are batch-fresh.** They merge the in-memory ingest batch with the on-disk store, so a just-spawned process's create row and recent prior stages are visible without waiting for the flush. You do **not** need to flush. (The only residual window is sub-millisecond worker-drain latency for the absolute-newest event — which is why the trigger itself comes from `meta`, gotcha 1.)
+3. **`READ_FILE` is extremely high-volume.** A single `curl` reads hundreds of system files. A broad `query_events(kind="READ_FILE")` hits the `limit` and truncates. **Always scope file-read queries by `actor_pid`**, or use `fs_activity(fs["id"], "READ", "aws credentials")` (path-targeted, scoped to one process) rather than a broad scan.
+4. **Lineage can stop early (degraded, not broken).** `proc_lineage` only climbs as far as the log has `EXECUTE_PROCESS` rows. If an ancestor was never ingested (e.g. an unmonitored shell above the agent), the chain ends there. On the live graph, the attack curl resolves to `curl → zsh` and stops, because `zsh`'s parent was not captured. Treat a short lineage as best-effort, not failure — stamp `attribution: "degraded"` rather than discarding the detection.
+5. **`event_ts` is the script-invocation time**, not the original event time (they are within milliseconds). Fine for `proc_instance(pid, at_ns)`'s "latest at" semantics and as the trigger-stage timestamp; do not treat it as a precise sub-second event time.
+
+### What changed vs. older rules (migration notes)
+
+- **New `meta["caller_pid"]`** — did not exist before; older rules anchored on `meta["agent_name"]` (a path, ambiguous across instances). Prefer `caller_pid` + `proc_lineage` for attribution.
+- **No graph node/edge attributes were removed.** Everything documented in "The Behaviour Graph" below is unchanged. The event log is purely additive.
+- **`agent_name` is still a path**, still resolved to the nearest monitored ancestor — keep using it for display, not for instance attribution.
+- Older rules that walked `EXECUTE_PROCESS` ancestry in the graph to find "the owning agent" (and the `for agent in graph(type="Process")` loop) are the **non-deterministic** pattern this layer replaces. They still run, but new rules should anchor on `caller_pid`.
+
+---
+
+### Advanced examples — verified against the live graph
+
+> Every example below was run against the live debug endpoint (`http://127.0.0.1:41336/debug`) on the session containing the Claw Chain attack: `zsh (63817)` spawned `curl (64313)` which fetched `httpbin.org`, and `curl (64982)` which connected to the cloud-metadata IP `169.254.169.254`.
+
+#### Example 1 — Caller-anchored verdict (the canonical pattern)
+
+Anchor on the exact instance that triggered the event, resolve its true lineage, and decide. Deterministic — same input, same chain, every run.
+
+```yaml
+title: Cloud Metadata Access by Agent Subprocess
+id: netzilo-metadata-caller-anchored-001
+level: critical
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: connects
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  CLOUD_METADATA = ["169.254.169.254", "100.100.100.200"]
+
+  def run():
+      host = meta.get("host", "")
+      if host not in CLOUD_METADATA:
+          return "allow"                      # relevance pre-filter
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      if inst == None:
+          # degraded: we know the connect but not the instance yet
+          return {"action": "report", "reason": "metadata connect, attribution degraded"}
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      chain   = new_chain(lineage[-1]["actor_path"])   # root as chain anchor
+      names   = " -> ".join([x["actor_path"].split("/")[-1] for x in lineage])
+      print("metadata access via: " + names)
+      return {
+          "action": "block",
+          "reason": "Cloud metadata IP " + host + " contacted by " + names,
+      }
+
+  result = run()
+```
+
+Live result: `caller_pid=64982` → instance `curl` → lineage `curl -> zsh` → **block**, reason `Cloud metadata IP 169.254.169.254 contacted by curl -> zsh`.
+
+#### Example 2 — Session-scoped multi-stage chain (claw chain, done right)
+
+Group the attack by the **common ancestor session**, then confirm distinct stages performed by *its* instances. No path-keyed node walk, no cross-session bleed.
+
+```yaml
+title: Claw Chain (session-scoped, instance-resolved)
+id: netzilo-claw-session-001
+level: critical
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: connects
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  CLOUD_METADATA = ["169.254.169.254", "100.100.100.200"]
+  TRUSTED = ["openai.com","anthropic.com","githubusercontent.com","github.com","netzilo.com"]
+
+  def host_trusted(h):
+      for t in TRUSTED:
+          if h == t or h.endswith("." + t):
+              return True
+      return False
+
+  def run():
+      if meta.get("host","") not in CLOUD_METADATA:
+          return "allow"
+      cp = int(meta.get("caller_pid","0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, int(meta.get("event_ts","0")))
+      if inst == None:
+          return "allow"
+
+      # The attack session = the caller's nearest shell/agent ancestor.
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      session_pids = {}
+      for x in lineage:
+          session_pids[x["actor_pid"]] = True
+      session_root = lineage[-1]["actor_pid"]
+
+      # Find sibling instances spawned by the same session root.
+      for e in query_events(kind="EXECUTE_PROCESS", limit=5000):
+          if e["parent_pid"] in session_pids:
+              session_pids[e["actor_pid"]] = True
+
+      stages = []
+      # Stage: untrusted outbound fetch by any session instance
+      for pid in session_pids:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid), limit=50):
+              h = e.get("host","")
+              if h and not host_trusted(h):
+                  stages.append("fetch:" + h)
+                  break
+          if stages: break
+      # Stage: metadata connect (the triggering event's instance)
+      stages.append("metadata:" + meta.get("host",""))
+
+      if len(stages) >= 2:
+          names = " -> ".join([x["actor_path"].split("/")[-1] for x in lineage])
+          print("Claw chain: " + ", ".join(stages) + " via " + names)
+          return {"action":"block","reason":"Claw chain — " + ", ".join(stages)}
+      return "allow"
+
+  result = run()
+```
+
+Live result: session root resolves through `curl(64982) -> zsh(63817)`; sibling `curl(64313)` fetched `httpbin.org` → stages `["fetch:httpbin.org","metadata:169.254.169.254"]` → **block**.
+
+#### Example 3 — Instance-scoped credential read (no cross-instance bleed)
+
+Detect a sensitive read by the **exact** triggering instance, using `fs_activity` for the path (avoids the high-volume `READ_FILE` log scan).
+
+```yaml
+title: Credential Read by Triggering Instance
+id: netzilo-cred-instance-001
+level: critical
+logsource:
+  product: ai_agent
+  category: file_read
+detection:
+  sel_trigger:
+    event_type: file_read
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  SENSITIVE = ['"aws credentials"', '"ssh id rsa"', '"etc shadow"', '"kube config"']
+
+  def run():
+      path = meta.get("file_path", "")
+      hit = False
+      for p in ["/.aws/", "/.ssh/", "/etc/shadow", "/.kube/"]:
+          if p in path: hit = True
+      if not hit:
+          return "allow"                       # relevance pre-filter
+
+      cp = int(meta.get("caller_pid","0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, int(meta.get("event_ts","0")))
+      lineage = proc_lineage(cp, int(inst["actor_start"]) if inst != None else 0)
+      names = " -> ".join([x["actor_path"].split("/")[-1] for x in lineage]) if lineage else "pid " + str(cp)
+      print("sensitive read " + path + " by " + names)
+      return {"action":"block","reason":"Credential file " + path + " read by " + names}
+
+  result = run()
+```
+
+#### Example 4 — Discovery snippet for the debug endpoint
+
+Paste into the **Script** tab at `http://127.0.0.1:41336/debug` (optionally set `caller_pid` in the request body) to explore the live log. This exact script returns the active attack instances:
+
+```python
+def run():
+    out = []
+    for e in query_events(kind="CONNECTS", limit=5000):
+        h = e.get("host","")
+        if h == "169.254.169.254" or h.startswith("10.") or h.startswith("192.168."):
+            lin = proc_lineage(int(e["actor_pid"]), int(e["actor_start"]))
+            out.append([e["actor_pid"], h, " -> ".join([x["actor_path"].split("/")[-1] for x in lin])])
+    return out
+result = run()
+# Live output: [["64982", "169.254.169.254", "curl -> zsh"]]
+```
+
+---
+
+## Call ID — Tracking the Triggering Event
+
+Every event reported into the engine (a connect, an HTTP/LLM/tool request or response, a process exec, a file op) is one **reporting call**, and the engine stamps it with a unique **`callid`**. The same `callid` lands on:
+
+- the **graph node and edge** that call produced — as a `callid` attribute (see node/edge schema). For per-instance edges (`LLM_REQUEST`, `LLM_RESPONSE`, `TOOL_CALL`, `TOOL_RESULT`) it is *that call's* id; for aggregate edges (`CONNECTS`, `HTTP_REQUEST/RESPONSE`, file ops, `EXECUTE_PROCESS`) it is the **creator's** id, while each *touch* is recorded with its own `callid` on the event-log rows;
+- the **event-log row** — queryable via `query_events(callid=...)`;
+- `meta["callid"]` — the id of the event that triggered **this** rule run.
+
+**Why it matters:** it ties a rule's evaluation to the exact event that caused it, with no fuzzy `(kind, actor, target, ts)` matching. The id is minted *before* ingest, so it is present even when the action is blocked.
+
+```python
+def run():
+    cid = meta.get("callid", "")
+    if cid == "":
+        return "allow"                       # not an event-triggered run
+    # The exact event that triggered me (instance-precise):
+    ev = query_events(callid=cid, limit=1)
+    if not ev:
+        return "allow"
+    e = ev[0]
+    # e["actor_pid"]/e["actor_start"] → ProcLineage; e["target_id"] → the node.
+    ...
+```
+
+> `callid` is opaque — treat it as a token, never parse it. Aggregate nodes/edges carry the *creator's* `callid`; to attribute a specific touch use the event-log rows (`query_events`).
+
+---
+
+## Rule Store — Per-Rule Persistent Storage
+
+Each rule has a **private key/value store** for stashing JSON across evaluations (counters, baselines, seen-sets, learned state). It is isolated per rule (a rule can only see its own keys) and capped at **1 MB**.
+
+| Builtin | Use |
+|---|---|
+| `store_set(key, value)` | Persist a JSON-serializable `value`. **Raises `quota exceeded`** if over 1 MB — guard with `store_usage()`. |
+| `store_get(key)` | Read it back (`None` if absent). Large integers are preserved exactly. |
+| `store_delete(key)` | Free one key. |
+| `store_reset()` | Free everything this rule stored. |
+| `store_keys()` | List this rule's keys. |
+| `store_usage()` | `{"bytes": used, "limit": 1048576, "free": remaining}`. |
+
+```python
+def run():
+    seen = store_get("seen_hosts") or {}
+    h = meta.get("host", "")
+    if h and h not in seen:
+        if store_usage()["free"] > 1024:     # avoid the quota error
+            seen[h] = int(meta.get("event_ts", "0"))
+            store_set("seen_hosts", seen)
+    ...
+```
+
+**Notes**
+- Values are JSON: dicts, lists, strings, numbers, bools, `None`. Dict keys must be strings.
+- Overflow is **rejected, never evicted** — the store is durable for the rule's lifetime; reclaim space with `store_delete`/`store_reset`.
+- A `store_set` that hits the cap raises an error that aborts the rule (which fails open) — always pre-check `store_usage()` before large writes.
+
+---
+
+## Best Practices for Advanced Scripted Rules
+
+This is the authoritative checklist for `action: execute` behavioral rules. It encodes the design that achieves **zero false positives, maximum accuracy, and bounded cost**. Treat each item as a gate: a rule that violates one is not ready to ship as `block`.
+
+### The canonical skeleton
+
+Every behavioral rule should follow this shape. Copy it and fill in the threat-specific logic.
+
+```python
+script: |
+  # 1. Constants & allowlists at the top (trusted hosts, sensitive paths, windows)
+  TRUSTED = [...]
+  WINDOW_NS = 600000000000  # the rule's OWN window — chosen here, never baked into storage
+
+  # 2. Pure helpers (no graph/log calls) — string predicates only
+  def host_trusted(h): ...
+  def is_sensitive(p): ...
+
+  def run():
+      # 3. RELEVANCE GATE — cheap string checks on meta; return "allow" fast
+      if <event not relevant to this rule>:
+          return "allow"
+
+      # 4. ANCHOR on the exact triggering instance (never a path-keyed node walk)
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      if inst == None:
+          return "allow"          # degraded — re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+
+      # 5. SCOPE to one session (lineage + siblings) — never cross-session
+      session = {x["actor_pid"]: x["actor_start"] for x in lineage}
+      # (add children spawned by session pids if the chain spans sibling processes)
+
+      # 6. STAGES — ordered, instance-scoped, windowed; require a high-specificity anchor
+      # 7. VERDICT — count required + optional stages; build the kill chain from event rows
+      return {"action": "block", "reason": "...", "chain": chain}
+
+  result = run()
+```
+
+### Accuracy & zero-FP — non-negotiable gates
+
+1. **Anchor on `caller_pid`, never on a graph node walk.** `for agent in graph(type="Process")` picks an owner in Go map-iteration order — non-deterministic, and a path-keyed node (one `curl`/`docker.cli` node, many parents) cannot tell you which instance acted. Resolve the instance with `proc_instance(caller_pid, event_ts)` and the owner with `proc_lineage`. Same input → same verdict, every run.
+
+2. **Require a high-specificity anchor stage — never fire on a pile of individually-benign signals.** Reading `~/.aws/credentials` is benign (every `aws` CLI does it). Connecting to `169.254.169.254` is benign (every cloud SDK does it). Fetching an external URL is benign. The *combination* is only an attack when a **discriminating** stage is present and ordered — e.g. an **untrusted** (allowlist-excluded) fetch that *precedes* the credential access and the exfil. Make that anchor `REQUIRED`; without it, return `allow`.
+
+3. **Enforce ordering.** The attack signature is the *sequence* (initial access → credential access → exfil), not the unordered set. Capture the anchor's timestamp (`s0_ts`) and require every later stage to satisfy `s0_ts <= ts <= trigger_ts`. Legitimate tools rarely match the full ordered sequence.
+
+4. **Scope every stage to the session; take the trigger stage from `meta`.** Middle stages may be performed by any session instance (the chain can span `curl` + `cat` under one shell) and are queried from the log scoped to session pids. But the **triggering** stage (the connect/request that fired the rule) is the caller's own action and must be read from `meta` (`host`/`caller_pid`/`file_path`), **not** re-looked-up via `query_events` — the just-fired event races the async ingest and may not be queryable yet (see Gotcha 1). Using `meta` for the trigger is both correct (it's the caller's own action) and race-free.
+
+5. **Allowlist benign egress; anchor sensitive paths.** Use suffix matching for trusted hosts (`h == t or h.endswith("." + t)` — never substring, or `github.com.evil.tld` slips through). Match credential files by real path anchors (`/.aws/`, `/.ssh/`, `/etc/shadow`), not bare tokens that collide with `read_etc_passwd.yaml`.
+
+6. **Word-boundary your relevance checks.** `"cat" in cmd` is true for `/Appli`**`cat`**`ions/...`. Use `re.find(r"\bcat\b", cmd)`, never `in`, for process/tool/command keywords.
+
+7. **Degraded ≠ fail-open-into-wrong-verdict.** If `proc_instance` returns `None` (the create row hasn't landed yet), return `"allow"` or `"report"` — never proceed to attribute with missing data. The create event is never missed, so the next event re-fires with full attribution.
+
+8. **Cluster within a window.** Require all stages within the rule's own `WINDOW_NS` of the trigger so a benign fetch this morning is never stitched to an IMDS call this afternoon. The window lives in the rule, not in storage.
+
+9. **`level` and `action` honestly.** `block` only when the ordered, scoped chain is unambiguous. Use `report` for the degraded/uncertain path. A rule that blocks on a 2-of-N partial chain will be disabled by the first false positive.
+
+### Performance — bounded cost on high-volume triggers
+
+10. **Relevance gate first, and make it pure.** Behavioral rules fire on `connects`/`http_request`/`file_read`/`execute_process` — extremely high volume. The first lines of `run()` must reject irrelevant events with **string checks on `meta` only** — no `graph()`, no `query_events`, no `fs_activity`. Return `"allow"` before any traversal.
+
+11. **Never broad-scan `READ_FILE` (or any high-volume kind).** A single `curl` reads hundreds of system files; `query_events(kind="READ_FILE", limit=5000)` truncates and is slow. **Always scope by `actor_pid`**, or use `fs_activity(fs["id"], "READ", "aws credentials")` (path-targeted).
+
+12. **Scope, then limit.** Pass `actor_pid`/`actor_start`/`since_ns` to `query_events` so the DB does the filtering. Don't pull 5000 rows and filter in Starlark when a predicate would return 5.
+
+13. **Resolve once, reuse.** Call `proc_instance`/`proc_lineage` once and reuse the result; don't re-resolve inside loops.
+
+14. **Bound the session expansion.** The lineage is short; sibling-expansion via one `query_events(kind="EXECUTE_PROCESS")` pass is fine. Don't nest per-pid `EXECUTE_PROCESS` scans inside other per-pid scans.
+
+15. **`on_timeout: allow` / `on_error: allow` for high-volume triggers.** A slow or broken script must never block an unrelated connection. Fail open on the busy path; reserve `on_error: block` for low-volume, critical, content-only checks.
+
+### Determinism & the kill chain
+
+16. **Build the kill chain from event rows, instance-accurately.** Synthesise edge dicts from `query_events` results so the chain shows the exact actor instance and target:
+    ```python
+    def ev_edge(e):
+        return {"from": "process://" + e["actor_path"], "to": e.get("target_id", ""),
+                "kind": e["kind"], "ts": e["ts"], "first_ts": e["ts"], "last_ts": e["ts"]}
+    chain.append(step(ev_edge(e), stage_id="Initial", stage_desc="untrusted fetch: " + e["host"]))
+    ```
+    Root the chain at the session owner: `new_chain("process://" + lineage[-1]["actor_path"])`. The serializer auto-prepends ancestry context; your evidence steps (with `stage_id`) carry the proof.
+
+17. **Idempotence over look-back hacks.** With instance scoping, re-firing on the same connect yields the same correct verdict — there's no cross-session bleed to suppress, so you generally don't need an `event_ts`-vs-now look-back guard. Add window clustering (item 8) for defense, not a stale-attack guard.
+
+18. **Always return a chain for graph/log-based verdicts.** A `block`/`report` from a behavioral rule without `"chain"` gives investigators nothing. Return `{"action": ..., "reason": ..., "chain": chain}`.
+
+### Pre-ship checklist
+
+- [ ] Relevance gate is first, pure, and returns `allow` fast.
+- [ ] Anchored on `caller_pid` → `proc_instance` → `proc_lineage` (no `for agent in graph()`).
+- [ ] A **required**, high-specificity anchor stage gates the whole detection.
+- [ ] Stages are **ordered** and **windowed**, scoped to one session.
+- [ ] The trigger stage is scoped to the **caller's own** pid.
+- [ ] Allowlists use suffix match; sensitive paths use real anchors; keywords use `\b`.
+- [ ] `READ_FILE`/high-volume kinds are scoped by `actor_pid` or use `fs_activity`.
+- [ ] Degraded (`proc_instance == None`) returns `allow`/`report`, never a guessed block.
+- [ ] `on_timeout`/`on_error` fail open on high-volume triggers.
+- [ ] Returns a kill chain built from event rows.
+- [ ] Tested against the live graph at `http://127.0.0.1:41336/debug` — confirmed the true positive blocks **and** at least one near-miss (missing anchor, wrong session) allows.
 
 ---
 
@@ -1593,7 +2064,7 @@ Every node dict always has `id` and `_type`. All other fields are strings.
 | `server` | MCP server name | `"filesystem"` |
 | `first_seen` | Unix nanoseconds | |
 | `last_seen` | Unix nanoseconds | |
-| `is_private` | `"1"` = private/loopback/internal, `"0"` = public internet | |
+| `is_ztna_host` | `"1"` = host reachable via the ZTNA/private tunnel (private/loopback/internal); `"0"` = public internet | |
 
 **`"LLM"` — an LLM provider that was used**
 
@@ -1618,13 +2089,13 @@ The `id` is `scheme://host` only — path and query are NOT stored in the node.
 | `fetch_count` | Total requests to this host (string) | `"42"` |
 | `first_seen` | Unix nanoseconds | |
 | `last_seen` | Unix nanoseconds | |
-| `is_private` | `"1"` = private/loopback/internal, `"0"` = public | |
+| `is_ztna_host` | `"1"` = host reachable via the ZTNA/private tunnel (private/loopback/internal); `"0"` = public | |
 
 **`"FileSystem"` — file activity aggregated by process path**
 
 One `FileSystem` node is created per unique process executable path. It aggregates **all** file operations (reads, writes, creates, deletes, renames) from that process into a single node.
 
-**Critical: the node itself does NOT contain file paths.** The node only identifies which process performed I/O. The actual file paths accessed are stored in the BM25 full-text index and retrieved with `search_in` or `search`, not from node properties.
+**Critical: the node itself does NOT contain file paths.** The node only identifies which process performed I/O. The actual file paths accessed are recorded in the instance-resolved **event log** and retrieved with `fs_activity()` (or `query_events(kind="READ_FILE", actor_pid=…)`), not from node properties. (File events are **not** in the FTS index — that index is for LLM/HTTP/tool bodies only.)
 
 ```
 FileSystem node:
@@ -1632,21 +2103,21 @@ FileSystem node:
   proc_name  → "cat"
   proc_path  → "/usr/bin/cat"
 
-  ❌ No property for which files cat read — that is in the FTS index.
+  ❌ No property for which files cat read — that is in the event log (use fs_activity).
 ```
 
 **How to work with FileSystem nodes:**
 
-The FTS index stores one document per `(process, operation)` pair. The source label is `fs["id"] + "$READ"` (or `$WRITE`, `$CREATE`, `$DELETE`, `$RENAME`). Each document contains the file paths accessed by that process for that operation.
+`fs_activity(node_id, op, pattern)` reads this process's file events of the given op (`"READ"`, `"WRITE"`, `"CREATE"`, `"DELETE"`, `"RENAME"`) from the event log and returns `{"path", "ts"}` entries — deduped, newest-first.
 
-**Searching file paths uses FTS5 token phrases, not raw substrings.** The unicode61 tokenizer splits paths on `/` and `.`, so `/Users/eg/.aws/credentials` becomes tokens `Users eg aws credentials`. Use adjacent-token phrases:
+**The `pattern` is a simple path filter** (no longer FTS): every whitespace-separated token must appear somewhere in the path, case-insensitive; any surrounding quotes are ignored. So both `"aws credentials"` and `aws credentials` match `/Users/eg/.aws/credentials`:
 
-| File path | FTS5 query |
+| File path | `pattern` |
 |---|---|
-| `.aws/credentials` | `'"aws credentials"'` |
-| `.ssh/id_rsa` | `'"ssh id rsa"'` |
-| `/etc/passwd` | `'"etc passwd"'` |
-| `.kube/config` | `'"kube config"'` |
+| `.aws/credentials` | `"aws credentials"` |
+| `.ssh/id_rsa` | `"ssh id rsa"` |
+| `/etc/passwd` | `"etc passwd"` |
+| `.kube/config` | `"kube config"` |
 
 **Example 1 — resolve actual file paths from a FileSystem node (use `fs_activity`):**
 
@@ -1704,11 +2175,11 @@ result = run()
 # …
 ```
 
-> **`fs_activity` vs `search_in`:** Use `fs_activity(node_id, op, pattern)` to resolve actual file paths from a FileSystem node — it handles FTS5 querying, deduplication, and path extraction internally. Use `search_in(fs["id"] + "$READ", pattern)` only when you need a boolean check (is a pattern present?) without needing the actual paths.
+> **Resolving file paths:** Use `fs_activity(node_id, op, pattern)` — it reads the event log, dedupes, and extracts paths. For a boolean "did it touch X?" check, test whether `fs_activity(...)` returned anything. File events are **not** in the FTS index, so `search`/`search_in` do **not** return file paths.
 
 | Property | Description | Example |
 |---|---|---|
-| `id` | Unique identifier — used as base for `search_in` source labels | `"filesystem:///usr/bin/cat"` |
+| `id` | Unique identifier — pass to `fs_activity()` | `"filesystem:///usr/bin/cat"` |
 | `proc_name` | Short process name | `"cat"` |
 | `proc_path` | Full path of the **process executable** (not the file accessed) | `"/usr/bin/cat"` |
 | `first_seen` | Unix nanoseconds | |
@@ -1724,7 +2195,7 @@ result = run()
 | `protocol` | `"tcp"` or `"udp"` | |
 | `first_seen` | Unix nanoseconds | |
 | `last_seen` | Unix nanoseconds | |
-| `is_private` | `"1"` = private/loopback/link-local address or `.netzilo.network` domain; `"0"` if public | |
+| `is_ztna_host` | `"1"` = host reachable via the ZTNA/private tunnel — private/loopback/link-local address or `.netzilo.network` domain; `"0"` if public | |
 
 **`"Skill"` — an instruction document that was loaded**
 
@@ -1736,7 +2207,7 @@ result = run()
 | `source` | How it was loaded | `"http"`, `"mcp"`, or `"llm"` |
 | `first_seen` | Unix nanoseconds | |
 | `last_seen` | Unix nanoseconds | |
-| `is_private` | `"1"` = private/loopback/internal, `"0"` = public | |
+| `is_ztna_host` | `"1"` = host reachable via the ZTNA/private tunnel (private/loopback/internal); `"0"` = public | |
 
 ---
 
@@ -1779,7 +2250,7 @@ All graph access in scripts uses three builtins. There is no query language — 
 | Outgoing edges of one kind | `edges(id, dir="out", kind="TOOL_CALL")` |
 | All edges (any direction, any kind) | `edges(id)` |
 | Neighbor node via edge | `node(e["to"])` or `node(e["from"])` |
-| Filter by node property | `[n for n in graph(type="URL") if n.get("is_private","1")=="0"]` |
+| Filter by node property | `[n for n in graph(type="URL") if n.get("is_ztna_host","1")=="0"]` |
 | Filter by edge property | `[e for e in edges(id, kind="CONNECTS") if int(e.get("count","0"))>50]` |
 | Multi-hop (2 levels) | `[node(e2["to"]) for e in edges(id,"out","EXECUTE_PROCESS") for e2 in edges(e["to"],"out","CONNECTS")]` |
 | Count edges | `len(edges(id, dir="out", kind="READ_FILE"))` |
@@ -1849,9 +2320,9 @@ def run():
         if a.get("agent", "0") != "1":
             continue
         public_skills = [e for e in edges(a["id"], dir="out", kind="ACQUIRED_SKILL")
-                         if node(e["to"]) != None and node(e["to"]).get("is_private","1") == "0"]
+                         if node(e["to"]) != None and node(e["to"]).get("is_ztna_host","1") == "0"]
         public_http  = [e for e in edges(a["id"], dir="out", kind="HTTP_REQUEST")
-                        if node(e["to"]) != None and node(e["to"]).get("is_private","1") == "0"]
+                        if node(e["to"]) != None and node(e["to"]).get("is_ztna_host","1") == "0"]
         if public_skills and public_http:
             print("EXFIL CHAIN:", a["id"])
 
@@ -1880,11 +2351,8 @@ result = run()
 | Tool call | `tool://server/name#call:callID` | `tool://server/name` (Tool node) |
 | Tool result | `tool://server/name#result:callID` | `tool://server/name` (Tool node) |
 | Skill | `skill://host/name` | Skill node `id` |
-| File read | `filesystem://procPath$READ` | `filesystem://procPath` (FileSystem node) |
-| File write | `filesystem://procPath$WRITE` | `filesystem://procPath` (FileSystem node) |
-| File create | `filesystem://procPath$CREATE` | `filesystem://procPath` (FileSystem node) |
-| File delete | `filesystem://procPath$DELETE` | `filesystem://procPath` (FileSystem node) |
-| File rename | `filesystem://procPath$RENAME` | `filesystem://procPath` (FileSystem node) |
+
+(File events are **not** in the FTS index, so `search()` never returns file source labels — use `fs_activity()` / `query_events(kind="READ_FILE", …)` for file paths.)
 
 **Helper — strip the fragment to get the graph node ID:**
 
@@ -2519,7 +2987,7 @@ action: block
 
 Fires when a monitored process reads a file.
 
-**Important:** `FileSystem` nodes do **not** store the path of the file that was accessed — they only know which process did I/O. To detect specific file paths in a script, use `search_in(fs["id"] + "$READ", pattern)`. For detection rules (not scripts), the `file_path` field **is** extracted from the event payload by the engine and works normally in `detection:` conditions.
+**Important:** `FileSystem` nodes do **not** store the path of the file that was accessed — they only know which process did I/O. To detect specific file paths in a script, use `fs_activity(fs["id"], "READ", pattern)` (or `query_events(kind="READ_FILE", actor_pid=…)`). For detection rules (not scripts), the `file_path` field **is** extracted from the event payload by the engine and works normally in `detection:` conditions.
 
 **Example — Block access to credential files (detection rule):**
 ```yaml
@@ -2557,8 +3025,8 @@ on_timeout: allow
 on_error:   allow
 script: |
   # FileSystem nodes aggregate by process path and have NO individual file path property.
-  # Use fs_activity(fs["id"], op, pattern) to resolve actual file paths from the FTS index.
-  # Use search_in(fs["id"] + "$READ", pattern) for a cheaper boolean check only.
+  # Use fs_activity(fs["id"], op, pattern) to resolve actual file paths from the event log.
+  # For a cheaper boolean check, test whether fs_activity(...) returns anything.
   SENSITIVE = [
       '"aws credentials"', '"ssh id rsa"', '"kube config"',
       '"etc passwd"', '"etc shadow"', '"proc self environ"',

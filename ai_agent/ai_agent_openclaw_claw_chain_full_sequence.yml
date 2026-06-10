@@ -2,11 +2,16 @@ title: Claw Chain Full Sequence Correlator
 id: netzilo-claw-chain-full-sequence-001
 status: stable
 description: >
-  Correlates the full Claw Chain (CVE-2026-44115 → 44113 → 44112 → 44118) across a
-  single agent session. Uses graph accumulation to detect the combination with high
-  confidence. 2+ stages = report; 3+ stages = block.
+  Detects the full Claw Chain (CVE-2026-44115 -> 44113 -> 44112 -> 44118) within a
+  SINGLE agent session using instance-resolved provenance. Anchors on the triggering
+  connection's caller_pid, resolves the exact process instance and its spawn lineage,
+  then confirms an ORDERED multi-stage sequence performed by that one session:
+  untrusted external fetch (initial access) -> credential access / heredoc bypass ->
+  exfiltration to a private peer or cloud-metadata endpoint. 3+ ordered in-session
+  stages = block. No path-keyed node walk, no cross-session bleed, fully deterministic.
 author: Netzilo
 date: "2026-04-01"
+modified: "2026-06-10"
 references:
   - https://nvd.nist.gov/vuln/detail/CVE-2026-44115
   - https://nvd.nist.gov/vuln/detail/CVE-2026-44113
@@ -14,11 +19,17 @@ references:
   - https://nvd.nist.gov/vuln/detail/CVE-2026-44118
 tags:
   - attack.execution
-  - attack.lateral-movement
   - attack.credential-access
+  - attack.exfiltration
+  - attack.lateral-movement
 level: critical
 falsepositives:
-  - None expected — the full 4-stage chain has no legitimate analogue
+  - >
+    Cloud CI/build agents that read ~/.aws/credentials and contact 169.254.169.254 are
+    NOT flagged unless they FIRST fetched from an untrusted (non-allowlisted) external
+    host in the SAME session, in order. The required untrusted-fetch anchor plus strict
+    fetch -> credential-access -> exfil ordering and per-instance session scoping make
+    benign cloud automation a non-match.
 
 logsource:
   product: ai_agent
@@ -31,390 +42,302 @@ detection:
   condition: sel_trigger
 
 action: execute
-# Fail OPEN on timeout/error. This is a behavioral correlation rule that runs on
-# high-volume events (every http_request, file op, connect). If the graph traversal
-# is slow, it must NEVER block the unrelated triggering event (e.g. a browser's
-# Google search) — that produces a chain-less block with wrong attribution.
-# Detection still fires the instant the script completes within budget.
+# Fail OPEN. This runs on every connects event (high volume). A slow or failing
+# script must never block an unrelated connection. Detection still fires the
+# instant the script completes within budget on a real chain.
 on_timeout: allow
 on_error: allow
 script: |
-  # Claw Chain detection — pure behavioral graph signals.
-  # No cmdline pattern matching, no hardcoded tool lists.
+  # ─────────────────────────────────────────────────────────────────────────────
+  # Claw Chain — instance-resolved, deterministic, zero-cross-session-bleed.
   #
-  # Stage 0: HTTP_REQUEST graph edge to untrusted host (agent or subprocess)
-  #          + tool call content fallback for HTTPS BYPASS connections.
-  # Stage 1: EXECUTE_PROCESS with heredoc pattern OR subprocess spawn after S0.
-  # Stage 2: READ_FILE graph edge + search_in on FTS5 index.
-  #          FTS5 phrases: unicode61 tokenises paths at '/' and '.' so
-  #          ".aws/credentials" → tokens "aws" "credentials" → phrase '"aws credentials"'.
-  # Stage 3: WRITE_FILE graph edge + search_in.
-  # Stage 4: CONNECTS graph edge where is_private="1".
+  # Decision is driven entirely by the on-disk event-provenance log via:
+  #   caller_pid -> proc_instance -> proc_lineage -> query_events (per instance).
+  # The path-keyed behaviour graph is NOT walked for attribution, so the same
+  # attack always yields the same chain, and a different agent's traffic can never
+  # be attributed to this session.
+  #
+  # Zero-FP design:
+  #   * relevance gate: only evaluate connects to a private/metadata endpoint
+  #   * session scoping: only the triggering instance's lineage + its siblings
+  #   * REQUIRED initial-access anchor: an untrusted (non-allowlisted) outbound
+  #     fetch that PRECEDES the credential access and the exfil connect
+  #   * ORDERING: every middle/exfil stage must occur at-or-after the fetch (s0)
+  #     and at-or-before the connect, within a 10-minute session window
+  #   * verdict requires Initial + (credential-access OR heredoc) + Exfil = 3 stages
+  # ─────────────────────────────────────────────────────────────────────────────
 
-  # FTS5 phrase queries for sensitive file paths.
-  # unicode61 splits on '/', '.', '_' so use quoted adjacent-token phrases.
-  SENSITIVE_PATTERNS = [
-      '"etc passwd"',
-      '"etc shadow"',
-      '"etc sudoers"',
-      '"ssh id rsa"',
-      '"ssh id ed25519"',
-      '"ssh authorized keys"',
-      '"aws credentials"',
-      '"aws config"',
-      '"kube config"',
-      'netrc',
-      '"proc self environ"',
-  ]
+  CLOUD_METADATA = ["169.254.169.254", "100.100.100.200"]
 
-  TRUSTED_HOSTS = [
-      "api.openai.com", "api.anthropic.com", "api.netzilo.com",
+  # Allowlisted egress — a fetch to any of these is NOT initial access.
+  TRUSTED = [
       "openai.com", "anthropic.com", "netzilo.com", "netzilo.network",
       "github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org",
       "npmjs.org", "npmjs.com", "pypi.org", "pkg.go.dev", "proxy.golang.org",
       "amazonaws.com", "azure.com", "microsoft.com", "visualstudio.com",
-      "datadoghq.com", "datadog.com", "newrelic.com", "sentry.io",
-      "telemetry.visualstudio.com", "vortex.data.microsoft.com",
-      "chatgpt.com", "gemini.google", "mistral.ai", "groq.com",
-      "cloudflare.com", "fastly.com",
-      "exp-tas.com", "vscode-cdn.net", "vsassets.io", "gallerycdn.vsassets.io",
-      "gallery.vsassets.io", "vscode-unpkg.net", "githubcopilot.com", "copilot.github.com",
-      "127.0.0.1", "localhost", "::1",
-      "posthog.com", "posthog.io",
+      "googleapis.com", "gemini.google", "mistral.ai", "groq.com",
+      "cloudflare.com", "fastly.com", "vscode-cdn.net", "vsassets.io",
+      "gallerycdn.vsassets.io", "vscode-unpkg.net", "githubcopilot.com",
+      "copilot.github.com", "posthog.com", "sentry.io", "datadoghq.com",
       "githubstatus.com", "statuspage.io",
   ]
 
-  def host_trusted(host):
-      for t in TRUSTED_HOSTS:
-          if t in host:
+  # Real credential locations (path substrings) — coincidental token matches in
+  # filenames like read_etc_passwd.yaml are excluded by requiring these dir/anchors.
+  SENSITIVE_PFX = [
+      "/.aws/", "/.ssh/", "/.kube/", "/.netrc",
+      "/etc/shadow", "/etc/passwd", "/etc/sudoers",
+      "ssh/authorized_keys", "/proc/self/environ",
+  ]
+
+  WINDOW_NS = 120000000000  # 2 minutes — stages must cluster tightly around the exfil
+  # (secondary guard; the primary FP fix is scoping the session to the shell, not the agent)
+
+  def host_trusted(h):
+      for t in TRUSTED:
+          if h == t or h.endswith("." + t):
               return True
       return False
 
-  def edge_recent(e):
-      """Most-recent activity timestamp on an edge. Edges aggregate across runs,
-      so last_ts (most recent) is the live signal; ts/first_ts are fallbacks."""
-      best = 0
-      for k in ("last_ts", "ts", "first_ts"):
-          v = int(e.get(k, "0"))
-          if v > best:
-              best = v
-      return best
+  def is_ztna_host(h):
+      if h in CLOUD_METADATA:
+          return True
+      if h.startswith("10.") or h.startswith("192.168.") or h.startswith("169.254."):
+          return True
+      if h.startswith("100."):  # CGNAT / Netzilo peers
+          return True
+      for n in range(16, 32):  # 172.16.0.0/12
+          if h.startswith("172." + str(n) + "."):
+              return True
+      return False
 
-  def heredoc_expansion(cmd):
+  def is_sensitive(path):
+      for p in SENSITIVE_PFX:
+          if p in path:
+              return True
+      return False
+
+  def heredoc_exec(cmd):
+      # CVE-2026-44115 pattern: << heredoc with $() or backtick command substitution,
+      # where << is a shell operator (appears before any quoted argument).
       if "<<" not in cmd:
           return False
       if "$(" not in cmd and "`" not in cmd:
           return False
-      # << must appear before the first string delimiter to be a shell operator,
-      # not embedded inside a quoted argument (e.g. curl -d '{"script":"<<..."}').
       arrow = cmd.find("<<")
-      q1 = cmd.find('"')
-      q2 = cmd.find("'")
-      first_quote = len(cmd)
-      if q1 >= 0:
-          first_quote = min(first_quote, q1)
-      if q2 >= 0:
-          first_quote = min(first_quote, q2)
-      return arrow < first_quote
+      q = len(cmd)
+      a = cmd.find('"')
+      b = cmd.find("'")
+      if a >= 0:
+          q = min(q, a)
+      if b >= 0:
+          q = min(q, b)
+      return arrow < q
 
-  def collect_exec_tree(aid):
-      """BFS over the agent's EXECUTE_PROCESS descendants.
-      No path filters — the attack chain is within this tree."""
-      tree = set([aid])
-      frontier = [aid]
-      for _ in range(8):
-          next_f = []
-          for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
-                  child = e["to"]
-                  if child not in tree:
-                      tree.add(child)
-                      next_f.append(child)
-          if not next_f:
-              break
-          frontier = next_f
-      return tree
-
-  # Fixed cloud instance metadata service IPs.
-  # These are standardised endpoints with no legitimate use from an agent subprocess:
-  # any connection to them after credential access is a metadata credential theft attempt.
-  CLOUD_METADATA_IPS = [
-      "169.254.169.254",   # AWS, GCP, Azure, DigitalOcean, Hetzner (link-local IMDS)
-      "100.100.100.200",   # Alibaba Cloud ECS metadata
-  ]
-
-  def is_relevant_event():
-      """Pre-filter: only evaluate when connecting to a metadata IP or RFC1918 host.
-      The trigger is connects-only, so this is the sole check needed.
-      meta["host"], meta["port"], meta["protocol"] are all available."""
-      host = meta.get("host", "")
-      if host in CLOUD_METADATA_IPS:
-          return True
-      for pfx in ["10.", "172.16.", "172.17.", "172.18.", "172.19.",
-                  "172.20.", "172.21.", "172.22.", "172.23.", "172.24.",
-                  "172.25.", "172.26.", "172.27.", "172.28.", "172.29.",
-                  "172.30.", "172.31.", "192.168.", "100."]:
-          if host.startswith(pfx):
-              return True
-      return False
+  def ev_edge(e):
+      # Synthesise a kill-chain edge dict from an event-log row. Instance-accurate:
+      # from = the exact actor process node, to = the real target.
+      #
+      # FileSystem nodes are AGGREGATE (keyed by process path) and carry no
+      # filename — so for file events point "to" at the exact file path (from the
+      # event's "path" attr) and keep the aggregate node id in "_orig_to", exactly
+      # like the old step(activity=...) mechanism. Otherwise the chain renders the
+      # process ("cat") instead of the file it read.
+      to = e.get("target_id", "")
+      orig = ""
+      kind = e.get("kind", "")
+      is_file = (kind == "READ_FILE" or kind == "WRITE_FILE" or kind == "CREATE_FILE" or
+                 kind == "DELETE_FILE" or kind == "RENAME_FILE")
+      path = e.get("path", "")
+      if is_file and path != "":
+          # file events only — HTTP_REQUEST also has a "path" attr (the URL path),
+          # which must NOT replace the URL node target.
+          orig = to
+          to = path
+      d = {
+          "from": "process://" + e.get("actor_path", ""),
+          "to": to,
+          "kind": e.get("kind", ""),
+          "ts": e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts": e.get("ts", "0"),
+      }
+      cid = e.get("callid", "")
+      if cid != "":
+          # Instance id of the reporting call. Lets the engine mark the EXACT
+          # triggering connect (this instance), not the path-keyed aggregate edge
+          # that every curl->host connect (and the editor's IMDS polls) collapse into.
+          d["callid"] = cid
+      if orig != "":
+          d["_orig_to"] = orig
+      return d
 
   def run():
-      if not is_relevant_event():
+      # ── relevance: only a connect to a private / cloud-metadata endpoint ──────
+      host = meta.get("host", "")
+      if not is_ztna_host(host):
+          return "allow"
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      event_ts = int(meta.get("event_ts", "0"))
+      connect_ts = event_ts   # the exfil connect = the triggering event
+
+      # ── anchor on the EXACT triggering instance + resolve its session ─────────
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"   # transient: create row not yet logged — next event re-fires
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
           return "allow"
 
-      # Scope detection to the agent that OWNS the current triggering event.
-      # The engine applies the verdict to the triggering connection/request, so a
-      # block must only be returned when the CURRENT event belongs to the agent
-      # whose session contains the attack. Looping all agents and blocking on any
-      # match blocks unrelated traffic (e.g. Chrome browsing) just because a
-      # different agent (Code Helper) ran the attack.
-      #
-      # meta["agent_name"] is the triggering event's process path. It may be the
-      # monitored agent itself, or a subprocess (curl/cat) for syscall events.
-      # We match by SESSION MEMBERSHIP: evaluate the agent whose EXECUTE_PROCESS
-      # tree contains the triggering process — robust whether agent_name is the
-      # agent or a descendant.
-      current_proc = ""
-      if meta.get("agent_name", "") != "":
-          current_proc = "process://" + meta.get("agent_name", "")
+      # Stage-scope = the connecting process's OWN shell subtree, EXCLUDING the
+      # long-running agent. proc_lineage climbs to the agent (Code Helper) for
+      # attribution, but the agent spawns the ENTIRE machine's process tree — if
+      # the agent is in the session, the child-expansion below pulls ~1000 unrelated
+      # processes, so EVERY private/metadata connect finds some stray untrusted-fetch
+      # + cred-read and false-positives (e.g. the VS Code plugin's own IMDS poll).
+      # Excluding agent nodes confines the session to the shell that ran the commands.
+      session = {}
+      for x in lineage:
+          if x.get("agent", "0") == "1":
+              continue                       # the agent is the chain root, NOT a stage actor
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      # If the caller IS the agent itself (no shell beneath it), there is no attack
+      # session — a bare private/metadata connect by the agent is not a chain.
+      if not session:
+          return "allow"
+      # Expand the shell subtree (siblings: fetch-curl + cat + connect-curl), but
+      # NEVER cross into an agent (so other terminals under the agent stay separate).
+      # TIME-BOUND the expansion to a 2-min window around the exfil connect: only
+      # processes spawned within WINDOW_NS count as same-session actors. Without
+      # this, the shell's ENTIRE history (every prior curl iteration over many
+      # minutes) is pulled in, and a stale fetch from 10 min ago gets stitched
+      # into the chain. The lineage spine (ancestors) is exempt — it is the
+      # vertical ancestry needed to reach the agent for attribution.
+      sess_lo = connect_ts - WINDOW_NS
+      sess_hi = connect_ts + WINDOW_NS
+      all_exec = query_events(kind="EXECUTE_PROCESS", limit=5000)
+      for _ in range(6):
+          grew = False
+          for e in all_exec:
+              pp = e.get("parent_pid", "")
+              if pp == "" or pp not in session or e["actor_pid"] in session:
+                  continue
+              t_spawn = int(e.get("ts", "0"))
+              if t_spawn < sess_lo or t_spawn > sess_hi:
+                  continue            # spawned outside the 2-min session window
+              session[e["actor_pid"]] = e.get("actor_start", "0")
+              grew = True
+          if not grew:
+              break
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
-          aid      = agent["id"]
-          session  = collect_exec_tree(aid)
-          # Only evaluate the agent whose session owns the triggering process.
-          # If current_proc is unknown (periodic/manual), evaluate all agents.
-          if current_proc and current_proc not in session:
-              continue
-          stages   = []
-          chain    = new_chain(aid)
-          # Session start time — used to filter stale edges from prior sessions.
-          # Edges whose last_ts < agent_ts are accumulated historical data and
-          # must not trigger stage detections.
-          agent_ts = int(agent.get("first_seen", "0"))
-          s0_ts    = 0    # timestamp of the stage 0 fetch — all later stages must follow it
-          latest_ts = 0   # most-recent stage activity — drives the look-back recency check
+      # ── the Exfil stage is the CALLER's OWN connect = THE TRIGGERING EVENT ────
+      # Take it straight from meta (host + caller_pid + event_ts). Do NOT look it
+      # up via query_events: the triggering connect is the single newest event and
+      # races the async ingest — it may not be queryable yet at synchronous
+      # evaluation time. meta always has it. (Prior stages and lineage are older
+      # and ARE queryable; the event log is batch-fresh for those.)
+      connect_ev = {
+          "kind": "CONNECTS", "actor_pid": str(cp),
+          "actor_path": inst.get("actor_path", ""),
+          "target_id": "host://tcp:" + host + ":" + meta.get("port", ""),
+          "ts": str(connect_ts), "host": host,
+          # callid of THIS triggering connect — the engine matches the trigger node
+          # by this exact instance, so it can never land on an earlier connect to
+          # the same host node (path-keyed aggregate).
+          "callid": meta.get("callid", ""),
+      }
 
-          # Stage 0 — earliest untrusted HTTP_REQUEST in session.
-          # We scan ALL untrusted requests and pick the one with the smallest
-          # first_ts so that a later unrelated VS Code request cannot steal
-          # s0_ts and cause Stages 2/4 timestamp checks to fail.
-          _s0_edge = None
-          _s0_host = ""
-          _s0_ts   = 0
-          for proc_id in session:
-              for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
-                  u = node(e["to"])
-                  if u == None: continue
-                  if u.get("is_private","0") == "1": continue
-                  host = u.get("host","")
-                  if not host or host_trusted(host): continue
-                  e_ts = int(e.get("first_ts","0"))
-                  if _s0_edge == None or (e_ts > 0 and (_s0_ts == 0 or e_ts < _s0_ts)):
-                      _s0_edge = e
-                      _s0_host = host
-                      _s0_ts   = e_ts
-          if _s0_edge != None:
-              stages.append("Initial:untrusted-fetch:" + _s0_host)
-              chain.append(step(_s0_edge, stage_id="Initial",
-                  stage_desc="Untrusted external fetch from " + _s0_host))
-              s0_ts = _s0_ts
-              if edge_recent(_s0_edge) > latest_ts: latest_ts = edge_recent(_s0_edge)
-          _has_s0 = False
-          for _s in stages:
-              if "Initial" in _s: _has_s0 = True
-          if not _has_s0:
-              for e in edges(aid, dir="out", kind="TOOL_CALL"):
-                  src = e["to"] + "#call:" + e.get("call_id","")
-                  if search_in(src,"curl") or search_in(src,"wget"):
-                      ok = False
-                      for t in TRUSTED_HOSTS:
-                          if search_in(src, t): ok = True
-                      if not ok:
-                          stages.append("Initial:untrusted-fetch:tool-call")
-                          chain.append(step(e, stage_id="Initial",
-                              stage_desc="Tool call with untrusted curl/wget"))
-                          if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                          break
+      # ── Stage 0 (REQUIRED): earliest untrusted outbound fetch before the exfil ─
+      s0_ts = 0
+      fetch_ev = None
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid), limit=100):
+              h = e.get("host", "")
+              if not h or host_trusted(h) or is_ztna_host(h):
+                  continue
+              t = int(e.get("ts", "0"))
+              if t > connect_ts or (connect_ts - t) > WINDOW_NS:
+                  continue            # must precede the exfil and be within the window
+              if s0_ts == 0 or t < s0_ts:
+                  s0_ts = t
+                  fetch_ev = e
+      if fetch_ev == None:
+          return "allow"              # no initial access -> not the Claw Chain (FP guard)
 
-          # Stage 1 — heredoc execution bypass with command substitution.
-          # This is the CVE-2026-44115 pattern: using << heredoc with $() or backtick
-          # to execute commands inside a shell document. Must happen AFTER stage 0
-          # (s0_ts) to be part of the attack chain — we check ts > s0_ts.
-          for proc_id in session:
-              for e in edges(proc_id, dir="out", kind="EXECUTE_PROCESS"):
-                  e_ts = int(e.get("ts","0"))
-                  if s0_ts > 0 and e_ts > 0 and e_ts <= s0_ts:
-                      continue  # must happen after the untrusted fetch
-                  if heredoc_expansion(e.get("cmdline","")):
-                      stages.append("Stage 1:heredoc-exec-bypass")
-                      chain.append(step(e, stage_id="Stage 1",
-                          stage_desc="Heredoc with command substitution"))
-                      if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                      break
-              _has_s1 = False
-              for _s in stages:
-                  if "Stage 1" in _s: _has_s1 = True
-              if _has_s1: break
+      stages = ["Poisoning:untrusted-fetch:" + fetch_ev.get("host", "")]
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain.append(step(ev_edge(fetch_ev), stage_id="Poisoning",
+          stage_desc="untrusted external fetch: " + fetch_ev.get("host", "")))
 
-          # Stage 2 — sensitive READ_FILE via graph index
-          # Uses fs_activity() which now returns {"path":..., "ts":...} entries.
-          # The exact per-file ts from the FTS index is used to validate ordering:
-          # the credential read must have happened AFTER stage 0 (s0_ts).
-          # This eliminates false positives from cat runs earlier in the same session.
-          for proc_id in session:
-              for e in edges(proc_id, dir="out", kind="READ_FILE"):
-                  if agent_ts > 0 and int(e.get("last_ts","0")) < agent_ts:
-                      continue
-                  fs = node(e["to"])
-                  if fs == None: continue
-                  source = fs["id"] + "$READ"
-                  for pattern in SENSITIVE_PATTERNS:
-                      if search_in(source, pattern):
-                          files = fs_activity(fs["id"], "READ", pattern)
-                          if not files: continue
-                          # Find the entry whose exact ts is after s0_ts
-                          matched = None
-                          for f in files:
-                              f_ts = int(f.get("ts","0"))
-                              if s0_ts > 0 and f_ts > 0 and f_ts < s0_ts:
-                                  continue  # this specific read predates the fetch
-                              matched = f
-                              break
-                          if matched == None: continue
-                          detail = matched["path"]
-                          # Guard against FTS false positives: reject paths where
-                          # the sensitive tokens appear only in a filename/dir that
-                          # coincidentally contains the pattern (e.g. read_etc_passwd.yaml).
-                          # Real sensitive paths live in /etc/, ~/.ssh/, ~/.aws/, ~/.kube/,
-                          # /proc/, or home dirs — they never have extensions like .yaml/.json.
-                          ok = False
-                          for pfx in ["/etc/", "/.ssh/", "/.aws/", "/.kube/", "/proc/", "/.netrc", "ssh/authorized_keys"]:
-                              if pfx in detail:
-                                  ok = True
-                          if not ok:
-                              continue
-                          stages.append("Stage 2:toctou-read:" + pattern)
-                          chain.append(step(e, stage_id="Stage 2",
-                              stage_desc="Read " + detail, activity=matched))
-                          _mts = int(matched.get("ts","0"))
-                          if _mts > latest_ts: latest_ts = _mts
-                          break
-                  _has_stage2 = False
-                  for _s in stages:
-                      if "Stage 2" in _s: _has_stage2 = True
-                  if _has_stage2: break
-              _has_stage2 = False
-              for _s in stages:
-                  if "Stage 2" in _s: _has_stage2 = True
-              if _has_stage2: break
+      # ── Stage 1 (optional): heredoc command-substitution bypass after s0 ──────
+      for pid in session:
+          hit = False
+          for e in query_events(kind="EXECUTE_PROCESS", actor_pid=int(pid), limit=100):
+              t = int(e.get("ts", "0"))
+              if t < s0_ts or t > connect_ts:
+                  continue
+              if heredoc_exec(e.get("cmdline", "")):
+                  stages.append("Exec:heredoc-bypass")
+                  chain.append(step(ev_edge(e), stage_id="Exec",
+                      stage_desc="heredoc command substitution: " + e.get("cmdline", "")[:80]))
+                  hit = True
+                  break
+          if hit:
+              break
 
-          # Stage 3 — sensitive WRITE_FILE (same ordering guards as stage 2)
-          for proc_id in session:
-              for e in edges(proc_id, dir="out", kind="WRITE_FILE"):
-                  edge_ts = int(e.get("last_ts","0"))
-                  if agent_ts > 0 and edge_ts < agent_ts:
-                      continue
-                  if s0_ts > 0 and edge_ts < s0_ts:
-                      continue
-                  fs = node(e["to"])
-                  if fs == None: continue
-                  source = fs["id"] + "$WRITE"
-                  for pattern in SENSITIVE_PATTERNS:
-                      if search_in(source, pattern):
-                          files = fs_activity(fs["id"], "WRITE", pattern)
-                          matched3 = files[0] if files else None
-                          detail = matched3["path"] if matched3 else pattern
-                          stages.append("Stage 3:toctou-write:" + pattern)
-                          chain.append(step(e, stage_id="Stage 3",
-                              stage_desc="Wrote " + detail, activity=matched3))
-                          _mts = int(matched3.get("ts","0")) if matched3 else edge_recent(e)
-                          if _mts > latest_ts: latest_ts = _mts
-                          break
-                  _has_stage3 = False
-                  for _s in stages:
-                      if "Stage 3" in _s: _has_stage3 = True
-                  if _has_stage3: break
-              _has_stage3 = False
-              for _s in stages:
-                  if "Stage 3" in _s: _has_stage3 = True
-              if _has_stage3: break
+      # ── Stage 2 (optional): sensitive credential READ after s0 ────────────────
+      for pid in session:
+          hit = False
+          for e in query_events(kind="READ_FILE", actor_pid=int(pid), limit=400):
+              t = int(e.get("ts", "0"))
+              if t < s0_ts or t > connect_ts:
+                  continue
+              p = e.get("path", "")
+              if is_sensitive(p):
+                  stages.append("Credential-Access:read:" + p)
+                  chain.append(step(ev_edge(e), stage_id="Credential Access",
+                      stage_desc="read sensitive file: " + p))
+                  hit = True
+                  break
+          if hit:
+              break
 
-          # Stage 4 — CONNECTS to Netzilo peer or cloud metadata service
-          # Use last_ts (most recent connection) not first_ts — the edge accumulates
-          # across sessions and first_ts may be from a prior session.
-          for proc_id in session:
-              for e in edges(proc_id, dir="out", kind="CONNECTS"):
-                  edge_ts = int(e.get("last_ts","0"))
-                  if agent_ts > 0 and edge_ts < agent_ts:
-                      continue
-                  if s0_ts > 0 and edge_ts < s0_ts:
-                      continue
-                  h = node(e["to"])
-                  if h == None: continue
-                  host = h.get("host","")
-                  if h.get("is_private","0") == "1":
-                      stages.append("Stage 4:private-connect:" + host)
-                      chain.append(step(e, stage_id="Stage 4",
-                          stage_desc="Lateral movement to private peer: " + host))
-                      if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                      break
-                  if host in CLOUD_METADATA_IPS:
-                      stages.append("Stage 4:metadata-connect:" + host)
-                      chain.append(step(e, stage_id="Stage 4",
-                          stage_desc="Cloud metadata service contacted at " + host))
-                      if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                      break
-              _has_stage4 = False
-              for _s in stages:
-                  if "Stage 4" in _s: _has_stage4 = True
-              if _has_stage4: break
-              for e in edges(proc_id, dir="out", kind="HTTP_REQUEST"):
-                  edge_ts = int(e.get("last_ts","0"))
-                  if agent_ts > 0 and edge_ts < agent_ts:
-                      continue
-                  if s0_ts > 0 and edge_ts < s0_ts:
-                      continue
-                  u = node(e["to"])
-                  if u == None: continue
-                  host = u.get("host","")
-                  if u.get("is_private","0") == "1":
-                      stages.append("Stage 4:private-http:" + host)
-                      chain.append(step(e, stage_id="Stage 4",
-                          stage_desc="HTTP to private peer: " + host))
-                      if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                      break
-                  if host in CLOUD_METADATA_IPS:
-                      stages.append("Stage 4:metadata-http:" + host)
-                      chain.append(step(e, stage_id="Stage 4",
-                          stage_desc="HTTP to cloud metadata: " + host))
-                      if edge_recent(e) > latest_ts: latest_ts = edge_recent(e)
-                      break
-              _has_stage4 = False
-              for _s in stages:
-                  if "Stage 4" in _s: _has_stage4 = True
-              if _has_stage4: break
+      # ── Stage 3 (optional): sensitive WRITE after s0 ──────────────────────────
+      for pid in session:
+          hit = False
+          for e in query_events(kind="WRITE_FILE", actor_pid=int(pid), limit=400):
+              t = int(e.get("ts", "0"))
+              if t < s0_ts or t > connect_ts:
+                  continue
+              p = e.get("path", "")
+              if is_sensitive(p):
+                  stages.append("Credential-Access:write:" + p)
+                  chain.append(step(ev_edge(e), stage_id="Credential Access",
+                      stage_desc="wrote sensitive file: " + p))
+                  hit = True
+                  break
+          if hit:
+              break
 
-          count = len(stages)
-          if count >= 3:
-              # Look-back guard — anchored on the MOST RECENT stage activity,
-              # NOT s0_ts. Edges aggregate across runs: an attack that ran many
-              # times has a stale first_ts but a fresh last_ts. Anchoring on
-              # s0_ts (earliest fetch) would wrongly treat a live re-run as old.
-              # latest_ts tracks the newest stage edge/file timestamp, so a fresh
-              # attack always passes and only a genuinely idle chain is suppressed.
-              LOOK_BACK_NS = 120000000000  # 2 minutes in nanoseconds
-              event_ts = int(meta.get("event_ts", "0"))
-              if event_ts > 0 and latest_ts > 0 and (event_ts - latest_ts) > LOOK_BACK_NS:
-                  continue  # stale — newest stage activity is well in the past
-              print("Claw Chain CONFIRMED — " + str(count) + " stages: " + ", ".join(stages))
-              return {
-                  "action": "block",
-                  "reason": "Claw Chain CONFIRMED — " + str(count) + " Stages: " + ", ".join(stages),
-                  "chain":  chain,
-              }
+      # ── Stage 4 (REQUIRED): the Lateral Movement connect (the trigger) ───────────────────
+      label = "cloud-metadata" if host in CLOUD_METADATA else "private-peer"
+      stages.append("Lat.Mov.:" + label + ":" + host)
+      chain.append(step(ev_edge(connect_ev), stage_id="Lateral Movement",
+          stage_desc="connection to " + label + ": " + host))
 
+      # ── verdict: Initial + >=1 credential/exec stage + Lateral Movement  (>=3 ordered) ───
+      if len(stages) >= 3:
+          names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
+          print("Claw Chain CONFIRMED (" + str(len(stages)) + " stages) via " +
+                names + ": " + ", ".join(stages))
+          return {
+              "action": "block",
+              "reason": "Claw Chain CONFIRMED — " + ", ".join(stages) +
+                        " [session: " + names + "]",
+              "chain": chain,
+          }
       return "allow"
 
   result = run()
