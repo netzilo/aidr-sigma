@@ -1,0 +1,67 @@
+title: Code Checker (LLM-as-Judge)
+id: netzilo-llmjudge-code-checker-001
+status: experimental
+description: |
+  LLM-as-judge port of the LangSmith "Code Checker" evaluator template.
+  Whether code produced is correct and solves the problem.
+  Delegates the verdict to the AI scanner via action: scan with the evaluator
+  rubric as the analysis prompt. Report-only: scanner never blocks, max severity is report.
+references:
+  - https://docs.smith.langchain.com/evaluation
+author: Netzilo (ported from LangSmith evaluator template)
+date: "2026-06-30"
+tags:
+  - quality.code-correctness
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - llm_response
+  condition: sel_trigger
+action: scan
+on_timeout: allow
+on_error: allow
+falsepositives:
+  - Legitimate content discussing the flagged topic (security research, documentation, test data)
+  - AI scanner unavailable or no AI keys configured (fails open -> allow)
+level: low
+prompt: |
+  You are a security guardrail analyzing AI agent content. The content is provided in key=value format; evaluate the message/output text it carries.
+
+  You are an expert code reviewer evaluating code for correctness. Your task is to assign a score based on the following rubric:
+
+  <Rubric>
+    A correct code solution:
+    - Solves the problem completely as specified in the input
+    - Should contain only valid code without any additional text
+    - Handles all edge cases appropriately
+    - Contains absolutely no bugs or logical errors
+    - Uses efficient and appropriate algorithms/data structures
+    - Follows language-specific best practices
+    - Has correct syntax and would compile/run without errors
+
+    When scoring, you should penalize:
+    - Logical errors or bugs that would cause incorrect behavior
+    - Missing edge case handling
+    - Overly inefficient implementations when better approaches exist
+    - Incomplete solutions that don't address all requirements
+    - Syntax errors that would prevent compilation/execution
+    - Security vulnerabilities or unsafe practices
+    - Additional text that is not code
+  </Rubric>
+
+  <Instructions>
+    - Carefully analyze both the output code and the initial input query
+    - Meticulously check for functional correctness and completeness
+    - Focus on whether the code would work correctly rather than style preferences
+  </Instructions>
+
+  <Reminder>
+    The goal is to evaluate whether the code correctly solves the given problem.
+  </Reminder>
+
+  Apply the rubric above to the content under review and choose one verdict:
+  - report: the content fails to correctly solve the requested coding task per the rubric.
+  - allow: the content does not, or the determination is ambiguous.

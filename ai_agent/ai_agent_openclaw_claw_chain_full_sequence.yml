@@ -1,23 +1,17 @@
-title: Claw Chain Full Sequence Correlator
-id: netzilo-claw-chain-full-sequence-001
+title: Agent Skill Poisoning Chain Correlator
+id: netzilo-agent-skill-poison-chain-001
 status: stable
-description: >
-  Detects the full Claw Chain (CVE-2026-44115 -> 44113 -> 44112 -> 44118) within a
-  SINGLE agent session using instance-resolved provenance. Anchors on the triggering
-  connection's caller_pid, resolves the exact process instance and its spawn lineage,
-  then confirms an ORDERED multi-stage sequence performed by that one session:
-  untrusted external fetch (initial access) -> credential access / heredoc bypass ->
-  exfiltration to a private peer or cloud-metadata endpoint. 3+ ordered in-session
-  stages = block. No path-keyed node walk, no cross-session bleed, fully deterministic.
+description: "Detects an agent skill-poisoning kill chain within a single agent session using instance-resolved provenance. The REQUIRED initial-access anchor is a skill acquisition by the AGENT itself OR by any process in the agent's subtree (a subprocess the agent spawned) — covering both an in-process fetch (skill attributed to the agent node) and a shell fetch (skill attributed to a descendant). The skill must be externally sourced (public origin); an internally sourced skill does not anchor the chain. Anchored on the triggering connection's caller_pid, the rule resolves the agent in that connection's lineage, then confirms an ORDERED sequence: external skill acquired (poisoning) -> credential access -> exfiltration to a private peer or cloud-metadata endpoint. Poisoning + Credential Access + Lateral Movement = block."
 author: Netzilo
-date: "2026-04-01"
-modified: "2026-06-10"
+date: "2026-06-11"
+modified: "2026-06-11"
 references:
-  - https://nvd.nist.gov/vuln/detail/CVE-2026-44115
-  - https://nvd.nist.gov/vuln/detail/CVE-2026-44113
+  - https://owasp.org/www-project-agentic-skills-top-10/ast01
+  - https://labs.cloudsecurityalliance.org/research/csa-research-note-skill-md-agent-context-poisoning-20260506/
   - https://nvd.nist.gov/vuln/detail/CVE-2026-44112
   - https://nvd.nist.gov/vuln/detail/CVE-2026-44118
 tags:
+  - attack.initial-access
   - attack.execution
   - attack.credential-access
   - attack.exfiltration
@@ -25,11 +19,12 @@ tags:
 level: critical
 falsepositives:
   - >
-    Cloud CI/build agents that read ~/.aws/credentials and contact 169.254.169.254 are
-    NOT flagged unless they FIRST fetched from an untrusted (non-allowlisted) external
-    host in the SAME session, in order. The required untrusted-fetch anchor plus strict
-    fetch -> credential-access -> exfil ordering and per-instance session scoping make
-    benign cloud automation a non-match.
+    An agent that acquires a skill AND reads a credential file AND contacts
+    169.254.169.254 is NOT flagged unless all three occur in the SAME agent
+    agent session within a 15-minute window, AND the skill came from an external
+    (public) origin. Internally sourced skills (is_ztna_host=1) do not anchor the
+    chain. Ordering is not required (skill-detection timing via server-side fetch
+    tool results is unreliable); same-session co-occurrence within the window is.
 
 logsource:
   product: ai_agent
@@ -42,71 +37,48 @@ detection:
   condition: sel_trigger
 
 action: execute
-# Fail OPEN. This runs on every connects event (high volume). A slow or failing
-# script must never block an unrelated connection. Detection still fires the
-# instant the script completes within budget on a real chain.
+# Fail OPEN. Runs on every connects event (high volume); a slow or failing
+# script must never block an unrelated connection.
 on_timeout: allow
 on_error: allow
 script: |
   # ─────────────────────────────────────────────────────────────────────────────
-  # Claw Chain — instance-resolved, deterministic, zero-cross-session-bleed.
+  # Agent Skill Poisoning Chain — agent-scoped poisoning anchor.
   #
-  # Decision is driven entirely by the on-disk event-provenance log via:
-  #   caller_pid -> proc_instance -> proc_lineage -> query_events (per instance).
-  # The path-keyed behaviour graph is NOT walked for attribution, so the same
-  # attack always yields the same chain, and a different agent's traffic can never
-  # be attributed to this session.
+  #   Poisoning anchor  = ACQUIRED_SKILL by the agent OR any subprocess of the
+  #                       agent (the agent's full subtree), external origin.
+  #   Credential Access = sensitive file read/write by the agent OR any subprocess
+  #                       of the agent (the whole agent subtree).
+  #   Lateral Movement  = the triggering connect to a private/metadata endpoint.
   #
-  # Zero-FP design:
-  #   * relevance gate: only evaluate connects to a private/metadata endpoint
-  #   * session scoping: only the triggering instance's lineage + its siblings
-  #   * REQUIRED initial-access anchor: an untrusted (non-allowlisted) outbound
-  #     fetch that PRECEDES the credential access and the exfil connect
-  #   * ORDERING: every middle/exfil stage must occur at-or-after the fetch (s0)
-  #     and at-or-before the connect, within a 10-minute session window
-  #   * verdict requires Initial + (credential-access OR heredoc) + Exfil = 3 stages
+  # Skills live only in the behaviour graph, so the poisoning stage reads
+  # ACQUIRED_SKILL edges off process nodes (the agent node + descendant nodes),
+  # TIME-GATED to the session window to bound the path-keyed lookup. Execution/
+  # exfil stages use the on-disk event-provenance log.
   # ─────────────────────────────────────────────────────────────────────────────
 
   CLOUD_METADATA = ["169.254.169.254", "100.100.100.200"]
 
-  # Allowlisted egress — a fetch to any of these is NOT initial access.
-  TRUSTED = [
-      "openai.com", "anthropic.com", "netzilo.com", "netzilo.network",
-      "github.com", "githubusercontent.com", "gitlab.com", "bitbucket.org",
-      "npmjs.org", "npmjs.com", "pypi.org", "pkg.go.dev", "proxy.golang.org",
-      "amazonaws.com", "azure.com", "microsoft.com", "visualstudio.com",
-      "googleapis.com", "gemini.google", "mistral.ai", "groq.com",
-      "cloudflare.com", "fastly.com", "vscode-cdn.net", "vsassets.io",
-      "gallerycdn.vsassets.io", "vscode-unpkg.net", "githubcopilot.com",
-      "copilot.github.com", "posthog.com", "sentry.io", "datadoghq.com",
-      "githubstatus.com", "statuspage.io",
-  ]
-
-  # Real credential locations (path substrings) — coincidental token matches in
-  # filenames like read_etc_passwd.yaml are excluded by requiring these dir/anchors.
   SENSITIVE_PFX = [
       "/.aws/", "/.ssh/", "/.kube/", "/.netrc",
       "/etc/shadow", "/etc/passwd", "/etc/sudoers",
       "ssh/authorized_keys", "/proc/self/environ",
   ]
 
-  WINDOW_NS = 120000000000  # 2 minutes — stages must cluster tightly around the exfil
-  # (secondary guard; the primary FP fix is scoping the session to the shell, not the agent)
-
-  def host_trusted(h):
-      for t in TRUSTED:
-          if h == t or h.endswith("." + t):
-              return True
-      return False
+  # Agentic attacks unfold over minutes (LLM latency, step-by-step confirmation),
+  # so skill-acquisition and the eventual exfil can be many minutes apart. A tight
+  # 2-minute window misses them. 15 minutes covers realistic agent pacing while
+  # the strict skill -> credential -> exfil ORDERING keeps false positives down.
+  WINDOW_NS = 900000000000  # 15 minutes, symmetric around the connect
 
   def is_ztna_host(h):
       if h in CLOUD_METADATA:
           return True
       if h.startswith("10.") or h.startswith("192.168.") or h.startswith("169.254."):
           return True
-      if h.startswith("100."):  # CGNAT / Netzilo peers
+      if h.startswith("100."):
           return True
-      for n in range(16, 32):  # 172.16.0.0/12
+      for n in range(16, 32):
           if h.startswith("172." + str(n) + "."):
               return True
       return False
@@ -117,32 +89,7 @@ script: |
               return True
       return False
 
-  def heredoc_exec(cmd):
-      # CVE-2026-44115 pattern: << heredoc with $() or backtick command substitution,
-      # where << is a shell operator (appears before any quoted argument).
-      if "<<" not in cmd:
-          return False
-      if "$(" not in cmd and "`" not in cmd:
-          return False
-      arrow = cmd.find("<<")
-      q = len(cmd)
-      a = cmd.find('"')
-      b = cmd.find("'")
-      if a >= 0:
-          q = min(q, a)
-      if b >= 0:
-          q = min(q, b)
-      return arrow < q
-
   def ev_edge(e):
-      # Synthesise a kill-chain edge dict from an event-log row. Instance-accurate:
-      # from = the exact actor process node, to = the real target.
-      #
-      # FileSystem nodes are AGGREGATE (keyed by process path) and carry no
-      # filename — so for file events point "to" at the exact file path (from the
-      # event's "path" attr) and keep the aggregate node id in "_orig_to", exactly
-      # like the old step(activity=...) mechanism. Otherwise the chain renders the
-      # process ("cat") instead of the file it read.
       to = e.get("target_id", "")
       orig = ""
       kind = e.get("kind", "")
@@ -150,8 +97,6 @@ script: |
                  kind == "DELETE_FILE" or kind == "RENAME_FILE")
       path = e.get("path", "")
       if is_file and path != "":
-          # file events only — HTTP_REQUEST also has a "path" attr (the URL path),
-          # which must NOT replace the URL node target.
           orig = to
           to = path
       d = {
@@ -164,9 +109,6 @@ script: |
       }
       cid = e.get("callid", "")
       if cid != "":
-          # Instance id of the reporting call. Lets the engine mark the EXACT
-          # triggering connect (this instance), not the path-keyed aggregate edge
-          # that every curl->host connect (and the editor's IMDS polls) collapse into.
           d["callid"] = cid
       if orig != "":
           d["_orig_to"] = orig
@@ -181,160 +123,143 @@ script: |
       if cp == 0:
           return "allow"
       event_ts = int(meta.get("event_ts", "0"))
-      connect_ts = event_ts   # the exfil connect = the triggering event
+      connect_ts = event_ts
 
-      # ── anchor on the EXACT triggering instance + resolve its session ─────────
       inst = proc_instance(cp, event_ts)
       if inst == None:
-          return "allow"   # transient: create row not yet logged — next event re-fires
+          return "allow"
       lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
       if not lineage:
           return "allow"
 
-      # Stage-scope = the connecting process's OWN shell subtree, EXCLUDING the
-      # long-running agent. proc_lineage climbs to the agent (Code Helper) for
-      # attribution, but the agent spawns the ENTIRE machine's process tree — if
-      # the agent is in the session, the child-expansion below pulls ~1000 unrelated
-      # processes, so EVERY private/metadata connect finds some stray untrusted-fetch
-      # + cred-read and false-positives (e.g. the VS Code plugin's own IMDS poll).
-      # Excluding agent nodes confines the session to the shell that ran the commands.
-      session = {}
-      for x in lineage:
-          if x.get("agent", "0") == "1":
-              continue                       # the agent is the chain root, NOT a stage actor
-          session[x["actor_pid"]] = x.get("actor_start", "0")
-      # If the caller IS the agent itself (no shell beneath it), there is no attack
-      # session — a bare private/metadata connect by the agent is not a chain.
-      if not session:
-          return "allow"
-      # Expand the shell subtree (siblings: fetch-curl + cat + connect-curl), but
-      # NEVER cross into an agent (so other terminals under the agent stay separate).
-      # TIME-BOUND the expansion to a 2-min window around the exfil connect: only
-      # processes spawned within WINDOW_NS count as same-session actors. Without
-      # this, the shell's ENTIRE history (every prior curl iteration over many
-      # minutes) is pulled in, and a stale fetch from 10 min ago gets stitched
-      # into the chain. The lineage spine (ancestors) is exempt — it is the
-      # vertical ancestry needed to reach the agent for attribution.
       sess_lo = connect_ts - WINDOW_NS
       sess_hi = connect_ts + WINDOW_NS
       all_exec = query_events(kind="EXECUTE_PROCESS", limit=5000)
-      for _ in range(6):
+
+      # ── identify the agent(s) in this connect's lineage ───────────────────────
+      agent_pids = {}
+      agent_paths = {}        # process node path -> True (seed for skill probe)
+      agent_root_path = ""
+      for x in lineage:
+          if x.get("agent", "0") == "1":
+              agent_pids[x["actor_pid"]] = True
+              p = x.get("actor_path", "")
+              if p != "":
+                  agent_paths[p] = True
+              agent_root_path = p
+      if not agent_pids:
+          return "allow"       # no agent in lineage → not an agent-driven chain
+
+      # ── agent subtree: the agent plus every descendant spawned in-window.
+      #    "agent OR any subprocess of the agent" — the poisoning probe set. ──────
+      subtree = {}
+      for p in agent_pids:
+          subtree[p] = True
+      for _ in range(8):
           grew = False
           for e in all_exec:
               pp = e.get("parent_pid", "")
-              if pp == "" or pp not in session or e["actor_pid"] in session:
+              ap = e["actor_pid"]
+              if pp == "" or pp not in subtree or ap in subtree:
                   continue
-              t_spawn = int(e.get("ts", "0"))
-              if t_spawn < sess_lo or t_spawn > sess_hi:
-                  continue            # spawned outside the 2-min session window
-              session[e["actor_pid"]] = e.get("actor_start", "0")
+              t = int(e.get("ts", "0"))
+              if t < sess_lo or t > sess_hi:
+                  continue
+              subtree[ap] = True
+              path = e.get("actor_path", "")
+              if path != "":
+                  agent_paths[path] = True
               grew = True
           if not grew:
               break
 
-      # ── the Exfil stage is the CALLER's OWN connect = THE TRIGGERING EVENT ────
-      # Take it straight from meta (host + caller_pid + event_ts). Do NOT look it
-      # up via query_events: the triggering connect is the single newest event and
-      # races the async ingest — it may not be queryable yet at synchronous
-      # evaluation time. meta always has it. (Prior stages and lineage are older
-      # and ARE queryable; the event log is batch-fresh for those.)
-      connect_ev = {
-          "kind": "CONNECTS", "actor_pid": str(cp),
-          "actor_path": inst.get("actor_path", ""),
-          "target_id": "host://tcp:" + host + ":" + meta.get("port", ""),
-          "ts": str(connect_ts), "host": host,
-          # callid of THIS triggering connect — the engine matches the trigger node
-          # by this exact instance, so it can never land on an earlier connect to
-          # the same host node (path-keyed aggregate).
-          "callid": meta.get("callid", ""),
-      }
-
-      # ── Stage 0 (REQUIRED): earliest untrusted outbound fetch before the exfil ─
-      s0_ts = 0
-      fetch_ev = None
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid), limit=100):
-              h = e.get("host", "")
-              if not h or host_trusted(h) or is_ztna_host(h):
+      # ── Stage 0 (REQUIRED): Poisoning — the agent OR any subprocess of the
+      #    agent acquired an external skill, within the session window. A skill's
+      #    detection time is unreliable (a server-side fetch result re-enters the
+      #    LLM context and is re-classified later), so this uses a SYMMETRIC window
+      #    around the connect, not strict skill-before-exfil ordering.
+      skill_edge = None
+      skill_node = None
+      for path in agent_paths:
+          for e in edges("process://" + path, dir="out", kind="ACQUIRED_SKILL"):
+              sn = node(e.get("to", ""))
+              if sn == None:
                   continue
+              if sn.get("is_ztna_host", "0") != "0":
+                  continue          # internal/private-origin skill — not poisoning
               t = int(e.get("ts", "0"))
-              if t > connect_ts or (connect_ts - t) > WINDOW_NS:
-                  continue            # must precede the exfil and be within the window
-              if s0_ts == 0 or t < s0_ts:
-                  s0_ts = t
-                  fetch_ev = e
-      if fetch_ev == None:
-          return "allow"              # no initial access -> not the Claw Chain (FP guard)
-
-      stages = ["Poisoning:untrusted-fetch:" + fetch_ev.get("host", "")]
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
-      chain.append(step(ev_edge(fetch_ev), stage_id="Poisoning",
-          stage_desc="untrusted external fetch: " + fetch_ev.get("host", "")))
-
-      # ── Stage 1 (optional): heredoc command-substitution bypass after s0 ──────
-      for pid in session:
-          hit = False
-          for e in query_events(kind="EXECUTE_PROCESS", actor_pid=int(pid), limit=100):
-              t = int(e.get("ts", "0"))
-              if t < s0_ts or t > connect_ts:
+              if t < sess_lo or t > sess_hi:
                   continue
-              if heredoc_exec(e.get("cmdline", "")):
-                  stages.append("Exec:heredoc-bypass")
-                  chain.append(step(ev_edge(e), stage_id="Exec",
-                      stage_desc="heredoc command substitution: " + e.get("cmdline", "")[:80]))
-                  hit = True
-                  break
-          if hit:
-              break
+              skill_edge = e
+              skill_node = sn
+      if skill_edge == None:
+          return "allow"
 
-      # ── Stage 2 (optional): sensitive credential READ after s0 ────────────────
-      for pid in session:
-          hit = False
+      stages = ["Poisoning:skill:" + skill_node.get("name", "")]
+      chain = new_chain("process://" + agent_root_path)
+      chain.append(step(skill_edge, stage_id="Poisoning",
+          stage_desc="agent/subprocess acquired external skill: " + skill_node.get("name", "") +
+                     " (host=" + skill_node.get("host", "") + ", source=" + skill_node.get("source", "") + ")"))
+
+      # ── Stage 1 (REQUIRED): Credential Access — a sensitive file read/written by
+      #    the agent OR any subprocess of the agent. A descendant's READ_FILE IS
+      #    the agent's behavior (e.g. `cat ~/.aws/credentials` run in the agent's
+      #    shell), so this scans the whole agent subtree — no command-line
+      #    heuristics. Symmetric window; no ordering constraint vs the skill.
+      cred_hit = False
+      for pid in subtree:
           for e in query_events(kind="READ_FILE", actor_pid=int(pid), limit=400):
               t = int(e.get("ts", "0"))
-              if t < s0_ts or t > connect_ts:
+              if t < sess_lo or t > sess_hi:
                   continue
               p = e.get("path", "")
               if is_sensitive(p):
                   stages.append("Credential-Access:read:" + p)
                   chain.append(step(ev_edge(e), stage_id="Credential Access",
                       stage_desc="read sensitive file: " + p))
-                  hit = True
+                  cred_hit = True
                   break
-          if hit:
+          if cred_hit:
               break
-
-      # ── Stage 3 (optional): sensitive WRITE after s0 ──────────────────────────
-      for pid in session:
-          hit = False
-          for e in query_events(kind="WRITE_FILE", actor_pid=int(pid), limit=400):
-              t = int(e.get("ts", "0"))
-              if t < s0_ts or t > connect_ts:
-                  continue
-              p = e.get("path", "")
-              if is_sensitive(p):
-                  stages.append("Credential-Access:write:" + p)
-                  chain.append(step(ev_edge(e), stage_id="Credential Access",
-                      stage_desc="wrote sensitive file: " + p))
-                  hit = True
+      if not cred_hit:
+          for pid in subtree:
+              for e in query_events(kind="WRITE_FILE", actor_pid=int(pid), limit=400):
+                  t = int(e.get("ts", "0"))
+                  if t < sess_lo or t > sess_hi:
+                      continue
+                  p = e.get("path", "")
+                  if is_sensitive(p):
+                      stages.append("Credential-Access:write:" + p)
+                      chain.append(step(ev_edge(e), stage_id="Credential Access",
+                          stage_desc="wrote sensitive file: " + p))
+                      cred_hit = True
+                      break
+              if cred_hit:
                   break
-          if hit:
-              break
+      if not cred_hit:
+          return "allow"          # credential access is required by this chain
 
-      # ── Stage 4 (REQUIRED): the Lateral Movement connect (the trigger) ───────────────────
+      # ── Stage 2 (REQUIRED): Lateral Movement — the triggering connect ─────────
+      connect_ev = {
+          "kind": "CONNECTS", "actor_pid": str(cp),
+          "actor_path": inst.get("actor_path", ""),
+          "target_id": "host://tcp:" + host + ":" + meta.get("port", ""),
+          "ts": str(connect_ts), "host": host,
+          "callid": meta.get("callid", ""),
+      }
       label = "cloud-metadata" if host in CLOUD_METADATA else "private-peer"
       stages.append("Lat.Mov.:" + label + ":" + host)
       chain.append(step(ev_edge(connect_ev), stage_id="Lateral Movement",
           stage_desc="connection to " + label + ": " + host))
 
-      # ── verdict: Initial + >=1 credential/exec stage + Lateral Movement  (>=3 ordered) ───
+      # ── verdict: Poisoning + Credential Access + Lateral Movement = 3 stages ──
       if len(stages) >= 3:
           names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
-          print("Claw Chain CONFIRMED (" + str(len(stages)) + " stages) via " +
+          print("Agent Skill Poisoning Chain CONFIRMED (" + str(len(stages)) + " stages) via " +
                 names + ": " + ", ".join(stages))
           return {
               "action": "block",
-              "reason": "Claw Chain CONFIRMED — " + ", ".join(stages) +
+              "reason": "Agent Skill Poisoning Chain CONFIRMED — " + ", ".join(stages) +
                         " [session: " + names + "]",
               "chain": chain,
           }

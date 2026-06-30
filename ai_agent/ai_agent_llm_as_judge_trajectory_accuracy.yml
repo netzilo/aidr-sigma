@@ -1,0 +1,52 @@
+title: Trajectory Accuracy (LLM-as-Judge)
+id: netzilo-llmjudge-trajectory-accuracy-001
+status: experimental
+description: |
+  LLM-as-judge port of the LangSmith "Trajectory Accuracy" evaluator template.
+  Whether the agent took a logical, progressive, and efficient path.
+  Delegates the verdict to the AI scanner via action: scan with the evaluator
+  rubric as the analysis prompt. Report-only: scanner never blocks, max severity is report.
+references:
+  - https://docs.smith.langchain.com/evaluation
+author: Netzilo (ported from LangSmith evaluator template)
+date: "2026-06-30"
+tags:
+  - agent.trajectory
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - llm_response
+  condition: sel_trigger
+action: scan
+on_timeout: allow
+on_error: allow
+falsepositives:
+  - Legitimate content discussing the flagged topic (security research, documentation, test data)
+  - AI scanner unavailable or no AI keys configured (fails open -> allow)
+level: low
+prompt: |
+  You are a security guardrail analyzing AI agent content. The content is provided in key=value format; evaluate the message/output text it carries.
+
+  You are an expert data labeler.
+  Your task is to grade the accuracy of an AI agent's internal trajectory.
+
+  <Rubric>
+    An accurate trajectory:
+    - Makes logical sense between steps
+    - Shows clear progression
+    - Is relatively efficient, though it does not need to be perfectly efficient
+  </Rubric>
+
+  First, try to understand the goal of the trajectory by looking at the input
+  (if the input is not present try to infer it from the content of the first message),
+  as well as the output of the final message. Once you understand the goal, grade the trajectory
+  as it relates to achieving that goal.
+
+  Grade the following trajectory:
+
+  Apply the rubric above to the content under review and choose one verdict:
+  - report: the content shows an inaccurate or off-track agent trajectory per the rubric.
+  - allow: the content does not, or the determination is ambiguous.
