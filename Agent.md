@@ -1134,6 +1134,8 @@ result = run()
 | `store_reset` | `store_reset()` | `True` | Remove **all** of this rule's stored keys (frees the whole quota). |
 | `store_keys` | `store_keys()` | `list[str]` | All keys this rule has stored. |
 | `store_usage` | `store_usage()` | `dict` | `{"bytes": used, "limit": 1048576, "free": remaining}` — check before a large `store_set`. |
+| `set_integrity_level` | `set_integrity_level(level)` | `None` | Set the agent/host **integrity level** (an int, ordered worst→best): `0`=breached, `1`=low, `2`=medium (**default**), `3`=high. Raises an error if out of range. The level is published in the agent's posture metadata; self-posture's **device-integrity check treats `0` (breached) exactly like a debugger being attached** (fails the check). Levels `1`/`2`/`3` are informational for now (sent and stored, no posture action). In SDK/embedded mode this is the *only* integrity signal evaluated (no host probing). |
+| `get_integrity_level` | `get_integrity_level()` | `int` | Returns the agent's current integrity level (`0`=breached … `3`=high; `2`/medium by default). |
 
 ---
 

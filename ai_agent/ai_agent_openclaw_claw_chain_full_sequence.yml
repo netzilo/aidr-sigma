@@ -257,6 +257,11 @@ script: |
           names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
           print("Agent Skill Poisoning Chain CONFIRMED (" + str(len(stages)) + " stages) via " +
                 names + ": " + ", ".join(stages))
+          # Mark the agent/host integrity as BREACHED (level 0). The block stops
+          # this one connect; the integrity level persists in the agent's posture
+          # metadata, so a DeviceIntegrityCheck keeps failing after the chain
+          # until the level is reset.
+          set_integrity_level(0)
           return {
               "action": "block",
               "reason": "Agent Skill Poisoning Chain CONFIRMED — " + ", ".join(stages) +
