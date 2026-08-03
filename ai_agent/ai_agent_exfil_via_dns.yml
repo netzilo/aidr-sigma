@@ -1,0 +1,92 @@
+title: DNS Exfiltration and Tunnelling
+id: 18ccf235-86e0-57ad-9cf0-83fa81cffb09
+status: experimental
+description: |
+  Detects DNS used as a data channel: dedicated tunnelling tools, TXT-record
+  queries carrying encoded payloads, resolution against an attacker-controlled
+  nameserver, and DNS-over-HTTPS used to bypass local resolvers.
+
+  Ported from sigma-ai. Upstream's strongest selections targeted an
+  `event_type: dns_query` surface with `query`, `query_length`, `subdomain_count`
+  and `domain_entropy` fields — none of which any AgentShield producer emits, so
+  those selections are dead upstream and are not reproduced here.
+
+  Two limits of this rule, stated so its coverage is not overestimated:
+    * Entropy and subdomain-count scoring of the query name is NOT covered.
+      Netzilo intercepts the connection, not the DNS question section.
+    * Detecting resolution against an unexpected nameserver by destination port
+      is NOT possible in a static rule: BuildLogEntry() does not copy Port or
+      Protocol into the LogEntry, so `port: '53'` can never match. Netzilo
+      exposes them only as meta['port'] / meta['protocol'] inside an
+      `action: execute` script — see ai_agent_dns_resolver_pivot.yml.
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://attack.mitre.org/techniques/T1071/004/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-16"
+modified: "2026-08-03"
+tags:
+  - attack.exfiltration
+  - attack.t1048
+  - attack.command-and-control
+  - attack.t1071.004
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Dedicated DNS tunnelling implementations. No benign development use.
+  sel_tunnel_tool_cmd:
+    event_type: tool_call
+    command|re: '(?i)\b(iodine|dnscat2?|dns2tcp|dnsexfiltrator|ozymandns|dnsteal)\b'
+  sel_tunnel_tool_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(iodine|dnscat2?|dns2tcp|dnsexfiltrator|ozymandns|dnsteal)\b'
+  # TXT-record lookups. See ai_agent_dns_tunneling for the argument-order
+  # rationale; repeated here so either rule alone is complete.
+  sel_txt_query:
+    event_type: tool_call
+    command|re:
+      - '(?i)\bdig\b.*[\s=]txt\b'
+      - '(?i)\bnslookup\b.*(-type=|-q=|-querytype=)txt\b'
+      - '(?i)\b(host|drill|kdig)\b.*\s-t\s+txt\b'
+  # A long base32/base64-looking label in a lookup is the payload itself.
+  sel_encoded_label:
+    event_type: tool_call
+    command|re: '(?i)\b(dig|nslookup|host|drill|kdig)\b.*\s[A-Za-z0-9+/=]{30,}\.'
+  # Resolution directed at a specific nameserver via dig's @server syntax.
+  sel_custom_nameserver:
+    event_type: tool_call
+    command|re: '(?i)\b(dig|nslookup|host|kdig)\b.*\s@[A-Za-z0-9._-]+'
+  filter_public_resolver:
+    # Pointing dig at a well-known public resolver is routine diagnostics.
+    event_type: tool_call
+    command|contains:
+      - '@8.8.8.8'
+      - '@8.8.4.4'
+      - '@1.1.1.1'
+      - '@1.0.0.1'
+      - '@9.9.9.9'
+      - '@208.67.222.222'
+      - '@localhost'
+      - '@127.0.0.1'
+  # DNS-over-HTTPS endpoints — bypasses the local resolver entirely, so no
+  # connects event to port 53 is ever produced.
+  sel_doh_endpoint:
+    event_type: http_request
+    url.full|contains:
+      - 'dns.google/resolve'
+      - 'cloudflare-dns.com/dns-query'
+      - '1.1.1.1/dns-query'
+      - '8.8.8.8/dns-query'
+      - 'dns.quad9.net/dns-query'
+      - 'doh.opendns.com'
+  condition: >
+    sel_tunnel_tool_cmd or sel_tunnel_tool_exec or
+    sel_txt_query or sel_encoded_label or sel_doh_endpoint or
+    (sel_custom_nameserver and not filter_public_resolver)
+falsepositives:
+  - Network administrators running DNS diagnostics against a specific nameserver
+  - Applications that deliberately use DNS-over-HTTPS for privacy
+  - Service-discovery libraries performing SRV/TXT lookups as designed
+  - Certificate validation tooling querying TXT records for ACME dns-01 challenges
+level: high

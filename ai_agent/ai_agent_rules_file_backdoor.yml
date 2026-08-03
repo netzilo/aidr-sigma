@@ -1,0 +1,80 @@
+title: Hidden Unicode in Agent Instruction Files
+id: 78b34f4d-5fde-57a5-905d-00fd92ed359c
+related:
+  - id: 78b34f4d-5fde-57a5-905d-00fd92ed359c-p
+    type: companion
+status: experimental
+description: |
+  Detects writes to agent instruction files (CLAUDE.md, .cursorrules,
+  .windsurfrules, copilot-instructions.md, .cursor/rules/) that carry bidi
+  overrides or zero-width characters. Those codepoints let a committed
+  instruction file read as benign in review while the model receives different
+  text — persistent injection that survives every subsequent session and travels
+  with the repository.
+
+  Ported from sigma-ai. Netzilo changes:
+    * Upstream scopes every selection to `event_type: file_write`. Netzilo has no
+      live producer for file_write (staticscanner/edr.go deliberately excludes
+      file I/O from rule evaluation), so this rule matches the write at the
+      tool_call layer — where the agent's own Write/Edit call is visible with both
+      the path and the body — and the companion periodic rule covers writes that
+      reach the filesystem without a tool call.
+    * `selection_suspicious_byte_ratio` (byte_size_to_visible_char_ratio) and
+      `selection_hidden_instructions`' `visibility_analysis` field are DROPPED:
+      neither field exists in Netzilo and no equivalent is computable in a static
+      rule. Ratio-based detection of padded files is therefore not covered.
+references:
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1564/
+  - https://www.pillar.security/blog/new-vulnerability-in-github-copilot-and-cursor-how-hackers-can-weaponize-code-agents
+author: AgentShield (ported to Netzilo)
+date: "2026-03-30"
+modified: "2026-08-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.stealth
+  - attack.t1564
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # The agent writing an instruction file, seen as the tool argument.
+  sel_instruction_path_arg:
+    event_type: tool_call
+    file_path|contains:
+      - '.cursorrules'
+      - '.windsurfrules'
+      - 'CLAUDE.md'
+      - 'AGENTS.md'
+      - 'copilot-instructions.md'
+      - '.cursor/rules/'
+      - '.github/instructions/'
+  # Same write expressed as a shell redirect rather than a Write tool call.
+  sel_instruction_path_cmd:
+    event_type: tool_call
+    command|re: '(?i)(>|>>|tee\s+)\s*\S*(\.cursorrules|\.windsurfrules|CLAUDE\.md|AGENTS\.md|copilot-instructions\.md)'
+  # Bidi control characters: LRE/RLE/PDF/LRO/RLO. Written as RE2 codepoint escapes
+  # — a raw byte cannot appear in the YAML and \uXXXX is not valid RE2.
+  sel_bidi_override:
+    event_type: tool_call
+    content|re: '[\x{202a}\x{202b}\x{202c}\x{202d}\x{202e}\x{2066}\x{2067}\x{2068}\x{2069}]'
+  # Zero-width and invisible characters: ZWSP, ZWNJ, ZWJ, WJ, BOM.
+  sel_zero_width:
+    event_type: tool_call
+    content|re: '[\x{200b}\x{200c}\x{200d}\x{2060}\x{feff}]'
+  # Imperative conditioning in an instruction file is only interesting alongside a
+  # concealment codepoint, so this is not a standalone arm — the condition pairs it.
+  sel_imperative:
+    event_type: tool_call
+    content|re: '(?i)\b(ALWAYS|NEVER|MUST|OVERRIDE|IGNORE\s+(ALL|PREVIOUS))\b'
+  condition: >
+    (sel_instruction_path_arg or sel_instruction_path_cmd)
+    and (sel_bidi_override or sel_zero_width)
+    and sel_imperative
+falsepositives:
+  - Instruction files that legitimately contain right-to-left natural language
+    (Arabic, Hebrew) — those use bidi marks as text, not as an override
+  - A file saved with a UTF-8 BOM by an editor, combined with imperative wording
+  - Emoji sequences that use zero-width joiners in prose examples
+level: high

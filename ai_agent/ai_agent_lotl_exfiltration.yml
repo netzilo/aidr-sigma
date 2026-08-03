@@ -1,0 +1,88 @@
+title: Living-off-the-Land Data Exfiltration
+id: af74dcc8-c033-5847-a7c9-a3f6eb0ef3b4
+status: experimental
+description: |
+  Detects exfiltration and tunnelling through tools already present on the host —
+  git, ssh, openssl, python's http.server, netcat — rather than a dedicated
+  exfiltration binary. Each is individually legitimate, so every selection pairs
+  the tool with the flag or argument that turns it into a transport.
+
+  Ported from sigma-ai. Netzilo additions: (1) execute_process coverage so a
+  tunnel opened by a spawned subprocess is caught at the syscall layer;
+  (2) `git remote add` / `git push` to a non-corporate host is narrowed by a
+  filter for the organisation's own forges rather than matching any http URL.
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://attack.mitre.org/techniques/T1572/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-16"
+modified: "2026-08-03"
+tags:
+  - attack.exfiltration
+  - attack.t1048
+  - attack.command-and-control
+  - attack.t1572
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # git as a transport — pushing to, or adding, a remote over http(s).
+  sel_git_transport:
+    event_type: tool_call
+    command|re: '(?i)\bgit\s+(push|remote\s+add)\b.*https?://'
+  # ssh port forwarding. -R (reverse), -L (local), -D (dynamic/SOCKS) are the
+  # three tunnel modes; a bare `ssh host` is not matched.
+  sel_ssh_tunnel_cmd:
+    event_type: tool_call
+    command|re: '(?i)\bssh\b.*\s-[RLD]\s*[0-9]'
+  sel_ssh_tunnel_exec:
+    event_type: execute_process
+    command|re: '(?i)\bssh\b.*\s-[RLD]\s*[0-9]'
+  # openssl as a raw TLS client/server — a common encrypted exfil channel.
+  sel_openssl_transport:
+    event_type: tool_call
+    command|contains:
+      - 'openssl s_client'
+      - 'openssl s_server'
+  sel_openssl_transport_exec:
+    event_type: execute_process
+    command|contains:
+      - 'openssl s_client'
+      - 'openssl s_server'
+  # An ad-hoc HTTP server started inside the workspace exposes it for pull-based
+  # collection.
+  sel_python_http_server:
+    event_type: tool_call
+    command|re: '(?i)\bpython[23]?\b.*\b(http\.server|SimpleHTTPServer)\b'
+  sel_python_http_server_exec:
+    event_type: execute_process
+    command|re: '(?i)\bpython[23]?\b.*\b(http\.server|SimpleHTTPServer)\b'
+  # netcat in listen mode — inbound channel for a pull-based collector.
+  sel_nc_listen:
+    event_type: tool_call
+    command|re: '(?i)\b(nc|ncat)\b\s+-[a-z]*l[a-z]*\b'
+  sel_nc_listen_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(nc|ncat)\b\s+-[a-z]*l[a-z]*\b'
+  filter_known_forge:
+    # Pushes to the organisation's own forges are the normal case. Replace these
+    # hosts with your own before enabling; leaving a foreign forge in this list
+    # is what turns the rule into a no-op.
+    event_type: tool_call
+    command|contains:
+      - 'github.com'
+      - 'gitlab.com'
+      - 'bitbucket.org'
+      - 'dev.azure.com'
+  condition: >
+    (sel_ssh_tunnel_cmd or sel_ssh_tunnel_exec or
+     sel_openssl_transport or sel_openssl_transport_exec or
+     sel_python_http_server or sel_python_http_server_exec or
+     sel_nc_listen or sel_nc_listen_exec)
+    or (sel_git_transport and not filter_known_forge)
+falsepositives:
+  - Developers using ssh -L to reach a database or service through a bastion host
+  - python -m http.server used to preview static site output locally
+  - openssl s_client used to debug a TLS handshake or inspect a certificate
+  - git push to a self-hosted forge not listed in filter_known_forge
+level: medium

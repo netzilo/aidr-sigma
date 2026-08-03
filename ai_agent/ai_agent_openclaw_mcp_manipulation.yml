@@ -1,0 +1,119 @@
+title: MCP Server, Plugin or Skill Installed Outside a Tool Call
+id: c6651188-df04-513f-a86f-35f898b4e92a
+status: experimental
+description: |
+  Detects new MCP server definitions, plugins or skill documents appearing on the
+  endpoint through a path that never surfaces as a tool call — a script the agent
+  wrote and ran, a package postinstall hook, a curl into a config directory. The
+  existing ai_agent_mcp_config_write rule covers the agent editing a config through
+  its own Write tool; this covers everything else.
+
+  Upstream sigma-ai declares this against `event_type: config_modification`,
+  `plugin_installation`, `plugin_configuration`, `skill_installation` and
+  `file_write` — five event types no producer emits. Netzilo has no live producer
+  for file_write either (staticscanner/edr.go excludes file I/O from rule
+  evaluation by design), so the only way to see these writes is the AIDR behaviour
+  graph, which receives every file event via ingest. Hence a periodic rule.
+
+  Verdict is `report`: by the time a 30-second scan observes the write it has
+  already landed, so blocking has no preventive value. Prevention belongs to
+  ai_agent_mcp_config_write at the tool-call layer.
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1543/
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-02-26"
+modified: "2026-08-03"
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1543
+  - attack.initial-access
+  - attack.t1195.002
+logsource:
+  product: ai_agent
+  category: periodic
+detection:
+  sel:
+    content|re: '.'
+  condition: sel
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # FTS5 phrase patterns. The unicode61 tokeniser splits on '/', '.' and '_', so
+  # "claude_desktop_config.json" tokenises to ["claude","desktop","config","json"]
+  # and must be queried as an adjacent phrase.
+  CONFIG_PATTERNS = [
+      '"claude desktop config json"',
+      '"cline mcp settings json"',
+      '"mcp json"',
+      '"mcp servers json"',
+      '"claude settings json"',
+      '"openclaw plugin json"',
+      '"claw json"',
+  ]
+  SKILL_PATTERNS = [
+      '"skills"',
+      '"skill md"',
+      '"plugins"',
+  ]
+
+  def collect(aid, kind, op, patterns, label, chain, hits):
+      for e in edges(aid, dir="out", kind=kind):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          for pat in patterns:
+              entries = fs_activity(fs["id"], op, pat)
+              if len(entries) == 0:
+                  continue
+              entry = entries[0]
+              hits.append(label + " " + entry["path"])
+              chain.append(step(e, stage_id="Persistence",
+                                stage_desc=label + ": " + entry["path"],
+                                activity=entry))
+              break
+
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          chain = new_chain(aid)
+          hits = []
+
+          collect(aid, "WRITE_FILE",  "WRITE",  CONFIG_PATTERNS, "MCP config written",  chain, hits)
+          collect(aid, "CREATE_FILE", "CREATE", CONFIG_PATTERNS, "MCP config created",  chain, hits)
+          collect(aid, "CREATE_FILE", "CREATE", SKILL_PATTERNS,  "skill/plugin created", chain, hits)
+
+          if len(hits) == 0:
+              continue
+
+          # A skill acquired from an external host in the same session raises this
+          # from "a config changed" to "a config changed right after untrusted
+          # content arrived".
+          for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              sk = node(se["to"])
+              if sk == None:
+                  continue
+              if sk.get("is_ztna_host", "0") == "1":
+                  continue
+              chain.append(step(se, stage_id="Initial Access",
+                                stage_desc="external skill loaded from " +
+                                           sk.get("host", "?")))
+              hits.append("external skill from " + sk.get("host", "?"))
+
+          reason = "MCP/plugin/skill artefact written outside a tool call — " + ", ".join(hits)
+          print(reason)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
+falsepositives:
+  - A developer installing or upgrading an MCP server by hand while the agent is
+    the monitored ancestor of their shell
+  - Package managers writing plugin manifests during an ordinary npm/pip install
+  - Editor extensions rewriting their own settings files
+  - Repository checkout materialising a committed .mcp.json

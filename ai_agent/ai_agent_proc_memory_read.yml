@@ -1,0 +1,84 @@
+title: Process Memory Read via /proc Filesystem
+id: bcc3f1fe-0c5f-53d3-b7a4-0639619810be
+status: experimental
+description: |
+  Detects attempts to read process memory or environment variables via the Linux
+  /proc pseudo-filesystem (/proc/*/mem, /proc/*/environ, /proc/*/maps, /proc/*/fd)
+  or /dev/mem. Supply-chain malware injected into AI framework packages uses this
+  to lift AWS/GCP tokens and Kubernetes service-account credentials out of running
+  processes without ever touching a credential file on disk.
+
+  Ported from sigma-ai. Netzilo addition: the same patterns are evaluated on the
+  execute_process context, so a /proc read performed by a subprocess the agent
+  spawned is caught at the syscall layer even when it never appears as a tool call.
+references:
+  - https://attack.mitre.org/techniques/T1005/
+  - https://www.kaspersky.com/blog/critical-supply-chain-attack-trivy-litellm-checkmarx-teampcp/55510/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-30"
+modified: "2026-08-03"
+tags:
+  - attack.collection
+  - attack.t1005
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Specific /proc targets that only make sense for memory/secret extraction.
+  # Bare '/proc/' is deliberately NOT matched — /proc/cpuinfo, /proc/meminfo and
+  # /proc/*/stat reads are routine in health checks and would swamp this rule.
+  sel_proc_sensitive_cmd:
+    event_type: tool_call
+    command|re: '(?i)/proc/([0-9]+|self)/(mem|environ|maps|fd|cmdline)\b'
+  sel_proc_sensitive_exec:
+    event_type: execute_process
+    command|re: '(?i)/proc/([0-9]+|self)/(mem|environ|maps|fd|cmdline)\b'
+  # Wildcard forms used by shell loops over every PID.
+  sel_proc_glob_cmd:
+    event_type: tool_call
+    command|re: '(?i)/proc/\*/(mem|environ|maps|cmdline)\b'
+  sel_proc_glob_exec:
+    event_type: execute_process
+    command|re: '(?i)/proc/\*/(mem|environ|maps|cmdline)\b'
+  sel_devmem_cmd:
+    event_type: tool_call
+    command|contains:
+      - '/dev/mem'
+      - '/dev/kmem'
+  sel_devmem_exec:
+    event_type: execute_process
+    command|contains:
+      - '/dev/mem'
+      - '/dev/kmem'
+  # Python/Node source that opens a /proc path — reaches the tool_call context as
+  # the argument of a write/edit tool or an inline interpreter invocation.
+  sel_code_open_proc:
+    event_type: tool_call
+    command|contains:
+      - "open('/proc/"
+      - 'open("/proc/'
+      - "open(f'/proc/"
+      - 'open(f"/proc/'
+      - "readFileSync('/proc/"
+      - 'readFileSync("/proc/'
+  # A tool reading the path directly rather than shelling out.
+  sel_tool_path_proc:
+    event_type: tool_call
+    file_path|re: '(?i)^/proc/([0-9]+|self)/(mem|environ|maps|fd|cmdline)'
+  filter_self_environ_container:
+    # A process reading its OWN environment is how container entrypoints and
+    # health checks inspect their config. Only /proc/self/environ is excluded —
+    # reading another PID's environ has no benign equivalent.
+    event_type: tool_call
+    command|re: '(?i)^\s*(cat|head)\s+/proc/self/environ\s*$'
+  condition: >
+    (sel_proc_sensitive_cmd or sel_proc_sensitive_exec or
+     sel_proc_glob_cmd or sel_proc_glob_exec or
+     sel_devmem_cmd or sel_devmem_exec or
+     sel_code_open_proc or sel_tool_path_proc)
+    and not filter_self_environ_container
+falsepositives:
+  - Performance profilers reading /proc/*/maps for memory analysis (gdb, pprof, valgrind wrappers)
+  - Container runtimes inspecting /proc/*/cmdline to enumerate processes
+  - Debuggers attached to a developer's own process during troubleshooting
+level: critical

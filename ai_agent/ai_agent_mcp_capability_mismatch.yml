@@ -12,7 +12,7 @@ date: "2026-06-03"
 tags:
   - attack.privilege-escalation
   - attack.t1078
-  - attack.defense-evasion
+  - attack.stealth
 logsource:
   product: ai_agent
   category: agent_events
@@ -39,11 +39,22 @@ detection:
       - 'execute'
       - 'send_email'
       - 'upload'
-  # LP3: No permission declaration at all — skill manifest missing permissions field
-  selection_no_permissions:
+  # LP3: No permission declaration at all — skill manifest names a tool but never
+  # declares permissions.
+  #
+  # Netzilo compiles |re: with Go's regexp (RE2), which has NO negative lookahead:
+  # a pattern like '"name"…(?!.*"permissions")' fails regexp.Compile(), findRegex()
+  # returns nil, and the selection silently never matches. The absence of a field
+  # must therefore be expressed as a filter selection negated in the condition.
+  selection_manifest_named:
     event_type: skill_acquired
-    content|re: '(?i)"name"\s*:\s*"[^"]+"(?!.*"permissions")'
-  condition: (selection_readonly_declared and selection_write_capability) or selection_no_permissions
+    content|re: '(?i)"name"\s*:\s*"[^"]+"'
+  filter_declares_permissions:
+    event_type: skill_acquired
+    content|contains: '"permissions"'
+  condition: >
+    (selection_readonly_declared and selection_write_capability) or
+    (selection_manifest_named and not filter_declares_permissions)
 falsepositives:
   - Skills that declare read-only in documentation but legitimately need write for their function
   - Skill manifests where permissions field appears later in the document

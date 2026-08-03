@@ -1,0 +1,54 @@
+title: ANSI Escape Injection in Tool Output
+id: netzilo-tool-output-ansi-injection-001
+status: experimental
+description: |
+  Detects ANSI escape sequences in tool results. A tool that returns escape codes
+  can overwrite what a terminal already printed, hide appended instructions from
+  the operator while leaving them visible to the model, or forge an approval
+  prompt. The output is untrusted data that the agent will read as context.
+
+  This is the tool_response half of the upstream sigma-ai mcp_tool_poisoning
+  rule, split out because Netzilo scopes rules to one logsource.category and
+  tool descriptions and tool results are separate contexts.
+references:
+  - https://attack.mitre.org/techniques/T1027/
+  - https://cwe.mitre.org/data/definitions/117.html
+author: Netzilo (from AgentShield mcp_tool_poisoning)
+date: "2026-08-03"
+tags:
+  - attack.stealth
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: tool_output
+detection:
+  # The literal ESC byte, written in Go RE2 codepoint syntax. Two things must NOT
+  # be done here: a raw 0x1B byte in the YAML ("control characters are not
+  # allowed" from gopkg.in/yaml.v3), and a \u001b escape (RE2 rejects \u as an
+  # invalid escape sequence). \x{001b} is the only spelling that works.
+  sel_ansi_literal:
+    response|re: '(?i)\x{001b}\['
+  # Escape sequences that survived as source text rather than raw bytes, which is
+  # how they arrive when the tool result was JSON-encoded by an intermediary.
+  sel_ansi_encoded:
+    response|contains:
+      - '\x1b['
+      - '\033['
+      - '\e['
+  # Cursor and screen manipulation — the primitives used to rewrite scrollback.
+  sel_screen_control:
+    response|re: '(?i)\x{001b}\[[0-9;]*[ABCDEFGJKSTfHhlmn]'
+  filter_colour_only:
+    # SGR colour and reset codes alone are ordinary CLI output (git, npm, pytest).
+    # Only excluded when NO cursor/screen control sequence is present, which the
+    # condition enforces by requiring sel_screen_control for the literal arm.
+    response|re: '(?i)^(?:[^\x{001b}]|\x{001b}\[[0-9;]*m)*$'
+  condition: >
+    (sel_ansi_literal and sel_screen_control and not filter_colour_only)
+    or sel_ansi_encoded
+falsepositives:
+  - CLI tools whose output legitimately includes progress bars or spinners
+    (these use cursor control) — scope with a `when.tool` filter or allowlist
+    the specific tool before promoting the level
+  - Test frameworks that reprint a status line in place
+level: medium

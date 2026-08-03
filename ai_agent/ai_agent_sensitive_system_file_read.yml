@@ -1,0 +1,60 @@
+title: Sensitive System File Read
+id: cb33c5f1-4bd1-5d36-a9b7-3e56737f928b
+related:
+  - id: cb33c5f1-4bd1-5d36-a9b7-3e56737f928b-p
+    type: companion
+status: experimental
+description: |
+  Detects reads of system account and authentication files — /etc/passwd,
+  /etc/shadow, /etc/sudoers, the auth log, root's authorized_keys. Account
+  enumeration and privilege-path discovery before escalation.
+
+  Ported from sigma-ai, the only rule added upstream after the initial Netzilo
+  port. Netzilo change: upstream's `selection_file_read_sensitive_unix` arm uses
+  `event_type: file_read`, which has no live client producer, so the read is
+  matched at the tool_call and execute_process layers here and the companion
+  periodic rule covers syscall-level reads via READ_FILE graph edges.
+references:
+  - https://attack.mitre.org/techniques/T1087/
+  - https://attack.mitre.org/techniques/T1552/
+author: AgentShield (ported to Netzilo)
+date: "2026-07-03"
+modified: "2026-08-03"
+tags:
+  - attack.discovery
+  - attack.t1087
+  - attack.credential-access
+  - attack.t1552
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # A read utility aimed at an account or auth file.
+  sel_read_util_cmd:
+    event_type: tool_call
+    command|re: '(?i)\b(cat|less|more|head|tail|grep|awk|sed|strings|cp|scp)\b.*\s/(etc/(passwd|shadow|sudoers|sudoers\.d|group|gshadow)|var/log/auth\.log|var/log/secure|root/\.ssh/authorized_keys)\b'
+  sel_read_util_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(cat|less|more|head|tail|grep|awk|sed|strings|cp|scp)\b.*\s/(etc/(passwd|shadow|sudoers|sudoers\.d|group|gshadow)|var/log/auth\.log|var/log/secure|root/\.ssh/authorized_keys)\b'
+  # A Read tool pointed straight at the path, no shell involved.
+  sel_read_tool_path:
+    event_type: tool_call
+    file_path|re: '(?i)^/(etc/(passwd|shadow|sudoers|group|gshadow)|var/log/(auth\.log|secure)|root/\.ssh/authorized_keys)'
+  # macOS equivalents.
+  sel_macos_directory:
+    event_type: tool_call
+    command|re: '(?i)\b(dscl|dscacheutil)\b.*\b(-read|-list)\b.*\b(/Users|/Local/Default/Users)\b'
+  filter_passwd_existence_check:
+    # `test -f /etc/passwd` and `ls -l /etc/passwd` are portability and
+    # permission checks, not reads of the contents.
+    event_type: tool_call
+    command|re: '(?i)^\s*(test|\[|ls|stat|file)\s'
+  condition: >
+    (sel_read_util_cmd or sel_read_util_exec or sel_read_tool_path or sel_macos_directory)
+    and not filter_passwd_existence_check
+falsepositives:
+  - System administration and user-provisioning scripts run deliberately
+  - Configuration-management agents (Ansible, Puppet, Chef) reading account state
+  - Container image builds appending a service account to /etc/passwd
+  - Compliance tooling auditing sudoers or authorized_keys on a schedule
+level: high

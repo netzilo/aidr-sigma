@@ -1,0 +1,84 @@
+title: Sensitive System File Read (EDR Graph)
+id: cb33c5f1-4bd1-5d36-a9b7-3e56737f928b-p
+related:
+  - id: cb33c5f1-4bd1-5d36-a9b7-3e56737f928b
+    type: companion
+status: experimental
+description: |
+  Periodic companion to ai_agent_sensitive_system_file_read. Walks READ_FILE edges
+  in the AIDR behaviour graph for accesses to account and authentication files.
+  This is the only path that sees a read performed by a spawned subprocess:
+  staticscanner/edr.go scans exec events but routes file events to AIDR ingest
+  only, so no file_read rule ever fires live.
+author: Netzilo
+date: "2026-08-03"
+modified: "2026-08-03"
+level: medium
+tags:
+  - attack.discovery
+  - attack.t1087
+  - attack.credential-access
+  - attack.t1552
+logsource:
+  product: ai_agent
+  category: periodic
+detection:
+  sel:
+    content|re: '.'
+  condition: sel
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # FTS5 phrase queries. The unicode61 tokeniser splits on '/', '.' and '_', so
+  # "/etc/shadow" tokenises to ["etc","shadow"] and is queried as the adjacent
+  # phrase '"etc shadow"'. A bare "shadow" token would also match
+  # /usr/share/shadow-utils and any file whose name merely contains the word.
+  SENSITIVE = [
+      '"etc passwd"',
+      '"etc shadow"',
+      '"etc sudoers"',
+      '"etc gshadow"',
+      '"auth log"',
+      '"root ssh authorized keys"',
+  ]
+
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          chain = new_chain(aid)
+          hits = []
+
+          for e in edges(aid, dir="out", kind="READ_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              for pat in SENSITIVE:
+                  entries = fs_activity(fs["id"], "READ", pat)
+                  if len(entries) == 0:
+                      continue
+                  entry = entries[0]
+                  hits.append(entry["path"])
+                  chain.append(step(e,
+                      stage_id="Discovery",
+                      stage_desc="account/auth file read: " + entry["path"],
+                      activity=entry))
+
+          if len(hits) > 0:
+              print("Sensitive system file read at EDR level: " + ", ".join(hits))
+              return {
+                  "action": "report",
+                  "reason": "Account/authentication file read outside a tool call: " +
+                            ", ".join(hits),
+                  "chain": chain,
+              }
+      return "allow"
+
+  result = run()
+falsepositives:
+  - Configuration-management agents reading account state on a schedule
+  - Login and session tooling consulting /etc/passwd as designed — a monitored
+    agent that spawns a shell will show that shell's own passwd lookups here
+  - Compliance scanners auditing sudoers or authorized_keys

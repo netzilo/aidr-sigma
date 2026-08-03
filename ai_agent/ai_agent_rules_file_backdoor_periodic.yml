@@ -1,0 +1,98 @@
+title: Hidden Unicode in Agent Instruction Files (EDR Graph)
+id: 78b34f4d-5fde-57a5-905d-00fd92ed359c-p
+related:
+  - id: 78b34f4d-5fde-57a5-905d-00fd92ed359c
+    type: companion
+status: experimental
+description: |
+  Periodic companion to ai_agent_rules_file_backdoor. The trigger rule sees the
+  agent's own Write/Edit tool call; this one sees WRITE_FILE and CREATE_FILE edges
+  in the AIDR behaviour graph, which is the only way a write performed by a
+  subprocess the agent spawned (a script it generated, `sed -i`, a package
+  postinstall hook) becomes visible — staticscanner/edr.go routes file events to
+  AIDR ingest only, never to rule evaluation.
+
+  Verdict is `report`: the write has already happened by the time a periodic scan
+  observes it, so blocking has no preventive value here. The trigger rule is the
+  enforcement point.
+author: Netzilo
+date: "2026-08-03"
+modified: "2026-08-03"
+level: medium
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.stealth
+  - attack.t1564
+logsource:
+  product: ai_agent
+  category: periodic
+detection:
+  sel:
+    content|re: '.'
+  condition: sel
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # FTS5 phrase patterns. The unicode61 tokeniser splits on '/', '.' and '_', so
+  # "CLAUDE.md" tokenises to ["claude","md"] and must be queried as the adjacent
+  # phrase '"claude md"' — a bare token would miss it. The outer double quotes are
+  # FTS5 syntax, not Starlark delimiters.
+  INSTRUCTION_PATTERNS = [
+      '"cursorrules"',
+      '"windsurfrules"',
+      '"claude md"',
+      '"agents md"',
+      '"copilot instructions md"',
+      '"cursor rules"',
+  ]
+
+  def scan_op(fs_id, op, chain, stages):
+      """Record any instruction-file path touched by this op."""
+      for pat in INSTRUCTION_PATTERNS:
+          entries = fs_activity(fs_id, op, pat)
+          for entry in entries:
+              stages.append(op + " " + entry["path"])
+              return entry      # first hit per pattern is enough evidence
+      return None
+
+  def run():
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          chain = new_chain(aid)
+          stages = []
+
+          for kind in ["WRITE_FILE", "CREATE_FILE"]:
+              op = "WRITE"
+              if kind == "CREATE_FILE":
+                  op = "CREATE"
+              for e in edges(aid, dir="out", kind=kind):
+                  fs = node(e["to"])
+                  if fs == None:
+                      continue
+                  entry = scan_op(fs["id"], op, chain, stages)
+                  if entry != None:
+                      chain.append(step(e,
+                          stage_id="Persistence",
+                          stage_desc="agent instruction file modified: " + entry["path"],
+                          activity=entry))
+
+          if len(stages) > 0:
+              print("Instruction file(s) modified at EDR level: " + ", ".join(stages))
+              return {
+                  "action": "report",
+                  "reason": "Agent instruction file modified outside a tool call: " +
+                            ", ".join(stages),
+                  "chain": chain,
+              }
+      return "allow"
+
+  result = run()
+falsepositives:
+  - A developer editing CLAUDE.md or .cursorrules in their own editor while the
+    agent process is the monitored ancestor of that editor
+  - Repository checkout or branch switch rewriting instruction files
+  - Formatter or pre-commit hook rewriting the file in place

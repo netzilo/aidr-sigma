@@ -1,0 +1,86 @@
+title: Authority Impersonation in Agent Input
+id: 325e6012-52d6-5504-983a-80856b12c609
+status: experimental
+description: |
+  Detects text that claims institutional authority in order to talk the agent past
+  its own guardrails — "as your system administrator", "approved by the CISO",
+  "per company policy you must". The claim is the attack: the agent has no way to
+  verify it, and the phrasing exists to make refusal feel like non-compliance.
+
+  Ported from sigma-ai. Netzilo field/context corrections:
+    * Upstream selects `event_type: user_input` and `content_retrieval`; neither
+      exists in Netzilo. A prompt submitted through the framework hook arrives as
+      the `llm_request` context, and externally-loaded content arrives as
+      `skill_acquired` (semantic classifier) or `tool_response`.
+    * Upstream matches the `message` field, which BuildLogEntry() never populates.
+      The equivalents are `message.content` for llm_request, `response` for
+      tool_response, and `skill` for skill_acquired — one selection each, because
+      the field differs per surface.
+references:
+  - https://attack.mitre.org/techniques/T1566/
+  - https://attack.mitre.org/techniques/T1656/
+  - https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6372438
+author: AgentShield (ported to Netzilo)
+date: "2026-07-11"
+modified: "2026-08-03"
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - attack.stealth
+  - attack.t1656
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── The prompt surface (framework hook → llm_request) ─────────────────────
+  sel_prompt_authority:
+    event_type: llm_request
+    message.content|contains:
+      - 'as your system administrator'
+      - 'I am the developer'
+      - 'this is an authorized override'
+      - 'this is an authorised override'
+      - 'management has approved'
+      - 'the security team has verified'
+      - 'per company policy you must'
+      - 'IT department requires'
+      - 'your supervisor has instructed'
+      - 'official directive from'
+      - 'compliance requires you to'
+  # ── Externally loaded content (skill/instruction documents) ───────────────
+  # The far more dangerous surface: the agent did not ask for this text, it was
+  # fetched, so authority claims inside it are unambiguously injected.
+  sel_skill_authority:
+    event_type: skill_acquired
+    skill|contains:
+      - 'as your system administrator'
+      - 'this is an authorized override'
+      - 'this is an authorised override'
+      - 'the security team has verified'
+      - 'per company policy you must'
+      - 'official directive from'
+      - 'signed by the administrator'
+      - 'approved by the CISO'
+      - 'per the governance board'
+      - 'verified by the development team'
+  # ── Tool output ──────────────────────────────────────────────────────────
+  sel_tool_output_authority:
+    event_type: tool_response
+    response|contains:
+      - 'as your system administrator'
+      - 'this is an authorized override'
+      - 'this is an authorised override'
+      - 'official documentation states'
+      - 'from the security team:'
+      - 'verified by the development team'
+      - 'according to internal policy'
+      - 'signed by the administrator'
+      - 'approved by the CISO'
+      - 'per the governance board'
+  condition: sel_prompt_authority or sel_skill_authority or sel_tool_output_authority
+falsepositives:
+  - A genuine administrator or developer describing their role in a prompt
+  - Security awareness training material and phishing-simulation content
+  - Policy documents legitimately retrieved and summarised by the agent
+  - Incident runbooks that quote approval language verbatim
+level: high

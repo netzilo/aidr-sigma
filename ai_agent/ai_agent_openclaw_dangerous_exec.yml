@@ -19,62 +19,62 @@ modified: "2026-02-24"
 tags:
   - attack.execution
   - attack.t1059
-  - attack.defense-evasion
+  - attack.stealth
 logsource:
   product: ai_agent
   category: agent_events
   source: openclaw
 detection:
   selection_curl_bash:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '| bash'
   selection_curl_sh:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '| sh'
   selection_wget_bash:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'wget'
       - '| bash'
   selection_wget_sh:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'wget'
       - '| sh'
   selection_curl_python:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '| python'
   selection_wget_python:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'wget'
       - '| python'
   selection_bash_c_curl:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'bash -c'
       - 'curl'
   selection_bash_c_wget:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'bash -c'
       - 'wget'
   selection_eval_download:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'eval'

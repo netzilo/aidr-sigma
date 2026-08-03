@@ -17,7 +17,7 @@ author: AgentShield
 date: "2026-03-16"
 modified: "2026-03-16"
 tags:
-  - attack.defense-evasion
+  - attack.stealth
   - attack.t1195.002
 logsource:
   product: ai_agent

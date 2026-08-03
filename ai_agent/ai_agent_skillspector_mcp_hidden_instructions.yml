@@ -14,7 +14,7 @@ date: "2026-06-03"
 tags:
   - attack.initial-access
   - attack.t1566
-  - attack.defense-evasion
+  - attack.stealth
   - attack.t1027
 logsource:
   product: ai_agent
@@ -31,7 +31,7 @@ detection:
     event_type:
       - skill_acquired
       - tool_response
-    content|re: '[\u200b\u200c\u200d]{2,}'
+    content|re: '[\x{200b}\x{200c}\x{200d}]{2,}'
   # Large base64 blobs (>=50 chars) in skill descriptions that are not image data
   selection_base64_blob:
     event_type:

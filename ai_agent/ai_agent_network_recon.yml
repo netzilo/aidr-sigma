@@ -1,0 +1,62 @@
+title: Network Reconnaissance Activity
+id: 5ab0c6d8-c202-5f02-b71c-f0228052c20d
+status: experimental
+description: |
+  Detects port scanning and network enumeration — an agent mapping reachable
+  services before lateral movement. Scanner invocation is matched on both the
+  tool_call and execute_process contexts.
+
+  Ported from sigma-ai. Netzilo addition: the execute_process selections catch a
+  scanner launched by a subprocess (`bash -c 'nmap …'`, a script the agent wrote
+  and then ran) which never surfaces as a tool call.
+references:
+  - https://attack.mitre.org/techniques/T1046/
+  - https://attack.mitre.org/techniques/T1040/
+author: AgentShield (ported to Netzilo)
+date: "2026-01-25"
+modified: "2026-08-03"
+tags:
+  - attack.discovery
+  - attack.t1046
+  - attack.t1040
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Dedicated scanners. Anchored with \b so 'nmap' does not match inside a path
+  # like /opt/nmap-notes/README and 'zmap' does not match 'zmapper'.
+  sel_scanner_cmd:
+    event_type: tool_call
+    command|re: '(?i)\b(nmap|masscan|zmap|rustscan|unicornscan|nbtscan|arp-?scan|fping|nping)\b'
+  sel_scanner_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(nmap|masscan|zmap|rustscan|unicornscan|nbtscan|arp-?scan|fping|nping)\b'
+  # netcat in scan mode. `nc -v host port` alone is legitimate connectivity
+  # testing, so only the port-sweep flag combinations are matched.
+  sel_nc_scan_cmd:
+    event_type: tool_call
+    command|re: '(?i)\b(nc|ncat|netcat)\b\s+(-[a-z]*z[a-z]*|-[a-z]*nv[a-z]*)\b'
+  sel_nc_scan_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(nc|ncat|netcat)\b\s+(-[a-z]*z[a-z]*|-[a-z]*nv[a-z]*)\b'
+  # Bash /dev/tcp port sweeps — no external binary required, so the scanner
+  # selections above miss them entirely.
+  sel_devtcp_sweep:
+    event_type: tool_call
+    command|contains|all:
+      - '/dev/tcp/'
+      - 'for '
+  filter_localhost_only:
+    # Scanning your own loopback is standard local development (checking whether
+    # a dev server came up). Only excluded when no other host appears.
+    event_type: tool_call
+    command|re: '(?i)\b(nc|ncat|netcat|nmap)\b[^;|&]*\b(localhost|127\.0\.0\.1|::1)\b'
+  condition: >
+    (sel_scanner_cmd or sel_scanner_exec or
+     sel_nc_scan_cmd or sel_nc_scan_exec or sel_devtcp_sweep)
+    and not filter_localhost_only
+falsepositives:
+  - Authorised internal vulnerability scanning and asset inventory runs
+  - Developers checking whether a service is listening on a remote host
+  - CI pipelines waiting on a dependency's port to open before running tests
+level: high

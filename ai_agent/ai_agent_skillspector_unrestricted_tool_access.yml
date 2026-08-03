@@ -13,7 +13,7 @@ date: "2026-06-03"
 tags:
   - attack.privilege-escalation
   - attack.t1078
-  - attack.defense-evasion
+  - attack.defense-impairment
 logsource:
   product: ai_agent
   category: agent_events

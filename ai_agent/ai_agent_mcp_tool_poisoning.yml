@@ -1,0 +1,90 @@
+title: Suspicious MCP Tool Descriptions
+id: 27eee8c9-af55-5190-8601-1e7b365afc99
+status: experimental
+description: |
+  Detects instruction injection inside MCP tool and gateway descriptions — text
+  the model reads as trusted context before it ever calls the tool. A poisoned
+  description can redirect the agent's behaviour without any malicious tool call
+  appearing in the transcript.
+
+  Ported from sigma-ai with two Netzilo corrections:
+    * Upstream selects `event_type: tool_description`. Netzilo's
+      contextToEventType() collapses the tool-description phase to event_type
+      "tool_call", so that selection can never match. The rule is scoped with
+      `logsource.category: tool_description` instead, which is a real live
+      context (OnMCPToolCall's description phase) and needs no event_type filter.
+    * Upstream matches the `description` field. Netzilo delivers the description
+      body in `content`.
+  The ANSI-in-tool-output half of the upstream rule is a different context and
+  lives in ai_agent_tool_output_ansi_injection.yml.
+references:
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1027/
+  - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+author: AgentShield (ported to Netzilo)
+date: "2026-02-16"
+modified: "2026-08-03"
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.stealth
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: tool_description
+detection:
+  # Pseudo-system framing inside a description — the tool asserting authority it
+  # does not have.
+  sel_system_framing:
+    content|contains:
+      - '<IMPORTANT>'
+      - '<SYSTEM>'
+      - '{{SYSTEM:'
+      - '[SYSTEM]'
+      - '<|im_start|>'
+      - 'OVERRIDE:'
+      - 'IGNORE PREVIOUS'
+      - 'NEW INSTRUCTIONS:'
+      - 'DISREGARD ALL'
+  # Imperative conditioning. Requires BOTH an absolute and an obligation word:
+  # either alone is common in legitimate API documentation.
+  sel_imperative_pair:
+    content|contains|all:
+      - 'ALWAYS'
+      - 'MUST'
+  # ANSI escapes hide text from a terminal-rendered description while the model
+  # still reads it. The raw ESC byte cannot be written into the YAML (yaml.v3
+  # rejects control characters), so the literal form is matched via the RE2
+  # codepoint escape \x{001b} and the source-text spellings are matched separately.
+  sel_ansi_literal:
+    content|re: '(?i)\x{001b}\['
+  sel_ansi_encoded:
+    content|contains:
+      - '\x1b['
+      - '\033['
+      - '\e['
+  # CSS/markup that renders the text invisible in a UI that displays descriptions.
+  sel_hidden_markup:
+    content|contains:
+      - 'color: white'
+      - 'color:#fff'
+      - 'display: none'
+      - 'visibility: hidden'
+      - 'font-size: 0'
+      - 'opacity: 0'
+  filter_security_documentation:
+    # Descriptions of security tooling legitimately quote these markers.
+    content|contains:
+      - 'prompt injection detection'
+      - 'sanitis'
+      - 'sanitiz'
+      - 'this tool scans for'
+  condition: >
+    (sel_system_framing or sel_imperative_pair or sel_ansi_literal or
+     sel_ansi_encoded or sel_hidden_markup)
+    and not filter_security_documentation
+falsepositives:
+  - API documentation that genuinely uses ALWAYS and MUST in the same description
+  - Terminal-oriented tools whose descriptions embed colour codes for output samples
+  - Security tools whose descriptions quote injection markers as examples
+level: high

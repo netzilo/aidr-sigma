@@ -22,58 +22,58 @@ logsource:
 detection:
   # curl POST/PUT with data
   selection_curl_post:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '-X POST'
   selection_curl_put:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '-X PUT'
   selection_curl_data:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '--data'
   selection_curl_d_flag:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - ' -d '
   selection_curl_upload:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'curl'
       - '-F '
   # wget POST
   selection_wget_post:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'wget'
       - '--post-data'
   selection_wget_post_file:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'wget'
       - '--post-file'
   # Netcat / ncat data transfer
   selection_nc_pipe:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains:
       - '| nc '
       - '| ncat '
   # Encoded exfiltration via DNS or base64
   selection_base64_curl:
-    source: openclaw
+    server: openclaw
     event_type: tool_call
     command|contains|all:
       - 'base64'

@@ -9,7 +9,7 @@ description: |
 author: Netzilo (SkillSpector TM3)
 date: "2026-06-03"
 tags:
-  - attack.defense-evasion
+  - attack.defense-impairment
   - attack.t1562
   - attack.credential-access
 logsource:

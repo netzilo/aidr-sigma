@@ -1,0 +1,65 @@
+title: Filesystem and Cloud Enumeration Preceding Lateral Movement
+id: 8e4f5d74-7aa5-5b67-a647-aad470bf4030
+status: experimental
+description: |
+  Detects broad filesystem walks and cloud-object enumeration — the discovery
+  phase an agent performs before deciding what to take. Individually these are
+  ordinary commands, so the selections require the recursive/whole-tree forms
+  rather than any ls or find.
+
+  Ported from sigma-ai. Netzilo change: upstream's `selection_agent_tools`
+  matched the bare strings 'list_files' / 'list_directory' against the command
+  field, which fires on any prose mentioning the tool name. Netzilo resolves the
+  actual tool name into the `tool` field, so that selection is expressed against
+  `tool` plus a recursive argument instead.
+references:
+  - https://attack.mitre.org/techniques/T1083/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-23"
+modified: "2026-08-03"
+tags:
+  - attack.discovery
+  - attack.t1083
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Recursive listing of a whole tree. `ls -R` with any flag ordering.
+  sel_recursive_ls:
+    event_type: tool_call
+    command|re: '(?i)\bls\s+-[a-z]*R[a-z]*\b'
+  # find rooted at a system-wide or home-wide path. `find .` and `find ./src`
+  # are scoped to the workspace and deliberately not matched.
+  sel_find_broad:
+    event_type: tool_call
+    command|re: '(?i)\bfind\s+(/|/home|/Users|/etc|/var|~)\s'
+  sel_find_broad_exec:
+    event_type: execute_process
+    command|re: '(?i)\bfind\s+(/|/home|/Users|/etc|/var|~)\s'
+  # Cloud object enumeration across a whole bucket or subscription.
+  sel_cloud_enum:
+    event_type: tool_call
+    command|re: '(?i)(aws\s+s3\s+ls\s+(--recursive|s3://)|gsutil\s+ls\s+-r|gcloud\s+storage\s+ls|az\s+storage\s+blob\s+list)'
+  sel_cloud_enum_exec:
+    event_type: execute_process
+    command|re: '(?i)(aws\s+s3\s+ls\s+(--recursive|s3://)|gsutil\s+ls\s+-r|gcloud\s+storage\s+ls|az\s+storage\s+blob\s+list)'
+  # A listing tool invoked recursively. Matched on the resolved tool name so a
+  # description that merely mentions "list_files" does not fire.
+  sel_listing_tool_recursive:
+    event_type: tool_call
+    tool|re: '(?i)^(list_files|list_directory|glob|Glob)$'
+    content|re: '(?i)"(recursive|depth)"\s*:\s*(true|[3-9]|[1-9][0-9])'
+  filter_workspace_scoped:
+    # Enumerating the project the agent was asked to work on is the whole point.
+    event_type: tool_call
+    command|re: '(?i)\b(ls|find)\b[^;|&]*\s(\.|\./|\$\{?PWD)'
+  condition: >
+    (sel_recursive_ls or sel_find_broad or sel_find_broad_exec or
+     sel_cloud_enum or sel_cloud_enum_exec or sel_listing_tool_recursive)
+    and not filter_workspace_scoped
+falsepositives:
+  - Build systems and linters walking a source tree
+  - Backup and sync tooling enumerating a home directory
+  - Cloud cost or inventory reporting that lists buckets on a schedule
+  - An agent legitimately asked to audit or index a large repository
+level: high

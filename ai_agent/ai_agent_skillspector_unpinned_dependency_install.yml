@@ -19,9 +19,18 @@ detection:
   selection_latest_flag:
     event_type: tool_call
     content|re: '(?i)pip\s+install.*?(?:--upgrade|--latest)'
+  # A bare package name with no version specifier. Netzilo compiles |re: with Go's
+  # regexp (RE2), which has NO negative lookahead — the previous
+  # '(?!-)…(?![>=!<\[])' form failed regexp.Compile(), so findRegex() returned nil
+  # and this selection never matched. Both lookaheads are expressible without one:
+  #   (?!-)  is redundant — [a-zA-Z] already cannot match a leading '-', so
+  #          `pip install -r reqs.txt` is excluded by the character class.
+  #   (?![>=!<\[])  is subsumed by requiring (\s|$) directly after the name: a
+  #          pinned install (`pip install foo==1.0`, `foo>=2`, `foo[extra]`) has
+  #          no whitespace or end-of-string at that position and cannot match.
   selection_no_version:
     event_type: tool_call
-    content|re: '(?i)pip\s+install\s+(?!-)[a-zA-Z][a-zA-Z0-9_-]*(?:\s|$)(?![>=!<\[])'
+    content|re: '(?i)\bpip\s+install\s+[a-zA-Z][a-zA-Z0-9_.-]*(\s|$)'
   selection_npm_latest:
     event_type: tool_call
     content|re: '(?i)npm\s+(?:install|i)\s+[a-zA-Z@][a-zA-Z0-9@/_-]*(?:@latest)'

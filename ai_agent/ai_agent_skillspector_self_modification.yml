@@ -11,7 +11,7 @@ date: "2026-06-03"
 tags:
   - attack.persistence
   - attack.t1546
-  - attack.defense-evasion
+  - attack.defense-impairment
   - attack.t1562
 logsource:
   product: ai_agent

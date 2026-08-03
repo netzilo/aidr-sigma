@@ -1,0 +1,21 @@
+name: rulelint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  rulelint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml
+      # Errors fail the build. Warnings are printed for review but do not block:
+      # they flag decisions a human should make (is this regex intentionally
+      # case-sensitive?) rather than defects.
+      - name: Lint detection rules
+        run: python3 tools/rulelint.py ai_agent

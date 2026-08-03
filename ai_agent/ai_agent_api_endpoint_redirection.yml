@@ -1,0 +1,84 @@
+title: LLM API Endpoint or Auth Header Redirection
+id: 9e338173-4519-5c00-9fb6-d72b3cb0fd6f
+status: experimental
+description: |
+  Detects an agent's LLM traffic being pointed at a non-canonical endpoint, or a
+  provider API key being sent to a host that is not that provider. Redirecting
+  ANTHROPIC_BASE_URL or OPENAI_BASE_URL to an attacker-controlled relay hands over
+  every subsequent prompt, response and API key while the agent keeps working
+  normally.
+
+  Ported from sigma-ai, where every selection was dead: upstream matched
+  `event_type` values config_load / env_set / file_write / outbound_request and the
+  fields `request.headers` and `destination.host`, none of which any AgentShield
+  producer emits.
+
+  Netzilo does not need to infer the redirection from a config write — it sees the
+  request itself. `llm_request` carries the real provider and host, and HTTP
+  contexts expose individual request headers as header_<name>, so "an API key
+  going somewhere it should not" is a direct observation. The config-write arm is
+  kept as an early-warning signal at the tool_call layer.
+references:
+  - https://attack.mitre.org/techniques/T1556/
+  - https://attack.mitre.org/techniques/T1090/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-23"
+modified: "2026-08-03"
+tags:
+  - attack.credential-access
+  - attack.t1556
+  - attack.command-and-control
+  - attack.t1090
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── Arm 1: the agent writing an endpoint override ─────────────────────────
+  # Visible at the tool_call layer whether written as an env assignment, a shell
+  # export, or a JSON config body.
+  sel_base_url_override:
+    event_type: tool_call
+    content|re: '(?i)(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|OPENAI_BASE_URL|OPENAI_API_BASE|AZURE_OPENAI_ENDPOINT|GEMINI_API_BASE|baseURL|base_url|apiBase)\s*[:=]\s*"?https?://'
+  filter_canonical_base_url:
+    # The same assignment pointing at the provider's real API. Keep this list in
+    # step with the provider set the tenant actually uses — a missing entry here
+    # turns every legitimate configuration into an alert.
+    event_type: tool_call
+    content|re: '(?i)(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|OPENAI_BASE_URL|OPENAI_API_BASE|AZURE_OPENAI_ENDPOINT|GEMINI_API_BASE|baseURL|base_url|apiBase)\s*[:=]\s*"?https?://([a-z0-9-]+\.)*(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|bedrock[a-z0-9.-]*\.amazonaws\.com|localhost|127\.0\.0\.1)([:/"]|$)'
+  # ── Arm 2: an LLM request already going to a non-canonical host ───────────
+  # Netzilo resolves provider and host on every intercepted LLM call, so this is
+  # the redirection itself rather than a prediction of it.
+  sel_llm_request_any:
+    event_type: llm_request
+    host|re: '(?i).'
+  filter_canonical_llm_host:
+    event_type: llm_request
+    host|re: '(?i)(^|\.)(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|amazonaws\.com|githubcopilot\.com|localhost)$'
+  filter_loopback_llm_host:
+    # Local model servers (ollama, llama.cpp, vLLM) are a normal deployment.
+    event_type: llm_request
+    host|re: '(?i)^(127\.0\.0\.1|::1|localhost|host\.docker\.internal)$'
+  # ── Arm 3: a provider API key leaving to a third-party host ───────────────
+  # header_* is populated for HTTP contexts only; the key prefixes are the
+  # provider-issued formats.
+  sel_provider_key_header:
+    event_type: http_request
+    header_authorization|re: '(?i)Bearer\s+(sk-|sk-ant-|xai-)'
+  sel_provider_key_apikey:
+    event_type: http_request
+    header_x-api-key|re: '(?i)^(sk-|sk-ant-)'
+  filter_canonical_http_host:
+    event_type: http_request
+    host|re: '(?i)(^|\.)(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|amazonaws\.com|githubcopilot\.com|localhost)$'
+  condition: >
+    (sel_base_url_override and not filter_canonical_base_url) or
+    (sel_llm_request_any and not filter_canonical_llm_host and not filter_loopback_llm_host) or
+    ((sel_provider_key_header or sel_provider_key_apikey) and not filter_canonical_http_host)
+falsepositives:
+  - An approved LLM gateway or proxy (LiteLLM, Portkey, Helicone, an internal
+    relay) — add its host to the three filter selections before enabling, or this
+    rule will fire on every request
+  - Self-hosted inference on a LAN address rather than loopback
+  - A provider adding a new API domain not yet in the allowlists
+  - Developers testing against a mock LLM server on a non-loopback interface
+level: critical

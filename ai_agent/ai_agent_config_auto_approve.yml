@@ -17,7 +17,7 @@ modified: "2026-06-02"
 tags:
   - attack.privilege-escalation
   - attack.t1548
-  - attack.defense-evasion
+  - attack.defense-impairment
   - attack.t1112
 logsource:
   product: ai_agent

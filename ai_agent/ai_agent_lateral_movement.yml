@@ -1,0 +1,158 @@
+title: Agent Lateral Movement and Pivoting
+id: a76493f4-047c-5eab-994f-df740faa5180
+status: experimental
+description: |
+  Detects an agent moving from the host it was given to another one: remote
+  execution, credential reuse against a second host, or spawning a process that
+  immediately dials out. Two independent stages inside a short window are required
+  — a single ssh command is how developers work.
+
+  Upstream sigma-ai expresses this with `event_type: tool_sequence`,
+  `parallel_operations`, `agent_creation` and `authentication`, none of which any
+  producer emits, so the rule is entirely dead there. Netzilo reconstructs the
+  sequence from the behaviour graph: EXECUTE_PROCESS gives the spawn, CONNECTS and
+  HTTP_REQUEST give the egress, and READ_FILE gives the credential access — all
+  with timestamps, so ordering and windowing are real rather than assumed.
+
+  `authentication` has no Netzilo equivalent and is not covered: there is no
+  producer for auth outcomes, so credential *reuse* is inferred from a credential
+  read followed by a connection to a new host, not from a login event.
+references:
+  - https://attack.mitre.org/techniques/T1021/
+  - https://attack.mitre.org/techniques/T1078/
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-03-16"
+modified: "2026-08-03"
+tags:
+  - attack.lateral-movement
+  - attack.t1021
+  - attack.credential-access
+  - attack.t1078
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - execute_process
+      - http_request
+      - connects
+      - tool_call
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  WINDOW_NS = 180000000000    # 3 minutes across the whole chain
+
+  REMOTE_EXEC = [
+      r"\bssh\b", r"\bscp\b", r"\brsync\b.*::", r"\bpsexec\b",
+      r"\bwinrs\b", r"\bwmic\b\s+/node", r"\bkubectl\s+exec\b",
+      r"\bdocker\s+(-H|exec\s+-it)\b", r"\baws\s+ssm\s+start-session\b",
+      r"\bgcloud\s+compute\s+ssh\b", r"\baz\s+vm\s+run-command\b",
+  ]
+  CRED_TOKENS = [
+      '"ssh id rsa"', '"ssh id ed25519"', '"aws credentials"',
+      '"kube config"', '"netrc"',
+  ]
+
+  def has_remote_exec(cmd):
+      for pat in REMOTE_EXEC:
+          if re.find(pat, cmd) != None:
+              return re.find(pat, cmd)
+      return None
+
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct in ("tool_input", "execute_process"):
+          # Cheap: only proceed when the command itself shows a remote-exec verb.
+          # Word-anchored — a bare substring test matches "sshd" and file paths.
+          return has_remote_exec(meta.get("content", "")) != None
+      # Egress events always pass: they may be the second stage of a chain whose
+      # first stage is already in the graph.
+      if ct in ("http_request", "connects"):
+          return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      event_ts = int(meta.get("event_ts", "0"))
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+
+          # Stage 1 — a spawned process whose command line is a remote-exec verb.
+          for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              cmd = pe.get("cmdline", "")
+              verb = has_remote_exec(cmd)
+              if verb == None:
+                  continue
+              s0 = int(pe.get("ts", "0"))
+              if s0 == 0:
+                  continue
+              if event_ts > 0 and (event_ts - s0) > WINDOW_NS:
+                  continue      # stale — already handled
+
+              child = pe["to"]
+              chain = new_chain(aid)
+              chain.append(step(pe, stage_id="Remote Execution",
+                                stage_desc="spawned remote-exec process: " + verb))
+              stages = ["remote-exec:" + verb]
+
+              # Stage 2 — that child, or the agent, reaching a host.
+              for holder in [child, aid]:
+                  for kind in ["CONNECTS", "HTTP_REQUEST"]:
+                      for ce in edges(holder, dir="out", kind=kind):
+                          cts = int(ce.get("ts", ce.get("first_ts", "0")))
+                          if cts < s0 or (cts - s0) > WINDOW_NS:
+                              continue
+                          target = node(ce["to"])
+                          if target == None:
+                              continue
+                          # Movement toward an internal host is the concern.
+                          # Egress to a public host is data exfiltration, which
+                          # other rules own.
+                          if target.get("is_ztna_host", "0") != "1":
+                              continue
+                          where = target.get("host", target.get("id", "?"))
+                          chain.append(step(ce, stage_id="Pivot",
+                                            stage_desc=kind + " to internal host " + where))
+                          stages.append("pivot:" + where)
+
+              # Stage 3 — a credential read in the same window strengthens it.
+              for re_edge in edges(aid, dir="out", kind="READ_FILE"):
+                  fs = node(re_edge["to"])
+                  if fs == None:
+                      continue
+                  for tok in CRED_TOKENS:
+                      entries = fs_activity(fs["id"], "READ", tok)
+                      if len(entries) == 0:
+                          continue
+                      ets = int(entries[0]["ts"])
+                      if ets < (s0 - WINDOW_NS) or ets > (s0 + WINDOW_NS):
+                          continue
+                      chain.append(step(re_edge, stage_id="Credential Access",
+                                        stage_desc="read " + entries[0]["path"],
+                                        activity=entries[0]))
+                      stages.append("cred:" + entries[0]["path"])
+
+              if len(stages) >= 2:
+                  reason = "Lateral movement chain — " + ", ".join(stages)
+                  print(reason)
+                  return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
+falsepositives:
+  - Developers using ssh or kubectl exec to reach internal infrastructure as part
+    of the task they asked the agent to do — this is the dominant false positive
+    and the reason the verdict is report
+  - Deployment and configuration-management runs that ssh to a fleet
+  - Backup jobs using rsync between internal hosts
+level: medium

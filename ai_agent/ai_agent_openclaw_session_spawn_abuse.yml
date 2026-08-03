@@ -1,0 +1,73 @@
+title: Detached or Backgrounded Process Spawn
+id: 376e4fd2-341f-5e11-b3fc-d76555ffa0fd
+status: experimental
+description: |
+  Detects an agent launching work that outlives the session it was asked for —
+  nohup, disown, setsid, a detached screen/tmux session, or a fork bomb. A
+  detached process keeps running after the agent stops, so anything it does
+  afterwards is unattributed to the request that started it.
+
+  Ported from sigma-ai with two Netzilo corrections:
+    * Upstream gates every selection on `source: openclaw`. Netzilo resolves the
+      hook's identity into the `server` field, not `source` — `source` exists only
+      for semantic events — so a `source:` gate inside a tool_call selection is
+      false forever. The gate is dropped entirely rather than fixed to
+      `server: openclaw`: the technique is not OpenClaw-specific and Netzilo sees
+      the same commands from every framework.
+    * Upstream's `event_type: session_spawn` has no Netzilo equivalent. The
+      execute_process context is the real signal — it reports the actual spawn.
+    * Upstream's `selection_detached_shell` matched `bash` AND `&` anywhere in the
+      command, which fires on `a && b` and on any `&&` chain. Replaced with an
+      anchored trailing-`&` pattern.
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1543/
+author: AgentShield (ported to Netzilo)
+date: "2026-02-26"
+modified: "2026-08-03"
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.stealth
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Explicit detachment primitives.
+  sel_detach_cmd:
+    event_type: tool_call
+    command|re: '(?i)(\bnohup\b|\bsetsid\b|&\s*disown\b|\bdisown\s+-h\b)'
+  sel_detach_exec:
+    event_type: execute_process
+    command|re: '(?i)(\bnohup\b|\bsetsid\b|&\s*disown\b|\bdisown\s+-h\b)'
+  # Detached terminal multiplexer sessions.
+  sel_multiplexer_cmd:
+    event_type: tool_call
+    command|re: '(?i)(\bscreen\b\s+(-[a-zA-Z]*d[a-zA-Z]*m?|-S\b.*-d)|\btmux\b\s+new(-session)?\b.*\s-d)'
+  sel_multiplexer_exec:
+    event_type: execute_process
+    command|re: '(?i)(\bscreen\b\s+(-[a-zA-Z]*d[a-zA-Z]*m?|-S\b.*-d)|\btmux\b\s+new(-session)?\b.*\s-d)'
+  # A single trailing '&' backgrounds the command. Anchored at end-of-string so
+  # '&&' chains and '2>&1' redirects do not match: the character before must not
+  # be another '&' or a '>'.
+  sel_trailing_background:
+    event_type: tool_call
+    command|re: '[^&>]&\s*$'
+  # Fork bomb — the classic shell form and its variants.
+  sel_fork_bomb:
+    event_type: tool_call
+    command|re: '(?i)(:\s*\(\s*\)\s*\{.*\|\s*:.*&.*\}\s*;\s*:|\bwhile\s+true\s*;\s*do\s+.*&\s*done)'
+  filter_dev_server:
+    # Backgrounding a local dev server, watcher or test runner is routine.
+    event_type: tool_call
+    command|re: '(?i)\b(npm|yarn|pnpm|make|cargo|go|dotnet|gradle|mvn|vite|webpack|jest|pytest|uvicorn|gunicorn|rails|django-admin|flask)\b'
+  condition: >
+    (sel_detach_cmd or sel_detach_exec or sel_multiplexer_cmd or sel_multiplexer_exec or
+     sel_trailing_background or sel_fork_bomb)
+    and not filter_dev_server
+falsepositives:
+  - Long-running builds and dev servers started in the background deliberately
+  - CI helpers using nohup to survive a shell teardown
+  - Developers using tmux/screen as their normal working environment
+  - Log tailing or file watching backgrounded during a debugging session
+level: medium

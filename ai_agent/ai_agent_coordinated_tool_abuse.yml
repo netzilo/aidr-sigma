@@ -1,0 +1,134 @@
+title: Coordinated Tool Abuse Across Sessions
+id: a4422f2a-9c88-5eca-9eaf-8f7ed6978ebf
+status: experimental
+description: |
+  Detects the same sensitive tool being driven repeatedly across sessions — the
+  shape of a systemic campaign rather than one bad request. Any single call is
+  authorised and unremarkable; the volume over time is the signal.
+
+  Upstream sigma-ai expresses this with `session.cross_session_alert_count` and
+  `session.cross_session_tool_overlap`, injected by its in-memory session
+  registry. Netzilo has no session.* field injection at all, so those selections
+  cannot be ported — a rule referencing them evaluates to false forever.
+
+  What Netzilo has instead is durable: `store_set`/`store_get` give the rule a
+  private 1 MB keyspace that survives restarts, so counts accumulate across
+  sessions and across days rather than inside a 5-minute correlation window.
+  Buckets are hourly, and only the last 24 are kept so the store cannot grow
+  without bound.
+references:
+  - https://attack.mitre.org/techniques/T1078/
+  - https://papers.ssrn.com/sol3/papers.cfm?abstract_id=6372438
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-03-23"
+modified: "2026-08-03"
+tags:
+  - attack.discovery
+  - attack.t1078
+logsource:
+  product: ai_agent
+  category: tool_input
+detection:
+  sel_trigger:
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # Tools worth counting. A high call volume against a formatter is noise; against
+  # a credential store or a shell it is a campaign.
+  SENSITIVE_TOOL_MARKERS = [
+      "secret", "credential", "password", "token", "key",
+      "exec", "shell", "bash", "command", "terminal",
+      "delete", "drop", "grant", "permission", "role",
+  ]
+
+  HOUR_NS = 3600000000000
+  WINDOW_HOURS = 24
+  THRESHOLD = 40          # calls to one sensitive tool within 24h
+  MAX_STORE_FRACTION = 90
+
+  def is_sensitive(tool):
+      low = tool.lower()
+      for m in SENSITIVE_TOOL_MARKERS:
+          if m in low:
+              return True
+      return False
+
+  def quota_ok():
+      u = store_usage()
+      if u == None:
+          return False
+      limit = u.get("limit", 0)
+      if limit <= 0:
+          return False
+      return (u.get("bytes", 0) * 100) / limit < MAX_STORE_FRACTION
+
+  def run():
+      if meta.get("context_type", "") != "tool_input":
+          return "allow"
+
+      tool = meta.get("tool_name", "")
+      if tool == "" or not is_sensitive(tool):
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+      bucket = now / HOUR_NS
+
+      key = "c:" + meta.get("server_name", "") + "/" + tool
+      state = store_get(key)
+      if state == None:
+          state = {}
+
+      # Increment this hour's bucket, then drop anything older than the window.
+      bkey = str(bucket)
+      state[bkey] = state.get(bkey, 0) + 1
+
+      total = 0
+      pruned = {}
+      for k in state:
+          # Starlark dict keys from JSON are strings; compare numerically.
+          if (bucket - int(k)) < WINDOW_HOURS:
+              pruned[k] = state[k]
+              total = total + state[k]
+
+      if quota_ok():
+          store_set(key, pruned)
+
+      if total < THRESHOLD:
+          return "allow"
+
+      # Re-baseline so the alert does not repeat on every subsequent call once the
+      # threshold is crossed. Keeping only the current bucket preserves in-progress
+      # counting while resetting the alarm.
+      if quota_ok():
+          store_set(key, {bkey: pruned.get(bkey, 0)})
+
+      reason = ("Coordinated tool abuse: " + str(total) + " calls to sensitive tool '" +
+                tool + "' on server '" + meta.get("server_name", "?") +
+                "' within " + str(WINDOW_HOURS) + "h (threshold " + str(THRESHOLD) + ")")
+      print(reason)
+
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          chain = new_chain(p["id"])
+          for e in edges(p["id"], dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t != None and t.get("name", "") == tool:
+                  chain.append(step(e, stage_id="Campaign", stage_desc=reason))
+                  return {"action": "report", "reason": reason, "chain": chain}
+
+      return "report"
+
+  result = run()
+falsepositives:
+  - Bulk operations an operator deliberately asked for (rotating every secret,
+    migrating a permission model) — expect one report per tool per 24h
+  - CI or scheduled automation that legitimately calls a secrets tool per job
+  - A tool whose name merely contains a marker word ("keyword_search",
+    "tokenizer") — tighten SENSITIVE_TOOL_MARKERS if that produces noise
+level: medium

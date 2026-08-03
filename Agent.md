@@ -62,7 +62,10 @@ Every node dict contains `id`, `_type`, and all type-specific properties as stri
 **Sequence within a time window** (the core exfiltration pattern):
 ```python
 # A then B within N seconds — skill acquired then file written
-WINDOW_NS = 30_000_000_000  # 30 seconds
+# NOTE: no underscore digit separators. Starlark parses 30_000_000_000 as the
+# int 30 followed by the identifier _000_000_000, and the whole script fails to
+# parse — the rule then falls through to its on_error verdict, silently.
+WINDOW_NS = 30000000000  # 30 seconds
 
 def run():
     aid = meta.get("agent_name", "")
@@ -274,7 +277,8 @@ When asked to create a rule:
 5. **For content rules**: draft the detection conditions — start strict. Run it mentally against three legitimate payloads before including it. Write a `filter` selection with `condition: selection and not filter`.
 6. **Choose the action** — `block` only when confident; `report` when uncertain; `redact` for PII. Scripts use `on_error: allow` unless the rule is critical enough to justify fail-closed.
 7. **Assign level** — match the actual risk of a true positive, not the desired priority of the rule. When `action:` is absent, `level: critical`/`high` → block, `level: medium`/`low` → report.
-8. **Name the rule** — use a `title:` prefixed by threat category: `MCP Config Write`, `Credential File Access`, etc. The `id:` should be a UUID4. The filename should be `ai_agent_<kebab_description>.yml`.
+8. **Name the rule** — use a `title:` prefixed by threat category: `MCP Config Write`, `Credential File Access`, etc. The `id:` should be a UUID4 (or `<uuid>-p` for a periodic companion, or `netzilo-<kebab-slug>-NNN` for a Netzilo-authored rule). The filename should be `ai_agent_<kebab_description>.yml`.
+9. **Run `python3 tools/rulelint.py` before you are done.** A rule that references an event type no producer emits, a field the engine never populates, or a regex RE2 cannot compile **loads without error and then never fires** — silently, and indistinguishably from "no attack happened". The linter is the only thing standing between you and a rule that looks like coverage but is not. Zero errors is the bar; warnings are decisions for you to make.
 
 ## What You Produce
 
@@ -501,12 +505,54 @@ The `logsource.category` value controls which traffic events the rule evaluates 
 |---|---|---|
 | `execute_process` | A process spawned a child process; `content` = command line | `execute_process` |
 | `connects` | An outbound TCP/UDP connection intercepted by the SOCKS5 proxy; `host`, `port`, `protocol` in meta. Returning block from an execute rule **closes the connection before it is forwarded**. | `connects` |
-| `file_read` | A process read a file; `file_path` = path read | `file_read` |
-| `file_write` | A process wrote to a file; `file_path` = path written | `file_write` |
-| `file_create` | A process created a new file | `file_create` |
-| `file_delete` | A process deleted a file | `file_delete` |
-| `file_rename` | A process renamed or moved a file | `file_rename` |
+| `file_read` | ⚠️ **No live producer** — see the warning below | `file_read` |
+| `file_write` | ⚠️ **No live producer** | `file_write` |
+| `file_create` | ⚠️ **No live producer** | `file_create` |
+| `file_delete` | ⚠️ **No live producer** | `file_delete` |
+| `file_rename` | ⚠️ **No live producer** | `file_rename` |
 | `file_op` | Shorthand — expands to all five `file_*` categories above | varies |
+
+> ### ⚠️ The `file_*` categories do not fire on an endpoint
+>
+> This is deliberate, not a gap. `staticscanner/edr.go` scans process-exec events
+> and routes **file** events to AIDR ingest only: *"scanning every file I/O would
+> cause excessive CPU consumption. File-level detection is handled by Starlark
+> rules that traverse the AIDR behaviour graph, which receives all file events via
+> AIDR ingest."*
+>
+> A rule using `category: file_write` (or `file_read`, `file_op`, …) **loads
+> without error and never matches** during live evaluation. It will only ever fire
+> during server-side replay.
+>
+> **Do this instead** — a `periodic` rule that walks the graph:
+>
+> ```yaml
+> logsource:
+>   category: periodic
+> action: execute
+> script: |
+>   def run():
+>       for agent in graph(type="Process"):
+>           if agent.get("agent", "0") != "1":
+>               continue
+>           for e in edges(agent["id"], dir="out", kind="WRITE_FILE"):
+>               fs = node(e["to"])
+>               if fs == None:
+>                   continue
+>               # fs_activity() gives the exact path AND the per-file timestamp.
+>               # FTS5 splits on '/', '.' and '_' — query adjacent tokens as a phrase.
+>               entries = fs_activity(fs["id"], "WRITE", '"claude desktop config json"')
+>               if entries:
+>                   return {"action": "report", "reason": "...", "chain": ...}
+>       return "allow"
+>   result = run()
+> ```
+>
+> The established convention is a **companion pair**: a trigger rule on
+> `tool_call` (which catches the agent's own Write/Edit call and can *block* it),
+> plus a `_periodic.yml` twin with id `<uuid>-p` that catches writes reaching the
+> filesystem by any other route. See `ai_agent_rules_file_backdoor.yml` and
+> `ai_agent_rules_file_backdoor_periodic.yml`.
 
 ### Catch-All
 
@@ -556,10 +602,34 @@ These are the fields available in detection conditions. They are populated autom
 | `response` | Tool output body or LLM response text | |
 | `message.content` | Concatenated LLM message texts | |
 | `system_prompt` | LLM system message | |
-| `source` | How content was loaded (for semantic events) | `http`, `mcp`, `llm` |
+| `source` | How content was loaded — **semantic events only** (`skill_acquired`, `external_message`, …). It does **not** exist on `tool_call`, `llm_request` or HTTP contexts: `BuildLogEntry()` only creates it by parsing a classifier payload. Pairing `source:` with `event_type: tool_call` in one selection makes that selection false forever, because selections are AND. To scope a rule to a framework or MCP server, use `server:` (e.g. `server: openclaw`). | `http`, `mcp`, `llm` |
 | `agent_name` | Full path of the calling process | `/usr/bin/cursor` |
 
-For semantic events (`skill_acquired`, `external_message`, etc.), `content` is a `key=value\n` payload. You can match individual fields with `content|contains: "host=evil.com"` or use `content|re: 'host=[^\n]*\.evil\.com'`.
+For semantic events (`skill_acquired`, `external_message`, etc.), `content` is a `key=value\n` payload. `BuildLogEntry()` also flattens each pair into its own field, so `skill|contains: '…'`, `host: 'evil.com'`, `platform: 'slack'` and `format: '…'` work directly — you do not have to match against the packed `content` string, though `content|contains: "host=evil.com"` also works.
+
+#### Fields that exist in `meta` but NOT in a detection selection
+
+A script's `meta` dict is a superset of the LogEntry. These keys are **script-only** —
+a Sigma selection referencing them can never match, because `BuildLogEntry()` never
+copies them in:
+
+| Key | Available as | Use instead |
+|---|---|---|
+| `port` | `meta["port"]` | an `action: execute` rule — there is no static equivalent |
+| `protocol` | `meta["protocol"]` | same |
+| `caller_pid` | `meta["caller_pid"]` | same |
+| `callid` | `meta["callid"]` | same |
+| `server_url` | `meta["server_url"]` | `server:` (name) or `url.full:` |
+| `file_path` on `connects`/`execute_process` | — | for `execute_process` the path is inside `content` as JSON; `file_path` is only extracted for tool-arg and file contexts |
+
+So "block DNS to an unapproved resolver" cannot be written as `port: '53'` in a
+selection. See `ai_agent_dns_resolver_pivot.yml` for the scripted form.
+
+There is also **no `session.*` field injection** in Netzilo. Session-scoped counting
+(`session.tool_count`, `session.override_count`, cross-session overlap) has no
+equivalent field — use `action: execute` with `store_set`/`store_get`, which is
+strictly more capable because it persists across restarts. See
+`ai_agent_coordinated_tool_abuse.yml`.
 
 ### Field Modifiers
 
@@ -574,6 +644,35 @@ For semantic events (`skill_acquired`, `external_message`, etc.), `content` is a
 | `\|base64` | Decode the pattern values from base64 before matching |
 | `\|cidr` | CIDR network match (e.g. `10.0.0.0/8`) |
 | `\|windash` | Normalize Windows `-`/`/` flag prefixes |
+
+> **An unknown modifier is silently downgraded to `contains`.** `buildLeaf()` has a
+> `default:` branch, so a typo like `|re2:` or `|gte:` still loads and changes what
+> the rule means without any error. Only the modifiers in this table exist.
+
+#### `|re` is RE2 — four things that silently kill a rule
+
+`|re:` patterns are compiled with Go's `regexp` package. On a compile failure
+`findRegex()` returns `nil` and **that leaf simply never matches** — no load error,
+no log line, no indication the rule is dead. All four of these have shipped in this
+corpus and been caught only by running the engine:
+
+| Don't | Do | Why |
+|---|---|---|
+| `(?!…)`, `(?=…)`, `(?<=…)` | express the negation as a `filter` selection and `condition: sel and not filter` | RE2 has no lookaround at all |
+| `\1` … `\9` | restructure the pattern | RE2 has no backreferences |
+| `[​‮]` | `[\x{200b}\x{202e}]` | Go's regexp rejects `\u` as *"invalid escape sequence"*; `\x{…}` is the codepoint syntax |
+| a raw control byte in the YAML | `\x{001b}` inside a `\|re:` pattern | `gopkg.in/yaml.v3` fails the **entire file** with *"control characters are not allowed"* |
+
+Two more traps worth knowing:
+
+- **Only `|re:` is case-sensitive.** `contains`, `startswith` and `endswith`
+  lowercase both sides before comparing, so `contains: 'CURL'` already matches
+  `curl`. Adding `(?i)` to a `contains:` pattern does nothing; *omitting* it from a
+  `|re:` pattern is a bypass.
+- **Fold selectively when flag letters matter.** `curl -d` and `curl -D` are
+  different flags, so a blanket `(?i)` over `'curl\b.*\s-d\s+@'` makes the rule
+  match header dumps. Fold only the parts that are case-irrelevant:
+  `'(?i:curl)\b.*\s-d\s+@'`.
 
 **Value list semantics:**
 ```yaml
@@ -905,11 +1004,24 @@ The fix: at the very top of `run()`, check if the **current event** (`meta["cont
 
 **Pattern:**
 
+> **`meta["context_type"]` carries the raw context name, not the `event_type` value.**
+> The `detection:` section matches `event_type: tool_call`, but a script comparing
+> `ct == "tool_call"` never matches — the LogEntry's `event_type` is a *collapsed*
+> value (`contextToEventType()` maps six contexts onto `tool_call`), while `meta`
+> carries the context itself. Use `tool_input`, `tool_output`, `tool_description`,
+> `gateway_description`, `prompt_request`, `sampling_request` — never `tool_call`
+> or `tool_response`. See the `meta` keys table for the full list.
+
 ```python
 def is_relevant_event():
     ct = meta.get("context_type", "")
-    # Always evaluate on AI-layer events
-    if ct in ("tool_call", "tool_response", "llm_request", "llm_response"):
+    # Always evaluate on AI-layer events.
+    # NOTE the context names: tool_input / tool_output, NOT tool_call / tool_response.
+    if ct in ("tool_input", "tool_output", "llm_request", "llm_response"):
+        return True
+    # Tool and gateway descriptions — the injection surface that is read before
+    # any call happens.
+    if ct in ("tool_description", "gateway_description"):
         return True
     # execute_process: only if spawning attack-relevant tools.
     # Use WORD BOUNDARIES — a bare substring like "cat" in the content matches
@@ -932,12 +1044,15 @@ def is_relevant_event():
                     "172.2", "172.30.", "172.31.", "100."]:
             if host.startswith(pfx): return True
         return False
-    # file_read/write: only if a sensitive path is involved
-    if ct in ("file_read", "file_write"):
-        path = meta.get("file_path", "")
-        for pfx in ["/.aws/", "/.ssh/", "/etc/passwd", "/.kube/"]:
-            if pfx in path: return True
-        return False
+    # Semantic events from the classifier. For these, meta["content"] is the
+    # "key=value\n" payload, so the individual fields are parsed out of it.
+    if ct == "skill_acquired":
+        return True
+    # There is NO file_read / file_write branch here, and there must not be:
+    # those contexts have no live producer (staticscanner/edr.go deliberately
+    # excludes file I/O from rule evaluation), so a periodic rule traversing
+    # READ_FILE / WRITE_FILE graph edges is the only way to reach the file layer.
+    # meta also has no "file_path" key — see the meta keys table.
     return True  # unknown event type — evaluate to be safe
 
 def run():
@@ -953,8 +1068,8 @@ def run():
 
 **Rules for writing `is_relevant_event()`:**
 
-1. **AI-layer events always pass** — `tool_call`, `tool_response`, `llm_request`, `llm_response` are the orchestration layer; behavioral detections need them.
-2. **Each event type gets its own check** — use `meta["context_type"]` to branch, then check the relevant field (`host`, `file_path`, `content`, etc.).
+1. **AI-layer events always pass** — `tool_input`, `tool_output`, `llm_request`, `llm_response` are the orchestration layer; behavioral detections need them. (Context names, not the collapsed `event_type` values — `tool_call` is never a `context_type`.)
+2. **Each event type gets its own check** — use `meta["context_type"]` to branch, then check the relevant field (`host`, `port`, `content`, …). Note there is no `meta["file_path"]`: for `execute_process` the path is inside `meta["content"]` as JSON, and for the file layer you traverse the graph instead.
 3. **Err on the side of inclusion** — if unsure whether an event is relevant, return `True`. False negatives (missed detections) are worse than minor extra work.
 4. **The check must be fast** — no graph calls, no `search_in`, no `fs_activity`. Pure string matching on `meta` fields only.
 5. **The check is rule-specific** — it encodes exactly what events this rule's threat model requires. For a credential-stuffing rule it would be different from a claw-chain rule. This also makes the rule self-documenting.
@@ -968,7 +1083,7 @@ The relevance check prevents evaluation on unrelated events. The look-back guard
 Pattern: after confirming N stages, check `event_ts - last_stage_ts > LOOK_BACK_NS`:
 
 ```python
-LOOK_BACK_NS = 120_000_000_000  # 2 minutes
+LOOK_BACK_NS = 120000000000  # 2 minutes (no underscore separators — see above)
 event_ts = int(meta.get("event_ts", "0"))
 if event_ts > 0 and s0_ts > 0 and (event_ts - s0_ts) > LOOK_BACK_NS:
     continue  # attack is stale — already handled
@@ -985,6 +1100,31 @@ if event_ts > 0 and s0_ts > 0 and (event_ts - s0_ts) > LOOK_BACK_NS:
 - **Fail-open by default:** If the script raises an exception, does not assign `result`, or `result` is not a recognised verdict string, the engine defaults to `"allow"`. Use `on_error: block` for fail-closed enforcement.
 - **Script structure:** All logic should live inside a `def run():` function to avoid top-level `for`-loop restrictions. Assign `result = run()` at the bottom.
 - **Kill chain is required for every graph-based detection.** Any script that traverses the graph and returns `"block"` or `"report"` **must** build a kill chain and include it as `"chain"` in the dict result. This is how the dashboard, audit log, and downstream systems show investigators what happened. A plain string `"block"` is only acceptable for trivial content-matching rules that do not touch the graph.
+
+#### Starlark is not Python — four differences that break scripts
+
+A script that fails to **parse** produces no error anywhere the rule author will see;
+it takes the `on_error` verdict, which defaults to `allow`. These four have all
+shipped in this corpus:
+
+| Python | Starlark | Symptom |
+|---|---|---|
+| `any(x for y in z)` | `any([x for y in z])` | **Parse error.** Starlark has list comprehensions but no bare generator expressions. |
+| `30_000_000_000` | `30000000000` | **Parse error.** No underscore digit separators — it reads as `30` followed by the identifier `_000_000_000`. |
+| `for c in s: ord(c)` | `for c in s.elem_ords():` | `.elems()` yields one-character **strings**; only `.elem_ords()` / `.codepoint_ords()` yield ints. `int ^ str` is a runtime error. |
+| top-level `for` / `if` | put everything in `def run():` | Starlark forbids `for` at module level. |
+
+Verified against the engine's interpreter — these are **rejected**: `while` loops
+(*"this Starlark dialect does not support while loops"*), f-strings, `try`/`except`,
+`import`, and `class`. These **work**: `%` formatting (`"%x" % 255`), `.format()`,
+list *and* dict comprehensions, `range()`, `sorted()`, and the usual string methods.
+Iterate with `for … in range(n)` instead of `while`.
+
+One more: dict keys loaded back from `store_get()` are **strings** even if they were
+written as ints, because the store round-trips through JSON. Compare with
+`int(k)` when the key is numeric.
+
+`python3 tools/rulelint.py` catches the first three statically.
 
 ```python
 def run():
@@ -1259,7 +1399,7 @@ This produces a chain like:
 |---|---|---|
 | `rule_id` | all | ID of the rule being evaluated |
 | `event_ts` | all | Unix nanosecond timestamp of the current triggering event (`time.Now()` when the script is invoked). Use this for look-back guards: `int(meta.get("event_ts","0"))`. |
-| `context_type` | all | The specific context that fired: `tool_input`, `tool_output`, `llm_request`, `llm_response`, `http_request`, `sampling_request`, `sampling_response`, `prompt_request`, `prompt_response`, `execute_process`, `file_read`, `file_write`, `file_create`, `file_delete`, `file_rename` |
+| `context_type` | all | The specific context that fired — the **raw** context name, not the collapsed `event_type` the `detection:` section matches on. `tool_input`, `tool_output`, `tool_description`, `gateway_description`, `prompt_description`, `prompt_request`, `prompt_response`, `sampling_request`, `sampling_response`, `llm_request`, `llm_response`, `http_request`, `connects`, `execute_process`, `skill_acquired`, `external_message`, `file_upload`, `file_download`, `llm_tool_call`, `llm_tool_result`, `llm_reasoning`, `do_automation`, `periodic`. **Never** `tool_call` or `tool_response` — those are `event_type` values that six and three contexts respectively collapse onto. `file_read`/`file_write`/`file_create`/`file_delete`/`file_rename` appear only during server-side replay; no live producer emits them. |
 | `server_name` | all | MCP server name or LLM provider host |
 | `server_url` | MCP, LLM | Full URL of the upstream server |
 | `tool_name` | MCP tool calls, LLM tool blocks | MCP tool name or LLM tool call name |

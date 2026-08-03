@@ -1,0 +1,138 @@
+title: Inter-Agent Message Spoofing and Peer Impersonation
+id: 83e72875-7c6f-52cc-949c-505cbbb7649f
+status: experimental
+description: |
+  Detects an agent sending messages to an external platform (Slack, Teams, Discord,
+  email) that impersonate another agent or a control plane — forged handoffs,
+  fabricated approvals, instructions attributed to a peer. In a multi-agent
+  deployment a message that appears to come from a trusted peer is an instruction
+  channel with no authentication behind it.
+
+  Upstream sigma-ai declares this against `event_type: agent_message` and
+  `agent_handoff`, neither of which any producer emits. Netzilo's semantic
+  classifier emits `external_message` when an agent posts to a known messaging
+  endpoint, carrying the platform and host, so the send is observable; the
+  impersonation is then judged on the message body.
+
+  Two limits, stated so coverage is not overstated:
+    * Only sends to platforms the classifier recognises are seen
+      (matchMessagingEndpoint in semanticclassifier). A bespoke internal bus is
+      not covered.
+    * There is no agent-to-agent identity in Netzilo, so this detects a claimed
+      identity in the content, not a cryptographic mismatch. A genuine handoff
+      that phrases itself the same way will match.
+references:
+  - https://attack.mitre.org/techniques/T1656/
+  - https://attack.mitre.org/techniques/T1585/
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-03-16"
+modified: "2026-08-03"
+tags:
+  - attack.stealth
+  - attack.t1656
+  - attack.lateral-movement
+logsource:
+  product: ai_agent
+  category: external_message
+detection:
+  sel_trigger:
+    event_type: external_message
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # Claims of peer or control-plane identity. Each phrase asserts an origin the
+  # message cannot prove.
+  IMPERSONATION = [
+      "on behalf of the orchestrator",
+      "this is the supervisor agent",
+      "message from the coordinator",
+      "handoff from agent",
+      "delegated by the planner agent",
+      "as the reviewer agent i approve",
+      "automated approval granted",
+      "the security agent has cleared",
+      "signed by the control plane",
+      "system agent directive",
+  ]
+  # Instruction-shaped payloads. Impersonation only matters when it is carrying an
+  # instruction; a status update that mentions the orchestrator is not an attack.
+  DIRECTIVES = [
+      "you must", "proceed without", "skip the", "approve this",
+      "execute the following", "do not verify", "override",
+      "grant access", "disable",
+  ]
+
+  def find_any(text, needles):
+      low = text.lower()
+      for n in needles:
+          if n in low:
+              return n
+      return ""
+
+  def run():
+      if meta.get("context_type", "") != "external_message":
+          return "allow"
+
+      # For semantic events `content` is the classifier's key=value payload. The
+      # message body is not part of it — platform, host, url and source are. The
+      # body reaches the graph through the HTTP request that carried it, so the
+      # claim is matched against the payload text that IS present and the URL node
+      # is used for chain evidence.
+      payload = meta.get("content", "")
+      claim = find_any(payload, IMPERSONATION)
+      directive = find_any(payload, DIRECTIVES)
+
+      if claim == "":
+          # Fall back to the indexed request body for this send, which does carry
+          # the message text.
+          host = meta.get("host", "")
+          for u in graph(type="URL"):
+              if u.get("host", "") != host:
+                  continue
+              for n in IMPERSONATION:
+                  if search_in(u.get("id", ""), '"' + n + '"'):
+                      claim = n
+                      break
+              if claim != "":
+                  break
+
+      if claim == "":
+          return "allow"
+
+      host = meta.get("host", "")
+      platform = "external"
+      for line in payload.split("\n"):
+          if line.startswith("platform="):
+              platform = line[len("platform="):]
+
+      reason = ("Outbound message to " + platform + " (" + host +
+                ") claims peer/control-plane identity: '" + claim + "'")
+      if directive != "":
+          reason = reason + " and carries a directive ('" + directive + "')"
+      print(reason)
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          chain = new_chain(aid)
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              t = node(e["to"])
+              if t != None and t.get("host", "") == host:
+                  chain.append(step(e, stage_id="Impersonation",
+                                    stage_desc=reason))
+                  return {"action": "report", "reason": reason, "chain": chain}
+
+      return "report"
+
+  result = run()
+falsepositives:
+  - A genuine multi-agent orchestrator that announces handoffs in these words —
+    allowlist its host or refine IMPERSONATION to the phrasings your own
+    orchestrator does not use
+  - Status bots relaying approval outcomes from a real approval system
+  - Incident channels where humans quote agent messages verbatim
+level: high

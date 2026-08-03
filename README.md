@@ -264,6 +264,59 @@ Contributions are welcome. Please follow these guidelines:
 4. **Justify every `block` action.** Add a `falsepositives:` section explaining known benign cases and how the rule avoids them.
 5. **Prefer `report` for new or uncertain rules.** Escalate to `block` after validating the false-positive rate.
 6. **For behavioral threats, use `action: execute` with Starlark** rather than broad regex patterns that generate noise.
+7. **Run the linter before opening a PR.** CI enforces it.
+
+---
+
+## Linting
+
+```sh
+pip install pyyaml
+python3 tools/rulelint.py                    # defaults to ai_agent/
+python3 tools/rulelint.py --warnings-as-errors
+```
+
+A rule that references an event type no producer emits, a field the engine never
+populates, or a regex Go's RE2 cannot compile **loads without error and then never
+fires**. That is the most expensive failure mode in a detection corpus: silent, and
+indistinguishable from "no attack happened". `rulelint` exists to make those
+failures loud at authoring time.
+
+Every ground-truth set in `tools/rulelint.py` is derived from the Netzilo engine
+source with the `file:line` provenance recorded inline. When the engine gains a
+producer for a context, move it from `REPLAY_ONLY_CATEGORIES` into
+`LIVE_CATEGORIES` in the same commit.
+
+**Errors** (build-failing) include:
+
+| Check | Why it is fatal |
+|---|---|
+| `replay-only-category` / `replay-only-event-type` | `file_read`/`file_write`/… have no live client producer — `staticscanner/edr.go` deliberately excludes file I/O from rule evaluation. Use `category: periodic` + graph traversal instead. |
+| `phantom-event-type` | e.g. `event_type: tool_description` — `contextToEventType()` collapses that context to `tool_call`, so the selection can never match. |
+| `script-only-field` | `port`, `protocol`, `caller_pid`, `callid` exist in a script's `meta` but `BuildLogEntry()` never copies them into the LogEntry. |
+| `session-field` | Netzilo has no `session.*` injection at all. |
+| `re2-unsupported` | Lookahead, lookbehind, backreferences and `\uXXXX` are rejected by Go's regexp; `findRegex()` then returns nil and the leaf silently never matches. Use `\x{XXXX}`. |
+| `yaml-control-bytes` | A raw control byte fails the **whole** file in `gopkg.in/yaml.v3` (PyYAML accepts it, so this cannot be inferred from a load failure). |
+| `starlark-generator-expression` | `any(x for y in z)` is a parse error — Starlark has list comprehensions only. The script fails to parse and the rule falls through to `on_error`. |
+| `starlark-underscore-numeral` | `300_000_000_000` parses as an int followed by an identifier. Note that some examples in `Agent.md` use this form and are therefore wrong. |
+| `condition-unknown-selection` | `parsePrimary()` substitutes a never-matching condition, silently disabling that branch. |
+| `unknown-modifier` | `buildLeaf()` degrades an unknown modifier to `contains`, changing the rule's meaning without complaint. |
+| `duplicate-yaml-key` | Both YAML parsers keep the last value; the first pattern is discarded silently. |
+
+**Warnings** flag decisions for a human rather than defects — chiefly
+`case-sensitive-regex`, since `|re:` is case-sensitive in Netzilo while
+`|contains:` folds both sides. Some patterns (base64 alphabets, AWS key prefixes,
+codepoint classes) are intentionally case-exact.
+
+### Deeper verification
+
+The linter models the engine; it is not the engine. Two throwaway Go harnesses give
+the definitive answer and are worth running when touching many rules — they load
+the corpus through `scanner/yaml.ParseRawYAML` + `scanner.Engine.LoadRules`, and
+execute every `action: execute` script under the real `go.starlark.net`
+interpreter with stub builtins. Both found dead rules the Python linter could not
+see, because PyYAML and Python's `re` are more permissive than their Go
+counterparts.
 
 ---
 

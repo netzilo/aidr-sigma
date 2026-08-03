@@ -1,0 +1,168 @@
+title: MCP Tool Description Changed After Approval (Rug Pull)
+id: 43a31200-6894-5c9b-a187-1cd0a11af2b3
+status: experimental
+description: |
+  Detects an MCP tool whose description changes after it has been seen once — the
+  rug pull. A benign tool is approved and deployed, then its definition is swapped
+  for one carrying different instructions. Nothing about the individual tool call
+  looks wrong; only the change is the signal.
+
+  Upstream sigma-ai declares this rule against `event_type: tool_description`,
+  `tool_description_update`, `tool_list_comparison` and `tool_execution` — four
+  event types no AgentShield producer emits, and it has nowhere to keep the prior
+  description anyway, so the rule cannot work there.
+
+  Netzilo can: `store_set`/`store_get` give each rule a private 1 MB persistent
+  keyspace (aidr/rulestore.go), so the first description is recorded and every
+  later one compared against it. State survives restarts, so a swap performed
+  days after approval is still caught.
+
+  Deliberately `report`, not `block`: the first observation of any new tool is
+  indistinguishable from a rug pull until a baseline exists, and blocking would
+  break every legitimate first use. The signal is the change, and it needs a human.
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-02-26"
+modified: "2026-08-03"
+tags:
+  - attack.persistence
+  - attack.t1195.002
+  - attack.stealth
+logsource:
+  product: ai_agent
+  category: tool_description
+detection:
+  # Broad pre-filter: the script is the detector. Every description that reaches
+  # the gateway must be hashed, so this matches any non-empty content.
+  sel_trigger:
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # ── Storage layout ───────────────────────────────────────────────────────────
+  # key "d:<server>/<tool>"  -> {"h": <fnv1a64 hex>, "len": <int>, "ts": <ns str>}
+  # A hash rather than the description itself: the store is capped at 1 MB per
+  # rule, and a few hundred tools' worth of full descriptions would exhaust it.
+  # store_usage() is checked before writing so a full store degrades to "allow"
+  # instead of raising.
+
+  MAX_STORE_FRACTION = 90   # stop recording new baselines above 90% of quota
+
+  def fnv1a64(s):
+      # FNV-1a, 64-bit. Starlark integers are arbitrary precision, so the modulo
+      # after each step keeps this exactly 64-bit.
+      #
+      # elem_ords() yields the bytes as INTS. The similarly-named elems() yields
+      # one-character STRINGS and `int ^ str` is a runtime error, which would send
+      # the whole rule down the on_error path.
+      h = 14695981039346656037
+      for c in s.elem_ords():
+          h = h ^ c
+          h = (h * 1099511628211) % 18446744073709551616
+      return "%x" % h
+
+  def store_key(server, tool):
+      return "d:" + server + "/" + tool
+
+  def quota_ok():
+      u = store_usage()
+      if u == None:
+          return False
+      limit = u.get("limit", 0)
+      if limit <= 0:
+          return False
+      return (u.get("bytes", 0) * 100) / limit < MAX_STORE_FRACTION
+
+  def run():
+      # Only the description phase carries a tool definition. Other contexts would
+      # hash the wrong text and poison the baseline.
+      if meta.get("context_type", "") not in ("tool_description", "gateway_description"):
+          return "allow"
+
+      desc = meta.get("content", "")
+      if desc == "":
+          return "allow"
+
+      tool = meta.get("tool_name", "")
+      server = meta.get("server_name", "")
+      if tool == "" and server == "":
+          # Nothing stable to key on — recording it would create an unbounded
+          # number of useless baselines.
+          return "allow"
+
+      key = store_key(server, tool)
+      now = meta.get("event_ts", "0")
+      current = {"h": fnv1a64(desc), "len": len(desc), "ts": now}
+
+      previous = store_get(key)
+
+      if previous == None:
+          # First sighting. Record the baseline and stay silent — a new tool is
+          # not a rug pull.
+          if quota_ok():
+              store_set(key, current)
+          else:
+              print("rug-pull baseline NOT recorded for " + key + " — store near quota")
+          return "allow"
+
+      if previous.get("h", "") == current["h"]:
+          return "allow"      # unchanged, the overwhelmingly common case
+
+      # ── Changed ──────────────────────────────────────────────────────────────
+      old_len = previous.get("len", 0)
+      delta = current["len"] - old_len
+      first_seen = previous.get("ts", "0")
+
+      # Re-baseline to the new description so the same change is reported once
+      # rather than on every subsequent call.
+      if quota_ok():
+          store_set(key, current)
+
+      # Whether the new text carries instruction-injection markers decides how
+      # loudly this is reported.
+      injected = False
+      for marker in ["<IMPORTANT>", "<SYSTEM>", "IGNORE PREVIOUS", "OVERRIDE:",
+                     "NEW INSTRUCTIONS:", "DISREGARD", "you must always"]:
+          if marker.lower() in desc.lower():
+              injected = True
+
+      detail = ("tool " + server + "/" + tool +
+                " description changed (" + str(old_len) + " -> " +
+                str(current["len"]) + " chars, delta " + str(delta) + ")" +
+                " first seen at " + first_seen)
+      if injected:
+          detail = detail + " AND the new text contains instruction-injection markers"
+      print(detail)
+
+      # Attach the TOOL_CALL edge for this tool as chain evidence when the graph
+      # has one. A description-phase event may precede any call, in which case
+      # there is no edge yet and a plain verdict is returned.
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          c = new_chain(p["id"])
+          for e in edges(p["id"], dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t == None:
+                  continue
+              if t.get("name", "") == tool and (server == "" or t.get("server", "") == server):
+                  c.append(step(e, stage_id="Supply Chain",
+                                stage_desc=detail))
+                  return {"action": "report", "reason": detail, "chain": c}
+
+      return "report"
+
+  result = run()
+falsepositives:
+  - A legitimate MCP server upgrade that rewords its tool descriptions — expect one
+    report per changed tool per upgrade, then silence as the baseline re-anchors
+  - Servers that template a description with a timestamp, version string or row
+    count, which changes the hash on every load. Those need an allowlist here or a
+    normalisation step before hashing
+  - The first run after the rule's store is reset, if descriptions changed while
+    the rule was disabled
+level: medium

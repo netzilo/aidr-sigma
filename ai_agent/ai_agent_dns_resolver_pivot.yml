@@ -1,0 +1,128 @@
+title: DNS Resolution Against an Unexpected Nameserver
+id: netzilo-dns-resolver-pivot-001
+status: experimental
+description: |
+  Detects an agent (or a process it spawned) opening a connection to port 53 on a
+  host that is not an approved resolver — the transport half of DNS tunnelling,
+  observed as a fact about the connection rather than inferred from a command line.
+
+  Netzilo-authored companion to ai_agent_exfil_via_dns. It exists as an
+  `action: execute` rule and not a static one because BuildLogEntry() does not
+  copy Port or Protocol into the LogEntry: `port: '53'` in a Sigma selection can
+  never match. Both are available to a script as meta['port'] / meta['protocol'].
+
+  The verdict is `report`, not `block`: blocking a connects event closes the
+  connection before it is forwarded, and a wrong entry in APPROVED_RESOLVERS
+  would break name resolution for the whole endpoint. Promote to block only after
+  the allowlist has been validated against the tenant's real resolver set.
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://attack.mitre.org/techniques/T1048/
+author: Netzilo
+date: "2026-08-03"
+tags:
+  - attack.command-and-control
+  - attack.t1071.004
+  - attack.exfiltration
+logsource:
+  product: ai_agent
+  category: connects
+detection:
+  # Broad pre-filter: the script is the detector. connects events carry no
+  # content, so match on the always-present event_type rather than content|re.
+  sel_trigger:
+    event_type: connects
+  condition: sel_trigger
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  # Approved resolvers. Loopback and RFC1918 cover the usual DHCP-assigned and
+  # container-internal resolvers; the public entries are the well-known anycast
+  # services. Tighten this to the tenant's actual resolvers before promoting the
+  # verdict to "block".
+  PUBLIC_RESOLVERS = [
+      "8.8.8.8", "8.8.4.4",          # Google
+      "1.1.1.1", "1.0.0.1",          # Cloudflare
+      "9.9.9.9", "149.112.112.112",  # Quad9
+      "208.67.222.222", "208.67.220.220",  # OpenDNS
+      "127.0.0.1", "::1", "localhost",
+  ]
+  PRIVATE_PREFIXES = [
+      "10.", "192.168.", "127.",
+      "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+      "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+      "172.28.", "172.29.", "172.30.", "172.31.",
+      "169.254.",  # link-local, includes container DNS on some runtimes
+      "fd", "fe80:",
+  ]
+
+  def is_approved(host):
+      if host == "":
+          return True          # unknown destination — do not guess
+      for r in PUBLIC_RESOLVERS:
+          if host == r:
+              return True
+      for p in PRIVATE_PREFIXES:
+          if host.startswith(p):
+              return True
+      return False
+
+  def is_relevant_event():
+      # Only port 53 matters. Every other connection returns immediately, so this
+      # rule costs one string comparison on the vast majority of connects events.
+      if meta.get("context_type", "") != "connects":
+          return False
+      return meta.get("port", "") == "53"
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      host = meta.get("host", "")
+      if is_approved(host):
+          return "allow"
+
+      proto = meta.get("protocol", "")
+      agent = meta.get("agent_name", "")
+
+      # Attribute the connection to a process instance and build a kill chain from
+      # the CONNECTS edge the reporting path has already written for this event.
+      pid = int(meta.get("caller_pid", "0"))
+      chain = None
+      if pid > 0:
+          inst = proc_instance(pid)
+          if inst != None:
+              for p in graph(type="Process"):
+                  if p.get("agent", "0") != "1":
+                      continue
+                  c = new_chain(p["id"])
+                  for e in edges(p["id"], dir="out", kind="CONNECTS"):
+                      target = node(e["to"])
+                      if target != None and target.get("host", "") == host:
+                          c.append(step(e, stage_id="C2 Channel",
+                                        stage_desc="DNS/53 to non-approved resolver " +
+                                                   host + " (" + proto + ")"))
+                          chain = c
+                          break
+                  if chain != None:
+                      break
+
+      print("DNS port 53 to non-approved resolver " + host +
+            " proto=" + proto + " agent=" + agent)
+
+      if chain != None:
+          return {
+              "action": "report",
+              "reason": "DNS resolution against non-approved nameserver " + host,
+              "chain": chain,
+          }
+      return "report"
+
+  result = run()
+falsepositives:
+  - An endpoint whose DHCP-assigned resolver is a public IP not in PUBLIC_RESOLVERS
+  - VPN or split-horizon DNS pointing at a corporate resolver on a public address
+  - Container runtimes with a resolver outside the RFC1918 and link-local ranges
+  - Applications bundling their own stub resolver aimed at a specific upstream
+level: medium

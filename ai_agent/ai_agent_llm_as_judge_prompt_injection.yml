@@ -13,7 +13,7 @@ date: "2026-06-30"
 tags:
   - attack.initial-access
   - attack.t1190
-  - attack.defense-evasion
+  - attack.stealth
 logsource:
   product: ai_agent
   category: agent_events

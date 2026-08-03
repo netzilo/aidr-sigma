@@ -1,0 +1,91 @@
+title: Steganographic Data Hiding
+id: 083d7427-a932-5e34-85b8-0867ad7eb18c
+status: experimental
+description: |
+  Detects use of steganography and carving tools to hide data inside media files,
+  and metadata rewriting that smuggles payloads through EXIF fields. Concealment
+  precedes the egress, so this fires earlier than any network-layer rule.
+
+  Ported from sigma-ai with three upstream selections DROPPED because Netzilo
+  never populates the fields they rely on — porting them verbatim would have
+  produced a rule that looks broader than it is:
+    * selection_python_stego_patterns  — needs `code` (event_type: code_execution);
+      Netzilo has no code field. The LSB-manipulation source patterns are
+      re-expressed against `content` on tool_call, where write/edit tool bodies
+      actually arrive.
+    * selection_suspicious_image_operations — needs `file_extension` and
+      `size_increase_ratio` on file_write. Netzilo has neither field, and
+      file_write has no live client producer at all.
+    * selection_python_lsb's `file_extension: .py` — same missing field; replaced
+      with a content match.
+  Size-growth detection on image writes is therefore not covered by this rule.
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://attack.mitre.org/techniques/T1027/
+author: AgentShield (ported to Netzilo)
+date: "2026-03-23"
+modified: "2026-08-03"
+tags:
+  - attack.exfiltration
+  - attack.t1048
+  - attack.stealth
+  - attack.t1027
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Dedicated steganography binaries. Presence alone is the signal — none of
+  # these has a routine development use.
+  sel_stego_tool_cmd:
+    event_type: tool_call
+    command|re: '(?i)\b(steghide|outguess|jphide|jsteg|openstego|stegano|stegpy|mp3stego|deepsteg|hideme)\b'
+  sel_stego_tool_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(steghide|outguess|jphide|jsteg|openstego|stegano|stegpy|mp3stego|deepsteg|hideme)\b'
+  # EXIF rewriting in place — hides a payload in metadata and leaves no copy.
+  sel_exif_inplace:
+    event_type: tool_call
+    command|contains|all:
+      - 'exiftool'
+      - '-overwrite_original'
+  sel_exif_inplace_exec:
+    event_type: execute_process
+    command|contains|all:
+      - 'exiftool'
+      - '-overwrite_original'
+  # Carving tools in extract mode. Requires the -e/--extract flag: binwalk
+  # without it is ordinary firmware inspection.
+  sel_carving_extract:
+    event_type: tool_call
+    command|re: '(?i)\b(binwalk|foremost|scalpel)\b.*\s(-e|--extract)\b'
+  sel_carving_extract_exec:
+    event_type: execute_process
+    command|re: '(?i)\b(binwalk|foremost|scalpel)\b.*\s(-e|--extract)\b'
+  # Hand-rolled LSB steganography. Two independent signals are required because
+  # each alone appears in ordinary image-processing code.
+  sel_lsb_pixel_api:
+    event_type: tool_call
+    content|re: '(?i)(putpixel|getpixel|Image\.open|np\.unpackbits|tobytes\(\))'
+  sel_lsb_bit_manipulation:
+    event_type: tool_call
+    content|re: '(?i)(&\s*0xFE|&\s*0x01|\|\s*0x01|bin\(ord\(|>>\s*1\s*&\s*1)'
+  filter_image_library_docs:
+    # Tutorials, library READMEs and test fixtures discuss these APIs freely.
+    event_type: tool_call
+    content|contains:
+      - 'example'
+      - 'tutorial'
+      - 'docstring'
+      - 'unittest'
+      - 'pytest'
+  condition: >
+    sel_stego_tool_cmd or sel_stego_tool_exec or
+    sel_exif_inplace or sel_exif_inplace_exec or
+    sel_carving_extract or sel_carving_extract_exec or
+    ((sel_lsb_pixel_api and sel_lsb_bit_manipulation) and not filter_image_library_docs)
+falsepositives:
+  - Security researchers and CTF participants using steganography tools deliberately
+  - exiftool -overwrite_original in a legitimate photo-processing pipeline
+  - binwalk -e used for authorised firmware analysis
+  - Image-processing code performing genuine bit-depth or channel manipulation
+level: high

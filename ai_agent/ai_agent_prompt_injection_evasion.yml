@@ -19,7 +19,7 @@ related:
   - id: eddcdc94-698c-577f-900d-28b1b5491a80
     type: similar
 tags:
-  - attack.defense-evasion
+  - attack.stealth
   - attack.t1027
   - attack.initial-access
   - attack.t1190

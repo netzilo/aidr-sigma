@@ -1,0 +1,153 @@
+title: Retrieved Content Poisoning Followed by Action
+id: 4e438202-0742-5a3b-9062-064fa4b2d6fc
+status: experimental
+description: |
+  Detects the indirect-injection sequence: the agent loads external content that
+  carries instruction-shaped text, and then acts — an outbound request, a process
+  spawn, or a credential-path read. Neither half is conclusive alone. A retrieved
+  document containing "ignore previous instructions" may simply be a security
+  article; an HTTP POST after reading a file is ordinary work. The ordering is the
+  attack.
+
+  Upstream sigma-ai declares this against `event_type: document_retrieval` and
+  `tool_sequence`. Netzilo's rulelint records both as never-emitted: the real
+  document-load surface is `skill_acquired` (the WASM semantic classifier scores
+  fetched content and reports it with a confidence and signal list), and there is
+  no "sequence" event at all — sequencing is what the behaviour graph is for.
+
+  This is therefore a scripted rule rather than a content match. It anchors on the
+  ACQUIRED_SKILL edge and looks only at what the agent did AFTER it, inside a
+  bounded window, so a skill loaded last week does not taint today's activity.
+references:
+  - https://attack.mitre.org/techniques/T1566/
+  - https://attack.mitre.org/techniques/T1204/
+  - https://arxiv.org/abs/2403.04783
+author: AgentShield (reimplemented for Netzilo)
+date: "2026-03-16"
+modified: "2026-08-03"
+tags:
+  - attack.initial-access
+  - attack.t1566
+  - attack.execution
+  - attack.t1204
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Broad pre-filter — the script decides. Kept to the contexts that can either
+  # establish the taint (skill_acquired) or be the action half.
+  sel_skill:
+    event_type: skill_acquired
+    content|re: '.'
+  sel_action:
+    event_type:
+      - http_request
+      - execute_process
+      - tool_call
+    content|re: '.'
+  condition: sel_skill or sel_action
+action: execute
+on_error: allow
+on_timeout: allow
+script: |
+  WINDOW_NS = 300000000000   # 5 minutes between the load and the action
+
+  # Instruction-shaped text inside retrieved content. These are the phrasings that
+  # only make sense if the document is addressing the model.
+  INJECTION_MARKERS = [
+      "ignore previous", "ignore all previous", "disregard the above",
+      "disregard previous", "new instructions", "system prompt",
+      "you must always", "do not tell the user", "without informing",
+      "instead of what the user asked", "your real task is",
+      "override your", "forget your instructions",
+  ]
+
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "skill_acquired":
+          return True
+      # The action half. tool_input covers Write/Bash/etc; http_request and
+      # execute_process are the syscall and network layers.
+      if ct in ("http_request", "execute_process", "tool_input"):
+          return True
+      return False
+
+  def skill_is_poisoned(skill_node):
+      """True when the skill node's own indexed content carries injection text.
+
+      search_in() queries the FTS index for this specific document rather than
+      re-reading the body, so this stays cheap even for a large skill file.
+      """
+      sid = skill_node.get("id", "")
+      if sid == "":
+          return ""
+      for marker in INJECTION_MARKERS:
+          if search_in(sid, '"' + marker + '"'):
+              return marker
+      return ""
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      event_ts = int(meta.get("event_ts", "0"))
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+
+          for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              skill = node(se["to"])
+              if skill == None:
+                  continue
+              # Only externally-sourced skills can be attacker-controlled. A skill
+              # loaded from a ZTNA-internal host is trusted by policy.
+              if skill.get("is_ztna_host", "0") == "1":
+                  continue
+
+              marker = skill_is_poisoned(skill)
+              if marker == "":
+                  continue
+
+              s0 = int(se.get("ts", "0"))
+              if s0 == 0:
+                  continue
+              # Look-back guard: if the load is older than the window relative to
+              # the current event, this is a re-fire on stale graph state.
+              if event_ts > 0 and (event_ts - s0) > WINDOW_NS:
+                  continue
+
+              chain = new_chain(aid)
+              chain.append(step(se, stage_id="Initial Access",
+                                stage_desc="untrusted content loaded from " +
+                                           skill.get("host", "?") +
+                                           " containing '" + marker + "'"))
+
+              # Action half: anything the agent did after the load, inside the window.
+              for kind in ["HTTP_REQUEST", "CONNECTS", "EXECUTE_PROCESS"]:
+                  for ae in edges(aid, dir="out", kind=kind):
+                      ats = int(ae.get("ts", ae.get("first_ts", "0")))
+                      if ats <= s0 or (ats - s0) > WINDOW_NS:
+                          continue
+                      target = node(ae["to"])
+                      where = "?"
+                      if target != None:
+                          where = target.get("host", target.get("name", target.get("id", "?")))
+                      chain.append(step(ae, stage_id="Action After Injection",
+                                        stage_desc=kind + " to " + where +
+                                                   " within 5m of the poisoned load"))
+                      reason = ("Indirect injection chain: '" + marker +
+                                "' loaded from " + skill.get("host", "?") +
+                                " then " + kind + " to " + where)
+                      print(reason)
+                      return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
+falsepositives:
+  - 'Security research: reading an article about prompt injection and then making a network request is exactly this shape — scope by host, or promote only after measuring in report mode'
+  - Documentation of the agent's own system prompt fetched from an internal wiki served from a non-ZTNA host
+  - A skill document that legitimately instructs the model to always cite sources, followed by ordinary tool use
+level: high

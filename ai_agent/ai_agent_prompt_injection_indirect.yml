@@ -15,7 +15,7 @@ modified: "2026-06-02"
 tags:
   - attack.persistence
   - attack.t1546
-  - attack.defense-evasion
+  - attack.stealth
   - attack.t1564
 logsource:
   product: ai_agent
