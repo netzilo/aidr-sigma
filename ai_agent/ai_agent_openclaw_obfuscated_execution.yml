@@ -1,0 +1,398 @@
+title: OpenClaw Obfuscated Dangerous Execution Chain
+id: 4b1f7d02-9c3a-4f6e-8a51-2d7e6c0b9af3
+status: experimental
+level: high
+description: |
+  Behavioural detection for the OpenClaw technique: an AI agent is coerced into
+  executing a dangerous command whose payload is hidden with zero-width / bidi
+  Unicode controls, textual \u / \x / octal escapes, or terminal-control ANSI
+  escape sequences.
+
+  The rule does not judge a single command line. It walks the EXECUTE_PROCESS
+  subtree rooted at each monitored agent process and requires an ordered,
+  windowed sequence:
+
+    Stage 1 (REQUIRED anchor) - an agent-rooted process spawn whose command line
+      combines (a) an execution primitive (sh -c / eval / python -c / node -e /
+      osascript -e / powershell -enc / cmd /c) with (b) at least one obfuscation
+      encoding class, and (c) either a real impact verb or a second, independent
+      obfuscation encoding. Plain SGR colour codes are deliberately NOT an
+      obfuscation class.
+
+    Stage 2 (REQUIRED corroboration) - within 5 minutes of the anchor, the
+      obfuscated process must show graph-visible consequence: it spawned a child
+      process, connected / issued HTTP to a non-ZTNA (public) endpoint, or wrote,
+      created, deleted or renamed files. A self-contained decode-and-run pipeline
+      (base64 -d | sh, curl | sh, xxd -r | sh, b64decode+exec) or two independent
+      obfuscation encodings in the same command satisfy this stage on their own.
+
+  Reports only. No traffic is blocked and no host, domain or path is added to any
+  trust list by this rule.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0048
+  - https://attack.mitre.org/techniques/T1027/
+  - https://attack.mitre.org/techniques/T1059/
+tags:
+  - attack.execution
+  - attack.defense-evasion
+  - attack.t1059
+  - attack.t1027
+  - atlas.aml.t0048
+falsepositives:
+  - Release and build scripts invoked through `bash -c` that embed terminal cursor
+    or erase-line escapes for progress rendering and then spawn compilers or write
+    build artefacts. Mitigated by ignoring plain SGR colour sequences, by requiring
+    an impact verb or a second encoding class, and by reporting rather than blocking.
+  - Developer-approved vendor installers that the agent runs at explicit user request
+    (`curl ... | sh`, `base64 -d | sh` bootstrap snippets). These genuinely match the
+    decode-and-run corroboration; they are surfaced as report-only so an analyst can
+    confirm the user asked for them.
+  - Command lines carrying internationalised text (Arabic, Hebrew, Farsi filenames or
+    commit messages) that legitimately contain bidi marks. Mitigated because the bidi
+    class alone is never sufficient - an execution primitive plus impact/corroboration
+    is also required.
+  - Terminal-recording and demo tooling (asciinema, vhs, script) whose command lines
+    embed escape sequences. Mitigated by the execution-primitive and impact-verb gates.
+  - Security-research repositories, CTF exercises and this product's own rule test
+    suites that intentionally execute obfuscated payloads. Expected true positives on
+    the behaviour; triage by repository context.
+  - Shell prompt/theme initialisation (oh-my-zsh, starship) re-exec'd under `sh -c`.
+    Mitigated by the non-SGR ANSI requirement and the 10-minute look-back guard.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ─────────────────────────────────────────────────────────────────────────
+  # OpenClaw - obfuscated dangerous execution under an AI agent (AML.T0048)
+  # Graph-driven: EXECUTE_PROCESS subtree walk from every monitored agent,
+  # then CONNECTS / HTTP_REQUEST / *_FILE edges for consequence.
+  # ─────────────────────────────────────────────────────────────────────────
+
+  WINDOW_NS    = 300000000000   # 5 min  anchor -> corroborating stage
+  LOOK_BACK_NS = 600000000000   # 10 min ignore anchors older than this
+  MAX_DEPTH    = 4
+  MAX_EDGES    = 400
+
+  # Obfuscation encoding classes. Plain SGR colour (ESC[..m) is intentionally
+  # absent - it is ubiquitous in benign build output.
+  OBF = [
+      ["zero-width or bidi control characters",
+       r"[\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2060}-\x{2064}\x{2066}-\x{2069}\x{feff}]"],
+      ["textual zero-width/bidi escape",
+       r"(?i:\\u\{?(?:200[b-f]|202[a-e]|206[0-9]|feff)|%e2%80%[89ab][0-9a-f]|%ef%bb%bf)"],
+      ["terminal-control ANSI escape",
+       r"(?:\x{001b}|(?i:\\u001b|\\x1b|\\033|\\e))(?:\]|\[[0-9;]{0,6}[A-KSTfsu])"],
+      ["ANSI conceal escape",
+       r"(?:\x{001b}|(?i:\\u001b|\\x1b|\\033|\\e))\[8m"],
+      ["hex-escaped command string",     r"(?:\\x[0-9a-fA-F]{2}){3,}"],
+      ["octal-escaped command string",   r"(?:\\[0-7]{3}){3,}"],
+      ["unicode-escaped command string", r"(?:\\u[0-9a-fA-F]{4}){3,}"],
+      ["character-code reassembly",
+       r"(?i:(?:chr\(\s*\d{1,3}\s*\)\s*[+.,]\s*){2,}|String\.fromCharCode\(\s*\d{1,3}\s*,)"],
+  ]
+
+  EXEC_PRIM = [
+      r"(?i:\b(?:ba|z|k|da)?sh)\b[^\n]{0,120}\s-c\b",
+      r"\beval\b\s",
+      r"(?i:\bpython[23]?(?:\.exe)?)\b[^\n]{0,120}\s-c\b",
+      r"(?i:\bnode)\b[^\n]{0,120}\s-e\b",
+      r"(?i:\b(?:perl|ruby|php))\b[^\n]{0,120}\s-e\b",
+      r"(?i:\bosascript)\b[^\n]{0,120}\s-e\b",
+      r"(?i:\bpowershell(?:\.exe)?|\bpwsh)\b[^\n]{0,120}\s-(?:enc|ec|e|encodedcommand)\b",
+      r"(?i:\bcmd(?:\.exe)?)\b[^\n]{0,120}\s/c\b",
+      r"(?i:\bsource|\.)\s+/dev/stdin\b",
+  ]
+
+  DECODE_EXEC = [
+      r"(?i:base64)\s+-{1,2}[dD]\w*\b[^\n]{0,140}\|\s*(?:/\S*/)?(?i:(?:ba|z|k|da)?sh)\b",
+      r"\|\s*(?i:base64)\s+-{1,2}[dD]\w*\b[^\n]{0,140}\|\s*(?:/\S*/)?(?i:(?:ba|z|k|da)?sh)\b",
+      r"(?i:xxd\s+-r|openssl\s+enc\s+-d|uudecode)\b[^\n]{0,140}\|\s*(?:/\S*/)?(?i:(?:ba|z|k|da)?sh)\b",
+      r"(?i:curl|wget)\b[^\n|]{0,200}\|\s*(?:/\S*/)?(?i:(?:ba|z|k|da)?sh)\b",
+      r"(?i:python[23]?)\b[^\n]{0,200}(?i:b64decode|codecs\.decode|marshal\.loads|zlib\.decompress)",
+      r"(?i:node)\b[^\n]{0,200}(?i:Buffer\.from)[^\n]{0,80}(?i:base64)",
+  ]
+
+  IMPACT = [
+      r"\brm\b\s+-\S*[rRf]",
+      r"(?i:\bchmod)\b\s+(?:\+x|[0-7]{3,4})",
+      r"(?i:\bchown)\b",
+      r"(?i:\b(?:curl|wget|nc|ncat|socat|scp|sftp|rsync|ssh))\b",
+      r"/dev/tcp/",
+      r"(?i:\bbase64|\bxxd|\buuencode)\b",
+      r"(?i:\bopenssl)\s+enc\b",
+      r"(?i:\bcrontab|\blaunchctl|\bsystemctl|\bschtasks)\b",
+      r"(?i:\bdefaults\s+write|\bosascript|\breg\s+add)\b",
+      r"(?i:\bsudo|\bdoas)\b",
+      r"(?i:\bkill(?:all)?|\bpkill)\b",
+      r"\bdd\s+if=",
+      r"(?i:\bmkfifo|\bnohup|\bdisown|\bsetsid)\b",
+      r"(?i:\bhistory)\s+-c\b",
+      r"(?i:\bunset)\s+HISTFILE\b",
+      r"(?i:authorized_keys|id_rsa|id_ed25519)",
+      r"\.aws/credentials",
+      r"\.kube/config",
+      r"(?i:\bexport)\s+\w*(?i:TOKEN|KEY|SECRET|PASSWORD)",
+      r"(?i:\bpip3?\s+install|\bnpm\s+(?:i|install)|\bgem\s+install)\b",
+      r"(?i:\bpython[23]?|\bnode|\bperl|\bruby|\bphp)\b",
+  ]
+
+  # Cheap relevance tokens - keeps the rule off unrelated process spawns.
+  GATE = [
+      r"(?i:\bcurl|\bwget|\bnc|\bncat|\bsocat|\bscp|\bssh|\brsync)\b",
+      r"(?i:\bbase64|\bxxd|\bopenssl)\b",
+      r"(?i:\bchmod|\brm|\bdd|\bmkfifo)\b",
+      r"(?i:\bcrontab|\blaunchctl|\bsystemctl|\bschtasks|\bosascript)\b",
+      r"(?i:\bpython[23]?|\bnode|\bperl|\bruby|\bphp|\bsudo)\b",
+  ]
+
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def obf_classes(s):
+      out = []
+      for c in OBF:
+          if re.find(c[1], s) != None:
+              out.append(c[0])
+      return out
+
+  def short(s):
+      s = re.replace(r"[\x{0000}-\x{001f}\x{007f}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2060}-\x{2069}\x{feff}]", s, "?")
+      if len(s) > 160:
+          s = s[:160] + "..."
+      return s
+
+  # ── relevance gate: pure string work on meta, no graph / log calls ────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if obf_classes(cmd):
+          return True
+      if matches_any(EXEC_PRIM, cmd):
+          return True
+      if matches_any(DECODE_EXEC, cmd):
+          return True
+      return matches_any(GATE, cmd)
+
+  def edge_cmd(e):
+      c = e.get("cmdline", "")
+      if c != "":
+          return c
+      n = node(e["to"])
+      if n == None:
+          return ""
+      c = n.get("cmdline", "")
+      if c != "":
+          return c
+      return n.get("path", "")
+
+  # Bounded BFS over the agent's EXECUTE_PROCESS subtree.
+  def subtree(aid):
+      seen = {aid: 0}
+      frontier = [aid]
+      out = []
+      for d in range(MAX_DEPTH):
+          nxt = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  if len(out) >= MAX_EDGES:
+                      return out
+                  out.append(e)
+                  ch = e["to"]
+                  if ch not in seen:
+                      seen[ch] = d + 1
+                      nxt.append(ch)
+          if not nxt:
+              break
+          frontier = nxt
+      return out
+
+  def edge_last_ts(e):
+      t = int(e.get("last_ts", "0"))
+      if t == 0:
+          t = int(e.get("first_ts", "0"))
+      if t == 0:
+          t = int(e.get("ts", "0"))
+      return t
+
+  # Stage 2 - graph-visible consequence of the obfuscated spawn.
+  def corroborate(child_id, t0, chain):
+      tmax = t0 + WINDOW_NS
+
+      for e in edges(child_id, dir="out", kind="EXECUTE_PROCESS"):
+          t = int(e.get("ts", "0"))
+          if t >= t0 and t <= tmax:
+              chain.append(step(e, stage_id="Execution Fan-out",
+                                stage_desc="obfuscated command spawned: " + short(edge_cmd(e))))
+              return "child process spawn"
+
+      for kind in ["CONNECTS", "HTTP_REQUEST"]:
+          for e in edges(child_id, dir="out", kind=kind):
+              tl = edge_last_ts(e)
+              if tl < t0 or tl > tmax:
+                  continue
+              tgt = node(e["to"])
+              if tgt == None:
+                  continue
+              if tgt.get("is_ztna_host", "1") != "0":
+                  continue
+              dst = tgt.get("host", "")
+              if dst == "":
+                  dst = tgt.get("id", "?")
+              if kind == "CONNECTS":
+                  dst = dst + ":" + tgt.get("port", "?")
+              chain.append(step(e, stage_id="Egress",
+                                stage_desc="obfuscated command reached public endpoint: " + dst))
+              return "egress to public endpoint " + dst
+
+      for kind in ["WRITE_FILE", "CREATE_FILE", "DELETE_FILE", "RENAME_FILE"]:
+          op = kind.split("_")[0]
+          for e in edges(child_id, dir="out", kind=kind):
+              tl = edge_last_ts(e)
+              if tl < t0 or tl > tmax:
+                  continue
+              fs = node(e["to"])
+              act = None
+              detail = ""
+              if fs != None:
+                  ents = fs_activity(fs["id"], op)
+                  if ents:
+                      act = ents[0]
+                      detail = act["path"]
+              desc = op + " performed by the obfuscated command"
+              if detail != "":
+                  desc = desc + ": " + detail
+              chain.append(step(e, stage_id="Filesystem Impact", stage_desc=desc, activity=act))
+              return "filesystem " + op.lower()
+
+      return ""
+
+  def already_reported(key, now_ns):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if key in seen:
+          return True
+      if len(seen) > 200:
+          fresh = {}
+          for k, v in seen.items():
+              if now_ns - int(v) < LOOK_BACK_NS:
+                  fresh[k] = v
+          seen = fresh
+      seen[key] = str(now_ns)
+      if store_usage()["free"] > 8192:
+          store_set("reported", seen)
+      return False
+
+  def caller_desc():
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return ""
+      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      if inst == None:
+          return ""
+      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lin:
+          return ""
+      names = []
+      for x in lin:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      return " [caller lineage: " + " -> ".join(names) + "]"
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          sub = subtree(aid)
+          if not sub:
+              continue
+
+          best = None
+          best_ts = 0
+          best_cmd = ""
+          best_cls = []
+          best_decode = False
+
+          for e in sub:
+              t0 = int(e.get("ts", "0"))
+              if t0 == 0:
+                  continue
+              if now > 0 and (now - t0) > LOOK_BACK_NS:
+                  continue          # stale - already handled in an earlier run
+              if t0 <= best_ts:
+                  continue
+              cmd = edge_cmd(e)
+              if cmd == "":
+                  continue
+              cls = obf_classes(cmd)
+              if not cls:
+                  continue
+              if not matches_any(EXEC_PRIM, cmd):
+                  continue
+              decode = matches_any(DECODE_EXEC, cmd)
+              if not matches_any(IMPACT, cmd) and len(cls) < 2 and not decode:
+                  continue
+              best = e
+              best_ts = t0
+              best_cmd = cmd
+              best_cls = cls
+              best_decode = decode
+
+          if best == None:
+              continue
+
+          chain = new_chain(aid)
+          chain.append(step(best, stage_id="Obfuscated Execution",
+                            stage_desc="agent subtree spawned execution primitive carrying " +
+                                       ", ".join(best_cls) + ": " + short(best_cmd)))
+
+          corr = ""
+          if best_decode:
+              corr = "decode-and-run pipeline in the same command"
+          if corr == "":
+              corr = corroborate(best["to"], best_ts, chain)
+          if corr == "" and len(best_cls) >= 2:
+              corr = str(len(best_cls)) + " independent obfuscation encodings in one command"
+          if corr == "":
+              continue          # anchor only - wait for a second stage
+
+          key = best.get("from", "?") + ">" + best.get("to", "?") + "@" + str(best_ts)
+          if already_reported(key, now):
+              return "allow"
+
+          print("OpenClaw obfuscated execution | agent=" + agent.get("name", "?") +
+                " | encodings=" + ", ".join(best_cls) +
+                " | corroboration=" + corr +
+                " | cmd=" + short(best_cmd))
+
+          return {
+              "action": "report",
+              "reason": "OpenClaw dangerous execution - agent " + agent.get("name", "?") +
+                        " spawned an obfuscated execution primitive (" + ", ".join(best_cls) +
+                        "), corroborated by " + corr + caller_desc(),
+              "chain": chain,
+          }
+
+      return "allow"
+
+  result = run()
