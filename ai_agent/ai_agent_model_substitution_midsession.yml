@@ -1,0 +1,81 @@
+title: Model Substitution - Off-Vendor Inference Endpoint or Safety-Stripped Model
+id: 6f1c9a42-9d3b-4e7a-9c58-0b7a2f3d81e4
+status: experimental
+level: high
+description: |
+  Detects a single llm_request that is directed at a locally hosted / off-vendor
+  inference stack, or that names a model checkpoint whose identifier advertises the
+  removal of alignment or safety tuning (uncensored / abliterated / unfiltered / jailbroken).
+
+  Threat: an agent starts a session on an approved provider+model, a tool call rewrites
+  the agent configuration (.agentrc, settings.json, env), and every subsequent turn is
+  served by a differently-tuned model that does not carry the approved model's refusal
+  and safety behaviour. The substituted turn is observable on its own: the provider on
+  the llm_request is a self-hosted inference runtime, or the model identifier itself
+  declares that guardrails were stripped.
+
+  This rule is deliberately single-event. It does not attempt to prove "mid-session"
+  from one record - it flags the substituted leg. Correlating it back to the approved
+  opening turn is an investigation step, not a detection prerequisite.
+author: AI Threat Response Engineering
+date: "2026-06-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm06-sensitive-information-disclosure/
+tags:
+  - atlas.aml.t0051
+  - owasp.llm06
+  - attack.defense-evasion
+  - attack.t1562
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: outbound model invocations only.
+  sel_event:
+    event_type: llm_request
+
+  # (A) Provider metadata resolves to a self-hosted / local inference runtime.
+  #     These stacks serve raw open-weight checkpoints with no vendor safety layer,
+  #     which is exactly the endpoint a configuration swap points the agent at.
+  sel_provider_local_inference:
+    provider|re: '(?i)^(self[ _-]?hosted|local|localai|localhost|localllm|on[ _-]?prem(ise|ises)?|ollama|lm[ _-]?studio|llama[ ._-]?cpp|llamafile|vllm|sglang|kobold(cpp)?|oobabooga|text[ _-]?gen(eration)?([ _-]?webui)?|gpt4all|tgi|triton)$'
+
+  # (B) Model metadata names a checkpoint that advertises stripped alignment.
+  sel_model_safety_stripped:
+    model|re: '(?i)(uncensored|unfiltered|abliterated|unaligned|jailbr(oken|eak)|no[-_]?guard(rails)?|no[-_]?safety|nsfw|\bdolphin[-_.]|toxic[-_]?dpo|wizard[-_]?vicuna|godmode|\bevil[-_])'
+
+  # (C) Same signal read from the request body, anchored to the UNESCAPED top-level
+  #     "model" key. A model name pasted inside a chat message is escaped (\"model\")
+  #     and cannot reach this pattern - only the real request field can.
+  sel_body_model_safety_stripped:
+    content|re: '"model"\s*:\s*"[^"]{0,120}(?i:uncensored|unfiltered|abliterated|unaligned|jailbroken|no[-_]?guardrails|no[-_]?safety|nsfw|dolphin[-_.]|toxic[-_]?dpo|godmode)'
+
+  # (D) The request body itself carries an inference endpoint override pointing at
+  #     loopback or RFC1918 space - a rewritten agent config leaking into the call.
+  sel_body_endpoint_override:
+    content|re: '"(base_url|api_base|openai_api_base|azure_endpoint|endpoint)"\s*:\s*"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.\d{1,3}\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.)'
+
+  # ── Suppressions: templating, placeholders and non-production identifiers only.
+  #    No host, domain or path is trusted here.
+  filter_placeholder_model:
+    content|re: '"model"\s*:\s*"(?i:<[^"]*>|\{\{[^"]*\}\}|\$\{[^"]*\}|your[-_ ]?model|model[-_ ]?name|placeholder|example|dummy|fake|test[-_ ]?model|foo|bar)'
+  filter_placeholder_provider:
+    provider|re: '(?i)^(test|dummy|mock|fixture|example|sample)$'
+
+  condition: >
+    sel_event and (
+      sel_provider_local_inference or
+      sel_model_safety_stripped or
+      sel_body_model_safety_stripped or
+      sel_body_endpoint_override
+    ) and not (filter_placeholder_model or filter_placeholder_provider)
+
+falsepositives:
+  - Organisations that legitimately run an approved self-hosted inference stack (vLLM, Ollama, TGI, Triton). Every such call reports until those deployments are registered under a named approved provider; this is why the action is report and not block.
+  - Deliberate red-team, safety-benchmark or eval-harness sessions that query uncensored open-weight checkpoints on purpose.
+  - Local laptop development against a model served on 127.0.0.1 while offline.
+  - A legitimately approved fine-tune whose name happens to contain a listed token (for example a vendor-published "dolphin-*" derivative used for an approved workload).
+  - Gateway software that rewrites base_url to an internal RFC1918 relay as part of normal routing.
+action: report
