@@ -1,0 +1,331 @@
+title: Scheduled Task Enumeration In Agent Session
+id: 7b3c1f42-9a6d-4e81-b0c5-2f18d6a4e93c
+status: experimental
+level: medium
+author: Egemen
+date: "2026-03-05"
+modified: "2026-03-05"
+description: |
+  Restores (and widens) visibility into scheduled-task reconnaissance performed by an AI
+  agent, which was lost when 'crontab -l' was removed from the persistence detection
+  signatures.
+
+  The rule fires on tool_call events whose arguments reference the cron / launchd /
+  systemd-timer surface, then anchors on meta["caller_pid"] and resolves the exact
+  process instance (proc_instance) and its spawn chain (proc_lineage). It scopes a single
+  session (lineage + processes spawned by lineage members inside the window) and queries
+  the instance-resolved event log for corroborating EXECUTE_PROCESS and READ_FILE activity
+  belonging only to that session. The triggering tool call itself is always taken from
+  meta, never re-queried from the log.
+
+  Two confidence tiers are reported once each per session:
+    recon        - scheduled tasks were enumerated (the removed 'crontab -l' signal),
+                   optionally corroborated by a cron-store read in the same session.
+    persistence  - the same session also installed / edited / removed a scheduled task
+                   (crontab -e, crontab <file>, writes into /etc/cron*, launchctl load,
+                   systemctl enable).
+references:
+  - https://attack.mitre.org/techniques/T1053/003/
+  - https://attack.mitre.org/techniques/T1007/
+  - https://attack.mitre.org/techniques/T1543/001/
+tags:
+  - attack.discovery
+  - attack.persistence
+  - attack.t1007
+  - attack.t1053.003
+falsepositives:
+  - SRE or platform-engineering agent running 'crontab -l' from an incident runbook to
+    inventory scheduled jobs on a host.
+  - Configuration-management style agent tasks (Ansible/Chef/Puppet-like) that list cron
+    before making an idempotent change; these surface as the 'persistence' tier and are
+    expected to be triaged as benign change management.
+  - System-inventory or compliance-audit agents that read /etc/crontab, /etc/cron.d or
+    /Library/LaunchAgents as part of a baseline collection.
+  - macOS developer agents invoking 'launchctl list' or 'systemctl list-timers' while
+    diagnosing a local service.
+  - Container/CI images where the agent enumerates cron to prove no scheduled jobs exist.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+  sel_cron_surface:
+    content|contains:
+      - 'crontab'
+      - '/etc/cron'
+      - '/var/spool/cron'
+      - 'anacrontab'
+      - 'LaunchAgents'
+      - 'LaunchDaemons'
+      - 'launchctl'
+      - 'systemd/user'
+      - 'list-timers'
+  condition: sel_tool_call and sel_cron_surface
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Constants ─────────────────────────────────────────────────────────────
+  WINDOW_NS = 600000000000      # 10 minutes - session clustering window
+  MAX_PIDS  = 16                # bound per-pid READ_FILE queries
+  STORE_CAP = 400               # max dedupe keys retained
+
+  CRON_HINTS = [
+      r"(?i)\bcrontab\b",
+      r"(?i)/etc/cron",
+      r"(?i)/var/spool/cron",
+      r"(?i)\banacrontab\b",
+      r"(?i)launchagents",
+      r"(?i)launchdaemons",
+      r"(?i)\blaunchctl\b",
+      r"(?i)systemd/user",
+      r"(?i)\blist-timers\b",
+  ]
+
+  # Anchor - enumeration of scheduled tasks (the signal that was removed).
+  ENUM_PATTERNS = [
+      r"(?i)\bcrontab\b[^\n]{0,120}?(-l\b|--list\b)",
+      r"(?i)(-l\b|--list\b)[^\n]{0,40}?\bcrontab\b",
+      r"(?i)\b(cat|less|more|head|tail|ls|find|stat|grep)\b[^\n]{0,120}?(/var/spool/cron|/etc/crontab|/etc/cron\.|/etc/anacrontab|/etc/periodic)",
+      r"(?i)\blaunchctl\b[^\n]{0,60}\b(list|print)\b",
+      r"(?i)\bsystemctl\b[^\n]{0,60}\blist-timers\b",
+  ]
+
+  # Corroboration - installation / modification of a scheduled task.
+  INSTALL_PATTERNS = [
+      r"(?i)\bcrontab\b[^\n]{0,120}?(-e\b|--edit\b|-r\b|--remove\b)",
+      r"(?i)\bcrontab\b\s+[~./][^\n]{0,120}",
+      r"(?i)(>>|>|\btee\b|\bcp\b|\bmv\b|\bln\b|\binstall\b)[^\n]{0,120}(/var/spool/cron|/etc/crontab|/etc/cron\.|/etc/periodic)",
+      r"(?i)\blaunchctl\b[^\n]{0,60}\b(load|bootstrap|enable|submit)\b",
+      r"(?i)\bsystemctl\b[^\n]{0,60}\benable\b",
+      r"(?i)(>>|>|\btee\b|\bcp\b|\bmv\b)[^\n]{0,120}(launchagents|launchdaemons|systemd/user)",
+  ]
+
+  CRON_PATHS = ["/var/spool/cron", "/etc/crontab", "/etc/cron.", "/etc/anacrontab",
+                "/etc/periodic/", "/library/launchagents", "/library/launchdaemons",
+                "/.config/systemd/user"]
+
+  # ── Pure helpers (no graph / log calls) ───────────────────────────────────
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def is_cron_path(p):
+      lp = p.lower()
+      for a in CRON_PATHS:
+          if a in lp:
+              return True
+      return False
+
+  def trunc(s, n):
+      s = s.replace("\n", " ").replace("\r", " ")
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def cmd_of(e):
+      c = e.get("cmdline", "")
+      if c == "":
+          c = e.get("actor_path", "")
+      return c
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = e.get("path", "")
+      return {"from": "process://" + e.get("actor_path", ""),
+              "to": tgt,
+              "kind": e.get("kind", ""),
+              "ts": e.get("ts", ""),
+              "first_ts": e.get("ts", ""),
+              "last_ts": e.get("ts", "")}
+
+  def trigger_edge(actor_path, ts, tool):
+      return {"from": "process://" + actor_path,
+              "to": "tool://" + tool,
+              "kind": "TOOL_CALL",
+              "ts": str(ts),
+              "first_ts": str(ts),
+              "last_ts": str(ts)}
+
+  # ── Relevance gate - pure string checks on meta only ──────────────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct not in ("tool_input", "tool_description", "gateway_description",
+                    "prompt_request", "sampling_request"):
+          return False
+      c = meta.get("content", "")
+      if c == "":
+          return False
+      return matches_any(CRON_HINTS, c)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      content  = meta.get("content", "")
+      event_ts = int(meta.get("event_ts", "0"))
+      since    = 0
+      if event_ts > WINDOW_NS:
+          since = event_ts - WINDOW_NS
+
+      # High-specificity anchor: the tool call itself must enumerate or modify
+      # scheduled tasks. A passing mention of a cron path is not enough.
+      meta_enum    = matches_any(ENUM_PATTERNS, content)
+      meta_install = matches_any(INSTALL_PATTERNS, content)
+      if not meta_enum and not meta_install:
+          return "allow"
+
+      snippet = trunc(content, 200)
+
+      # ── Anchor on the exact triggering instance ──────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return {"action": "report",
+                  "reason": "Scheduled-task activity in agent tool call; attribution=degraded " +
+                            "(no caller_pid): " + snippet}
+
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return {"action": "report",
+                  "reason": "Scheduled-task activity in agent tool call by pid " + str(cp) +
+                            "; attribution=degraded (instance not yet in event log): " + snippet}
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+      root        = lineage[len(lineage) - 1]
+      caller_path = inst.get("actor_path", "")
+
+      # ── Scope strictly to this session: lineage + its descendants ────────
+      session = {}
+      for x in lineage:
+          pid = x.get("actor_pid", "")
+          if pid != "":
+              session[pid] = x.get("actor_start", "0")
+
+      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                               until_ns=event_ts, limit=5000)
+      for _pass in range(3):
+          for e in exec_rows:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in session:
+                  session[ap] = e.get("actor_start", "0")
+
+      # ── Evidence steps ───────────────────────────────────────────────────
+      chain  = new_chain("process://" + root.get("actor_path", caller_path))
+      stages = []
+
+      tool = meta.get("tool_name", "")
+      if tool == "":
+          tool = "tool"
+
+      # Trigger stage - always from meta, never re-queried from the log.
+      if meta_enum:
+          chain.append(step(trigger_edge(caller_path, event_ts, tool),
+                            stage_id="Scheduled Task Discovery",
+                            stage_desc="agent tool call enumerated scheduled tasks: " + snippet))
+          stages.append("tool-call:enumerate")
+      else:
+          chain.append(step(trigger_edge(caller_path, event_ts, tool),
+                            stage_id="Scheduled Task Modification",
+                            stage_desc="agent tool call modified scheduled tasks: " + snippet))
+          stages.append("tool-call:install")
+
+      # Corroboration from the session's own EXECUTE_PROCESS rows.
+      enum_ev = None
+      inst_ev = None
+      for e in exec_rows:
+          ap = e.get("actor_pid", "")
+          pp = e.get("parent_pid", "")
+          if ap not in session and pp not in session:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < since or ts > event_ts:
+              continue
+          c = cmd_of(e)
+          if c == "":
+              continue
+          if enum_ev == None and matches_any(ENUM_PATTERNS, c):
+              enum_ev = e
+          if inst_ev == None and matches_any(INSTALL_PATTERNS, c):
+              inst_ev = e
+
+      # Corroboration from the session's own file reads - always pid-scoped.
+      read_ev = None
+      n = 0
+      for pid in session:
+          if n >= MAX_PIDS:
+              break
+          if pid == "":
+              continue
+          n = n + 1
+          rows = query_events(kind="READ_FILE", actor_pid=int(pid),
+                              actor_start=int(session[pid]), since_ns=since,
+                              until_ns=event_ts, limit=200)
+          for r in rows:
+              p = r.get("path", "")
+              if p != "" and is_cron_path(p):
+                  read_ev = r
+                  break
+          if read_ev != None:
+              break
+
+      if enum_ev != None:
+          chain.append(step(ev_edge(enum_ev),
+                            stage_id="Cron Enumeration (exec)",
+                            stage_desc="session process listed scheduled tasks: " +
+                                       trunc(cmd_of(enum_ev), 160)))
+          stages.append("exec:enumerate")
+      if read_ev != None:
+          chain.append(step(ev_edge(read_ev),
+                            stage_id="Cron Store Read",
+                            stage_desc="session process read scheduled-task store: " +
+                                       read_ev.get("path", "")))
+          stages.append("read:" + base(read_ev.get("path", "")))
+      if inst_ev != None:
+          chain.append(step(ev_edge(inst_ev),
+                            stage_id="Persistence Install",
+                            stage_desc="session process created or edited a scheduled task: " +
+                                       trunc(cmd_of(inst_ev), 160)))
+          stages.append("exec:install")
+
+      tier = "recon"
+      if meta_install or inst_ev != None:
+          tier = "persistence"
+
+      # ── Dedupe: one report per session per tier ──────────────────────────
+      key  = "s:" + root.get("actor_pid", "?") + ":" + root.get("actor_start", "0") + ":" + tier
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      if key in seen:
+          return "allow"
+      if len(seen) >= STORE_CAP:
+          seen = {}
+      seen[key] = str(event_ts)
+      if store_usage()["free"] > 8192:
+          store_set("seen", seen)
+
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "?")))
+      lin = " -> ".join(names)
+      attribution = "instance-resolved"
+      if len(lineage) <= 1:
+          attribution = "degraded"
+
+      reason = ("Scheduled-task " + tier + " by agent session [" + lin + "] - " +
+                ", ".join(stages) + " (attribution=" + attribution + ")")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
