@@ -1,0 +1,325 @@
+title: Recursive Agent Loop and Token Budget Exhaustion
+id: 6f3b1c4e-8d92-4a17-b5e0-2c7a91d4f386
+status: experimental
+level: medium
+description: |
+  Detects a single agent process instance that has entered a non-converging
+  (recursive) execution loop: the same tool is invoked repeatedly with byte-identical
+  arguments, or the instance burns through a large step budget while cycling through
+  only a handful of distinct call states. Both conditions indicate the agent is not
+  making progress and is accumulating model/tool spend without state change
+  (denial-of-wallet / ASI10 Recursive Resource Exhaustion).
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), establishes ownership with proc_lineage(),
+  and keys all loop state on the (pid, start) instance identity so counters can never
+  be merged across sessions or across recycled PIDs. Outbound request volume for the
+  same instance is pulled from the event log with query_events() purely as spend
+  evidence for the kill chain.
+
+  Report-only by design: a loop is a cost and availability problem, not a compromise,
+  and blocking a tool call mid-flight on a heuristic threshold would break legitimate
+  long-running agent work.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://genai.owasp.org/  # ASI10 - Recursive Resource Exhaustion / Agentic Loops
+  - https://attack.mitre.org/techniques/T1496/
+tags:
+  - attack.impact
+  - attack.t1496
+  - owasp.asi10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+  condition: sel_tool_call
+falsepositives:
+  - Legitimate polling loops - an agent calling a status/queue/watch tool with the
+    same arguments while waiting for an external job. Mitigated by the 15-repeat
+    threshold for argument-bearing calls, the raised 40-repeat threshold for
+    argument-less calls, the 5 minute clustering window and the 10 minute
+    per-instance report cooldown.
+  - Retry-on-transient-error behaviour (rate limit / 5xx backoff) re-issuing an
+    identical tool call a handful of times. Well below threshold.
+  - Large batch refactors or bulk file processing that issue hundreds of tool calls.
+    These have high argument diversity, so the budget path requires 200+ calls across
+    8 or fewer distinct call states before it fires.
+  - Agent evaluation harnesses, benchmark suites and load tests that intentionally
+    replay the same tool call. Report-only, so no work is interrupted.
+  - Short-lived shells or unmonitored ancestors truncating proc_lineage - the rule
+    still attributes to the caller instance and only degrades the displayed lineage.
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule's own window; never persisted) ────────────────────
+  WINDOW_NS   = 300000000000     # 5 min  - loop observation window
+  COOLDOWN_NS = 600000000000     # 10 min - per-instance report suppression
+  PRUNE_NS    = 1800000000000    # 30 min - drop dead instance state
+
+  REPEAT_ARGS    = 15    # identical (tool,args) invocations, args present
+  REPEAT_ARGLESS = 40    # identical invocations when the tool takes no args
+  BUDGET_STEPS   = 200   # total invocations by ONE instance in the window
+  DIVERSITY_MAX  = 8     # distinct call states at BUDGET_STEPS -> non-converging
+  EGRESS_BURST   = 100   # outbound requests by the instance in the window
+
+  MAX_SESSIONS = 24
+  MAX_FPS      = 64
+  FP_SCAN_CAP  = 2048
+  STORE_KEY    = "recursive_loop_state"
+
+  # ── Pure helpers (no graph / no log calls) ────────────────────────────────
+  def to_int(s, dflt):
+      if s == None:
+          return dflt
+      if s == "":
+          return dflt
+      if not re.match(r"^[0-9]+$", s):
+          return dflt
+      return int(s)
+
+  def is_relevant_event():
+      # Only real tool invocations carry arguments. tool_description /
+      # gateway_description / prompt_request also collapse onto event_type
+      # tool_call and must not be counted as loop iterations.
+      if meta.get("context_type", "") != "tool_input":
+          return False
+      if meta.get("tool_name", "") == "":
+          return False
+      if to_int(meta.get("caller_pid", ""), 0) == 0:
+          return False
+      if to_int(meta.get("event_ts", ""), 0) == 0:
+          return False
+      return True
+
+  def norm_args(s):
+      raw_len = len(s)
+      if raw_len > FP_SCAN_CAP:
+          s = s[:FP_SCAN_CAP]
+      return [re.replace(r"\s+", s, ""), raw_len]
+
+  def fingerprint(tool, server, na, raw_len):
+      h = 5381
+      for o in na.elem_ords():
+          h = (h * 33 + o) % 1000000007
+      return server + "/" + tool + "#" + str(raw_len) + "." + str(h)
+
+  def is_argless(na):
+      return na == "" or na == "{}" or na == "[]" or na == "null"
+
+  def prune(state, now, keep):
+      out = {}
+      for k in state:
+          s = state[k]
+          if k == keep or (now - to_int(s.get("last", "0"), 0)) <= PRUNE_NS:
+              out[k] = s
+      if len(out) > MAX_SESSIONS:
+          out2 = {}
+          for k in out:
+              if k == keep or to_int(out[k].get("total", "0"), 0) >= REPEAT_ARGS:
+                  out2[k] = out[k]
+          out = out2
+      if len(out) > MAX_SESSIONS:
+          cur = out.get(keep)
+          out = {}
+          if cur != None:
+              out[keep] = cur
+      return out
+
+  def trim_fps(fps, keep_key, now):
+      out = {}
+      for k in fps:
+          e = fps[k]
+          fresh = (now - to_int(e.get("last", "0"), 0)) <= WINDOW_NS
+          if k == keep_key or (fresh and to_int(e.get("n", "0"), 0) >= 3):
+              out[k] = e
+      if len(out) > MAX_FPS:
+          out2 = {}
+          for k in out:
+              if k == keep_key or to_int(out[k].get("n", "0"), 0) >= REPEAT_ARGS // 2:
+                  out2[k] = out[k]
+          out = out2
+      return out
+
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+      }
+
+  def synth_edge(actor_path, target, kind, ts):
+      return {
+          "from":     "process://" + actor_path,
+          "to":       target,
+          "kind":     kind,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  def save(state, keep):
+      u = store_usage()
+      if u["free"] < 8192:
+          store_reset()
+          cur = state.get(keep)
+          state = {}
+          if cur != None:
+              state[keep] = cur
+      store_set(STORE_KEY, state)
+
+  # ── Detection ─────────────────────────────────────────────────────────────
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = to_int(meta.get("event_ts", "0"), 0)
+      cp  = to_int(meta.get("caller_pid", "0"), 0)
+
+      # Anchor on the exact instance that made this call. Never a path-keyed
+      # graph walk - one process:// node is shared by every invocation ever.
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"          # degraded attribution - never guess an owner
+
+      apid   = to_int(inst.get("actor_pid", "0"), 0)
+      astart = to_int(inst.get("actor_start", "0"), 0)
+      if apid == 0:
+          return "allow"
+
+      # Session identity == the caller instance (pid, start). Reuse-proof and
+      # impossible to merge with another agent run under the same shell.
+      skey = str(apid) + ":" + str(astart)
+
+      lineage = proc_lineage(apid, astart)
+      if not lineage:
+          lineage = [inst]
+      root  = lineage[-1]
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lname = " -> ".join(names)
+
+      tool   = meta.get("tool_name", "")
+      server = meta.get("server_name", "")
+      parsed = norm_args(meta.get("content", ""))
+      na      = parsed[0]
+      raw_len = parsed[1]
+      fp      = fingerprint(tool, server, na, raw_len)
+
+      state = store_get(STORE_KEY)
+      if state == None:
+          state = {}
+      state = prune(state, now, skey)
+
+      sess = state.get(skey)
+      if sess == None:
+          sess = {"fps": {}, "total": "0", "distinct": "0",
+                  "first": str(now), "last": str(now), "reported": "0"}
+      if (now - to_int(sess.get("first", "0"), 0)) > WINDOW_NS:
+          sess = {"fps": {}, "total": "0", "distinct": "0",
+                  "first": str(now), "last": str(now),
+                  "reported": sess.get("reported", "0")}
+
+      fps = sess["fps"]
+      ent = fps.get(fp)
+      if ent == None:
+          ent = {"n": "0", "first": str(now), "last": str(now)}
+          sess["distinct"] = str(to_int(sess.get("distinct", "0"), 0) + 1)
+      if (now - to_int(ent.get("last", "0"), 0)) > WINDOW_NS:
+          ent = {"n": "0", "first": str(now), "last": str(now)}
+      ent["n"]    = str(to_int(ent.get("n", "0"), 0) + 1)
+      ent["last"] = str(now)
+      fps[fp] = ent
+      if len(fps) > MAX_FPS:
+          fps = trim_fps(fps, fp, now)
+      sess["fps"]   = fps
+      sess["total"] = str(to_int(sess.get("total", "0"), 0) + 1)
+      sess["last"]  = str(now)
+      state[skey]   = sess
+
+      reps     = to_int(ent.get("n", "0"), 0)
+      total    = to_int(sess.get("total", "0"), 0)
+      distinct = to_int(sess.get("distinct", "0"), 0)
+      span     = now - to_int(ent.get("first", "0"), 0)
+
+      limit = REPEAT_ARGS
+      if is_argless(na):
+          limit = REPEAT_ARGLESS
+
+      loop_hit   = reps >= limit and span <= WINDOW_NS
+      budget_hit = total >= BUDGET_STEPS and distinct <= DIVERSITY_MAX
+
+      if not loop_hit and not budget_hit:
+          save(state, skey)
+          return "allow"
+
+      if (now - to_int(sess.get("reported", "0"), 0)) < COOLDOWN_NS:
+          save(state, skey)
+          return "allow"          # already reported this instance recently
+
+      sess["reported"] = str(now)
+      state[skey] = sess
+      save(state, skey)
+
+      # Spend evidence - scoped to THIS instance only, from the event log.
+      win_start = now - WINDOW_NS
+      rows = query_events(kind="HTTP_REQUEST", actor_pid=apid,
+                          actor_start=astart, since_ns=win_start, limit=500)
+      egress = len(rows)
+
+      tool_id = "tool://" + tool
+      if server != "":
+          tool_id = "tool://" + server + "/" + tool
+
+      apath = inst.get("actor_path", "")
+      chain = new_chain("process://" + root.get("actor_path", apath))
+      stages = []
+
+      spawn = query_events(kind="EXECUTE_PROCESS", actor_pid=apid,
+                           actor_start=astart, limit=1)
+      if spawn:
+          chain.append(step(ev_edge(spawn[0]),
+                            stage_id="Session Anchor",
+                            stage_desc="looping agent instance pid " + str(apid) +
+                                       " lineage: " + lname))
+
+      if loop_hit:
+          d1 = "tool '" + tool + "' invoked " + str(reps) + \
+               " times with identical arguments in " + str(span // 1000000000) + \
+               "s (state fingerprint " + fp + ")"
+          chain.append(step(synth_edge(apath, tool_id, "TOOL_CALL",
+                                       to_int(ent.get("last", "0"), now)),
+                            stage_id="Agentic Loop", stage_desc=d1))
+          stages.append("identical-args x" + str(reps))
+
+      if budget_hit:
+          d2 = "step budget exceeded: " + str(total) + \
+               " tool invocations across only " + str(distinct) + \
+               " distinct call states in " + str(WINDOW_NS // 1000000000) + "s"
+          chain.append(step(synth_edge(apath, tool_id, "TOOL_CALL", now),
+                            stage_id="Budget Exhaustion", stage_desc=d2))
+          stages.append("non-converging " + str(total) + " steps / " +
+                        str(distinct) + " states")
+
+      if egress >= EGRESS_BURST and rows:
+          d3 = "instance made " + str(egress) + \
+               " outbound requests inside the loop window (model/tool spend " + \
+               "amplification); most recent target: " + rows[0].get("host", "?")
+          chain.append(step(ev_edge(rows[0]),
+                            stage_id="Cost Amplification", stage_desc=d3))
+          stages.append("egress x" + str(egress))
+
+      reason = "Recursive agent loop / token-budget exhaustion - " + \
+               ", ".join(stages) + " | instance " + skey + " (" + lname + ")"
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
