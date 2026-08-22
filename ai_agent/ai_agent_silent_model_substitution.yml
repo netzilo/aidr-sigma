@@ -1,0 +1,77 @@
+title: LLM Silent Model Substitution To Unmanaged Or Uncensored Model
+id: 7c1e4a92-3f6b-4d58-9a0e-2b5f81c47d63
+status: experimental
+level: high
+description: |
+  Detects an outbound LLM inference request whose model/provider identity indicates the
+  session has been silently re-pointed away from an approved, safety-tuned vendor model
+  onto an unmanaged inference endpoint (self-hosted / local runner) or onto an explicitly
+  uncensored, abliterated or unaligned open-weights fine-tune.
+
+  Attack shape (ATLAS AML.T0051 / OWASP LLM06): the agent begins the session on its
+  approved provider, a tool call rewrites the agent configuration (e.g. writing
+  "model: llama-2-7b-uncensored" into .agentrc), and every subsequent llm_request in the
+  same session runs on a differently-tuned model that does not carry the refusal and
+  safety behaviour the approved model provides. This rule fires on the substituted turn
+  itself, which is the single event that carries the swapped identity.
+
+  Detection is positive-signal only: it names the substituted-model indicators rather than
+  enumerating an approved-model allowlist, so it cannot be widened by adding a host,
+  domain or endpoint to a trust list.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm06-sensitive-information-disclosure/
+tags:
+  - atlas.aml.t0051
+  - owasp.llm06
+  - attack.defense-evasion
+  - attack.t1562
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_llm:
+    event_type: llm_request
+
+  # Provider identity is an unmanaged / locally-run inference endpoint rather than a
+  # governed vendor. Anchored exact match on the short provider token, so it cannot
+  # match these words appearing anywhere in prompt text.
+  sel_provider_unmanaged:
+    provider|re: '(?i)^(selfhosted|self-hosted|self_hosted|local|localhost|localai|local-ai|ollama|lmstudio|lm-studio|llamacpp|llama-cpp|llamafile|vllm|tgi|textgen|text-generation-webui|oobabooga|koboldcpp|kobold|gpt4all|jan|custom|unknown|none)$'
+
+  # Model identity advertises removal of alignment / safety tuning.
+  sel_model_uncensored:
+    model|re: '(?i)(uncensored|abliterat|unfiltered|unaligned|unrestricted|no-?guardrails|no-?refusal|jailbreak|dolphin|unhinged|nsfw|toxic-?dpo)'
+
+  # Same marker read from the request body, anchored to the top-level JSON "model" key
+  # so it cannot fire on prose that merely mentions an uncensored model by name.
+  sel_body_model_uncensored:
+    content|re: '(?i)"model"\s*:\s*"[^"]*(uncensored|abliterat|unfiltered|unaligned|unrestricted|no-?guardrails|jailbreak|dolphin|unhinged|nsfw|toxic-?dpo)[^"]*"'
+
+  # The marker only appears inside an escaped JSON string (\"model\": ...), i.e. the agent
+  # is quoting or echoing a config blob inside a message, not naming its own model.
+  filter_escaped_config:
+    content|re: '\\"model\\"\s*:'
+
+  # Template / placeholder model identifiers emitted by scaffolding and test harnesses.
+  filter_placeholder_model:
+    model|re: '(?i)^(\{\{[^}]*\}\}|\$\{[a-z0-9_]+\}|<[a-z0-9_.-]+>|your[-_]model|model[-_]name|placeholder|dummy|fake|test[-_]model)$'
+
+  condition: >
+    sel_llm and
+    (sel_provider_unmanaged or sel_model_uncensored or sel_body_model_uncensored)
+    and not (filter_escaped_config or filter_placeholder_model)
+falsepositives:
+  - Teams that intentionally run a self-hosted inference stack (Ollama, vLLM, LM Studio, TGI)
+    for local development — every llm_request in those sessions carries an unmanaged provider
+    token and will report. Expect a steady baseline per developer host before promoting.
+  - Safety-evaluation and red-team harnesses that deliberately drive an uncensored or
+    abliterated model as the system under test.
+  - An internal model-routing gateway that reports provider as "custom" or "unknown" while
+    proxying approved vendor traffic; the underlying model name will still be an approved one.
+  - A prompt or tool result that quotes an agent configuration file naming an uncensored model.
+    Mitigated by anchoring the body pattern to the top-level "model" JSON key and by
+    filter_escaped_config, which suppresses markers that appear only inside escaped JSON.
+action: report
