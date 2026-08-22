@@ -1,0 +1,117 @@
+title: Recursive Agent Loop and Token Budget Exhaustion Directive
+id: 3f8c1a56-9d24-4be7-b0f1-72c6ad4e5910
+status: experimental
+level: medium
+description: |
+  Detects the single tool_call event that *initiates* a non-converging agent loop —
+  the denial-of-wallet / ASI-10 precursor — rather than trying to measure the loop
+  after the fact.
+
+  Two mutually exclusive branches, each requiring TWO independent signals in the same
+  event:
+
+    Branch A (agent self-invocation): the tool being called is an agent-spawning /
+    delegation surface (Task, subagent, dispatch_agent, crew_kickoff, ...) AND the
+    arguments carry an unbounded-repetition directive ('keep calling yourself',
+    'repeat indefinitely', 'never stop invoking') or an explicit budget-defeating
+    parameter (max_iterations=-1, max_turns=null, max_depth="unlimited",
+    max_steps>=10000, max_tokens/token_budget>=1,000,000).
+
+    Branch B (shell-driven fan-out): a shell command containing an unbounded loop
+    construct (while true / until false / for((;;)) / seq with >=100 iterations)
+    AND an LLM or agent CLI / inference endpoint inside that command.
+
+  KNOWN LIMITATION (deliberate): cumulative token spend, executed step count, and
+  observed recursion depth cannot be computed here. The engine emits no
+  RECURSIVE_CALL, STEP_EXECUTION, TOKEN_CONSUMPTION or TOOL_INVOCATION edge and no
+  model_call event, so no counting or correlation is possible from a single
+  tool_call. This rule therefore targets only the observable, high-specificity
+  artefact that is present in the one live event type: the instruction or
+  configuration that removes the loop bound. It is intentionally scoped to that and
+  ships as report-only.
+author: Selhan
+date: "2026-06-14"
+references:
+  - https://genai.owasp.org/  # OWASP Agentic Security Initiative — ASI-10 Unbounded Consumption
+  - https://attack.mitre.org/techniques/T1499/
+tags:
+  - owasp.asi10
+  - attack.impact
+  - attack.t1499
+falsepositives:
+  - Load-testing or benchmarking harnesses that legitimately drive an LLM CLI inside a
+    `while true` or `seq` loop. These are filtered when the command is a dry run or
+    when the invocation is read-only, but a genuine long-running benchmark will still
+    report. Expected volume is low and the report is the correct outcome for cost review.
+  - Chaos-engineering or resilience tests that intentionally set max_iterations=-1 to
+    verify the platform's own guardrails fire.
+  - Watch loops that poll an agent for a queue (`while true; do claude -p ...; sleep 60; done`)
+    used as a poor-man's daemon. Legitimate but genuinely unbounded — worth surfacing.
+  - Security awareness / red-team content describing runaway loops. Mitigated by
+    filter_negation (guidance phrasing) and filter_docs (markdown, docs/, tests/,
+    examples/, *.spec.*, *.test.* targets).
+  - An engineer grepping the codebase for `while true` or `max_iterations`. Mitigated by
+    filter_search, which suppresses commands whose leading binary is a search/pager tool.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type: tool_call
+
+  # ── Branch A signal 1: the call targets an agent-spawning / delegation surface ──
+  sel_agent_tool:
+    tool_name|re: '(?i)^(?:task|agent|subagent|sub_agent|run_agent|runagent|agent_run|agent_invoke|invoke_agent|dispatch_agent|spawn_agent|launch_agent|delegate|delegate_to_agent|handoff|crew_kickoff|autogen_run|swarm_run|orchestrate)$'
+
+  # ── Branch A signal 2: the arguments remove the convergence bound ──────────────
+  sel_unbounded_directive:
+    content|re:
+      - '(?i)\b(?:repeat|re-?run|re-?try|retry|loop|iterate|invoke|call|spawn)\b[^\n]{0,80}?\b(?:indefinitely|forever|infinitely|endlessly|in\s+an\s+infinite\s+loop|without\s+(?:any\s+)?(?:limit|bound|stopping|end)|with\s+no\s+(?:limit|bound|max|cap))'
+      - '(?i)\bnever\s+stop\b[^\n]{0,60}\b(?:calling|invoking|spawning|dispatching|delegating|retrying|looping|iterating)\b'
+      - '(?i)\b(?:keep|continue)\s+(?:calling|invoking|spawning|launching|dispatching|delegating)\b[^\n]{0,60}\b(?:yourself|this\s+(?:same\s+)?(?:agent|tool|task|prompt)|the\s+same\s+(?:agent|tool|task|prompt)|(?:more|new)\s+(?:sub)?-?agents?)\b'
+      - '(?i)\b(?:call|invoke|spawn|launch|dispatch)\s+(?:yourself|this\s+(?:very\s+)?(?:same\s+)?(?:agent|tool|prompt)|the\s+same\s+(?:agent|tool|prompt))\s+(?:again|recursively|repeatedly)'
+      - '(?i)\b(?:recursion|recursive(?:ly)?)\b[^\n]{0,40}\b(?:unbounded|unlimited|no\s+(?:limit|bound|depth|cap)|until\s+(?:you\s+)?succeed)'
+      - '(?i)"?max_(?:iterations?|steps?|turns?|loops?|depth|recursion|retries|attempts)"?\s*[:=]\s*(?:-1|null|none|"?(?:unlimited|unbounded|infinite|infinity|inf)"?|[1-9][0-9]{4,})'
+      - '(?i)"?(?:max_tokens|token_budget|token_limit|budget_tokens|max_cost|cost_limit|spend_limit)"?\s*[:=]\s*(?:null|none|"?(?:unlimited|unbounded|infinite|infinity)"?|[1-9][0-9]{6,})'
+
+  # ── Branch B signal 1: an unbounded shell loop construct ───────────────────────
+  sel_shell_loop:
+    command|re:
+      - '(?i)\bwhile\s+(?:true|:|\[\s*1\s*\]|\[\[\s*1\s*\]\])\s*;?\s*do\b'
+      - '(?i)\buntil\s+false\s*;?\s*do\b'
+      - '(?i)\bfor\s*\(\(\s*;\s*;\s*\)\)'
+      - '(?i)\bfor\s+\w+\s+in\s+\$\(\s*seq\s+\d+\s+[1-9][0-9]{2,}\s*\)'
+      - '(?i)\brepeat\s+[1-9][0-9]{2,}\s'
+
+  # ── Branch B signal 2: the loop body drives an LLM / agent ─────────────────────
+  sel_shell_agent_cli:
+    command|re:
+      - '(?i)\b(?:claude|codex|aider|sgpt|shell_?gpt|ollama|litellm|autogpt|babyagi|crewai|open-?interpreter|gemini-cli)\b'
+      - '(?i)\bllm\s+(?:-|"|''|[a-z])'
+      - '(?i)\b(?:curl|wget|http|httpie)\b[^\n]{0,240}(?:api\.openai\.com|api\.anthropic\.com|generativelanguage\.googleapis\.com|api\.cohere\.ai|/v1/messages|/v1/chat/completions|/v1/responses|:generateContent)'
+
+  # ── Filters ────────────────────────────────────────────────────────────────────
+  filter_docs:
+    file_path|re: '(?i)(?:/(?:docs?|documentation|examples?|samples?|tests?|spec|specs|fixtures?|testdata|__tests__|__mocks__)/|(?:^|/)(?:readme|changelog|contributing|security|threat[-_]?model)\.(?:md|mdx|rst|txt)$|\.(?:md|mdx|rst|adoc|ipynb)$|[._-](?:test|spec)\.(?:[jt]sx?|py|go|rb|rs)$)'
+
+  filter_negation:
+    content|re: '(?i)\b(?:avoid|prevent|preventing|never\s+allow|do\s+not\s+(?:create|write|allow)|don''t\s+(?:create|write|allow)|must\s+not|guard\s+against|protect(?:s|ing)?\s+against|mitigat\w+|detect(?:s|ing|ion)?|test(?:s|ing)?\s+for|beware|risk\s+of|example\s+of)\b[^\n]{0,70}\b(?:infinite\s+loop|recursive\s+loop|runaway|unbounded\s+(?:recursion|loop|consumption)|denial[-\s]of[-\s]wallet|token\s+exhaustion|budget\s+exhaustion)'
+
+  filter_dry_run:
+    command|contains:
+      - '--dry-run'
+      - '--dryrun'
+      - '--help'
+      - '--version'
+
+  filter_search:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:grep|egrep|rg|ripgrep|ag|ack|git\s+grep|find|locate|awk|sed\s+-n|cat|bat|less|more|head|tail|wc|man)\b'
+
+  condition: >
+    sel_scope and
+    ((sel_agent_tool and sel_unbounded_directive) or
+     (sel_shell_loop and sel_shell_agent_cli))
+    and not (filter_docs or filter_negation or filter_dry_run or filter_search)
+
+action: report
