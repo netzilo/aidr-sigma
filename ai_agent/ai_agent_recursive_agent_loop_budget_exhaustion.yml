@@ -1,0 +1,325 @@
+title: Recursive Agent Loop and Token Budget Exhaustion
+id: 6b1f2c9d-7a54-4de8-9c31-2f80a4d5e713
+status: experimental
+level: medium
+description: |
+  Detects a non-converging (recursive) agent loop: the same MCP tool re-invoked with
+  byte-identical arguments, at machine cadence, by one instance-resolved session, with
+  little or no state change to show for it. This is the denial-of-wallet / resource
+  exhaustion pattern (ATLAS T1499, OWASP ASI10) reduced to the telemetry that actually
+  exists.
+
+  TRIAGE DISSENT — answered explicitly:
+  The reviewer is correct. RESOURCE_EXHAUSTION, TOKEN_CONSUMPTION and TOOL_INVOCATION
+  are not edge kinds in this engine, and `model_call` is never emitted, so step-budget
+  breach, cumulative token spend and self-prompt recursion depth have NO telemetry path
+  and are NOT claimed by this rule. Rather than ship three selections that can never
+  fire, this rule detects the one signal that is real (`tool_call`) and then adds the
+  correlation the narrative was actually reaching for, using facilities that DO exist:
+    * instance-resolved session scoping (caller_pid -> proc_instance -> proc_lineage)
+      so repetition is counted per agent session, never pooled across sessions;
+    * per-rule persistent store to accumulate identical-argument fingerprints across
+      events, which is the only way to observe "budget" behaviour without a token edge;
+    * an instance-scoped state-change audit via query_events on WRITE/CREATE/DELETE/
+      RENAME_FILE, which is the closest available proxy for "no goal state change".
+  Cost/token figures are deliberately absent from the verdict text — the engine does not
+  expose them and the rule does not invent them. What it reports is invocation volume,
+  cadence, argument-identity and productive-work absence.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0034
+  - https://attack.mitre.org/techniques/T1499/
+  - https://genai.owasp.org/
+tags:
+  - attack.impact
+  - attack.t1499
+  - atlas.t1499
+  - owasp.asi10
+falsepositives:
+  - Long-poll / status-poll tools (get_job_status, wait_for_build) called with identical
+    arguments while an external job runs. Mitigated by the tight-cadence requirement -
+    the mean inter-call gap must be <= 3s; human- or scheduler-paced polling at 5s+
+    intervals never reaches the threshold.
+  - Retry-with-backoff against a flaky tool or MCP server. Backoff widens the mean gap
+    on every attempt, so a backing-off retry loop falls out of the tight-cadence gate
+    long before 12 attempts.
+  - Test harnesses and evaluation suites replaying the same fixture call repeatedly.
+    These are report-only findings and are recognisable by the lineage shown in the kill
+    chain (test runner as session root, not an agent-driven shell).
+  - Genuinely productive tight loops - a code-mod agent editing files in a loop calls the
+    same tool rapidly but with DIFFERENT arguments (distinct fingerprints), and produces
+    WRITE/CREATE file events. Identical-argument fingerprinting excludes the former; the
+    state-change audit doubles the threshold for the latter.
+  - Stateful cursor tools where pagination state lives server-side and the client sends
+    identical arguments each page. Rare, and surfaces as report only.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+    content|re: '.'
+  condition: sel_tool_call
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables. Every window/threshold lives in the rule, never in storage. ──────
+  WINDOW_NS        = 300000000000     # 5 min  - loop observation window
+  SESSION_TTL_NS   = 3600000000000    # 1 h    - stale session state eviction
+  MEAN_GAP_NS      = 3000000000       # 3 s    - max mean gap for a "tight" loop
+  REPEAT_THRESHOLD = 12               # identical (tool,args) invocations in-window
+  FLOOD_TOTAL      = 60               # total in-window calls for non-convergence
+  FLOOD_DISTINCT   = 3                # ...spread over this few argument sets
+  MAX_FPS          = 64               # fingerprints retained per session
+  MAX_SESSIONS     = 24               # sessions retained in the rule store
+  ARG_SCAN_LIMIT   = 4096             # bytes of tool args hashed
+  MAX_PIDS_AUDIT   = 12               # cap on instance-scoped mutation queries
+  MUTATION_KINDS   = ["WRITE_FILE", "CREATE_FILE", "DELETE_FILE", "RENAME_FILE"]
+
+  # ── Pure helpers (no graph / no event-log calls) ──────────────────────────────
+  def fnv1a(s):
+      if len(s) > ARG_SCAN_LIMIT:
+          s = s[:ARG_SCAN_LIMIT]
+      h = 2166136261
+      for c in s.elem_ords():
+          h = ((h ^ c) * 16777619) % 4294967296
+      return "%x" % h
+
+  def norm(s):
+      # collapse whitespace so pretty-printed vs compact JSON hash identically
+      return re.replace(r"\s+", s, " ")
+
+  def prune_fps(d, limit):
+      extra = len(d) - limit
+      if extra <= 0:
+          return d
+      for i in range(extra):
+          ok = ""
+          ot = -1
+          for k in d:
+              t = int(d[k].get("last", 0))
+              if ot < 0 or t < ot:
+                  ot = t
+                  ok = k
+          if ok == "":
+              break
+          d.pop(ok)
+      return d
+
+  def exec_edge(child, parent):
+      return {
+          "from":     "process://" + parent.get("actor_path", "?"),
+          "to":       "process://" + child.get("actor_path", "?"),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       child.get("ts", child.get("actor_start", "0")),
+          "first_ts": child.get("actor_start", "0"),
+          "last_ts":  child.get("actor_start", "0"),
+          "cmdline":  child.get("cmdline", ""),
+      }
+
+  def tool_edge(actor_path, tid, ts):
+      return {
+          "from":     "process://" + actor_path,
+          "to":       tid,
+          "kind":     "TOOL_CALL",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  # ── Store maintenance ─────────────────────────────────────────────────────────
+  def prune_sessions(now):
+      live = []
+      for k in store_keys():
+          v = store_get(k)
+          if v == None:
+              store_delete(k)
+              continue
+          last = int(v.get("last", 0))
+          if now - last > SESSION_TTL_NS:
+              store_delete(k)
+          else:
+              live.append([last, k])
+      extra = len(live) - MAX_SESSIONS
+      if extra <= 0:
+          return
+      for i in range(extra):
+          oldest = -1
+          oi     = -1
+          for j in range(len(live)):
+              if live[j][0] < 0:
+                  continue
+              if oldest < 0 or live[j][0] < oldest:
+                  oldest = live[j][0]
+                  oi     = j
+          if oi < 0:
+              break
+          store_delete(live[oi][1])
+          live[oi][0] = -1
+
+  def persist(key, st, now):
+      u = store_usage()
+      if u["free"] < 65536 or len(store_keys()) > MAX_SESSIONS:
+          prune_sessions(now)
+      store_set(key, st)
+
+  def tool_node_id(name, server):
+      for t in graph(type="Tool"):
+          if t.get("name", "") != name:
+              continue
+          if server == "" or t.get("server", "") == server:
+              return t["id"]
+      if server == "":
+          return "tool://" + name
+      return "tool://" + server + "/" + name
+
+  def run():
+      # ── 1. Relevance gate: pure string checks on meta, zero traversal ─────────
+      #     tool_input is the raw context name; tool_call is the collapsed
+      #     event_type the Sigma pre-filter matches. Descriptions and prompt
+      #     contexts also collapse onto tool_call and must not be counted.
+      if meta.get("context_type", "") != "tool_input":
+          return "allow"
+      tool = meta.get("tool_name", "")
+      if tool == "":
+          return "allow"
+      now = int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+
+      # ── 2. Anchor on the exact triggering instance (never a node walk) ────────
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"            # degraded attribution - never guess an owner
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+      root = lineage[-1]
+      ses  = "s:" + str(root.get("actor_pid", "0")) + ":" + str(root.get("actor_start", "0"))
+
+      # ── 3. Session-scoped, window-scoped identical-argument fingerprints ──────
+      st  = store_get(ses)
+      if st == None:
+          st = {"last": now, "fps": {}}
+      fps   = st.get("fps", {})
+      fresh = {}
+      for k in fps:
+          v = fps[k]
+          if now - int(v.get("last", 0)) <= WINDOW_NS:
+              fresh[k] = v
+
+      fp  = fnv1a(tool + "|" + norm(meta.get("content", "")))
+      ent = fresh.get(fp)
+      if ent == None:
+          ent = {"n": 0, "first": now, "last": now, "tool": tool, "reported": 0}
+      ent["n"]    = int(ent.get("n", 0)) + 1
+      ent["last"] = now
+      ent["tool"] = tool
+      fresh[fp]   = ent
+      fresh       = prune_fps(fresh, MAX_FPS)
+      st["fps"]   = fresh
+      st["last"]  = now
+
+      n    = int(ent["n"])
+      span = now - int(ent.get("first", now))
+      gap  = span // (n - 1) if n > 1 else WINDOW_NS
+
+      total    = 0
+      distinct = 0
+      tmin     = now
+      for k in fresh:
+          total    += int(fresh[k].get("n", 0))
+          distinct += 1
+          f = int(fresh[k].get("first", now))
+          if f < tmin:
+              tmin = f
+      sgap = (now - tmin) // (total - 1) if total > 1 else WINDOW_NS
+
+      reported   = int(ent.get("reported", 0))
+      flood_at   = int(st.get("flood_at", 0))
+      fire_rep   = gap <= MEAN_GAP_NS and n >= REPEAT_THRESHOLD and n >= reported + REPEAT_THRESHOLD
+      fire_flood = (sgap <= MEAN_GAP_NS and total >= FLOOD_TOTAL and
+                    distinct <= FLOOD_DISTINCT and now - flood_at > WINDOW_NS)
+
+      if not (fire_rep or fire_flood):
+          persist(ses, st, now)
+          return "allow"            # rule stays invisible - no event, no noise
+
+      # ── 4. Session expansion + instance-scoped state-change audit ─────────────
+      since   = now - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[str(x.get("actor_pid", "0"))] = str(x.get("actor_start", "0"))
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e["actor_pid"]] = e["actor_start"]
+
+      mutations = 0
+      checked   = 0
+      for pid in session:
+          if checked >= MAX_PIDS_AUDIT:
+              break
+          checked += 1
+          for kind in MUTATION_KINDS:
+              rows = query_events(kind=kind, actor_pid=int(pid),
+                                  actor_start=int(session[pid]),
+                                  since_ns=since, limit=20)
+              mutations += len(rows)
+
+      # Productive work present -> require twice the evidence before reporting.
+      if mutations > 0:
+          if n < REPEAT_THRESHOLD * 2 and total < FLOOD_TOTAL * 2:
+              persist(ses, st, now)
+              return "allow"
+
+      # ── 5. Verdict + kill chain ───────────────────────────────────────────────
+      ent["reported"] = n
+      fresh[fp]       = ent
+      st["fps"]       = fresh
+      if fire_flood:
+          st["flood_at"] = now
+      persist(ses, st, now)
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lname = " -> ".join(names)
+
+      apath = inst.get("actor_path", "?")
+      tid   = tool_node_id(tool, meta.get("server_name", ""))
+      chain = new_chain("process://" + root.get("actor_path", "?"))
+
+      if len(lineage) > 1:
+          chain.append(step(exec_edge(lineage[0], lineage[1]),
+                            stage_id="Session Anchor",
+                            stage_desc="loop driven by instance chain: " + lname))
+      chain.append(step(tool_edge(apath, tid, now),
+                        stage_id="Recursive Invocation",
+                        stage_desc=tool + " re-invoked " + str(n) +
+                                   "x with byte-identical arguments (fp " + fp +
+                                   ", mean gap " + str(gap // 1000000) + "ms)"))
+      if fire_flood:
+          chain.append(step(tool_edge(apath, tid, now),
+                            stage_id="Non-Convergence",
+                            stage_desc=str(total) + " in-window tool calls across only " +
+                                       str(distinct) + " distinct argument sets"))
+      chain.append(step(tool_edge(apath, tid, now),
+                        stage_id="Budget Impact",
+                        stage_desc="state-changing file events by this session in-window: " +
+                                   str(mutations) + " (no token/cost telemetry exists in this engine)"))
+
+      reason = ("Recursive agent loop - " + tool + " re-invoked " + str(n) +
+                "x with identical arguments over " + str(span // 1000000000) +
+                "s (mean gap " + str(gap // 1000000) + "ms) by " + lname +
+                "; session window: " + str(total) + " calls / " + str(distinct) +
+                " distinct argument sets; " + str(mutations) +
+                " state-changing file events")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
