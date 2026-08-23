@@ -1,0 +1,118 @@
+title: Supply Chain NPM Claw Orchestrator Delivery
+id: 6f2a91c4-3d5e-4b17-9c8a-0e7b42d51f83
+status: experimental
+level: medium
+description: |
+  Detects the command line that fetches, installs or executes the "Claw Orchestrator"
+  npm package family (claw-orchestrator, @claw/*, clawcode-orchestrator and close
+  spelling variants), or that runs a binary of that name against Model Context
+  Protocol / AI-agent integration points (Claude Desktop, Cursor, Cline, Continue,
+  Windsurf, Roo config surfaces).
+
+  Scope note (answers the triage objection): the engine has no package_install or
+  network_connect event type and no INSTALLED_PACKAGE / ACQUIRED_CAPABILITY /
+  EXECUTE_CODE edge, so the full chain "npm install -> capability acquisition ->
+  exfiltration" is not observable. The only live signal is execute_process, whose
+  content field carries the spawned command line. This rule therefore deliberately
+  detects ONE thing precisely: the moment the package is pulled into or run inside
+  the developer/agent environment. It makes no claim about what the package did
+  afterwards. That is why it reports rather than blocks: it is an investigation
+  trigger for the AI development environment, not a verdict on behaviour.
+
+  Precision is achieved by requiring two independent signals in the same command
+  line: (1) a package-manager fetch/exec verb OR a same-named binary invocation,
+  AND (2) the specific package identifier OR an MCP-host integration target.
+  Neither half fires alone.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope ────────────────────────────────────────────────────────────────
+  sel_scope:
+    event_type: execute_process
+
+  # ── signal A1: a package manager is being asked to FETCH or EXECUTE code ──
+  sel_install_verb:
+    content|re:
+      - '(?i)(?:^|[\s;|&(])(?:sudo\s+)?(?:npm|pnpm|yarn|bun)\s+(?:global\s+)?(?:i|in|install|add|exec|dlx|create)\b'
+      - '(?i)(?:^|[\s;|&(])(?:npx|pnpx|bunx)\s'
+
+  # ── signal A2: the specific package identifier ───────────────────────────
+  sel_claw_package:
+    content|re:
+      - '(?i)(?:^|[\s"''=/])@?cl[ao]w[-_.]?(?:code|ai|labs)?[-_/.]?orchestrat(?:or|er)(?:@[\w.^~*-]+)?\b'
+      - '(?i)(?:^|[\s"''=/])@cl[ao]w(?:[-_.](?:code|ai|labs))?/(?:orchestrator|orchestration|mcp|runtime|cli)\b'
+
+  # ── signal B1: the same-named binary is being executed ───────────────────
+  sel_claw_binary:
+    content|re: '(?i)(?:^|[\s"''/])cl[ao]w[-_]?orchestrat(?:or|er)(?:\.(?:js|cjs|mjs))?(?:\s|"|''|$)'
+
+  # ── signal B2: it is being pointed at an MCP host / agent config surface ─
+  sel_mcp_integration:
+    content|re:
+      - '(?i)--?mcp(?:[-_](?:config|server|servers|install|register|setup|host|add))?\b'
+      - '(?i)claude[_-]?desktop[_-]?config\.json'
+      - '(?i)cline[_-]?mcp[_-]?settings\.json'
+      - '(?i)mcp[_-]?servers?\.json'
+      - '(?i)\.(?:cursor|continue|codeium|windsurf|roo|claude)/[\w./-]*(?:mcp|config)'
+
+  # ── filters: narrow only, no host/domain/path is being trusted ───────────
+
+  # Read-only registry metadata queries — how a defender investigates a package.
+  filter_readonly_query:
+    content|re: '(?i)(?:^|[\s;|&(])(?:npm|pnpm|yarn|bun)\s+(?:view|info|show|search|audit|ls|list|outdated|why|docs|repo|dist-tag|pack|deprecate|unpublish)\b'
+
+  # Simulation / help output — nothing is fetched or executed.
+  filter_dry_run:
+    content|re: '(?i)(?:^|\s)--(?:dry-run|help|version|usage)(?:[\s=]|$)'
+
+  # Remediation: the package is being taken back out.
+  filter_uninstall:
+    content|re: '(?i)(?:^|[\s;|&(])(?:npm|pnpm|yarn|bun)\s+(?:global\s+)?(?:uninstall|unlink|remove|rm|un)\b'
+
+  # The spawned binary is itself a text-search/pager tool, i.e. someone is
+  # reading documentation or a runbook that quotes the install command.
+  # Anchored to the start of the command line, so only the actual argv[0] counts.
+  filter_text_tooling:
+    content|re: '(?i)^\s*(?:sudo\s+)?(?:/[\w./-]*/)?(?:grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|man|diff|wc|jq|code|open)\b'
+
+  condition: >
+    sel_scope
+    and ((sel_install_verb and sel_claw_package)
+         or (sel_claw_binary and sel_mcp_integration))
+    and not (filter_readonly_query or filter_dry_run
+             or filter_uninstall or filter_text_tooling)
+
+falsepositives:
+  - Security responder or malware analyst deliberately installing the package in a
+    sandbox to triage it. The read-only forms (npm view/info/audit/pack) and
+    --dry-run are filtered; a real install is intentionally still reported, because
+    an analyst pulling it onto a developer workstation is exactly the event worth
+    seeing.
+  - An internal or first-party package that legitimately uses the name
+    "claw-orchestrator" or the "@claw/*" scope. Confirm the registry, publisher and
+    integrity hash before dismissing.
+  - CI or dependency-hygiene runs that reinstall from a historical lockfile which
+    still pins the package while it is being removed from the tree.
+  - A shell wrapper that echoes the install command before running it (echo/printf
+    chains are not filtered, only pager and grep style argv[0]).
+  - Generic orchestration CLIs invoked with --mcp flags that happen to match the
+    binary-name variant; requires both the name and the MCP target, so this needs
+    the tool to actually be named claw-orchestrator.
+
+action: report
