@@ -1,0 +1,78 @@
+title: MCP Minecraft Control (vitaminmcp) Agent Process Spawn
+id: 7b3f9c42-5d18-4a6e-9f2b-8c41d0a7e365
+status: experimental
+level: medium
+description: |
+  Detects an AI-agent-monitored process spawning the vitaminmcp MCP server, a
+  Minecraft protocol bot library (mineflayer / prismarine / node-minecraft-protocol),
+  a Paper/Spigot/Purpur/Folia game-server jar, or a client aimed at the Minecraft
+  service ports (25565 game / 25575 RCON) alongside Minecraft-specific context.
+
+  vitaminmcp gives an agent the ability to drive real Minecraft Paper servers and
+  protocol bots. Once wired into an agent, that capability lets model-generated
+  instructions start, join, command and disrupt live game infrastructure without a
+  human in the loop, and the same protocol-bot machinery is a general-purpose
+  outbound socket client. This rule surfaces the moment that capability is actually
+  exercised on the endpoint (process execution), rather than merely configured.
+
+  Single-event content detection only: the verdict is derived from the spawned
+  command line of one execute_process event. It is intentionally scoped to report
+  so that legitimate Minecraft plugin development and CI test runs are recorded and
+  reviewed rather than interrupted.
+author: Evgen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://modelcontextprotocol.io/
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0050
+  - owasp.llm03
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  # 1. The MCP server itself — highest specificity token.
+  sel_vitaminmcp_cmd:
+    command|re: '(?i)\bvitamin[-_]?mcp\b'
+  sel_vitaminmcp_content:
+    content|re: '(?i)\bvitamin[-_]?mcp\b'
+
+  # 2. Minecraft protocol bot / RCON client runtimes driven by the MCP server.
+  sel_mc_bot:
+    command|re: '(?i)\b(mineflayer|prismarine[-_]?(protocol|client|chunk|viewer)|node[-_]?minecraft[-_]?protocol|mcrcon|mineflayer[-_]?pathfinder)\b'
+
+  # 3. Launch of a Minecraft server jar (Paper and forks).
+  sel_mc_jar:
+    command|re: '(?i)\bjava\b[^\n]{0,400}-jar\s+\S*(paper(clip|mc|spigot)?|spigot|purpur|folia|craftbukkit|bukkit|mohist|pufferfish|leaves|minecraft[_-]server)\S*\.jar'
+
+  # 4. Minecraft service ports, only when paired with Minecraft context on the
+  #    same command line (port digits alone are not evidence).
+  sel_mc_port:
+    command|re: '(?i)(?:[:=]|\bport[ =]|--port[ =]|--rcon-port[ =])255(?:65|75)\b'
+  sel_mc_ctx:
+    command|re: '(?i)\b(minecraft|mineflayer|prismarine|paper(mc|clip)?|spigot|purpur|folia|bukkit|rcon|vitamin[-_]?mcp)\b'
+
+  # ── Benign-shape suppressions (content shape only, no host/path trust) ──────
+  filter_doc_inspection:
+    command|re: '(?i)\b(grep|rg|ripgrep|ack|man|apropos|whatis|which|whereis|npm (?:view|info|search|ls|list)|pip (?:show|search|list)|brew (?:info|search))\b'
+  filter_help_version:
+    command|re: '(?i)(?:^|\s)(?:--help|--version|--usage)(?:\s|$)'
+
+  condition: >
+    sel_exec
+    and (sel_vitaminmcp_cmd or sel_vitaminmcp_content or sel_mc_bot or sel_mc_jar
+         or (sel_mc_port and sel_mc_ctx))
+    and not (filter_doc_inspection or filter_help_version)
+falsepositives:
+  - Minecraft plugin developers using vitaminmcp for its intended purpose — driving a local Paper test server from an agent during plugin development.
+  - CI or integration test runs in a Minecraft plugin repository that boot a Paper/Spigot jar and connect a mineflayer bot as part of the test harness.
+  - A developer workstation that happens to run a personal Paper server or a mineflayer script while an AI coding agent is also monitored on the same machine.
+  - Node.js projects that install or execute mineflayer/prismarine packages during ordinary dependency work.
+  - Game-server operations tooling (mcrcon, RCON admin scripts) run by an operator on a monitored host.
+action: report
