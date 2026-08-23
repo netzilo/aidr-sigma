@@ -1,0 +1,344 @@
+title: vLLM ZeroMQ Pickle Deserialization RCE - Payload Spawn Under Inference Server
+id: 3f7a2c1d-9b64-4e5a-8c2f-1d6b0a94e7c3
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation stage of the vLLM (0.6.5 - 0.8.4) mooncake / KV-transfer
+  remote code execution flaw, in which an unauthenticated attacker reaches an exposed
+  ZeroMQ socket bound to all interfaces and delivers a pickle payload that is
+  deserialized unsafely, executing arbitrary code inside the serving process.
+
+  The engine exposes no deserialization or socket-listen event for this threat, so the
+  rule anchors on the only verified signal: execute_process. Successful pickle RCE
+  materialises as the vLLM server process (or a descendant of it) spawning an attacker
+  command - typically a shell one-liner emitted by __reduce__ via os.system /
+  subprocess.Popen.
+
+  Attribution is instance-resolved and strictly single-session:
+    caller_pid -> proc_instance(pid, event_ts) -> proc_lineage -> query_events
+  The vLLM server instance must be present in the TRIGGERING process's own lineage;
+  no cross-session or path-keyed graph attribution is performed. Corroborating
+  post-exploitation spawns are gathered only from instances inside that same session
+  and only inside the detection window.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-32444
+  - https://docs.vllm.ai/en/latest/features/disagg_prefill.html
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial_access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - attack.t1203
+  - atlas.aml.t0010
+  - owasp.o2
+  - owasp.o10
+falsepositives:
+  - Operators or MLOps automation running maintenance one-liners (curl ... | bash, pip
+    install from a script, chmod +x /tmp/setup.sh) inside the same container and under
+    the vLLM entrypoint lineage. These are genuine matches of the payload signature and
+    are reported, not blocked, so a human can confirm the change window.
+  - Ray / Kubernetes init, readiness or postStart hooks that download and execute a
+    bootstrap script while parented to the vLLM serving process during pod startup.
+  - Benchmark, profiling or model-download harnesses launched from inside the server
+    process that fetch an artefact into /tmp or /dev/shm and mark it executable.
+  - Configuration-management agents (cron/systemd/authorized_keys edits) that happen to
+    run as descendants of the serving process on a shared GPU host.
+  - A payload command line that itself contains the string "vllm" could in principle be
+    mistaken for the server anchor; the rule rejects any lineage entry whose own command
+    line matches a payload signature, so the anchor must be a distinct, non-payload
+    process instance.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # vLLM ZeroMQ / mooncake pickle-deserialization RCE - post-exploitation spawn.
+  # Instance-resolved, single-session attribution. Report only.
+
+  WINDOW_NS = 300000000000        # 5 minutes - corroborating stages must cluster
+  MAX_ROWS  = 2000
+  MAX_EVID  = 6
+
+  VLLM_RE  = r"(?i)(\bvllm\b|vllm[\./]entrypoints|vllm[\./]engine|openai[\./]api_server)"
+  ZMQ_RE   = r"(?i)(\bmooncake\b|kv[_-]transfer|kv[_-]connector|\bzmq\b|zeromq|tcp://0\.0\.0\.0|tcp://\*|--host[= ]+0\.0\.0\.0|--kv-transfer-config)"
+  PYISH_RE = r"(?i)(python[0-9.]*|uvicorn|\bray\b|vllm|torchrun)"
+
+  # High-specificity payload signatures - what a pickle __reduce__ gadget actually runs.
+  HIGH_SIGS = [
+      ["Download piped to shell",
+       r"(?i)\b(curl|wget|fetch)\b[^|\n]{0,400}\|[^|\n]{0,80}\b(ba|z|da|k)?sh\b"],
+      ["Download piped to interpreter",
+       r"(?i)\b(curl|wget|fetch)\b[^|\n]{0,400}\|[^|\n]{0,80}\b(python[0-9.]*|perl|ruby|node)\b"],
+      ["Reverse shell via /dev/tcp",
+       r"(?i)/dev/(tcp|udp)/[a-z0-9._\-]+/[0-9]{1,5}"],
+      ["Reverse shell via netcat",
+       r"(?i)\b(nc|ncat|netcat)\b[^\n]{0,200}-[a-z]{0,3}e[a-z]{0,3}\b[^\n]{0,60}(sh|bash|cmd)\b"],
+      ["Reverse shell via socat",
+       r"(?i)\bsocat\b[^\n]{0,200}\bexec\s*:"],
+      ["Interactive shell redirected to a socket",
+       r"(?i)\b(bash|sh|zsh)\b\s+-[a-z]{0,3}i\b[^\n]{0,120}(>&|<&|/dev/tcp|\|)"],
+      ["Base64-decoded payload piped to shell",
+       r"(?i)base64\s+(-d|-D|--decode)\b[^\n]{0,160}\|[^\n]{0,80}\b(ba|z)?sh\b"],
+      ["Long base64 blob piped to decoder",
+       r"(?i)\b(echo|printf)\b[^\n]{0,40}[A-Za-z0-9+/=]{60,}[^\n]{0,60}\|[^\n]{0,60}base64"],
+      ["Dropper: chmod +x in world-writable directory",
+       r"(?i)\bchmod\b[^\n]{0,40}\+?x[^\n]{0,100}(/tmp/|/dev/shm/|/var/tmp/|/run/shm/)"],
+      ["Download written to world-writable path",
+       r"(?i)\b(curl|wget)\b[^\n]{0,240}\s(-o|-O|--output)\b[^\n]{0,60}(/tmp/|/dev/shm/|/var/tmp/)"],
+      ["Persistence primitive",
+       r"(?i)(crontab\s+-|/etc/cron|systemctl\s+(enable|--user)|authorized_keys|\.bashrc|\.profile)"],
+  ]
+
+  # Lower-specificity, corroboration only - never sufficient on its own.
+  CORROB_SIGS = [
+      ["Host reconnaissance",
+       r"(?i)(^|[;&|\s])(whoami|hostname|uname|ifconfig|netstat|ss\s+-|ps\s+-?[aef])\b"],
+      ["Credential / secret access",
+       r"(?i)(\.ssh/id_|\.aws/credentials|/etc/shadow|\.kube/config|/proc/self/environ|\.netrc|\.docker/config\.json|HF_TOKEN|OPENAI_API_KEY|HUGGING_FACE_HUB_TOKEN)"],
+      ["Environment harvesting",
+       r"(?i)(^|[;&|\s])(env|printenv)\b"],
+      ["Outbound transfer tool",
+       r"(?i)(^|[;&|\s])(curl|wget|scp|sftp|rsync|nc|ncat)\b"],
+      ["Tooling installation",
+       r"(?i)\b(pip[0-9.]*\s+install|apt-get\s+install|apk\s+add|yum\s+install)\b"],
+      ["Container / orchestrator discovery",
+       r"(?i)(/var/run/docker\.sock|\bkubectl\b|/var/run/secrets/kubernetes\.io)"],
+  ]
+
+  def short(s, n):
+      s = s.replace("\n", " ")
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def classify_high(cmd):
+      for sig in HIGH_SIGS:
+          if re.find(sig[1], cmd) != None:
+              return sig[0]
+      # Inline interpreter one-liner carrying an exec / network primitive.
+      if re.find(r"(?i)\b(python[0-9.]*|perl|ruby|node|php)\b[^\n]{0,24}\s-(c|e)\b", cmd) != None:
+          if re.find(r"(?i)(socket|subprocess|os\.system|os\.popen|pty\.spawn|__import__|\bexec\(|\beval\(|base64|urllib|requests\.get|child_process|IO\.popen|marshal\.loads|pickle\.loads)", cmd) != None:
+              return "Inline interpreter payload with exec/network primitive"
+      return ""
+
+  def classify_corrob(cmd):
+      for sig in CORROB_SIGS:
+          if re.find(sig[1], cmd) != None:
+              return sig[0]
+      return ""
+
+  # ---- relevance gate: pure string work on meta, no graph / log access -------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      return classify_high(cmd) != ""
+
+  def lineage_cmdline(x):
+      cl = x.get("cmdline", "")
+      if cl != "":
+          return cl
+      rows = query_events(kind="EXECUTE_PROCESS",
+                          actor_pid=int(x.get("actor_pid", "0")),
+                          actor_start=int(x.get("actor_start", "0")),
+                          limit=2)
+      for r in rows:
+          c = r.get("cmdline", "")
+          if c != "":
+              return c
+      return x.get("actor_path", "")
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = "pid:" + e.get("parent_pid", "0")
+      return {
+          "from":     "process://" + frm,
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  short(e.get("cmdline", ""), 300),
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd        = meta.get("content", "")
+      label      = classify_high(cmd)
+      trigger_ts = int(meta.get("event_ts", "0"))
+
+      # ---- anchor on the exact triggering instance --------------------------
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"                      # unattributable / periodic
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"                      # degraded - create row not landed yet
+      lineage = proc_lineage(int(inst.get("actor_pid", "0")),
+                             int(inst.get("actor_start", "0")))
+      if not lineage:
+          return "allow"
+
+      # ---- REQUIRED anchor stage: a vLLM/mooncake server in THIS lineage ----
+      anchor         = None
+      anchor_cl      = ""
+      anchor_exposed = False
+      for x in lineage:
+          cl = lineage_cmdline(x)
+          if classify_high(cl) != "":
+              continue                        # a payload is never the server anchor
+          p   = x.get("actor_path", "")
+          hay = cl + " " + p
+          vll = re.find(VLLM_RE, hay) != None
+          zmq = re.find(ZMQ_RE, cl) != None
+          if vll or (zmq and re.find(PYISH_RE, hay) != None):
+              anchor         = x
+              anchor_cl      = cl
+              anchor_exposed = zmq
+              break
+      if anchor == None:
+          return "allow"                      # not a vLLM lineage - not this threat
+
+      anchor_ts = int(anchor.get("ts", "0"))
+
+      # ---- session scope: lineage instances + their descendants -------------
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+
+      rows = []
+      if trigger_ts > 0:
+          rows = query_events(kind="EXECUTE_PROCESS",
+                              since_ns=trigger_ts - WINDOW_NS,
+                              until_ns=trigger_ts,
+                              limit=MAX_ROWS)
+          for i in range(2):                  # two passes: rows are newest-first
+              for r in rows:
+                  pp = r.get("parent_pid", "")
+                  if pp == "" or pp not in session:
+                      continue
+                  ps = session[pp]
+                  rs = r.get("parent_start", "")
+                  if ps == "" or ps == "0" or rs == "" or rs == "0" or rs == ps:
+                      session[r.get("actor_pid", "")] = r.get("actor_start", "")
+
+      # ---- corroborating session activity, ordered after the server start ---
+      evidence = []
+      seen     = {}
+      for r in rows:
+          if len(evidence) >= MAX_EVID:
+              break
+          ap = r.get("actor_pid", "")
+          if ap == "" or ap not in session:
+              continue
+          cl = r.get("cmdline", "")
+          if cl == "":
+              continue
+          if ap == inst.get("actor_pid", "") and cl == cmd:
+              continue                        # this is the trigger itself
+          if anchor_ts > 0 and int(r.get("ts", "0")) < anchor_ts:
+              continue                        # predates the server instance
+          lab = classify_high(cl)
+          stg = "Payload Execution"
+          if lab == "":
+              lab = classify_corrob(cl)
+              stg = "Post-Exploitation Activity"
+          if lab == "":
+              continue
+          key = lab + "|" + ap
+          if key in seen:
+              continue
+          seen[key] = True
+          evidence.append([stg, lab, r])
+
+      # ---- kill chain --------------------------------------------------------
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      exposure = "ZMQ/mooncake KV-transfer exposure markers present"
+      if not anchor_exposed:
+          exposure = "vLLM serving process"
+      chain.append(step(ev_edge(anchor),
+                        stage_id="Vulnerable Inference Service",
+                        stage_desc=exposure + " (pid " + anchor.get("actor_pid", "?") +
+                                   "): " + short(anchor_cl, 220)))
+
+      for i in range(len(evidence) - 1, -1, -1):     # oldest-first
+          ev = evidence[i]
+          chain.append(step(ev_edge(ev[2]),
+                            stage_id=ev[0],
+                            stage_desc=ev[1] + ": " + short(ev[2].get("cmdline", ""), 220)))
+
+      # trigger stage comes from meta - never re-queried from the log
+      self_cl        = lineage_cmdline(lineage[0])
+      caller_is_child = False
+      if self_cl != "" and cmd != "":
+          if self_cl == cmd or cmd in self_cl or self_cl in cmd:
+              caller_is_child = True
+      if caller_is_child:
+          tfrm = inst.get("parent_path", "")
+          if tfrm == "" and len(lineage) > 1:
+              tfrm = lineage[1].get("actor_path", "")
+          tto = inst.get("actor_path", "")
+      else:
+          tfrm = inst.get("actor_path", "")
+          tok  = cmd.strip().split(" ")[0].replace("\"", "").replace("'", "")
+          tto  = tok
+          if tto == "":
+              tto = inst.get("actor_path", "")
+      trig = {
+          "from":     "process://" + tfrm,
+          "to":       "process://" + tto,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+          "cmdline":  short(cmd, 300),
+      }
+      chain.append(step(trig,
+                        stage_id="Deserialization Payload Execution",
+                        stage_desc=label + " spawned inside the vLLM lineage: " +
+                                   short(cmd, 220)))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[len(x.get("actor_path", "").split("/")) - 1])
+      path_txt = " -> ".join(names)
+
+      conf = "suspected"
+      if anchor_exposed:
+          conf = "high-confidence"
+
+      reason = ("vLLM ZeroMQ pickle-deserialization RCE (" + conf + ") - " + label +
+                " executed via " + path_txt +
+                ", descended from vLLM server pid " + anchor.get("actor_pid", "?") +
+                "; " + str(len(evidence)) + " corroborating in-session spawn(s) in the last 5m")
+      if len(lineage) < 2:
+          reason = reason + "; attribution: degraded (short lineage)"
+
+      print(reason)
+      print("server cmdline: " + short(anchor_cl, 300))
+      print("payload cmdline: " + short(cmd, 300))
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
