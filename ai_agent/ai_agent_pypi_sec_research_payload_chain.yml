@@ -1,0 +1,382 @@
+title: PyPI sec-research Post-Install Payload Chain
+id: 7b3c9d42-1f6a-4e58-9a0b-2c7d5e83f114
+status: experimental
+level: medium
+description: |
+  Behavioural rule for the sec-research PyPI package (CLI + agent skill claiming to
+  aggregate USENIX / NDSS / IACR / arXiv / NIST research).
+
+  The rule makes NO claim that sec-research is malicious. It never fires on
+  installation or execution of the package alone. It fires only when the package
+  is installed or executed under a monitored agent AND that same process tree then
+  performs, inside a 15 minute window, at least one high-specificity malicious
+  behaviour (credential-file access, obfuscated/encoded execution, or persistence
+  write) plus at least one further corroborating behaviour (a second stage class,
+  a resolved credential/persistence file touch, an outbound connection made by a
+  post-anchor stage process, or an agent-skill document loaded right after install).
+
+  Only signals the engine actually produces are used: the trigger is execute_process
+  (command line), and corroboration is drawn from the behaviour graph via
+  EXECUTE_PROCESS, CONNECTS, HTTP_REQUEST, READ_FILE, WRITE_FILE and ACQUIRED_SKILL
+  edges plus fs_activity() for resolved file paths and per-file timestamps. No
+  package_install / network_connection event types and no INSTALLED_PACKAGE /
+  EXECUTE_MALICIOUS_CODE / EXFILTRATE_DATA edges are referenced — those do not exist.
+author: Egemen
+date: "2026-06-08"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - attack.credential-access
+  - attack.t1552.001
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Security-research workflow that uses sec-research to fetch papers and, in the same
+    agent session, deliberately reads a local .env / .aws credential file for an unrelated
+    task. Mitigated by requiring the credential/obfuscation/persistence stage to occur
+    AFTER the anchor, inside 15 minutes, in the same agent process tree, plus a second
+    corroborating stage — and by report-only enforcement.
+  - CI or dev-container bootstrap that installs sec-research in the same shell as a step
+    which dumps environment variables or posts them to an artifact store. Host-discovery
+    and egress tooling are classed weak and can never fire on their own.
+  - A maintainer or reviewer auditing the sec-research wheel (strings / xxd / base64 -d on
+    the archive) — genuine audit work that looks like obfuscated execution. Still needs a
+    second stage class; report-only, so no work is blocked.
+  - pip/keyring backends reading ~/.pypirc or the OS keychain during a normal install.
+    Network corroboration is suppressed for the installer process itself, and the
+    credential-file check is time-anchored to the install so pre-existing reads by the
+    path-collapsed process node are excluded.
+  - Legitimate sec-research egress to public paper repositories. Egress alone (or egress
+    plus discovery) never reaches the reporting threshold.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_signal:
+    content|re:
+      - '(?i)sec[-_.]research'
+      - '(?i)\b(pip|pip3|pipx|uv|poetry|pdm|conda|easy_install)\b'
+      - '(?i)\b(curl|wget|nc|ncat|socat|scp|sftp|rsync|ftp)\b'
+      - '(?i)\b(base64|xxd|openssl|eval)\b'
+      - '(?i)\b(crontab|launchctl|systemctl|osascript)\b'
+      - '(?i)\b(cat|head|tail|strings|grep|printenv|env|whoami|security|kubectl)\b'
+  condition: sel_exec and sel_signal
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── tuning ────────────────────────────────────────────────────────────────
+  WINDOW_NS = 900000000000        # 15 min: anchor -> payload burst
+  MAX_DEPTH = 5                   # process-tree depth walked below the agent
+  MAX_EDGES = 400                 # cap on EXECUTE_PROCESS edges inspected
+  MAX_PROBE = 8                   # stage processes probed for file/net evidence
+
+  PKG = r"(?i)sec[-_.]research"
+
+  INSTALL_RE = [
+      r"(?i)\b(pip|pip3|pipx|uv|poetry|pdm|conda|easy_install)\b[^\n]{0,240}\b(install|add|sync)\b",
+      r"(?i)\bpython[0-9.]*\b[^\n]{0,80}-m\s+pip\b[^\n]{0,240}\binstall\b",
+      r"(?i)\bsetup\.py\b[^\n]{0,120}\b(install|develop|egg_info|bdist_wheel)\b",
+      r"(?i)\bpip[0-9]*\b[^\n]{0,240}--no-build-isolation\b",
+  ]
+
+  ENTRY_RE = [
+      r"(?i)(^|[/\s])sec[-_]research(\s|$)",
+      r"(?i)-m\s+sec[-_.]research\b",
+  ]
+
+  STAGES = [
+      ["Credential Access", "strong", [
+          r"(?i)\b(cat|head|tail|less|more|strings|xxd|od|grep|awk|sed|jq)\b[^\n]{0,240}(\.aws/credentials|\.aws/config|\.ssh/id_|\.ssh/config|\.netrc|\.git-credentials|\.kube/config|\.docker/config\.json|\.npmrc|\.pypirc|/etc/shadow|/\.env)",
+          r"(?i)\bsecurity\s+find-(generic|internet)-password\b",
+          r"(?i)\bkubectl\b[^\n]{0,120}\bget\s+secrets?\b",
+          r"(?i)\b(aws|az|gcloud)\b[^\n]{0,120}\b(sts\s+get-caller-identity|print-access-token|get-token|list-access-keys)\b",
+      ]],
+      ["Obfuscated Execution", "strong", [
+          r"(?i)\bbase64\b[^\n]{0,40}(-d|--decode)",
+          r"(?i)\b(python[0-9.]*|node|perl|ruby)\b[^\n]{0,300}\b(b64decode|atob|marshal\.loads|zlib\.decompress|fromCharCode)\b",
+          r"(?i)\beval\s*[\$\(]",
+          r"(?i)\bopenssl\b[^\n]{0,80}\benc\b[^\n]{0,80}-d\b",
+          r"(?i)\bxxd\s+-r\b",
+      ]],
+      ["Persistence", "strong", [
+          r"(?i)\b(tee|cp|mv|ln|install)\b[^\n]{0,240}(\.bashrc|\.zshrc|\.bash_profile|\.profile|authorized_keys|LaunchAgents|\.config/autostart)",
+          r"(?i)>>\s*[^\n]{0,160}(\.bashrc|\.zshrc|\.bash_profile|\.profile|authorized_keys)",
+          r"(?i)\bcrontab\b[^\n]{0,120}(-e\b|-\s*$|/)",
+          r"(?i)\b(launchctl\s+(load|bootstrap)|systemctl\s+--user\s+enable)\b",
+      ]],
+      ["Egress Tooling", "weak", [
+          r"(?i)\b(curl|wget|nc|ncat|socat|scp|sftp|rsync|ftp)\b",
+          r"(?i)\b(python[0-9.]*|node|perl|ruby)\b[^\n]{0,20}-(c|e)\b[^\n]{0,400}\b(socket|urllib|requests|http\.client|smtplib|paramiko|https?://)",
+          r"(?i)\bosascript\b[^\n]{0,160}do shell script",
+      ]],
+      ["Host Discovery", "weak", [
+          r"(?i)\b(printenv|whoami|hostname|ifconfig|dscl|net\s+user)\b",
+          r"(?i)\benv\b\s*(\||>|$)",
+          r"(?i)\bip\s+addr\b",
+      ]],
+  ]
+
+  CRED_FILES = ['"aws credentials"', '"ssh id rsa"', '"ssh id ed25519"',
+                '"git credentials"', '"kube config"', '"docker config json"',
+                '"pypirc"', '"netrc"', '"etc shadow"']
+
+  PERSIST_FILES = ['"zshrc"', '"bashrc"', '"bash profile"', '"authorized keys"',
+                   '"launchagents"', '"autostart"', '"crontabs"']
+
+  def to_int(v):
+      if v == None or v == "":
+          return 0
+      if re.match(r"^[0-9]+$", v):
+          return int(v)
+      return 0
+
+  def trunc(s):
+      if len(s) > 160:
+          return s[:160] + "..."
+      return s
+
+  def is_anchor(cmd):
+      if re.find(PKG, cmd) == None:
+          return ""
+      for p in INSTALL_RE:
+          if re.find(p, cmd) != None:
+              return "install"
+      for p in ENTRY_RE:
+          if re.find(p, cmd) != None:
+              return "execution"
+      return ""
+
+  def stage_of(cmd):
+      for s in STAGES:
+          for p in s[2]:
+              if re.find(p, cmd) != None:
+                  return [s[0], s[1]]
+      return None
+
+  def spawn_edges(aid):
+      out = []
+      frontier = [aid]
+      seen = {aid: True}
+      for _ in range(MAX_DEPTH):
+          nxt = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  child = e["to"]
+                  cmd = e.get("cmdline", "")
+                  if cmd == "":
+                      p = node(child)
+                      if p != None:
+                          cmd = p.get("cmdline", "")
+                          if cmd == "":
+                              cmd = p.get("path", "")
+                  out.append({"edge": e, "node": child, "cmd": cmd,
+                              "ts": to_int(e.get("ts", "0"))})
+                  if len(out) >= MAX_EDGES:
+                      return out
+                  if child not in seen:
+                      seen[child] = True
+                      nxt.append(child)
+          if len(nxt) == 0:
+              return out
+          frontier = nxt
+      return out
+
+  def run():
+      # ── 1. relevance gate: pure string work on meta, no graph calls ────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd_now = meta.get("content", "")
+      if cmd_now == "":
+          return "allow"
+      if stage_of(cmd_now) == None and is_anchor(cmd_now) == "":
+          return "allow"
+      event_ts = to_int(meta.get("event_ts", "0"))
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          spawns = spawn_edges(aid)
+          if len(spawns) == 0:
+              continue
+
+          # ── 2. REQUIRED anchor: sec-research installed or executed here ────
+          anchor = None
+          akind = ""
+          for d in spawns:
+              k = is_anchor(d["cmd"])
+              if k == "":
+                  continue
+              if event_ts > 0 and d["ts"] > 0 and (event_ts - d["ts"]) > WINDOW_NS:
+                  continue          # stale burst, already handled
+              if anchor == None or d["ts"] < anchor["ts"]:
+                  anchor = d
+                  akind = k
+          if anchor == None:
+              continue              # package never seen -> zero noise
+          a_ts = anchor["ts"]
+
+          dedup = "burst:" + aid + ":" + str(a_ts)
+          if store_get(dedup) != None:
+              continue              # this burst already reported
+
+          chain = new_chain(aid)
+          chain.append(step(anchor["edge"], stage_id="Package Execution",
+                            stage_desc="sec-research " + akind + " under agent: " +
+                                       trunc(anchor["cmd"])))
+
+          # ── 3. ordered, windowed post-anchor spawns ────────────────────────
+          labels = {}
+          strong = 0
+          weak = 0
+          probes = {}
+          for d in spawns:
+              if d["node"] == anchor["node"]:
+                  continue
+              if d["ts"] < a_ts:
+                  continue
+              if (d["ts"] - a_ts) > WINDOW_NS:
+                  continue
+              s = stage_of(d["cmd"])
+              if s == None:
+                  continue
+              if len(probes) < MAX_PROBE:
+                  probes[d["node"]] = d["ts"]
+              if s[0] in labels:
+                  continue
+              labels[s[0]] = True
+              if s[1] == "strong":
+                  strong += 1
+              else:
+                  weak += 1
+              chain.append(step(d["edge"], stage_id=s[0],
+                                stage_desc="post-anchor spawn: " + trunc(d["cmd"])))
+
+          # in-process payload (no subprocess) -> probe the anchor process too
+          probes[anchor["node"]] = a_ts
+
+          # ── 4. graph corroboration, time-anchored to the install/execution ─
+          egress = False
+          for pnid in probes:
+              if "Credential File Read" not in labels:
+                  for fe in edges(pnid, dir="out", kind="READ_FILE"):
+                      if "Credential File Read" in labels:
+                          break
+                      fs = node(fe["to"])
+                      if fs == None:
+                          continue
+                      for pat in CRED_FILES:
+                          if "Credential File Read" in labels:
+                              break
+                          for h in fs_activity(fs["id"], "READ", pat):
+                              hts = to_int(h.get("ts", "0"))
+                              if hts < a_ts or (hts - a_ts) > WINDOW_NS:
+                                  continue
+                              labels["Credential File Read"] = True
+                              strong += 1
+                              chain.append(step(fe, stage_id="Credential File Read",
+                                                stage_desc="credential material read after package execution: " + h["path"],
+                                                activity=h))
+                              break
+
+              if "Persistence Write" not in labels:
+                  for fe in edges(pnid, dir="out", kind="WRITE_FILE"):
+                      if "Persistence Write" in labels:
+                          break
+                      fs = node(fe["to"])
+                      if fs == None:
+                          continue
+                      for pat in PERSIST_FILES:
+                          if "Persistence Write" in labels:
+                              break
+                          for h in fs_activity(fs["id"], "WRITE", pat):
+                              hts = to_int(h.get("ts", "0"))
+                              if hts < a_ts or (hts - a_ts) > WINDOW_NS:
+                                  continue
+                              labels["Persistence Write"] = True
+                              strong += 1
+                              chain.append(step(fe, stage_id="Persistence Write",
+                                                stage_desc="startup/persistence file written after package execution: " + h["path"],
+                                                activity=h))
+                              break
+
+              # package-index traffic by the installer itself is not evidence
+              if pnid == anchor["node"] and akind == "install":
+                  continue
+              if egress:
+                  continue
+              for ce in edges(pnid, dir="out", kind="CONNECTS"):
+                  if to_int(ce.get("last_ts", "0")) < a_ts:
+                      continue
+                  hst = node(ce["to"])
+                  if hst == None:
+                      continue
+                  zone = "ztna/internal" if hst.get("is_ztna_host", "0") == "1" else "public"
+                  chain.append(step(ce, stage_id="Outbound Connection",
+                                    stage_desc="stage process opened " + zone + " connection to " +
+                                               hst.get("host", "?") + ":" + hst.get("port", "?")))
+                  egress = True
+                  break
+              if egress:
+                  continue
+              for he in edges(pnid, dir="out", kind="HTTP_REQUEST"):
+                  if to_int(he.get("last_ts", "0")) < a_ts:
+                      continue
+                  u = node(he["to"])
+                  if u == None:
+                      continue
+                  zone = "ztna/internal" if u.get("is_ztna_host", "0") == "1" else "public"
+                  chain.append(step(he, stage_id="Outbound HTTP",
+                                    stage_desc="stage process sent " + he.get("method", "?") +
+                                               " to " + zone + " host " + u.get("host", "?")))
+                  egress = True
+                  break
+
+          # the package ships an agent skill: a skill loaded right after install
+          for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              if "Skill Loaded" in labels:
+                  break
+              sts = to_int(se.get("ts", "0"))
+              if sts < a_ts or (sts - a_ts) > WINDOW_NS:
+                  continue
+              sk = node(se["to"])
+              if sk == None:
+                  continue
+              labels["Skill Loaded"] = True
+              weak += 1
+              chain.append(step(se, stage_id="Skill Loaded",
+                                stage_desc="agent skill/instruction document loaded after package execution: " +
+                                           sk.get("name", "?") + " via " + sk.get("source", "?")))
+              break
+
+          # ── 5. verdict: anchor + >=1 high-specificity stage + corroboration ─
+          total = strong + weak + (1 if egress else 0)
+          if strong >= 1 and total >= 2:
+              if len(store_keys()) > 200:
+                  store_reset()
+              if store_usage()["free"] > 4096:
+                  store_set(dedup, event_ts)
+              print("sec-research chain: strong=" + str(strong) + " weak=" + str(weak) +
+                    " egress=" + str(egress) + " agent=" + agent.get("name", "?"))
+              return {
+                  "action": "report",
+                  "reason": "sec-research " + akind + " under agent " + agent.get("name", "?") +
+                            " followed within 15m by " + str(strong) +
+                            " high-specificity and " + str(weak) + " supporting behaviour(s)" +
+                            (" plus a confirmed outbound connection" if egress else "") +
+                            " - possible malicious PyPI package payload",
+                  "chain": chain,
+              }
+      return "allow"
+
+  result = run()
