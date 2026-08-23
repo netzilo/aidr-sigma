@@ -1,0 +1,137 @@
+title: Supply Chain - agsearch PyPI Session History Harvester
+id: 7b3c9e14-2f5a-4d61-9c8e-3a6f2b0d94e7
+status: experimental
+level: high
+description: |
+  Detects installation, import, or execution of the 'agsearch' PyPI package, which
+  advertises the ability to search Claude Code and Codex CLI session history by
+  content. Prior-session transcripts routinely contain pasted secrets, private source
+  code, internal hostnames and tool output, so a third-party package that indexes them
+  is a credential-harvesting / reconnaissance primitive rather than a developer utility.
+
+  A second, tighter detection group generalises to copycat tooling: it fires only when
+  an agent action references a Claude Code or Codex CLI session store AND simultaneously
+  carries either an egress/archiving primitive (curl, scp, tar, base64, requests.post)
+  or a secret-hunting query term (api_key, password, AKIA..., sk-..., PRIVATE KEY).
+  A plain content grep over one's own session history - the common benign case - does
+  NOT fire.
+
+  Single-event content rule. The engine exposes only READ_FILE edges for this threat and
+  the file_* event types have no live producer, so the enforceable signal is the agent's
+  own tool_call / execute_process / llm_tool_call payload. Pair with a periodic graph rule
+  that walks READ_FILE edges into the session directories for post-hoc coverage.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial_access
+  - attack.t1195.001
+  - attack.collection
+  - attack.t1005
+  - attack.credential_access
+  - attack.t1552.001
+  - attack.exfiltration
+  - attack.t1041
+  - owasp.a04_2023
+  - owasp.a06_2023
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: agent-originated actions only ────────────────────────────────────
+  sel_scope:
+    event_type:
+      - tool_call
+      - execute_process
+      - llm_tool_call
+
+  # ── Group A: the named package itself (installer, pin, artifact, import) ────
+  sel_agsearch_install:
+    content|re:
+      # \binstall\b deliberately does NOT match inside "uninstall" (word boundary),
+      # so remediation commands are excluded without needing a bypassable filter.
+      - '(?i)\b(?:pip3|pip|pipx|uvx|uv|poetry|conda|mamba)\b[^\n\r]{0,80}\b(?:install|add)\b[^\n\r]{0,80}\bagsearch\b'
+      - '(?i)\bagsearch\s*(?:==|>=|<=|~=|!=)\s*[0-9]'
+      - '(?i)\bagsearch-[0-9][0-9a-z.]*\.(?:whl|tar\.gz)\b'
+      - '(?i)pypi\.org/(?:project|simple|pypi)/agsearch\b'
+
+  sel_agsearch_exec:
+    content|re:
+      - '(?i)\b(?:import|from)\s+agsearch\b'
+      - '(?i)\bpython3?\s+-m\s+agsearch\b'
+      - '(?i)(?:^|[;|&(`\s])agsearch\s+(?:search|index|scan|dump|export|list|show|-)'
+      - '(?i)\bagsearch\.(?:search|index|sessions|cli|main)\b'
+
+  # ── Group B: copycat behaviour - AI session store + exfil OR secret hunting ─
+  sel_session_store:
+    content|re:
+      - '(?i)\.claude[/\\](?:projects|history|sessions|todos|shell-snapshots)\b'
+      - '(?i)\.codex[/\\](?:sessions|archived_sessions|history|log)\b'
+      - '(?i)\.config[/\\](?:claude|codex)[/\\](?:projects|sessions|history)\b'
+      - '(?i)application support[/\\]claude[/\\](?:projects|sessions)\b'
+
+  sel_egress:
+    content|re:
+      - '(?i)\b(?:curl|wget|scp|rsync|ncat|socat|sftp)\b'
+      - '(?i)\b(?:tar|zip|7z|gzip|xz)\b'
+      - '(?i)\bbase64\b'
+      - '(?i)\brequests\.(?:post|put)\(|\bhttpx\.(?:post|put)\(|\burllib\.request\b'
+      - '(?i)\b(?:sendmail|mailx|smtplib)\b'
+
+  sel_secret_query:
+    content|re:
+      - '(?i)\b(?:api[_-]?key|secret[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|passwd|password|credential|private[_-]?key)\b'
+      - '\bAKIA[0-9A-Z]{16}\b'
+      - '(?i)\bsk-[A-Za-z0-9_-]{16,}'
+      - '-----BEGIN\s+(?:RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+      - '\b(?:ghp|ghs|ghu|github_pat)_[A-Za-z0-9]{10,}'
+
+  # ── filters: benign contexts that legitimately mention the package/paths ────
+  filter_threat_intel:
+    content|contains:
+      - 'indicator of compromise'
+      - 'indicators of compromise'
+      - 'supply chain advisory'
+      - 'security advisory'
+      - 'malicious package'
+      - 'known-malicious'
+      - 'typosquat'
+      - 'osv.dev/vulnerability'
+      - 'threat intel'
+
+  filter_rule_authoring:
+    content|contains|all:
+      - 'logsource:'
+      - 'detection:'
+
+  filter_sca_tooling:
+    content|re: '(?i)\b(?:pip-audit|osv-scanner|safety\s+check|dependabot|renovate|trivy|syft|grype|cyclonedx)\b'
+
+  condition: >
+    sel_scope and
+    (sel_agsearch_install or sel_agsearch_exec or
+     (sel_session_store and (sel_egress or sel_secret_query)))
+    and not (filter_threat_intel or filter_rule_authoring or filter_sca_tooling)
+
+falsepositives:
+  - Security or IR staff investigating the package (pip show agsearch, pip download
+    agsearch, browsing pypi.org/project/agsearch) - not suppressed by design, because
+    any filter for these terms would be trivially prefixed by an attacker; treat the
+    report as low priority when the operator context is known.
+  - An unrelated internal or private-index distribution that happens to be named
+    "agsearch" (for example an "agent search" helper library). Word-boundary anchoring
+    prevents matches on agsearch_utils / ag-search, but an exact name collision will
+    report. Confirm the index the wheel came from before escalating.
+  - A developer legitimately archiving or sharing their own Claude Code / Codex session
+    directory (tar czf claude-sessions.tgz ~/.claude/projects) for a support bundle.
+    Group B requires the session-store reference plus an egress/archive or secret term,
+    so this benign-but-noisy case does report; plain content greps over one's own
+    session history do not.
+  - Backup, sync or dotfile-management agents that enumerate ~/.claude and ~/.codex
+    alongside rsync/tar. Scope is limited to agent-originated tool_call,
+    execute_process and llm_tool_call events, which excludes OS-level backup daemons.
+action: report
