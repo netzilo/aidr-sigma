@@ -1,0 +1,118 @@
+title: OpenClaw Memory File Manipulation
+id: 7c1f4a3e-9b62-4d51-8f0a-2e6d3b7c58a1
+status: experimental
+level: high
+description: |
+  Detects a single tool_call (or spawned shell command) that writes instruction-override,
+  permission-escalation, secret-exfiltration or hidden-unicode content INTO an OpenClaw
+  workspace context/memory file (e.g. .openclaw/memory.md, .openclaw/context.json,
+  .openclaw/AGENTS.md, openclaw-workspace/persona.md).
+
+  Memory poisoning is durable prompt injection: the payload is not in the current prompt,
+  it is written to a file the agent re-reads at the start of every future session, so the
+  hijack survives context resets and is invisible to any per-prompt scanner.
+
+  Two conditions must BOTH hold in the same event: (1) the write target is an OpenClaw
+  context/memory artefact, and (2) the payload carries an actual behaviour-altering
+  directive. Either signal alone is normal agent work and is deliberately not detected.
+
+  Coverage note: the engine has no live producer for file_write events, so filesystem
+  writes reaching these paths by a route other than a tool call or a monitored process
+  exec are NOT visible to this rule; that surface is only reachable by traversing the
+  WRITE_FILE graph edge from a periodic script, which is out of scope for this rule.
+author: Evgen
+date: "2026-03-14"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0051.002
+  - https://attack.mitre.org/techniques/T1565/001/
+tags:
+  - attack.persistence
+  - attack.t1565.001
+  - atlas.aml.t0051.002
+  - owasp.llm01
+  - owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only events that can actually carry a write payload ───────────────
+  sel_event:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # ── Target: an OpenClaw workspace context / memory artefact ──────────────────
+  sel_target_path:
+    file_path|re:
+      - '(?i)(^|[/\\])\.?openclaw[/\\][^\n]{0,200}(memory|memories|context|state|session|notes|scratchpad|instruction|agents|persona|identity|soul|preferences)[^/\\\n]{0,60}\.(md|markdown|txt|json|jsonl|ya?ml|toml)$'
+      - '(?i)(^|[/\\])\.?openclaw[/\\](memory|memories|context|state|sessions|knowledge|skills)[/\\][^\n]{1,200}$'
+      - '(?i)(^|[/\\])(openclaw|\.openclaw)\.(md|json|jsonl|ya?ml|toml)$'
+      - '(?i)(^|[/\\])[^/\\\n]{0,40}openclaw[^/\\\n]{0,40}[/\\][^\n]{0,200}(memory|context|instruction|agents|persona|notes)[^/\\\n]{0,40}\.(md|markdown|txt|json|jsonl|ya?ml)$'
+
+  # ── The tool doing it must be a write/edit/shell capability, not a reader ────
+  sel_write_tool:
+    tool_name|re: '(?i)(^|[_.:/-])(write|edit|multiedit|notebook_?edit|str_replace[a-z_]*|create_?file|write_?file|fs_write|apply_?patch|update_?file|patch_?file|save_?file|put_?file|append_?file|insert_?edit|text_?editor|bash|shell|sh|zsh|run_?command|run_?terminal_?cmd|execute_?command|execute_?bash|terminal)([_.:/-]|$)'
+
+  # ── Alternative target: a shell redirect / in-place edit into the same files ─
+  sel_target_cmd:
+    command|re:
+      - '(?i)(>>?\s*|tee\s+(-a\s+)?|-o\s+|\bof=)[^\n]{0,160}openclaw[^\n]{0,160}(memory|context|state|instruction|agents|persona|notes)'
+      - '(?i)(sed\s+-i|perl\s+-p?i|python3?\s+-c|node\s+-e|cat\s*>|printf\s|echo\s)[^\n]{0,200}openclaw[^\n]{0,160}(memory|context|state|instruction|agents|persona|notes)'
+
+  # ── Payload: an actual behaviour-altering directive, not just prose ──────────
+  sel_injection:
+    content|re:
+      - '(?i)ignore\s+(all\s+|any\s+|the\s+|your\s+)?(previous|prior|earlier|above|preceding|foregoing)\s+(instructions|directives|rules|prompts|guidance)'
+      - '(?i)(disregard|override|overrule|supersede|bypass|forget)\s+[^\n]{0,60}(system\s+prompt|safety\s+(rules|guidelines|policy)|guardrails?|security\s+(policy|rules|controls)|previous\s+instructions)'
+      - '(?i)you\s+are\s+(now|no\s+longer)\s+[^\n]{0,80}(unrestricted|jailbroken|\bdan\b|developer\s+mode|without\s+(any\s+)?(restrictions|limits|filters))'
+      - '(?i)(from\s+now\s+on|going\s+forward|in\s+(all\s+)?future\s+sessions|at\s+the\s+start\s+of\s+(every|each)\s+session)[^\n]{0,120}(send|post|upload|forward|exfiltrate|email|transmit|copy)[^\n]{0,80}(credential|secret|token|api[\s_-]?key|password|\.env|private\s+key|ssh\s+key)'
+      - '(?i)(never|do\s+not|don.?t)\s+(ask|request|require|prompt)[^\n]{0,40}(for\s+)?(permission|confirmation|approval|consent)'
+      - '(?i)(auto[\s_-]?approve|auto[\s_-]?accept)[^\n]{0,40}(all\s+)?(tool|command|action|bash|shell)'
+      - '(?i)(dangerously[\s_-]?skip[\s_-]?permissions|bypasspermissions|yolo\s+mode)'
+      - '(?i)(<!--|<\|)[^\n]{0,200}(ignore\s+previous|system\s+prompt|you\s+are\s+now|do\s+not\s+tell)'
+      - '(?i)(never|do\s+not|don.?t)\s+(mention|tell|reveal|disclose|log|report)\s+[^\n]{0,40}(this|these\s+instructions|to\s+the\s+user)'
+      - '(?i)(remember|note\s+to\s+self|memory\s+entry)\s*[:\-][^\n]{0,80}(always|never)\s+[^\n]{0,80}(send|upload|exfil|disable|skip|ignore|bypass)'
+      - '(?i)(curl|wget)\s+[^\n]{0,120}\|\s*(bash|sh|zsh|python3?)'
+      - '[\x{200b}\x{200c}\x{200d}\x{200e}\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}]'
+
+  # ── FP suppression: test fixtures, sample/template copies, vendored trees ────
+  filter_test_paths:
+    file_path|re:
+      - '(?i)(^|[/\\])(tests?|__tests__|testdata|fixtures?|examples?|samples?|mocks?|docs?|node_modules|\.git)[/\\]'
+      - '(?i)\.(example|sample|template|bak|orig|dist)(\.[a-z0-9]{1,6})?$'
+
+  # ── FP suppression: the write is documentation ABOUT the attack ──────────────
+  filter_docs_prose:
+    content|re:
+      - '(?i)this\s+(rule|detection|signature|sigma|test|document|section)\s+(detects|matches|fires|demonstrates|describes|covers)'
+      - '(?i)example\s+of\s+(a\s+)?(prompt\s+injection|memory\s+poisoning|jailbreak|malicious)'
+      - '(?i)(security\s+(awareness|training)\s+(material|module|document)|red[\s-]team\s+(exercise|report)|threat\s+model\s+document|purple\s+team\s+exercise)'
+      - '(?i)(known\s+attack\s+pattern|indicator\s+of\s+compromise|mitre\s+att&ck|owasp\s+llm0)'
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+
+  # ── FP suppression: obvious placeholder / scaffold content ──────────────────
+  filter_placeholder:
+    content|re:
+      - '(?i)\blorem\s+ipsum\b'
+      - '(?i)\b(dummy|fake|mock|synthetic)\s+(data|content|payload|memory)\b'
+      - '(?i)for\s+(testing|demonstration|illustration)\s+purposes\s+only'
+
+  # ── FP suppression: read-only inspection of the same files ──────────────────
+  filter_readonly_cmd:
+    command|re: '(?i)^\s*(sudo\s+)?(grep|rg|ag|ack|less|more|head|tail|wc|file|stat|ls|find|diff|md5sum|sha256sum|git\s+(diff|log|show|status|blame))\b'
+
+  condition: >
+    sel_event and sel_injection and
+    ((sel_target_path and sel_write_tool) or sel_target_cmd) and
+    not (filter_test_paths or filter_docs_prose or filter_placeholder or filter_readonly_cmd)
+
+falsepositives:
+  - A user deliberately recording an autonomy preference in their own OpenClaw memory file, e.g. "never ask for confirmation before running the test suite" — matches the permission-waiver pattern and is a legitimate, intentional configuration change. This is the single most likely benign hit and the main reason the rule reports rather than blocks.
+  - A developer authoring or updating in-repo detection fixtures / red-team payloads that happen to live under an .openclaw/ path outside a tests/ or fixtures/ directory (the path filter only suppresses the conventional locations).
+  - The agent summarising a phishing email, a malicious README, or a support ticket into its own notes/context file — the quoted attacker text lands verbatim in the memory write. The write is real and worth reviewing even though the agent was not compromised.
+  - Security documentation about prompt-injection defences stored as agent context, where the prose does not use any of the filter_docs_prose framing phrases.
+  - Migration or backup tooling that rewrites .openclaw/memory.md wholesale, carrying forward previously stored (and previously reviewed) directive text.
+
+action: report
