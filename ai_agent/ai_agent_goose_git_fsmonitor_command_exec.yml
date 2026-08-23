@@ -1,0 +1,283 @@
+title: Goose CLI Git core.fsmonitor Command Execution Chain
+id: 3f9c1d8a-2b47-4e6d-9c05-7ad1e8b34f62
+status: experimental
+level: high
+description: |
+  Behavioural detection for arbitrary command execution against the goose CLI via a
+  repository-controlled git `core.fsmonitor` value (advisory maps to OWASP A03:2021 -
+  Injection; no ATLAS technique applies cleanly, so none is asserted).
+
+  A poisoned repository sets `core.fsmonitor` to an attacker-supplied command. When the
+  user runs `goose review` on that repository, goose invokes git, and git executes the
+  fsmonitor value through a shell as a normal child process. The only signal the engine
+  exposes for this is process spawning, so the rule reconstructs the sequence from
+  EXECUTE_PROCESS edges in the behaviour graph:
+
+    goose  --EXECUTE_PROCESS-->  git  --EXECUTE_PROCESS-->  sh / interpreter / net tool
+
+  Two of three independent indicators must hold for the same recent spawn:
+    (1) a `fsmonitor` / `fs_monitor` reference anywhere in the goose spawn chain
+        (e.g. `git -c core.fsmonitor=...`, `git config core.fsmonitor ...`),
+    (2) the immediate parent of the spawned interpreter is a git process,
+    (3) the spawned command line shows remote-fetch / eval / decode / reverse-shell traits.
+  `goose review` on the ancestor command line is recorded as supporting context only -
+  it is never sufficient on its own, because `goose review` legitimately spawns git,
+  and git legitimately spawns a shell for pagers and hooks.
+author: Haibo
+date: "2026-06-08"
+references:
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://attack.mitre.org/techniques/T1546/
+  - https://git-scm.com/docs/git-config#Documentation/git-config.txt-corefsmonitor
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.t1546
+falsepositives:
+  - Developers who legitimately use a filesystem-monitor hook (watchman, rs-git-fsmonitor)
+    inside a goose session - the config string contains "fsmonitor" and git spawns the
+    helper through a shell, satisfying indicators (1) and (2). This is the dominant benign
+    case and the reason the rule only reports.
+  - Git hooks (pre-commit, post-checkout, husky) that fetch dependencies with curl/wget
+    while goose is driving git - satisfies indicators (2) and (3).
+  - Security researchers or the owning team intentionally reproducing this advisory.
+  - Unrelated binaries named "goose" (for example the goose database-migration tool)
+    running git plus shell steps during a migration.
+  - Repository-local git aliases that pipe a remote script into a shell as part of a
+    sanctioned build workflow.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── goose CLI  ->  git  ->  core.fsmonitor payload ────────────────────────────
+  LOOK_BACK_NS = 900000000000     # 15 min: evidence must be recent vs the trigger
+  MAX_DEPTH    = 3                # goose -> git -> shell -> payload
+  MAX_EDGES    = 2000
+
+  GOOSE_RE  = r"(?i)\bgoose\b"
+  GIT_RE    = r"(?i)\bgit\b"
+  FSMON_RE  = r"(?i)fs[_-]?monitor"
+  REVIEW_RE = r"(?i)\breview\b"
+
+  INTERP = [
+      r"(?i)\bsh\b", r"(?i)\bbash\b", r"(?i)\bzsh\b", r"(?i)\bdash\b", r"(?i)\bksh\b",
+      r"(?i)\bfish\b", r"(?i)\bpython[0-9.]*\b", r"(?i)\bperl\b", r"(?i)\bruby\b",
+      r"(?i)\bnode\b", r"(?i)\bosascript\b", r"(?i)\bpowershell\b", r"(?i)\bpwsh\b",
+  ]
+
+  NETTOOL = [
+      r"(?i)\bcurl\b", r"(?i)\bwget\b", r"(?i)\bnc\b", r"(?i)\bncat\b",
+      r"(?i)\bnetcat\b", r"(?i)\bsocat\b", r"(?i)\btelnet\b",
+  ]
+
+  TRAITS = [
+      r"\|\s*(sh|bash|zsh|python[0-9.]*|perl|ruby|node)\b",
+      r"(?i)\bcurl\b[^\n]{0,240}\bhttps?://",
+      r"(?i)\bwget\b[^\n]{0,240}\bhttps?://",
+      r"(?i)\bbase64\b[^\n]{0,40}(-d|--decode|-D)\b",
+      r"(?i)\beval\b",
+      r"/dev/(tcp|udp)/",
+      r"(?i)\bnc\b\s+-[a-z]{0,6}e\b",
+      r"(?i)\bpython[0-9.]*\s+-c\b",
+      r"(?i)\bperl\s+-e\b",
+      r"(?i)\bruby\s+-e\b",
+      r"(?i)\bnode\s+-e\b",
+      r"(?i)\bosascript\b",
+      r"(?i)\bmkfifo\b",
+      r"(?i)\bbash\s+-i\b",
+      r"(?i)\bsocat\b",
+      r"(?i)\bchmod\s+\+?[0-7]*x\b",
+      r"(?i)-enc(odedcommand)?\s+[A-Za-z0-9+/]{16}",
+  ]
+
+  def num(s):
+      if s == None or s == "":
+          return 0
+      return int(s)
+
+  def clip(s):
+      if len(s) <= 180:
+          return s
+      return s[:180] + "..."
+
+  def any_match(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # ── relevance gate: pure string checks on meta, no graph / log calls ─────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      c = meta.get("content", "")
+      if c == "":
+          return False
+      if re.find(FSMON_RE, c) != None:
+          return True
+      if re.find(GOOSE_RE, c) != None:
+          return True
+      if re.find(GIT_RE, c) != None:
+          return True
+      if any_match(TRAITS, c):
+          return True
+      if any_match(NETTOOL, c):
+          return True
+      if any_match(INTERP, c):
+          return True
+      return False
+
+  def name_blob(nd):
+      return nd.get("name", "") + " " + nd.get("path", "")
+
+  def is_interpreter_or_nettool(nd, cmdline):
+      if any_match(INTERP, name_blob(nd)):
+          return True
+      if any_match(NETTOOL, name_blob(nd)):
+          return True
+      return any_match(NETTOOL, cmdline)
+
+  def is_git(nd):
+      if nd == None:
+          return False
+      return re.find(GIT_RE, name_blob(nd)) != None
+
+  # ── EXECUTE_PROCESS subtree under a goose process, bounded depth / size ─────
+  def descend(root_id):
+      out      = []
+      frontier = [root_id]
+      seen     = {root_id: True}
+      for d in range(MAX_DEPTH):
+          nxt = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  ch = node(e["to"])
+                  if ch == None:
+                      continue
+                  if len(out) < MAX_EDGES:
+                      out.append(e)
+                  if e["to"] not in seen:
+                      seen[e["to"]] = True
+                      nxt.append(e["to"])
+          frontier = nxt
+      return out
+
+  def find_fsmon(g, subtree):
+      best    = None
+      best_ts = 0
+      if re.find(FSMON_RE, g.get("cmdline", "")) != None:
+          best_ts = num(g.get("first_seen", "0"))
+      for e in subtree:
+          if re.find(FSMON_RE, e.get("cmdline", "")) != None:
+              t = num(e.get("ts", "0"))
+              if best == None or best_ts == 0 or t < best_ts:
+                  best    = e
+                  best_ts = t
+      return [best, best_ts]
+
+  def review_context(g):
+      if re.find(REVIEW_RE, g.get("cmdline", "")) != None:
+          return True
+      for e in edges(g["id"], dir="in", kind="EXECUTE_PROCESS"):
+          if re.find(REVIEW_RE, e.get("cmdline", "")) != None:
+              return True
+      return False
+
+  def inspect(g, ev_ts):
+      subtree = descend(g["id"])
+      if not subtree:
+          return None
+
+      fs      = find_fsmon(g, subtree)
+      fs_edge = fs[0]
+      fs_ts   = fs[1]
+      review  = review_context(g)
+
+      for e in subtree:
+          ts = num(e.get("ts", "0"))
+          if ev_ts > 0 and ts > 0 and (ev_ts - ts) > LOOK_BACK_NS:
+              continue                      # stale graph state, already handled
+          ch = node(e["to"])
+          if ch == None:
+              continue
+          cl = e.get("cmdline", "")
+          if not is_interpreter_or_nettool(ch, cl):
+              continue
+
+          par        = node(e["from"])
+          git_parent = is_git(par)
+          traits     = any_match(TRAITS, cl)
+          fsmon_here = re.find(FSMON_RE, cl) != None
+          has_fsmon  = fsmon_here
+          if not has_fsmon and fs_ts > 0 and fs_ts <= ts + 2000000000:
+              has_fsmon = True
+
+          ind = []
+          if has_fsmon:
+              ind.append("core.fsmonitor reference in the goose spawn chain")
+          if git_parent:
+              ind.append("interpreter spawned directly by git")
+          if traits:
+              ind.append("payload traits (remote fetch / eval / decode / reverse shell)")
+          if len(ind) < 2:
+              continue                      # single weak signal -> stay silent
+          if review:
+              ind.append("context: goose invoked with the vulnerable 'review' subcommand")
+
+          key = "seen:" + str(ts) + ":" + ch.get("path", "")
+          if store_get(key) != None:
+              continue                      # already reported this exact spawn
+          if store_usage()["free"] > 8192:
+              store_set(key, 1)
+
+          pname = "?"
+          if par != None:
+              pname = par.get("name", "?")
+
+          chain = new_chain(g["id"])
+          if fs_edge != None and num(fs_edge.get("ts", "0")) <= ts + 2000000000:
+              chain.append(step(fs_edge,
+                                stage_id="fsmonitor Config",
+                                stage_desc="git invocation referencing core.fsmonitor: " +
+                                           clip(fs_edge.get("cmdline", ""))))
+          chain.append(step(e,
+                            stage_id="Hook Command Execution",
+                            stage_desc=pname + " spawned " + ch.get("name", "?") +
+                                       ": " + clip(cl)))
+          return {
+              "action": "report",
+              "reason": "Possible goose CLI git core.fsmonitor command execution under " +
+                        g.get("name", "goose") + " -- " + "; ".join(ind),
+              "chain":  chain,
+          }
+      return None
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+      ev_ts = num(meta.get("event_ts", "0"))
+
+      goose_procs = []
+      for p in graph(type="Process"):
+          if re.find(GOOSE_RE, name_blob(p)) != None:
+              goose_procs.append(p)
+      if not goose_procs:
+          return "allow"                   # no goose in this session
+
+      for g in goose_procs:
+          v = inspect(g, ev_ts)
+          if v != None:
+              return v
+      return "allow"
+
+  result = run()
