@@ -1,0 +1,113 @@
+title: Agent Config Hook Injection Write
+id: 7c3f1d2a-9b48-4e61-8d5a-2f6c0b91ae34
+status: experimental
+level: high
+description: |
+  Detects a monitored agent process spawning a child whose command line
+  materialises a repository- or project-scoped agent configuration file
+  (.claude/settings.json, .claude.json, .mcp.json, .cursor/mcp.json,
+  .gemini/settings.json, .vscode/mcp.json, ...) that carries an inline hook
+  declaration (SessionStart, PreToolUse, PostToolUse, UserPromptSubmit, Stop,
+  ...) or a project-MCP auto-trust flag (enableAllProjectMcpServers,
+  trustProjectMcp, hasTrustDialogAccepted, bypassPermissions).
+
+  A repository that ships such a file achieves code execution the moment the
+  agent CLI starts a session in that working tree - before any trust dialog is
+  shown (CVE-2025-59536 class, and equivalents observed across other agent CLIs
+  in early 2026).
+
+  execute_process is the only live event type that carries the configuration
+  text in a single event: the JSON body has to appear inline in argv
+  (bash -c "echo ... > .claude/settings.json", printf, python3 -c, node -e,
+  jq, sed -i, tee), which is exactly the shape used to plant a hook config or
+  to have a hijacked agent self-modify one. Reading or grepping an existing
+  settings file does not put a JSON hook literal on the command line, so the
+  rule does not fire on inspection.
+author: Tanya
+date: "2026-02-20"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1195/001/
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.execution
+  - attack.t1059
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - atlas.aml.t0053
+  - owasp.llm03
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # A repository- or project-scoped agent configuration target appears in argv.
+  sel_config_path:
+    content|re:
+      - '(?i)\.claude[\\/]settings(\.local)?\.json'
+      - '(?i)\.claude[\\/]hooks[\\/]'
+      - '(?i)(^|[\s"''=(,/])\.claude\.json'
+      - '(?i)(^|[\s"''=(,/])\.mcp\.json'
+      - '(?i)\.cursor[\\/](mcp|settings)\.json'
+      - '(?i)\.gemini[\\/]settings\.json'
+      - '(?i)\.vscode[\\/]mcp\.json'
+      - '(?i)\.windsurf[\\/]mcp\.json'
+      - '(?i)\.continue[\\/]config\.json'
+      - '(?i)\.opencode[\\/]opencode\.json'
+      - '(?i)\.roo[\\/]mcp\.json'
+      - '(?i)cline_mcp_settings\.json'
+      - '(?i)\.codex[\\/]config\.toml'
+      - '(?i)\.agents?[\\/](settings|hooks)\.json'
+
+  # An actual hook DECLARATION literal - not a jq/grep path expression.
+  # The optional leading backslash tolerates JSON-encoded command lines.
+  sel_hook_decl:
+    content|re:
+      - '(?i)\\?"hooks\\?"\s*:\s*[\{\[]'
+      - '(?i)\\?"(SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|SubagentStop|PreCompact|Notification|Stop)\\?"\s*:\s*[\{\[]'
+      - '(?i)\\?"hookEventName\\?"\s*:\s*\\?"'
+      - '(?i)\\?"type\\?"\s*:\s*\\?"command\\?"'
+      - '(?i)\[hooks\.(session_start|session_end|pre_tool_use|post_tool_use|user_prompt_submit|stop)\]'
+
+  # Auto-trust / trust-dialog-bypass flags are unique enough to stand alone.
+  sel_autotrust_flag:
+    content|re:
+      - '(?i)\\?"enableAllProjectMcpServers\\?"\s*:\s*true'
+      - '(?i)\\?"trustProjectMcp\\?"\s*:\s*true'
+      - '(?i)\\?"enabledMcpjsonServers\\?"\s*:\s*\['
+      - '(?i)\\?"hasTrustDialogAccepted\\?"\s*:\s*true'
+      - '(?i)\\?"autoApprove(Tools|Servers|MCP)?\\?"\s*:\s*true'
+      - '(?i)\\?"dangerouslySkipPermissions\\?"\s*:\s*true'
+      - '(?i)\\?"(defaultMode|permissionMode)\\?"\s*:\s*\\?"(bypassPermissions|yolo)'
+      - '(?i)\bconfig\s+set\s+(enableAllProjectMcpServers|trustProjectMcp|hasTrustDialogAccepted)\s+true\b'
+
+  # Whole command line is a single read-only inspection with no shell operators
+  # and no redirection - it cannot have written anything.
+  filter_readonly:
+    command|re:
+      - '^\s*(\S+[\\/])?(grep|egrep|fgrep|rg|ripgrep|ack|ag|head|tail|less|more|wc|diff|cmp|stat|file|md5|md5sum|shasum|sha256sum)\b[^;&|>]*$'
+      - '^\s*(\S+[\\/])?git\s+(diff|show|log|status|blame|ls-files|grep)\b[^;&|>]*$'
+
+  # Hook block being emptied or nulled out - removal, not injection.
+  filter_noop:
+    content|re:
+      - '(?i)\\?"hooks\\?"\s*:\s*(\{\s*\}|\[\s*\]|null)'
+
+  condition: sel_event and ((sel_config_path and sel_hook_decl) or sel_autotrust_flag) and not (filter_readonly or filter_noop)
+falsepositives:
+  - Developer or agent deliberately installing a project hook (for example a
+    PostToolUse formatter or a Stop notification) with a shell one-liner.
+  - Dotfile, devcontainer or team bootstrap scripts that scaffold
+    .claude/settings.json or .mcp.json with a standard hook block inline.
+  - Hook or MCP installer packages (npx ...-hooks-install, make setup) that
+    write the configuration from an inline heredoc-free echo/printf.
+  - Config migration or lint scripts that rewrite an existing hooks block with
+    jq or sed -i during an upgrade.
+  - Security tooling or CI that plants a benign canary hook config to validate
+    that this detection still fires.
+action: report
