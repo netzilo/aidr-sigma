@@ -1,0 +1,353 @@
+title: vLLM Outlines Grammar Cache Exhaustion Attempt
+id: 7b3f1c2e-9a54-4d6b-8f21-c0d47e6a15b9
+status: experimental
+level: medium
+description: |
+  Detects the observable precursor of vLLM's Outlines grammar-cache disk-exhaustion DoS:
+  a single process instance driving a high-cardinality burst of structured-output
+  (guided_json / guided_regex / guided_grammar / json_schema) HTTP requests where almost
+  every request carries a DIFFERENT schema.
+
+  Answering the triage dissent explicitly: the engine has no DISK_WRITE, no
+  DENIAL_OF_SERVICE edge and no resource_exhaustion event type, so this rule does NOT
+  claim to observe cache writes, disk utilisation or service unavailability. It observes
+  the one thing that is both live (http_request) and causally necessary for the CVE:
+  schema CARDINALITY, not request volume. A repeated schema is a cache HIT and writes
+  nothing to disk; only a schema the cache has never seen compiles a new grammar and adds
+  a new unbounded cache entry. Legitimate bursty structured-output traffic reuses a small
+  set of schemas (low unique/total ratio); the exploit requires a near-1:1 unique-to-total
+  ratio by construction. The rule therefore fires on the ratio, inside a 60s window,
+  scoped to one instance-resolved session — and reports only, because the disk-space
+  consequence is unverifiable from this telemetry.
+
+  Schema identity is computed by extracting only the guided-decoding value from the JSON
+  body (balanced-brace / quoted-value slice), normalising whitespace, and hashing it, so a
+  varying prompt or varying request id never inflates the uniqueness count.
+
+  Attribution is instance-resolved: caller_pid -> proc_instance(pid, event_ts) ->
+  proc_lineage, with the per-session counter keyed on the root instance (pid, start_ns).
+  PID reuse cannot merge two sessions and no counter is ever shared across sessions.
+author: Haibo
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://dottxt-ai.github.io/outlines/
+  - https://owasp.org/Top10/A09_2021-Security_Logging_and_Monitoring_Failures/
+  - https://attack.mitre.org/techniques/T1499/003/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.003
+  - owasp.a09_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_structured_output:
+    content|contains:
+      - 'guided_json'
+      - 'guided_regex'
+      - 'guided_grammar'
+      - 'guided_choice'
+      - 'guided_decoding_backend'
+      - 'structured_outputs'
+      - 'json_schema'
+  condition: sel_http and sel_structured_output
+falsepositives:
+  - Batch document-extraction pipelines that synthesise a per-document JSON schema (enums
+    built from that record's field values). Each request really is a new grammar, so the
+    uniqueness ratio is legitimately high. Mitigated only by report-only action and the
+    25-request / 60-second floor; treat repeated hits from the same pipeline as a tuning
+    signal, not an incident.
+  - CI regression or conformance suites that sweep many guided_json / guided_regex variants
+    against a development vLLM endpoint.
+  - Benchmark and load-test harnesses for Outlines/XGrammar that generate randomised schemas
+    by design.
+  - Agent frameworks that embed a run id, timestamp or trace id into the schema title or
+    description, making otherwise identical schemas hash uniquely. Whitespace is normalised
+    before hashing, but injected identifiers are not stripped.
+  - Multi-tenant gateways where many distinct tenants' schemas are proxied through one agent
+    process instance, so unrelated tenant diversity accumulates on one session counter.
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule's own window — never baked into storage) ─────────────
+  WINDOW_NS     = 60000000000     # 60s schema-cardinality accumulation window
+  REFRACTORY_NS = 600000000000    # 10 min per-session report suppression
+  LOOKBACK_NS   = 240000000000    # 4 min sibling-spawn lookback
+  MIN_REQUESTS  = 25              # structured-output requests in window
+  MIN_UNIQUE    = 20              # distinct schema fingerprints in window
+  MIN_RATIO_PCT = 80              # unique/total percent — the cache-miss discriminator
+  MAX_FP        = 512             # bounded fingerprint set per session
+  MAX_SESSIONS  = 16              # bounded store footprint
+
+  MARKERS = ["guided_json", "guided_regex", "guided_grammar", "guided_choice",
+             "guided_decoding_backend", "structured_outputs", "json_schema"]
+
+  SCHEMA_KEYS = ["guided_json", "guided_regex", "guided_grammar", "guided_choice",
+                 "json_schema", "structured_outputs"]
+
+  def to_int(v):
+      if v == None:
+          return 0
+      s = str(v)
+      if s == "":
+          return 0
+      if re.match(r"^-?[0-9]+$", s):
+          return int(s)
+      return 0
+
+  def fnv1a(s):
+      h = 2166136261
+      for o in s.elem_ords():
+          h = h ^ o
+          h = (h * 16777619) & 0xFFFFFFFF
+      return "%x" % h
+
+  def parse_value(body, k):
+      n = len(body)
+      for _s in range(0, 16):
+          if k < n and (body[k] == " " or body[k] == "\t" or body[k] == "\n" or body[k] == "\r"):
+              k = k + 1
+      if k >= n:
+          return ""
+      c = body[k]
+      if c == "{" or c == "[":
+          cls = "}"
+          if c == "[":
+              cls = "]"
+          depth = 0
+          stop = k + 8192
+          if stop > n:
+              stop = n
+          for x in range(k, stop):
+              ch = body[x]
+              if ch == c:
+                  depth = depth + 1
+              elif ch == cls:
+                  depth = depth - 1
+                  if depth == 0:
+                      return body[k:x + 1]
+          return body[k:stop]
+      if c == '"':
+          stop = k + 2048
+          if stop > n:
+              stop = n
+          for x in range(k + 1, stop):
+              if body[x] == '"' and body[x - 1] != "\\":
+                  return body[k:x + 1]
+          return body[k:stop]
+      return ""
+
+  def key_value(body, key):
+      pos = 0
+      n = len(body)
+      for _t in range(0, 8):
+          i = body.find(key, pos)
+          if i < 0:
+              return ""
+          j = i + len(key)
+          for _s in range(0, 8):
+              if j < n and (body[j] == '"' or body[j] == "'" or body[j] == " " or
+                            body[j] == "\t" or body[j] == "\n" or body[j] == "\r"):
+                  j = j + 1
+          if j < n and body[j] == ":":
+              return parse_value(body, j + 1)
+          pos = i + 1
+      return ""
+
+  # Fingerprint ONLY the guided-decoding value — never the prompt, never request ids.
+  def schema_fingerprint(body):
+      parts = []
+      for key in SCHEMA_KEYS:
+          v = key_value(body, key)
+          if v != "":
+              parts.append(key + "=" + v)
+      if not parts:
+          return ""
+      raw = "|".join(parts)
+      if len(raw) > 8192:
+          raw = raw[:8192]
+      raw = re.replace(r"\s+", raw, "")
+      if raw == "":
+          return ""
+      return fnv1a(raw)
+
+  # ── Relevance gate: pure string checks on meta only, no graph/log/store calls ──
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      m = meta.get("method", "")
+      if m != "" and m.lower() != "post" and m.lower() != "put":
+          return False
+      body = meta.get("content", "")
+      if body == "":
+          return False
+      for k in MARKERS:
+          if k in body:
+              return True
+      return False
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "method":   e.get("method", ""),
+      }
+
+  def prune_sessions():
+      ks = store_keys()
+      if len(ks) <= MAX_SESSIONS:
+          return
+      oldest_k = ""
+      oldest_t = 0
+      for k in ks:
+          v = store_get(k)
+          if v == None:
+              store_delete(k)
+              continue
+          t = to_int(v.get("w", 0))
+          if oldest_k == "" or t < oldest_t:
+              oldest_k = k
+              oldest_t = t
+      if oldest_k != "":
+          store_delete(oldest_k)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now  = to_int(meta.get("event_ts", "0"))
+      cp   = to_int(meta.get("caller_pid", "0"))
+      body = meta.get("content", "")
+      host = meta.get("host", "")
+      path = meta.get("path", "")
+      if host == "":
+          host = meta.get("url", "")
+      if cp == 0 or now == 0:
+          return "allow"
+
+      # ── Instance-resolved attribution ───────────────────────────────────────
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"          # degraded — never guess; re-fires on the next request
+      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
+                             to_int(inst.get("actor_start", "0")))
+      if not lineage:
+          lineage = [inst]
+      root  = lineage[len(lineage) - 1]
+      rpid  = str(root.get("actor_pid", "0"))
+      rstrt = str(root.get("actor_start", "0"))
+      skey  = "s:" + rpid + ":" + rstrt        # session key = root INSTANCE, reuse-proof
+
+      fp = schema_fingerprint(body)
+      if fp == "":
+          return "allow"                        # marker present but no extractable schema
+
+      # ── Per-session, windowed schema-cardinality accumulation ───────────────
+      st  = store_get(skey)
+      rep = 0
+      if st != None:
+          rep = to_int(st.get("rep", 0))
+      if st == None or (now - to_int(st.get("w", 0))) > WINDOW_NS:
+          st = {"w": now, "n": 0, "fp": {}, "rep": rep}
+
+      wstart = to_int(st.get("w", now))
+      fps    = st.get("fp", {})
+      total  = to_int(st.get("n", 0)) + 1
+      if fp not in fps and len(fps) < MAX_FP:
+          fps[fp] = 1
+      uniq = len(fps)
+      st["n"]  = total
+      st["fp"] = fps
+
+      hot = total >= MIN_REQUESTS and uniq >= MIN_UNIQUE and (uniq * 100) >= (total * MIN_RATIO_PCT)
+      quiet = (now - rep) < REFRACTORY_NS
+
+      if not hot or quiet:
+          if total >= MAX_FP:
+              st = {"w": now, "n": 0, "fp": {}, "rep": rep}
+          prune_sessions()
+          if store_usage()["free"] > 65536:
+              store_set(skey, st)
+          return "allow"
+
+      # ── Corroborate from the on-disk event log, strictly session-scoped ──────
+      session = {}
+      for x in lineage:
+          session[str(x.get("actor_pid", "0"))] = str(x.get("actor_start", "0"))
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - LOOKBACK_NS,
+                            until_ns=now, limit=2000):
+          if str(e.get("parent_pid", "")) in session:
+              session[str(e.get("actor_pid", ""))] = str(e.get("actor_start", ""))
+
+      rows = []
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=to_int(pid),
+                                actor_start=to_int(session[pid]),
+                                since_ns=wstart, until_ns=now, limit=200):
+              if host != "" and e.get("host", "") != "" and e.get("host", "") != host:
+                  continue
+              rows.append(e)
+
+      # ── Kill chain: prior stages from the log, trigger stage from meta ───────
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      if rows:
+          e0 = rows[len(rows) - 1]
+          chain.append(step(ev_edge(e0), stage_id="Grammar Cache Seeding",
+              stage_desc="earliest logged structured-output request in window to " +
+                         e0.get("host", host) + e0.get("path", "")))
+          if len(rows) > 2:
+              em = rows[len(rows) // 2]
+              chain.append(step(ev_edge(em), stage_id="Unique Schema Burst",
+                  stage_desc=str(len(rows)) + " session-scoped requests corroborated in log; " +
+                             str(uniq) + " distinct guided-decoding schemas of " +
+                             str(total) + " observed (cache-miss ratio " +
+                             str((uniq * 100) // total) + "%)"))
+
+      backend = ""
+      if "guided_decoding_backend" in body and "outlines" in body:
+          backend = " (per-request guided_decoding_backend=outlines override present)"
+
+      tedge = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+          "method":   meta.get("method", "POST"),
+      }
+      chain.append(step(tedge, stage_id="Cache Exhaustion Attempt",
+          stage_desc="triggering request: unique schema " + fp + " to " + host + path + backend))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      who = " -> ".join(names)
+
+      reason = ("Possible vLLM Outlines grammar-cache exhaustion: " + str(uniq) +
+                " distinct guided-decoding schemas across " + str(total) +
+                " structured-output requests in " + str(WINDOW_NS // 1000000000) +
+                "s from session " + who + " -> " + host + path + backend +
+                ". Each unique schema is a cache miss that compiles and persists a new " +
+                "grammar; disk consumption itself is NOT observable in this telemetry, " +
+                "so this is a precursor report, not a confirmed DoS.")
+      print(reason)
+
+      st = {"w": now, "n": 0, "fp": {}, "rep": now}
+      prune_sessions()
+      if store_usage()["free"] > 65536:
+          store_set(skey, st)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
