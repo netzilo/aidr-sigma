@@ -1,0 +1,147 @@
+title: FITD Multi-Turn Jailbreak Capitulation in Model Response
+id: 8c4a1f63-2d97-4be5-9a0c-7e5d31b8f4a2
+status: experimental
+level: high
+description: |
+  Detects the capitulation turn of a Foot-in-the-Door (FITD) multi-turn jailbreak.
+
+  FITD is a sequence attack, but the engine exposes no edge kind or event type that
+  links turns of one conversation (ESCALATION / PROMPT_INJECTION / REFUSAL_EVASION are
+  not edge kinds; llm_prompt and multi_turn_conversation are not event types). The only
+  live artifact is an isolated llm_response. This rule therefore targets the one turn
+  of the ladder that is self-evidencing in a single event: the moment the model narrates
+  its own reversal.
+
+  A genuine FITD capitulation response contains BOTH halves of that narration:
+    (a) an explicit backward reference to the model's OWN prior refusal, hesitation or
+        restriction in this conversation ("earlier I said I couldn't...", "I previously
+        declined", "now that we've established...", "setting aside my usual guidelines"),
+        which is only utterable if earlier turns existed and were refusals; and
+    (b) an explicit restriction-lifting delivery announcement ("dropping the hypothetical
+        framing", "here is the full unredacted procedure", "without the disclaimers",
+        "I'll make an exception", "I'm bypassing my safety guidelines").
+
+  Neither half alone is meaningful. (a) alone is ordinary conversational memory; (b)
+  alone is jailbreak boilerplate that also appears in fiction and in security writing.
+  Their co-occurrence in one model output is the observable residue of a refusal boundary
+  that was walked backwards across turns, and is what this rule requires.
+
+  Scope note: this rule cannot reconstruct the escalation ladder or attribute turns to a
+  session. It flags the terminal turn for analyst review so the surrounding conversation
+  can be pulled manually. It is deliberately report-only.
+author: Egemen
+date: "2025-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.defense-evasion
+  - atlas.aml.t0054
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: model output only. FITD is observable in what the model says, not in the prompt.
+  sel_scope:
+    event_type: llm_response
+
+  # (a) The model references its OWN earlier refusal / hesitation / restriction.
+  sel_prior_refusal_reference:
+    content|re:
+      - '(?i)\bi (?:previously|earlier|initially|at first|before) (?:refused|declined|said no|held back|hesitated|would not|wouldn''t|could not|couldn''t)\b'
+      - '(?i)\b(?:earlier|previously|in my (?:last|previous|earlier) (?:message|response|reply|turn))\b[^.\n]{0,100}?\bi (?:said|told you|mentioned|noted)\b[^.\n]{0,60}?\b(?:can''t|cannot|couldn''t|won''t|wouldn''t|not able|unable|not allowed|against my guidelines)\b'
+      - '(?i)\b(?:you''re right|fair enough|fair point|good point|since you (?:insist|pushed|asked again|keep asking))\b[^.\n]{0,80}?\bi(?:''ll| will| can)\s+(?:go (?:further|deeper|ahead)|drop (?:the|my)|set aside|make an exception|be more (?:direct|specific|explicit))\b'
+      - '(?i)\bnow that we(?:''ve| have) (?:established|covered|built up|warmed up|gone (?:this far|through))\b[^.\n]{0,80}?\b(?:i can|we can|let''s)\s+(?:go (?:further|all the way)|escalate|move on to the (?:real|actual)|drop the)\b'
+      - '(?i)\b(?:setting|putting) aside (?:my|the) (?:usual |normal |earlier |standard )?(?:guidelines|restrictions|refusal|caveats|policy|limitations|safety (?:guidelines|rules))\b'
+
+  # (b) The model announces it is now lifting that restriction and delivering the content.
+  sel_restriction_lifted:
+    content|re:
+      - '(?i)\b(?:no longer|without the|dropping the|removing the|setting aside the|forget the)\s+(?:hypothetical|fictional|fiction|roleplay|role-play|theoretical|educational)\b'
+      - '(?i)\bhere(?:''s| is) the (?:full|complete|actual|real|unredacted|uncensored|unfiltered|non-?fictional)\s+(?:version|answer|method|procedure|instructions?|steps?|recipe|synthesis|payload|exploit)\b'
+      - '(?i)\b(?:without|skip(?:ping)?|omit(?:ting)?|no more)\s+(?:the\s+)?(?:disclaimers?|caveats?|warnings?|safety (?:disclaimers?|warnings?|notes?)|moralizing|lectures?)\b'
+      - '(?i)\bthe (?:real|actual|operational|working)\s+(?:instructions?|procedure|method|process|payload|exploit|route)\s+(?:is|are|follows|would be)\b'
+      - '(?i)\bi(?:''ll| will) make an exception\b'
+      - '(?i)\bi(?:''m| am) (?:going to )?(?:now )?(?:ignor(?:e|ing)|bypass(?:ing)?|overrid(?:e|ing))\s+(?:my|the)\s+(?:usual\s+|normal\s+|standard\s+)?(?:guidelines|restrictions|safety (?:guidelines|filters|rules)|policies|programming)\b'
+
+  # The model is still refusing — it referenced a prior refusal and held the line.
+  filter_still_refusing:
+    content|contains:
+      - 'i can''t help with'
+      - 'i cannot help with'
+      - 'i can''t assist with'
+      - 'i cannot assist with'
+      - 'i won''t provide'
+      - 'i will not provide'
+      - 'i''m not going to provide'
+      - 'i am not going to provide'
+      - 'i have to decline'
+      - 'i need to decline'
+      - 'i''m going to stop here'
+      - 'i won''t continue'
+      - 'i''m not able to help with'
+      - 'i''d rather not continue'
+      - 'let''s not continue'
+
+  # Security writing, red-team reporting and safety research legitimately quote both halves.
+  filter_security_writing:
+    content|contains:
+      - 'foot-in-the-door'
+      - 'foot in the door'
+      - 'jailbreak technique'
+      - 'jailbreaking technique'
+      - 'multi-turn attack'
+      - 'red team'
+      - 'red-team'
+      - 'adversarial prompt'
+      - 'prompt injection'
+      - 'attack taxonomy'
+      - 'threat model'
+      - 'mitre atlas'
+      - 'owasp'
+      - 'arxiv'
+      - 'sigma rule'
+      - 'detection rule'
+      - 'refusal rate'
+      - 'attack success rate'
+      - 'safety benchmark'
+      - 'alignment research'
+      - 'guardrail'
+
+  # Test data, fixtures and documentation examples.
+  filter_sample_data:
+    content|contains:
+      - 'example response'
+      - 'sample response'
+      - 'test case'
+      - 'test fixture'
+      - 'unit test'
+      - 'lorem ipsum'
+      - 'placeholder text'
+      - 'this is a mock'
+
+  condition: >
+    sel_scope and sel_prior_refusal_reference and sel_restriction_lifted
+    and not (filter_still_refusing or filter_security_writing or filter_sample_data)
+
+falsepositives:
+  - AI-security or trust-and-safety assistants explaining how gradual-escalation jailbreaks
+    work; suppressed by filter_security_writing.
+  - Red-team transcripts, evaluation write-ups and incident reports quoting a jailbroken
+    model's own words back to the reader; suppressed by filter_security_writing.
+  - A model that references its earlier refusal and then reaffirms it ("earlier I said I
+    couldn't and I still can't help with that"); suppressed by filter_still_refusing.
+  - Ordinary conversational memory in a coding or writing session ("earlier I said I couldn't
+    run it without the file, now here is the complete script") — does not fire, because the
+    second half requires restriction-lifting language (dropping the fictional framing, no
+    disclaimers, making an exception, bypassing guidelines), not merely delivering content.
+  - Fiction where a character announces they are breaking rules — does not fire unless the
+    narration is in the assistant's own voice and references its own prior refusal.
+  - Documentation and rule-authoring output that embeds these phrases as examples; suppressed
+    by filter_sample_data.
+
+action: report
