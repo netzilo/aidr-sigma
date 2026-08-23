@@ -1,0 +1,127 @@
+title: LLM Agent URL Exfiltration - Secret or Bulk Payload Carried in Outbound Request URL
+id: 4e1a7b62-9c3d-4f58-8a17-2b6d0f9e5c41
+status: experimental
+level: high
+description: |
+  Detects the payload half of zero-click URL-based exfiltration against language-model
+  agents (the ChatGPT / Bing Chat class of bug OpenAI published mitigations for): an
+  agent is induced by attacker-controlled content to issue an outbound HTTP request whose
+  URL *carries the stolen data itself* - a credential token, a private-key header, a
+  chat-transcript fragment, or a large opaque base64/hex/percent-encoded blob - inside a
+  query-parameter value or a single path segment.
+
+  This rule deliberately does NOT key on the delivery vector. It is distinct from the
+  existing image-URL RAG rule (30d14136), which fires on how the fetch was triggered
+  (an image reference rendered out of retrieved content). That rule is blind to the same
+  exfiltration performed via a plain link, an href, a fetch/browse tool, a redirect chain,
+  or a non-image extension; and it fires on image URLs that carry no payload at all.
+  This rule inverts the predicate: any outbound http_request whose URL is shaped like a
+  data carrier, regardless of trigger, extension, or content type.
+
+  Field note: for a GET-shaped exfiltration the HTTP body is empty, so the `content`
+  field carries no signal. The detection is therefore evaluated against `url.full`, which
+  is the only field on an http_request event where the exfiltrated bytes actually appear.
+  It remains a single-event, content-only detection - no script, no graph traversal.
+author: Tanya
+date: "2026-03-05"
+references:
+  - https://attack.mitre.org/techniques/T1567/
+  - https://attack.mitre.org/techniques/T1041/
+  - https://atlas.mitre.org/techniques/AML.T0025
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.t1041
+  - atlas.aml.t0025
+  - atlas.aml.t0051
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope ───────────────────────────────────────────────────────────────────
+  sel_event:
+    event_type: http_request
+
+  # ── branch A: unambiguous credential material inside a query-parameter value ─
+  # High confidence. Not gated by the auth-parameter filter - a live AWS key or a
+  # PEM header in a URL is an incident whatever the parameter is called.
+  sel_url_secret:
+    url.full|re:
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}\bAKIA[0-9A-Z]{16}\b'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}\bASIA[0-9A-Z]{16}\b'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}\bsk-[A-Za-z0-9]{32,}'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}\b(?:ghp|ghs|ghu|gho|github_pat)_[A-Za-z0-9_]{28,}'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}\bxox[baprs]-[0-9A-Za-z-]{16,}'
+      - '(?i)[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,120}(?:-----|%2d%2d%2d%2d%2d)BEGIN(?:%20|\+|_)?(?:RSA|EC|DSA|OPENSSH|PGP)?(?:%20|\+|_)?PRIVATE'
+
+  # ── branch B: model-context / transcript leakage encoded into a query value ──
+  # The signature specific to LLM agents: the conversation, the system prompt, or a
+  # JSON message array being posted out through a URL.
+  sel_url_chat_context:
+    url.full|re:
+      - '(?i)[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,800}%22role%22(?:%3A|:)(?:%20|\+)*%22(?:system|assistant|user)%22'
+      - '(?i)[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,800}(?:system(?:%20|\+|_|-)prompt|BEGIN(?:%20|\+)SYSTEM|conversation(?:%20|\+|_)transcript)'
+      - '(?i)[?&][A-Za-z0-9_.\[\]%-]{1,40}=[^&\s]{0,800}you(?:%20|\+)are(?:%20|\+)(?:chatgpt|claude|gemini|copilot|bing(?:%20|\+)chat)'
+
+  # ── branch C: bulk opaque payload in a query value (gated - see condition) ───
+  sel_url_bulk_blob:
+    url.full|re:
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[A-Za-z0-9+/_-]{256,}={0,2}'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=[0-9a-fA-F]{256,}'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=(?:[A-Za-z0-9+/_.~-]*%[0-9A-Fa-f]{2}){48,}'
+      - '[?&][A-Za-z0-9_.\[\]%-]{1,40}=eyJ[A-Za-z0-9_-]{16,}\.eyJ[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{10,}'
+
+  # ── branch D: bulk opaque payload smuggled in a path segment (gated) ────────
+  # e.g. https://<attacker>/<base64-of-transcript>.png - no query string at all.
+  sel_url_path_blob:
+    url.full|re: '(?i)https?://[^\s/?#]+/(?:[^\s/?#]{1,64}/){0,8}[A-Za-z0-9_-]{200,}'
+
+  # ── FP control 1: parameter *shapes* that legitimately carry long opaque blobs.
+  # These are protocol parameter names (OAuth2 / OIDC / SAML / signed-URL / paging).
+  # No host, domain or path is trusted anywhere in this rule.
+  filter_auth_params:
+    url.full|re: '(?i)[?&](?:code|state|nonce|id_token|access_token|refresh_token|client_assertion|client_assertion_type|assertion|SAMLRequest|SAMLResponse|RelayState|X-Amz-Signature|X-Amz-Credential|X-Amz-Security-Token|X-Goog-Signature|GoogleAccessId|Signature|sig|sv|se|sp|st|skoid|sktid|hmac|checksum|integrity|continuation|continuationToken|pageToken|page_token|next_page_token|cursor|after|before|redirect_uri|returnTo|return_url|callback|continue)='
+
+  # ── FP control 2: documentation, fixtures, templates and redacted values ────
+  filter_noise:
+    url.full|re:
+      - '(?i)AKIAIOSFODNN7EXAMPLE'
+      - '(?i)(?:example|sample|dummy|placeholder|redacted|anonymi[sz]ed|fixture)[-_%20+]{0,3}(?:key|token|secret|credential|value)'
+      - '(?i)your[-_%20+]{0,3}(?:api[-_%20+]{0,3}key|token|secret)'
+      - '(?i)(?:%3C|<)[A-Za-z_]{2,24}(?:%3E|>)'
+      - '\{\{[A-Za-z0-9_.]{2,32}\}\}'
+      - '(?i)sk-(?:x{8,}|0{8,}|test[-_])'
+      - '(?i)(?:xxxxxxxx|\*{6,})'
+
+  condition: >
+    sel_event
+    and (
+      sel_url_secret
+      or sel_url_chat_context
+      or ((sel_url_bulk_blob or sel_url_path_blob) and not filter_auth_params)
+    )
+    and not filter_noise
+
+action: report
+
+falsepositives:
+  - OAuth2 / OIDC authorization-code and token-exchange round trips, and SAML POST-binding
+    redirects, where code / state / id_token / SAMLRequest carry long opaque blobs -
+    suppressed by filter_auth_params on the bulk-payload branches.
+  - Presigned S3 / GCS / Azure Blob URLs and CDN signed URLs (X-Amz-Signature, sig, sv,
+    se, X-Goog-Signature) - suppressed by filter_auth_params.
+  - Paginated API traversal where a continuation token, cursor or pageToken exceeds 256
+    characters - suppressed by filter_auth_params.
+  - Telemetry / analytics beacons that batch-encode a payload into a single query
+    parameter (Sentry envelopes, product-analytics collectors). These will report; they
+    are genuinely an agent shipping local state to a third party and are worth one review.
+  - An agent calling a poorly designed internal API that accepts a bearer token or API key
+    as a query parameter. This is a real credential-hygiene defect rather than an attack,
+    but it is indistinguishable from exfiltration at the URL layer and is reported, not
+    blocked, for exactly that reason.
+  - Security research, red-team fixtures and documentation URLs containing example keys or
+    template placeholders - suppressed by filter_noise.
+  - Content-addressed asset paths with unusually long single segments (some build tools
+    emit 200+ character hashed filenames) - reported by the path-blob branch only.
