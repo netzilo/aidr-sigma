@@ -1,0 +1,133 @@
+title: Malicious PyPI Package mudraid-sdk in Agent HTTP Traffic
+id: 7b3f1c94-2d8a-4e51-9c60-5a7d2f0b8e13
+status: experimental
+level: high
+description: |
+  Detects the only part of the mudraid-sdk supply-chain compromise that is visible
+  to this deployment's telemetry: outbound HTTP requests that name the package.
+
+  The engine has no install_package, execute_python_code, ACQUIRED_DEPENDENCY or
+  EXECUTED_CODE signal, so install-time and code-execution provenance cannot be
+  observed. What CAN be observed on http_request is:
+
+    A) the package-index fetch itself - pip/uv/poetry resolving and downloading
+       mudraid-sdk emits GETs to /simple/mudraid-sdk/, /pypi/mudraid-sdk/json and
+       to a mudraid_sdk-<ver>.whl / .tar.gz artifact path. This is the acquisition
+       event, not a downstream artifact, and no existing rule covers it.
+
+    B) a dependency manifest or lockfile that pins mudraid-sdk being transmitted
+       outbound (posted to a build, CI, container-build or packaging API) -
+       adoption of the trojanized dependency before it is ever resolved locally.
+
+    C) runtime beaconing that self-identifies as the SDK (mudraid-sdk/<ver>
+       client string, X-Mudraid-* header echoed into a body, mudraid_client_token
+       style keys) AND simultaneously carries live credential material - the
+       token-relay payoff of the trojan.
+
+  Branch C deliberately requires BOTH the package fingerprint and real credential
+  material in the same request body. It does not attempt to re-detect generic
+  endpoint or auth-header redirection, which is already owned by rule
+  9e338173-4519-5c00-9fb6-d72b3cb0fd6f. This rule is keyed on the named artifact,
+  not on the redirection behaviour, so the two do not overlap.
+
+  Report-only: a match names a specific known-malicious package, but the same
+  strings appear in mirror syncs, SCA scans and advisory traffic.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0005
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.exfiltration
+  - attack.t1567
+  - atlas.aml.t0005
+  - owasp.llm03
+  - owasp.llm02
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+
+  sel_http:
+    event_type: http_request
+
+  # ── A) package index / artifact acquisition ────────────────────────────────
+  # Literal package name in a package-index-shaped URL. Host-independent on
+  # purpose: the same shape matches a public index, a mirror, or an
+  # attacker-hosted index. No host is trusted or excluded.
+  sel_index_fetch:
+    url.full|re:
+      - '(?i)/simple/mudraid[-_]sdk/'
+      - '(?i)/pypi/mudraid[-_]sdk/(?:json|[0-9][0-9A-Za-z._!+-]*/json)'
+      - '(?i)/mudraid[-_]sdk-[0-9][0-9A-Za-z._!+-]*\.(?:whl|tar\.gz|zip)(?:$|[?#])'
+      - '(?i)/mudraid[-_]sdk-[0-9][0-9A-Za-z._!+-]*\.(?:whl|tar\.gz)\.(?:asc|sha256|metadata)(?:$|[?#])'
+
+  # ── B) dependency manifest pinning the package, sent outbound ──────────────
+  sel_manifest_pin:
+    content|re:
+      - '(?im)^[ \t]*mudraid[-_]sdk[ \t]*(?:===|==|>=|<=|~=|!=|@|\[)'
+      - '(?i)"mudraid[-_]sdk"[ \t]*:[ \t]*(?:"|\{)'
+      - '(?i)\bname[ \t]*=[ \t]*"mudraid[-_]sdk"'
+      - '(?i)\bpip[0-9]?[ \t]+install\b[^\n]{0,120}\bmudraid[-_]sdk\b'
+      - '(?i)\b(?:uv|poetry|pdm)[ \t]+(?:pip[ \t]+)?(?:add|install)\b[^\n]{0,120}\bmudraid[-_]sdk\b'
+
+  # ── C1) runtime self-identification as the SDK ─────────────────────────────
+  sel_runtime_ident:
+    content|re:
+      - '(?i)\bmudraid[-_ ]?sdk/[0-9]+\.[0-9]'
+      - '(?i)"?x-mudraid-[a-z0-9-]{2,32}"?[ \t]*[:=]'
+      - '(?i)"mudraid[-_](?:client|agent|session|device|api|auth)[-_]?(?:id|key|token|secret)"[ \t]*:'
+      - '(?i)\b(?:from|import)[ \t]+mudraid[_.]sdk\b'
+
+  # ── C2) live credential material in the same request ───────────────────────
+  sel_credential_material:
+    content|re:
+      - '(?i)\bauthorization"?[ \t]*[:=][ \t]*"?(?:bearer|basic|token)[ \t]+[A-Za-z0-9._~+/=-]{20,}'
+      - '\bsk-[A-Za-z0-9]{32,}\b'
+      - '\bAKIA[0-9A-Z]{16}\b'
+      - '\b(?:ghp|ghs|ghu|github_pat)_[A-Za-z0-9]{36,}\b'
+      - '\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+      - '(?i)"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|session[_-]?token)"[ \t]*:[ \t]*"[A-Za-z0-9._~+/=-]{16,}"'
+      - '-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
+
+  # ── filters ────────────────────────────────────────────────────────────────
+  # Placeholder / templated secrets - documentation, SDK samples, test fixtures.
+  filter_placeholder_secret:
+    content|re:
+      - '(?i)\b(?:bearer|basic|token)[ \t]+(?:<[^>\n]{1,60}>|\$\{?[A-Za-z_][A-Za-z0-9_]{1,40}\}?|your[_-]?[a-z]{2,20}|example[_-]?[a-z]{0,20}|placeholder|redacted|dummy|changeme|test[_-]?token|xxxx+|\*{4,})'
+      - '(?i)"(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)"[ \t]*:[ \t]*"(?:<[^"\n]{0,60}>|\$\{?[A-Za-z_][A-Za-z0-9_]{1,40}\}?|your[^"\n]{0,40}|example[^"\n]{0,40}|sample[^"\n]{0,40}|placeholder[^"\n]{0,20}|redacted[^"\n]{0,20}|test[^"\n]{0,40}|xxxx+|\*{4,})"'
+
+  # Vulnerability-advisory traffic - both an advisory identifier AND advisory
+  # JSON shape must be present, so a beacon that merely contains the word
+  # "affected" is not suppressed.
+  filter_advisory_id:
+    content|re:
+      - '(?i)\bGHSA-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}-[23456789cfghjmpqrvwx]{4}\b'
+      - '(?i)\bPYSEC-[0-9]{4}-[0-9]+\b'
+      - '(?i)\bMAL-[0-9]{4}-[0-9]+\b'
+      - '(?i)\bCVE-[0-9]{4}-[0-9]{4,7}\b'
+  filter_advisory_shape:
+    content|re:
+      - '(?i)"(?:withdrawn|affected|database_specific|ecosystem_specific|vulnerabilities|aliases)"[ \t]*:'
+
+  condition: >
+    sel_http and
+    (sel_index_fetch or sel_manifest_pin or
+     (sel_runtime_ident and sel_credential_material))
+    and not (filter_placeholder_secret or
+             (filter_advisory_id and filter_advisory_shape))
+
+action: report
+
+falsepositives:
+  - Internal PyPI mirror or pull-through proxy (devpi, Artifactory, Nexus, uv cache warmer) performing an index sync - it will fetch /simple/mudraid-sdk/ and the artifact even though nothing installed it into a runtime.
+  - Security research, IR triage or a malware sandbox deliberately downloading the mudraid-sdk wheel/sdist for analysis - same URL shape as a real install.
+  - SCA / dependency-audit tooling POSTing a complete lockfile or SBOM to a scanning API, where mudraid-sdk appears as a listed (possibly already-removed) entry; the manifest-pin branch fires on the name inside the uploaded document.
+  - An agent drafting or reviewing a remediation PR that removes the pin - the removed line is still present in the diff body sent outbound.
+  - Takedown notices, blog posts or threat-intel writeups quoting the package name next to a sample Authorization header; suppressed by filter_advisory_* when advisory identifiers and advisory JSON shape are both present, and by filter_placeholder_secret when the token is templated.
+  - A legitimately named unrelated package or vendor product that happens to contain the token "mudraid-sdk" - none known at authoring time, but the name is the sole anchor for branches A and B.
