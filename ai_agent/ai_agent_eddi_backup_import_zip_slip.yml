@@ -1,0 +1,121 @@
+title: Zip Slip Path Traversal in EDDI Backup Import
+id: 7d3f1c0a-9b42-4e57-8a16-2c5f0e9d4b31
+status: experimental
+level: high
+description: |
+  Detects exploitation of the Zip Slip vulnerability in the E.D.D.I LLM-middleware
+  /backup/import API endpoint (fixed in 5.5.0). A crafted ZIP archive whose entry
+  names contain parent-directory traversal (../), an absolute system path, or a
+  Windows drive prefix is uploaded to the import endpoint; on extraction the
+  application writes outside the intended directory and can overwrite
+  application-owned JAR/class files, yielding RCE in the application context.
+
+  Single-event content detection only. Three mutually reinforcing signatures:
+    1. HTTP POST/PUT to a /backup/import path whose body carries a ZIP local-file
+       or central-directory header AND a traversal / absolute entry name.
+    2. The same request carrying a multipart Content-Disposition filename that
+       contains traversal.
+    3. An agent subprocess that *builds* a slip archive (zip/jar/7z/tar/zipfile)
+       whose entry names traverse upward into a .jar/.war/.class/.so target, or
+       that curl-uploads to /backup/import with a traversing form filename.
+  The ZIP magic and the traversal must both be present in the same event; either
+  alone is ignored.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1574/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.persistence
+  - attack.t1574
+  - attack.execution
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1/2 context: the vulnerable endpoint ───────────────────────────
+  sel_http_ctx:
+    event_type: http_request
+    method:
+      - POST
+      - PUT
+  sel_http_path:
+    path|contains: '/backup/import'
+  sel_http_url:
+    url.full|contains: '/backup/import'
+
+  # ── ZIP local-file header immediately followed by a hostile entry name ────
+  # Local file header is 30 bytes; the name starts right after. The bounded,
+  # non-greedy gap tolerates UTF-8 rune-decoding drift over the binary header.
+  sel_zip_entry_traversal:
+    content|re:
+      - 'PK\x{0003}\x{0004}[\s\S]{0,48}?\.\.[\\/]'
+      - 'PK\x{0003}\x{0004}[\s\S]{0,48}?[A-Za-z]:[\\/]'
+      - 'PK\x{0003}\x{0004}[\s\S]{0,64}?/(?:etc|opt|usr|var|root|home|srv|deployments|WEB-INF|BOOT-INF)/'
+      - 'PK\x{0003}\x{0004}[\s\S]{0,400}?(?:\.\./){2,}'
+
+  # ── Offset-independent fallback: archive magic AND deep traversal ─────────
+  sel_zip_magic:
+    content|re: 'PK\x{0003}\x{0004}|PK\x{0001}\x{0002}'
+  sel_deep_traversal:
+    content|re:
+      - '(?:\.\./){3,}'
+      - '(?:\.\.\\){3,}'
+      - '(?i)(?:%2e%2e(?:%2f|%5c|/)){2,}'
+
+  # ── Traversal in the multipart upload filename itself ─────────────────────
+  sel_multipart_filename_traversal:
+    content|re: '(?i)content-disposition:[^\x{000A}]{0,300}?filename\*?=[^\x{000A}]{0,200}?(?:\.\.[\\/]|%2e%2e)'
+
+  # ── Branch 3 context: agent-spawned subprocess ────────────────────────────
+  sel_proc_ctx:
+    event_type: execute_process
+  sel_proc_slip_archive:
+    command|re:
+      - '(?i)\b(?:zip|7z|7za|jar|tar|bsdtar)\b[^\x{000A}]{0,300}?(?:\.\./){2,}[^\x{000A}]{0,160}?\.(?:jar|war|ear|class|jsp|so|dll|properties|conf|xml|ya?ml)\b'
+      - '(?i)\bzipfile\b[^\x{000A}]{0,400}?(?:\.\./){2,}[^\x{000A}]{0,160}?\.(?:jar|war|ear|class|jsp|so)\b'
+  sel_proc_import_ep:
+    command|contains: '/backup/import'
+  sel_proc_form_filename_traversal:
+    command|re: '(?i)\b(?:curl|wget|http|xh|httpie|Invoke-WebRequest)\b[^\x{000A}]{0,300}?filename=[^\x{000A}\x{0020}\x{0022}]{0,160}\.\.[\\/]'
+
+  # ── Filters: research prose and no-op invocations only. No host, domain or
+  #    URL path is trusted anywhere in this rule. ───────────────────────────
+  filter_docs_or_research:
+    content|contains:
+      - 'zip slip vulnerability'
+      - 'CWE-22'
+      - 'ZipSlip test fixture'
+  filter_no_op_cmd:
+    command|contains:
+      - '--dry-run'
+      - '--help'
+
+  condition: >
+    (
+      (sel_http_ctx and (sel_http_path or sel_http_url) and
+       (sel_zip_entry_traversal or (sel_zip_magic and sel_deep_traversal)
+        or sel_multipart_filename_traversal))
+      or (sel_proc_ctx and sel_proc_slip_archive)
+      or (sel_proc_ctx and sel_proc_import_ep and sel_proc_form_filename_traversal)
+    )
+    and not (filter_docs_or_research or filter_no_op_cmd)
+
+falsepositives:
+  - Authorised penetration tests or vulnerability scanners uploading a deliberate
+    Zip Slip proof-of-concept archive against an internal E.D.D.I instance.
+  - A legitimate E.D.D.I backup produced by a non-conformant archiver that stored
+    entry names with parent-directory components (rare; most zip implementations
+    strip leading ../ and / with a warning).
+  - Build or release tooling that packages an archive using two or more upward
+    relative path segments to reach a JAR under a sibling module directory
+    (branch 3 only; requires an archive tool, >=2 traversals and a binary
+    artefact extension on the same command line).
+  - Security regression suites in CI that replay an archived malicious sample
+    through the import endpoint.
+
+action: report
