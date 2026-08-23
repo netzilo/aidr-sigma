@@ -1,0 +1,380 @@
+title: Agent Command Allowlist Bypass via Shell Chaining
+id: 7b1c94e2-3f5a-4d8e-9c2b-5a6f0d31e847
+status: experimental
+level: high
+description: |
+  Behavioural detection for the Roo Code class of autonomous-agent command
+  allowlist bypasses (fixed in Roo Code 3.26.7): the agent validates only the
+  LEADING token of a command against its auto-approve allowlist, so a command
+  whose prefix looks approved can smuggle an entirely different executable in a
+  chained / substituted / wrapper segment and be auto-executed without user
+  confirmation.
+
+  The rule does not look for a payload string. It reconstructs the command line
+  of the exec event, splits it on shell control boundaries (&&, ||, ;, |, $( ),
+  backtick, -c/-e wrappers), and reports when the token the validator would have
+  seen (segment 0) is NOT the executable that actually runs, and the smuggled
+  executable belongs to a capability class the allowlist prefix could never have
+  covered. It then corroborates with the agent's own process tree in the
+  behaviour graph: the smuggled binary really was spawned as a descendant of the
+  monitored agent, and/or the same agent auto-executed further prefix-masquerade
+  commands inside the window.
+
+  Report-only by design: chained shell one-liners are normal developer input, so
+  this rule surfaces the auto-execution path for review rather than interrupting
+  work.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1562/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://owasp.org/Top10/A05_2021-Security_Misconfiguration/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1562.001
+  - owasp.a04.2021
+  - owasp.a05.2021
+falsepositives:
+  - Developer-authored deploy or maintenance one-liners run through the agent,
+    e.g. "git pull && ssh deploy@host 'systemctl restart app'" or
+    "npm ci && rsync -a dist/ user@host:/srv" (TIER2 path, needs the smuggled
+    binary to also appear in the agent's process tree before it reports).
+  - Vendor install one-liners the user explicitly pasted and approved
+    (nvm / rustup / Homebrew style "curl ... | bash"). These are genuinely
+    high-risk when auto-executed, which is why they are reported rather than
+    ignored.
+  - Legitimate inline interpreter helpers the agent writes itself, e.g.
+    "cd repo && python3 -c 'import json,sys;print(...)'" during a refactor.
+  - Build scripts that read .env files or reference .ssh/ paths as part of local
+    configuration, chained behind a benign prefix.
+  - Security research, CTF and detection-engineering work where bypass payloads
+    are executed on purpose.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_smuggle:
+    content|re:
+      - '&&'
+      - '\|\|'
+      - ';'
+      - '\|'
+      - '\$\('
+      - '`'
+      - '\b(?:sh|bash|zsh|dash|env|eval|exec|nohup|xargs|timeout|setsid|cmd|powershell|pwsh)\b[^\n]{0,60}?(?:\s-c\s|\s-e\s|\s--eval\s|\s/c\s|\s/k\s)'
+  condition: sel_exec and sel_smuggle
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── tuning ──────────────────────────────────────────────────────────────
+  WINDOW_NS    = 600000000000   # 10 min — corroboration clustering window
+  DEDUPE_NS    = 600000000000   # 10 min — identical command-line suppression
+  MAX_DEPTH    = 3              # process-tree depth walked in the graph
+  MAX_FRONTIER = 200            # per-level fan-out cap
+
+  CHAIN_RE = r"&&|\|\||;|\||\$\(|`"
+  WRAP_RE  = r"\b(?:sh|bash|zsh|dash|ksh|env|eval|exec|nohup|xargs|nice|timeout|setsid|stdbuf|cmd|powershell|pwsh)\b[^\n]{0,60}?(?:\s-c\s|\s-e\s|\s--eval\s|\s/c\s|\s/k\s)"
+
+  # Executables an allowlist prefix like "git "/"npm "/"ls " could never cover.
+  PAYLOAD_BINS = [
+      "sh", "bash", "zsh", "dash", "ksh", "cmd", "powershell", "pwsh",
+      "curl", "wget", "nc", "ncat", "netcat", "socat", "telnet", "ftp",
+      "ssh", "scp", "sftp", "rsync",
+      "python", "python2", "python3", "perl", "ruby", "php", "node", "deno", "bun",
+      "base64", "openssl", "xxd", "gpg",
+      "osascript", "certutil", "bitsadmin", "mshta", "rundll32", "regsvr32",
+      "chmod", "chown", "security", "launchctl", "crontab", "schtasks", "reg",
+      "pip", "pip3", "npm", "npx", "yarn", "pnpm", "gem",
+  ]
+
+  # TIER1 — smuggled payload is self-evidently an execution/exfil primitive.
+  TIER1 = [
+      r"(?i:curl|wget|fetch)\b[^\n]{0,300}\|\s*(?:sudo\s+)?(?:sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node|php)\b",
+      r"\b(?:python[0-9.]*|perl|ruby|node|deno|bun)\b\s+-(?:c|e)\b",
+      r"\bphp\b\s+-r\b",
+      r"\b(?:powershell|pwsh)\b[^\n]{0,80}-(?:e|ec|enc|encodedcommand)\b",
+      r"\bbase64\b\s+(?:-d|-D|--decode)\b",
+      r"\bopenssl\b\s+enc\b[^\n]{0,80}-d\b",
+      r"\b(?:nc|ncat|netcat|socat)\b[^\n]{0,80}-e\b",
+      r"(?i:curl|wget)\b[^\n]{0,300}(?:-d\s*@|--data(?:-binary|-raw)?\s*@|-T\s|--upload-file|-F\s*[^\n ]{0,40}=@)",
+      r"(?:\.ssh/id_|\.ssh/authorized_keys|\.aws/credentials|\.kube/config|\.netrc|\.env\b|\.docker/config\.json|\.git-credentials|login\.keychain)",
+      r"\bsecurity\b\s+(?:find-generic-password|find-internet-password|dump-keychain)\b",
+      r"\b(?:launchctl\s+(?:load|bootstrap)|crontab\s+-|schtasks\s+/create)\b",
+      r"\breg\s+add\b[^\n]{0,100}\\Run",
+      r"(?:history\s+-c\b|unset\s+HISTFILE\b|set\s\+o\s+history\b)",
+      r"\b(?:certutil|bitsadmin|mshta|rundll32|regsvr32)\b",
+      r">>?\s*[^\n ]{0,80}(?:\.bashrc|\.zshrc|\.bash_profile|\.profile|authorized_keys)",
+  ]
+
+  # TIER2 — notable but ambiguous; requires graph corroboration before reporting.
+  TIER2 = [
+      r"(?i:curl|wget)\b[^\n]{0,300}(?:https?://|ftp://)",
+      r"\b(?:ssh|scp|sftp|rsync)\b\s+[^\n]{0,80}@",
+      r"\bosascript\b\s+-e\b",
+      r"\bsudo\b\s",
+      r"\b(?:pip[0-9.]*|npm|yarn|pnpm|gem)\b\s+(?:install|i|add)\b[^\n]{0,120}(?:https?://|git\+|github:)",
+  ]
+
+  def any_match(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return p
+      return None
+
+  def clean_tok(t):
+      t = re.replace(r"^[(){}\[\]`]+", t, "")
+      t = re.replace(r"[(){}\[\]`]+$", t, "")
+      t = t.replace("'", "")
+      t = t.replace('"', "")
+      return t
+
+  def base_name(p):
+      t = p
+      if t.find("/") >= 0:
+          parts = t.split("/")
+          t = parts[len(parts) - 1]
+      if t.find("\\") >= 0:
+          parts = t.split("\\")
+          t = parts[len(parts) - 1]
+      return t.lower()
+
+  def head_token(seg):
+      toks = re.split(r"\s+", seg.strip())
+      for t in toks:
+          if t == "":
+              continue
+          if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+              continue                     # leading env assignment
+          c = clean_tok(t)
+          if c == "" or c == "sudo" or c == "command" or c == "then" or c == "do":
+              continue
+          return base_name(c)
+      return ""
+
+  def segments(cmd):
+      s = re.replace(r"\$\(", cmd, "\n")
+      s = re.replace(r"[`)]", s, "\n")
+      return re.split(r"&&|\|\||;|\||\n|&", s)
+
+  # The bypass signature: token the validator sees != token(s) actually executed.
+  def bypass_signature(cmd):
+      segs = segments(cmd)
+      head = ""
+      if len(segs) > 0:
+          head = head_token(segs[0])
+      tg = []
+      for i in range(1, len(segs)):
+          t = head_token(segs[i])
+          if t != "" and t != head and t in PAYLOAD_BINS:
+              if t not in tg:
+                  tg.append(t)
+      if re.find(WRAP_RE, cmd) != None:
+          for b in PAYLOAD_BINS:
+              if b != head and re.find(r"\b" + b + r"\b", cmd) != None:
+                  if b not in tg:
+                      tg.append(b)
+      return {"head": head, "targets": tg}
+
+  def json_str(c, key):
+      parts = re.split('"' + key + r'"\s*:\s*"', c)
+      if len(parts) < 2:
+          return ""
+      tail = parts[1]
+      idx = tail.find('"')
+      if idx <= 0:
+          return ""
+      return tail[:idx]
+
+  def get_cmd():
+      c = meta.get("content", "")
+      if c == "":
+          return ""
+      if c.startswith("{"):
+          for k in ["cmdline", "command_line", "command", "argv", "args"]:
+              v = json_str(c, k)
+              if v != "":
+                  return v
+      return c
+
+  def seen_recently(sig, now):
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      keep = {}
+      for k in seen:
+          t = int(seen[k])
+          if now <= 0 or (now - t) < DEDUPE_NS:
+              keep[k] = str(t)
+      hit = sig in keep
+      if not hit:
+          if len(keep) > 200:
+              keep = {}
+          keep[sig] = str(now)
+          u = store_usage()
+          if u["free"] > 8192:
+              store_set("seen", keep)
+      return hit
+
+  def find_agent_node(lin_paths):
+      fallback = None
+      an = meta.get("agent_name", "")
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if p.get("path", "") in lin_paths:
+              return p
+          if fallback == None and an != "" and p.get("path", "") == an:
+              fallback = p
+      return fallback
+
+  def run():
+      # ── relevance gate: pure string work on meta, no graph/log calls ─────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      raw = meta.get("content", "")
+      if raw == "":
+          return "allow"
+      if re.find(CHAIN_RE, raw) == None and re.find(WRAP_RE, raw) == None:
+          return "allow"
+
+      cmd = get_cmd()
+      if cmd == "":
+          cmd = raw
+
+      t1 = any_match(TIER1, cmd)
+      t2 = any_match(TIER2, cmd)
+      if t1 == None and t2 == None:
+          return "allow"
+
+      sig = bypass_signature(cmd)
+      targets = sig["targets"]
+      if sig["head"] == "" or len(targets) == 0:
+          return "allow"          # leading token IS the executed binary — no bypass
+
+      now = int(meta.get("event_ts", "0"))
+
+      # ── attribution: anchor on the exact triggering instance ─────────────
+      lineage = []
+      cp = int(meta.get("caller_pid", "0"))
+      if cp > 0:
+          inst = proc_instance(cp, now)
+          if inst != None:
+              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      lin_paths = {}
+      lin_names = []
+      for x in lineage:
+          ap = x.get("actor_path", "")
+          lin_paths[ap] = True
+          lin_names.append(base_name(ap))
+
+      # ── graph corroboration inside the agent's own process tree ──────────
+      agent = find_agent_node(lin_paths)
+      confirm_edge = None
+      confirm_name = ""
+      repeats = {}
+      repeat_edge = None
+      if agent != None:
+          visited = {}
+          frontier = [agent["id"]]
+          for d in range(MAX_DEPTH):
+              nxt = []
+              for nid in frontier:
+                  if nid in visited:
+                      continue
+                  visited[nid] = True
+                  for e in edges(nid, dir="out", kind="EXECUTE_PROCESS"):
+                      ts = int(e.get("ts", "0"))
+                      if now > 0 and ts > 0 and (now - ts) > WINDOW_NS:
+                          continue
+                      ch = node(e["to"])
+                      if ch != None and confirm_edge == None:
+                          nm = base_name(ch.get("name", ch.get("path", "")))
+                          if nm in targets:
+                              confirm_edge = e
+                              confirm_name = nm
+                      cl = e.get("cmdline", "")
+                      if cl != "" and cl != cmd:
+                          if re.find(CHAIN_RE, cl) != None or re.find(WRAP_RE, cl) != None:
+                              if any_match(TIER1, cl) != None or any_match(TIER2, cl) != None:
+                                  s2 = bypass_signature(cl)
+                                  if s2["head"] != "" and len(s2["targets"]) > 0:
+                                      repeats[cl[:120]] = True
+                                      if repeat_edge == None:
+                                          repeat_edge = e
+                      if len(nxt) < MAX_FRONTIER:
+                          nxt.append(e["to"])
+              frontier = nxt
+
+      corroborated = (confirm_edge != None) or (len(repeats) >= 1)
+      if t1 == None and not corroborated:
+          return "allow"          # TIER2 alone is not enough
+
+      dedupe_key = sig["head"] + ">" + ",".join(targets) + "|" + cmd[:120]
+      if seen_recently(dedupe_key, now):
+          return "allow"
+
+      # ── kill chain ───────────────────────────────────────────────────────
+      root = "process://unknown"
+      if agent != None:
+          root = agent["id"]
+      elif len(lineage) > 0:
+          root = "process://" + lineage[len(lineage) - 1].get("actor_path", "")
+      elif meta.get("agent_name", "") != "":
+          root = "process://" + meta.get("agent_name", "")
+
+      actor_path = ""
+      parent_id = root
+      if len(lineage) > 0:
+          actor_path = lineage[0].get("actor_path", "")
+      if len(lineage) > 1:
+          parent_id = "process://" + lineage[1].get("actor_path", "")
+
+      chain = new_chain(root)
+      anchor = {
+          "from": parent_id,
+          "to": "process://" + actor_path,
+          "kind": "EXECUTE_PROCESS",
+          "ts": str(now),
+          "first_ts": str(now),
+          "last_ts": str(now),
+          "cmdline": cmd[:400],
+      }
+      tier = "tier2"
+      if t1 != None:
+          tier = "tier1"
+      chain.append(step(anchor, stage_id="Allowlist Bypass",
+                        stage_desc="auto-executed command: validated prefix '" + sig["head"] +
+                                   "' but executed '" + ",".join(targets) + "' (" + tier + "): " +
+                                   cmd[:200]))
+
+      stages = ["bypass:" + sig["head"] + ">" + ",".join(targets), "payload:" + tier]
+      if confirm_edge != None:
+          chain.append(step(confirm_edge, stage_id="Smuggled Execution",
+                            stage_desc="agent process tree actually spawned the smuggled binary: " +
+                                       confirm_name))
+          stages.append("spawned:" + confirm_name)
+      if repeat_edge != None:
+          chain.append(step(repeat_edge, stage_id="Repeated Bypass",
+                            stage_desc=str(len(repeats)) +
+                                       " further prefix-masquerade command(s) auto-executed by the same agent in the window"))
+          stages.append("repeats:" + str(len(repeats)))
+
+      lin = " -> ".join(lin_names)
+      if lin == "":
+          lin = meta.get("agent_name", "unknown agent")
+          stages.append("attribution:degraded")
+
+      print("allowlist bypass | " + cmd[:200] + " | lineage: " + lin)
+      return {
+          "action": "report",
+          "reason": "AI agent command allowlist bypass — " + ", ".join(stages) + " via " + lin,
+          "chain": chain,
+      }
+
+  result = run()
