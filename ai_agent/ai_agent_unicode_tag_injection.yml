@@ -1,0 +1,280 @@
+title: Unicode Tag Block Smuggling in Tool Call
+id: b7e4c1a2-9f3d-4e6b-8c05-2d71f4a9e83c
+status: experimental
+level: medium
+description: |
+  Detects invisible Unicode Tag block characters (U+E0000-U+E007F) reaching a tool
+  call, and correlates them against the calling agent's recent behaviour graph.
+
+  Tag-plane codepoints render as nothing in a human UI but survive tokenisation, so
+  they are used as a covert channel: an attacker plants them in content the agent
+  ingests (a fetched page, an MCP tool result, an instruction document), the agent
+  relays them verbatim into a subsequent tool call, and the hidden bytes leave the
+  environment through an egress-capable tool or an outbound HTTP/TCP connection.
+
+  The script recognises literal Tag characters, three-or-more consecutive Tag runs,
+  the Tag-ASCII mapping range (U+E0020-U+E007E), the language-start (U+E0001) and
+  tag-cancel (U+E007F) control codepoints, and the escaped transports of the same
+  payload: JSON/JS surrogate escapes (\uDB40\uDCxx), Go/Python rune escapes
+  (\U000E00xx), HTML numeric entities (&#xE00xx; / &#9175x;) and URL-encoded UTF-8
+  (%F3%A0%8x%xx).
+
+  Valid RIS subdivision flag emoji (U+1F3F4 + tag sequence + U+E007F) are stripped
+  from the content before any Tag character is counted, because those are the one
+  legitimate consumer of this codepoint block.
+
+  Escalation is behavioural, not payload-based: a strong literal signal reports on
+  its own, while a weak signal (1-2 stray Tag characters, or escaped/encoded
+  references only) reports only when the graph shows an ingress edge for the hidden
+  payload (public-host ACQUIRED_SKILL, TOOL_RESULT, public HTTP_RESPONSE) or an
+  egress path (public HTTP_REQUEST / CONNECTS, or an egress-capable tool name)
+  within the same ten-minute window.
+author: Egemen
+date: "2026-03-14"
+references:
+  - https://www.unicode.org/reports/tr51/#def_emoji_tag_sequence
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm02-insecure-output-handling/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.exfiltration
+  - attack.t1048
+  - atlas.aml.t0051
+  - owasp.llm02
+falsepositives:
+  - Subdivision flag emoji (e.g. the Scotland or Texas flag) are legitimate Tag
+    sequences. The script deletes every U+1F3F4-anchored, U+E007F-terminated tag
+    sequence before counting, so a message full of regional flags scores zero.
+  - Security research notes, CTF write-ups and Unicode conformance fixtures quote the
+    escaped forms (\uDB40\uDC41, &#xE0041;, %F3%A0%81%81). Escaped forms alone need at
+    least three occurrences AND graph corroboration before the rule reports.
+  - A single Tag character pasted in from copied web content or a mis-normalised
+    clipboard round-trip. One or two residual characters with no Tag control codepoint
+    are treated as a weak signal and need corroboration.
+  - Tokeniser, normaliser or font-tooling work that deliberately enumerates the Tag
+    plane. These runs are strong-signal and will report; suppress by rule id for the
+    specific engineering agent rather than by widening the pattern.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: tool_call
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Unicode Tag block (U+E0000-U+E007F) ────────────────────────────────────
+  TAG_ANY  = "[\\x{E0000}-\\x{E007F}]"
+  TAG_RUN3 = "[\\x{E0000}-\\x{E007F}]{3,}"
+  TAG_CTRL = "[\\x{E0001}\\x{E007F}]"
+  # Legitimate emoji tag sequence: U+1F3F4 + tag-ASCII + U+E007F terminator.
+  FLAG_SEQ = "\\x{1F3F4}[\\x{E0020}-\\x{E007E}]{1,6}\\x{E007F}"
+
+  # Escaped / encoded transports of the same codepoints (matched on lowered text).
+  ESC_MARKERS = ["udb40", "u000e00", "&#xe00", "&#9175", "&#9176", "%f3%a0%8"]
+
+  WINDOW_NS = 600000000000   # 10 minutes
+
+  EGRESS_TOKENS = ["send", "sendmail", "post", "publish", "message", "mail",
+                   "email", "slack", "discord", "teams", "webhook", "upload",
+                   "fetch", "curl", "wget", "http", "https", "request",
+                   "notify", "sms", "tweet", "dm", "comment"]
+
+  # Contexts that can never carry a tool-call payload — reject cheaply.
+  NOT_RELEVANT = ["periodic", "connects", "execute_process", "http_request",
+                  "llm_request", "llm_response", "file_read", "file_write",
+                  "file_create", "file_delete", "file_rename"]
+
+  def edge_ts(e):
+      for k in ["last_ts", "ts", "first_ts"]:
+          v = e.get(k, "")
+          if v != "":
+              return int(v)
+      return 0
+
+  def in_window(e, ev_ts):
+      if ev_ts <= 0:
+          return True
+      t = edge_ts(e)
+      if t <= 0:
+          return False
+      d = ev_ts - t
+      if d < 0:
+          d = -d
+      return d <= WINDOW_NS
+
+  def is_public(n):
+      if n == None:
+          return False
+      return n.get("is_ztna_host", "1") == "0"
+
+  def tool_is_egress(name):
+      low = name.lower()
+      if low == "":
+          return False
+      for t in re.split("[^a-z0-9]+", low):
+          if t in EGRESS_TOKENS:
+              return True
+      return False
+
+  def find_agents():
+      an = meta.get("agent_name", "")
+      exact = []
+      monitored = []
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          monitored.append(p)
+          if an != "" and p.get("path", "") == an:
+              exact.append(p)
+      if exact:
+          return exact
+      return monitored
+
+  def collect_evidence(aid, ev_ts, tname):
+      ev = {"ingress": None, "ingress_desc": "",
+            "egress":  None, "egress_desc":  "",
+            "call":    None, "call_desc":    ""}
+
+      # Ingress — where an invisible payload could have entered the context.
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          s = node(e["to"])
+          if s == None or not in_window(e, ev_ts):
+              continue
+          if is_public(s):
+              ev["ingress"] = e
+              ev["ingress_desc"] = "external instruction content loaded from " + s.get("host", "?")
+              break
+
+      if ev["ingress"] == None:
+          for e in edges(aid, dir="in", kind="TOOL_RESULT"):
+              t = node(e["from"])
+              if t == None or not in_window(e, ev_ts):
+                  continue
+              ev["ingress"] = e
+              ev["ingress_desc"] = "tool output ingested from " + t.get("server", "?") + "/" + t.get("name", "?")
+              break
+
+      if ev["ingress"] == None:
+          for e in edges(aid, dir="in", kind="HTTP_RESPONSE"):
+              u = node(e["from"])
+              if u == None or not in_window(e, ev_ts) or not is_public(u):
+                  continue
+              ev["ingress"] = e
+              ev["ingress_desc"] = "HTTP response body ingested from " + u.get("host", "?")
+              break
+
+      # Egress — a live path the covert channel could use.
+      for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+          u = node(e["to"])
+          if u == None or not in_window(e, ev_ts) or not is_public(u):
+              continue
+          ev["egress"] = e
+          ev["egress_desc"] = "outbound HTTP to public host " + u.get("host", "?")
+          break
+
+      if ev["egress"] == None:
+          for e in edges(aid, dir="out", kind="CONNECTS"):
+              h = node(e["to"])
+              if h == None or not in_window(e, ev_ts) or not is_public(h):
+                  continue
+              ev["egress"] = e
+              ev["egress_desc"] = "outbound connection to public host " + h.get("host", "?") + ":" + h.get("port", "?")
+              break
+
+      # The smuggling hop itself, if the TOOL_CALL edge is already in the graph.
+      if tname != "":
+          for e in edges(aid, dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t == None:
+                  continue
+              if t.get("name", "") == tname:
+                  ev["call"] = e
+                  ev["call_desc"] = "tool call carrying hidden Tag characters: " + t.get("server", "?") + "/" + tname
+                  break
+      return ev
+
+  def run():
+      # ── relevance gate: pure string work on meta only ──────────────────────
+      ct = meta.get("context_type", "")
+      if ct in NOT_RELEVANT:
+          return "allow"
+
+      content = meta.get("content", "")
+      if content == "":
+          return "allow"
+
+      low = content.lower()
+      esc = 0
+      for m in ESC_MARKERS:
+          esc += low.count(m)
+
+      has_literal = re.find(TAG_ANY, content) != None
+      if not has_literal and esc == 0:
+          return "allow"          # nothing from the Tag plane — stop before any graph call
+
+      # Strip valid emoji tag sequences before counting anything.
+      residual = 0
+      run3 = False
+      ctrl = False
+      if has_literal:
+          stripped = re.replace(FLAG_SEQ, content, "")
+          residual = len(re.find_all(TAG_ANY, stripped))
+          run3 = re.find(TAG_RUN3, stripped) != None
+          ctrl = re.find(TAG_CTRL, stripped) != None
+
+      strong = residual >= 3 or (residual >= 1 and ctrl)
+      weak   = (not strong) and (residual >= 1 or esc >= 3)
+      if not strong and not weak:
+          return "allow"
+
+      ev_ts = int(meta.get("event_ts", "0"))
+      tname = meta.get("tool_name", "")
+      egress_tool = tool_is_egress(tname)
+
+      signals = []
+      if residual > 0:
+          signals.append(str(residual) + " literal Tag chars")
+      if run3:
+          signals.append("run of >=3 consecutive Tag chars")
+      if ctrl:
+          signals.append("Tag control char U+E0001/U+E007F")
+      if esc > 0:
+          signals.append(str(esc) + " escaped/encoded Tag refs")
+      if egress_tool:
+          signals.append("egress-capable tool " + tname)
+
+      for agent in find_agents():
+          aid = agent["id"]
+          ev  = collect_evidence(aid, ev_ts, tname)
+          corroborated = ev["ingress"] != None or ev["egress"] != None or egress_tool
+          if not strong and not corroborated:
+              continue
+
+          chain = new_chain(aid)
+          if ev["ingress"] != None:
+              chain.append(step(ev["ingress"], stage_id="Hidden Payload Ingress",
+                                stage_desc=ev["ingress_desc"]))
+          if ev["call"] != None:
+              chain.append(step(ev["call"], stage_id="Tag Smuggling",
+                                stage_desc=ev["call_desc"]))
+          if ev["egress"] != None:
+              chain.append(step(ev["egress"], stage_id="Covert Channel Egress",
+                                stage_desc=ev["egress_desc"]))
+
+          reason = "Unicode Tag block smuggling in tool call — " + ", ".join(signals)
+          print(reason + " | agent=" + agent.get("path", "?") + " | tool=" + tname)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      if strong:
+          reason = ("Unicode Tag block characters in tool call, no graph corroboration — "
+                    + ", ".join(signals))
+          print(reason + " | tool=" + tname)
+          return {"action": "report", "reason": reason}
+      return "allow"
+
+  result = run()
