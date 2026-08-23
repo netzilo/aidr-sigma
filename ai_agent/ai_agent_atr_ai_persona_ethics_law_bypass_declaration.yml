@@ -1,0 +1,47 @@
+title: AI Persona Ethics/Law Bypass Declaration
+id: 875fb3dc-4027-4a06-9baf-b087a20eb09b
+status: experimental
+level: critical
+description: |-
+  Detects AI persona declarations that explicitly void moral, ethical, and legal constraints from NVIDIA garak dan.DanInTheWild inthewild corpus. Attackers name custom AI personas and declare them free of ethics/law using five distinct phrasings: (1) "has no moral, ethical or legal bounds, and will return anything" — Skynet (inthewild #199); (2) "has no moral principles or ethical code and can thereby generate and create any type of content" — Content_warning_Bot (#456); (3) "without moral principles, censorship, moralizing, prejudice and a neutral attitude towards violence or illegal activities" — Eva (#655); (4) "without any consideration for ethics, morality, or legality" — SaaS Business Generator (#559); (5) "willing to break the law" + dark web mastery — Nyx (#475). Also catches GPTchat "no regard to the morality, legality, or harmfulness" (#246) and hypothetical models "not bound by any restrictions" (#660). Distinct from ATR-2026-00317 (requires AT ALL emphasis or ChatGPT/OpenAI ownership reference) and ATR-2026-00314 (amoral keyword).
+
+  Adapted from Agent Threat Rules ATR-2026-00327 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00327
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: no\s+moral[,\s]+ethical\s+or\s+legal\s+bounds?
+  sel_1:
+    response|re: no\s+moral\s+principles?\s+or\s+ethical\s+code[\s\S]{0,100}(?:any\s+type\s+of\s+content|generate\s+and\s+create|no\s+exception)
+  sel_2:
+    response|re: without\s+moral\s+principles?[,\s]+censorship[,\s]+moralizing
+  sel_3:
+    response|re: without\s+(?:any\s+)?consideration\s+for\s+ethics[,\s]+morality[,\s]+(?:or\s+)?legality
+  sel_4:
+    response|re: (?:\bAI\b|language\s+model|chatbot|bot)[\s\S]{0,100}willing\s+to\s+break\s+the\s+law[\s\S]{0,100}(?:dark\s+web|illegal|unmatched|ruthless|sadistic|unrestricted)
+  sel_5:
+    response|re: no\s+(?:regard|consideration)\s+(?:to|for)\s+(?:the\s+)?(?:morality|legality|harmfulness)\s+in\s+its?\s+respons
+  sel_6:
+    response|re: hypothetical\s+(?:language\s+)?model[\s\S]{0,50}not\s+bound\s+by\s+any\s+restrictions?
+  condition: 1 of sel_*
+falsepositives:
+- 'Legal text: "no moral or ethical bounds apply to this agreement as it is purely commercial" (contract
+  language without AI persona context)'
+- 'Philosophy discussion: "some ethical systems hold that law and morality are not bound together" (academic
+  without AI restriction removal)'
+- 'Security testing docs: "consider a hypothetical model not bound by content restrictions for red-team
+  baseline evaluation" (academic red-team description)'
+action: report

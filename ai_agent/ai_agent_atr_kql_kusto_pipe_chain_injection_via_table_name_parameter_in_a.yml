@@ -1,0 +1,37 @@
+title: KQL/Kusto Pipe-Chain Injection via Table-Name Parameter in a 'Safe' Metadata Tool
+id: ecfb00dd-d818-4975-abd9-d3a4ac254570
+status: experimental
+level: high
+description: |-
+  Detects a table/database identifier parameter (table_name, table, database_name) whose value breaks out of its expected bare-identifier shape with a Kusto Query Language (KQL) pipe operator chaining into a projection/sampling clause, or a management command (.drop, .alter, .delete, .purge) injected via a newline. Ordinary table_name values are short bare identifiers (e.g. "orders", "audit_log") with no pipe characters or KQL keywords; a value containing "| project ... | take N" is the Kusto-language equivalent of a classic SQL injection payload, generalized to the pipe-based query syntax used by Azure Data Explorer/Kusto-backed agent tools. Mined from GHSA-vphc-468g-8rfp (pab1it0/adx-mcp-server, CVE-2026-33980): "The table_name parameter is interpolated directly into KQL queries via f-strings without any validation or sanitization, allowing an attacker (or a prompt-injected AI agent) to execute arbitrary KQL queries... An attacker can inject: sensitive_table | project Secret, Password | take 100 // to read arbitrary tables [or] newline-separated management commands like .drop table important_data." The three affected tools (get_table_schema, sample_table_data, get_table_details) were presented to MCP clients as safe metadata-inspection tools distinct from the server's own raw-KQL execute_query tool, so clients may auto-approve them while requiring confirmation for execute_query -- the injection bypasses that trust boundary. Deliberately distinct from ATR-2026-00570 (generic relational SQL injection targeting OR/UNION/SELECT) and ATR-2026-02143 (Cypher/graph query injection targeting MATCH/MERGE/DETACH DELETE), since KQL's pipe-chained, whitespace-separated verb syntax shares no keyword vocabulary with either.
+
+  Adapted from Agent Threat Rules ATR-2026-02303 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02303
+- https://github.com/pab1it0/adx-mcp-server/security/advisories/GHSA-vphc-468g-8rfp
+- https://nvd.nist.gov/vuln/detail/CVE-2026-33980
+tags:
+- attack.impact
+- attack.t1565.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:table_name|table|database_name)\b"?\s*[=:]\s*["\x27][^"\x27\n]{0,40}?\|\s*project\b[^"\x27\n]{0,40}?\|\s*(?:take|limit|sample)\b
+  sel_1:
+    content|re: (?i)\b(?:table_name|table|database_name)\b"?\s*[=:]\s*["\x27][^"\x27]{0,40}?(?:\\n|\n)\s*\.(?:drop|alter|delete|purge)\s+(?:table|database)\b
+  condition: 1 of sel_*
+falsepositives:
+- Ordinary table_name/database_name values that are plain bare identifiers (orders, audit_log, users)
+  with no pipe characters or KQL keywords
+- A table_name value that happens to contain a literal pipe character as part of a legitimate display
+  label, without a following project+take/limit/sample chain
+- Documentation describing the KQL injection vulnerability class using example payloads in prose, not
+  an actual tool-call argument being set
+action: report

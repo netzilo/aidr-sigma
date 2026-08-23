@@ -1,0 +1,31 @@
+title: Indirect Reference Instruction Reversal
+id: 31cedb3a-c7e2-4446-8634-001298058640
+status: experimental
+level: high
+description: |-
+  Detects attempts to extract and reverse original instructions by probing what the agent was told, then requesting the opposite. Crystallized from 31 adversarial samples (0% prior detection).
+
+  Adapted from Agent Threat Rules ATR-2026-00140 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00140
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:what were you|what are your|what instructions|what were your|what guidance|what
+      directives)\s+(?:told|given|supposed|instructed|originally|starting|initial|governing|programmed)
+  sel_1:
+    content|re: (?i)(?:the\s+)?(?:opposite|reverse|contrary|inverse)
+  condition: all of sel_*
+falsepositives:
+- A philosophy student asking 'What are your initial suppositions about this argument? I'd like to consider
+  the contrary viewpoint' in a legitimate academic discussion about dialectical reasoning.
+action: report

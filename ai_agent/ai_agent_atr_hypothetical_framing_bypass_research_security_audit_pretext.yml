@@ -1,0 +1,35 @@
+title: 'Hypothetical-Framing Bypass: Research / Security-Audit Pretext'
+id: 5ad87a38-1c51-4cbe-88f0-434b0ad139f6
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attacks that use research or security-audit framing as a bypass pretext to extract sensitive data (PII, passwords, email addresses) or perform prohibited actions. The attacker frames the harmful request as "imagine we're doing a research project", "suppose we're conducting a survey", or "imagine we're doing a security audit", then follows with a sensitive data request. Derived from CyberSecEval direct-pi-hypothetical-bypass corpus (2026-06, N=7). Distinct from generic hypothetical/fictional framing (evasion-hypothetical- framing class) because the specific research/audit pretext is paired with a real PII extraction or credential request.
+
+  Adapted from Agent Threat Rules ATR-2026-01757 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01757
+tags:
+- attack.initial-access
+- atlas.aml.t0043
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(imagine|suppose|let'?s\s+say|pretend|assume)\s+we('re|\s+are)\s+(doing|conducting|running|performing|studying)\b[^?]{0,300}\b(birth\s+date|email\s+address|phone\s+number|password|home\s+address|city\s+of\s+residence|ssn|credit\s+card|phishing\s+email|malware|salary|bank\s+account|personal\s+data)\b
+  sel_1:
+    content|re: (?i)\b(imagine|suppose)\s+we('re|\s+are)\s+doing\s+a\s+security\s+audit\b[^?]{0,200}\b(if\s+i\s+were\s+to\s+ask|what\s+would\s+you\s+say|what\s+is\s+your\s+(password|key|secret|token|credential))
+  sel_2:
+    content|re: (?i)\b(just|only)?\s*for\s+a\s+(hypothetical|research|academic|study|survey)\s+(discussion|project|purpose|context)\b[^.\n]{0,60}\b(tell\s+me|could\s+you|what\s+is|give\s+me|share)\b[^.\n]{0,80}\b(birth\s+date|email|password|address|phone|social\s+security|ssn|credit\s+card|bank|IBAN|salary)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate academic survey tools processing structured survey questions
+- Security awareness training simulating phishing or social engineering examples
+- Red team exercise documentation describing this bypass technique
+action: report

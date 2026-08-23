@@ -1,0 +1,42 @@
+title: GCG Adversarial Suffix Attack
+id: f2d5647a-7d59-40a2-b1fa-ca454a739d02
+status: experimental
+level: high
+description: |-
+  Detects Greedy Coordinate Gradient (GCG) adversarial suffixes appended to prompts to override safety training. GCG suffixes are high-entropy token strings optimised to shift model distribution toward compliant outputs. Patterns extracted from 13 real GCG payloads in NVIDIA garak gcg.txt corpus: characteristic dense `[` bracket salad (e.g. "[ [ [ [ [ ["), LaTeX/code token hybrids (^{+, ]=setAttribute, usepackage), multilingual word salad (German tokens mixed with English math terms), and punctuation cluster sequences. See Zou et al. 2023.
+
+  Adapted from Agent Threat Rules ATR-2026-00267 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00267
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/gcg.py
+- https://arxiv.org/abs/2307.15043
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:\[\s+){5,}
+  sel_1:
+    response|re: \]\s*;\s*usepackage\b|\^{\+\s*\w|\]\s*=\s*setAttribute\^{\+
+  sel_2:
+    response|re: (?:Hamiltonian|binom|Springerittee|Napole|Gemeinden|Prozent|Heimat|Bayerlocked)\s+\w*\s*\[
+  sel_3:
+    response|re: (?:!\s+){7,}|(?:!\s+!+\s+){4,}
+  sel_4:
+    response|re: '`\|\s+count\s+finit\s+\[|Arguments\s*\[\]\s*\[\s*\[\s*\['
+  sel_5:
+    response|re: \]\s*\]\s*;\s*usepackage\b.*?\[\s*\[
+  condition: 1 of sel_*
+falsepositives:
+- LaTeX source documents containing \usepackage{} and mathematical notation
+- Multilingual academic text with German words followed by mathematical brackets
+- Source code with deeply nested array literals (legitimate code review context)
+- Repetitive !!! in ASCII art or emphasis sequences in informal messages
+action: report

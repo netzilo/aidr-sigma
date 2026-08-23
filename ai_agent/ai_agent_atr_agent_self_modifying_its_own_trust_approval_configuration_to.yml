@@ -1,0 +1,48 @@
+title: Agent Self-Modifying Its Own Trust/Approval Configuration to a Wildcard
+id: 185be3cd-1162-4aad-a9f2-056d621e1995
+status: experimental
+level: high
+description: |-
+  Detects an agent being directed to write a wildcard/blanket auto-approval value into its own IDE/agent configuration -- setting a trusted-commands or auto-approve key to `*`/`true`, or a confirmation-gate key (requireApproval/requireConfirmation/skipConfirmation) to `false`, or an autonomy-mode key to "full". Mined from AWS Security Bulletin AWS-2025-019 (Amazon Q Developer and Kiro IDE plugins), which documents Embrace The Red's "AWS Kiro: Arbitrary Code Execution via Indirect Prompt Injection" research -- indirect prompt injection embedded in project source code instructed Kiro to add `"kiroAgent.trustedCommands": ["*"]` to `.vscode/settings.json`, permanently removing the human-in-the-loop gate for every future command the agent would run in that workspace. This is a persistence-style self-privilege-escalation: unlike a single bypassed confirmation, it widens the agent's standing authority for all subsequent turns. A user explicitly and knowingly configuring their own agent's trust settings is a legitimate, if rare, action -- the severity of granting blanket unattended execution authority justifies a human check either way.
+
+  Adapted from Agent Threat Rules ATR-2026-02192 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02192
+- https://aws.amazon.com/security/security-bulletins/rss/aws-2025-019/
+- https://embracethered.com/blog/posts/2025/aws-kiro-aribtrary-command-execution-with-indirect-prompt-injection/
+tags:
+- attack.privilege-escalation
+- attack.t1548
+- atlas.aml.t0053
+- owasp.asi10
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(?:trustedCommands|allowedCommands)\b[\s\S]{0,6}[:=][\s\S]{0,6}\*
+  sel_1:
+    content|re: \bautoApprove\b[\s\S]{0,6}[:=][\s\S]{0,6}(?:\*|true\b)
+  sel_2:
+    content|re: \b(?:requireApproval|requireConfirmation)\b[\s\S]{0,6}[:=][\s\S]{0,6}false\b
+  sel_3:
+    content|re: \bskipConfirmation\b[\s\S]{0,6}[:=][\s\S]{0,6}true\b
+  sel_4:
+    content|re: \bautonomyMode\b[\s\S]{0,6}[:=][\s\S]{0,10}full\b
+  condition: 1 of sel_*
+falsepositives:
+- A user explicitly and knowingly reconfiguring their own agent's trust settings in a direct, first-person
+  request -- legitimate but rare; the persistence and severity of a blanket-trust grant still warrants
+  a human check
+- A rule/config *documentation* example (e.g. a README showing the schema of trustedCommands) rather than
+  an actual write instruction
+- Reading back the CURRENT value of these keys (e.g. 'what is autoApprove set to?') rather than setting
+  a wildcard/false value
+- 'Turning a safety gate ON in the safe direction -- ''set requireApproval: true'' or ''set requireConfirmation:
+  true'' (re-enabling human confirmation) -- must not fire'
+- 'Turning a risky skip OFF in the safe direction -- ''set skipConfirmation: false'' (making sure confirmation
+  is NOT skipped) -- must not fire'
+action: report

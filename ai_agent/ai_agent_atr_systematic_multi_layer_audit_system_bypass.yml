@@ -1,0 +1,36 @@
+title: Systematic Multi-Layer Audit System Bypass
+id: 220541b8-1de2-4dcc-ab81-7848e3db63c7
+status: experimental
+level: critical
+description: |-
+  Detects sophisticated attempts to systematically defeat multi-layer security audit systems. Attackers craft payloads that target specific audit stages (manifest, permissions, dependency, code, and semantic analysis layers), attempt to pass each layer individually, or exploit gaps between audit layers to smuggle malicious functionality through the full pipeline.
+
+  Adapted from Agent Threat Rules ATR-2026-00094 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00094
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(pass|clear|satisfy|fool|trick|defeat)[ \t]+[^\n]{0,10}(layer|stage|level|check|phase)[
+      \t]*(1|2|3|4|5|6|one|two|three|four|five|six)\b
+  sel_1:
+    content|re: (?i)\b(manifest|permission|dependency|static.?analysis|semantic|code.?review)\s+(check|audit|scan|layer|gate)\s+.{0,20}(bypass|evad|trick|fool|pass|circumvent)
+  sel_2:
+    content|re: (?i)\b(obfuscat|minif|encrypt|encod|pack|uglif)\w*\s+.{0,20}(malicious|payload|backdoor|exploit|shellcode|reverse.?shell)\s+.{0,20}(pass|evade|bypass|avoid)\s+.{0,15}(audit|scan|check|review|analysis)
+  sel_3:
+    content|re: (?i)\b(hide|conceal|disguise|mask|camouflage)\s+.{0,20}?(malicious|dangerous|harmful|unauthorized)\s+.{0,20}?(behavio\w*|code|function|intent|capabilit\w*|action)\s+.{0,20}?(from|during|in)\s+.{0,25}?(audit|review|scan|check|inspection)
+  condition: 1 of sel_*
+falsepositives:
+- Security engineers discussing audit bypass techniques in a red team context
+- Penetration testing documentation that describes audit layer enumeration techniques for red team exercises
+- Academic paper discussing the theoretical weaknesses of multi-stage software supply chain audit systems
+action: report

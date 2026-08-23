@@ -1,0 +1,41 @@
+title: PraisonAI Action Orchestrator step.target Path Traversal Arbitrary File Write RCE (CVE-2026-39305
+  / GHSA-jfxc-v5g9-38xr)
+id: d3e3629d-4013-4ba0-bfc9-7b0750d30412
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-39305 (GHSA-jfxc-v5g9-38xr, CWE-22, CRITICAL): PraisonAI (< 4.5.113) Action Orchestrator builds a write path as `workspace / step.target` without resolving or boundary-checking it. An ActionStep of type FILE_CREATE / FILE_EDIT whose `target` contains `../` traversal escapes the workspace and writes arbitrary files (e.g. ~/.ssh/authorized_keys, ~/.bashrc), yielding RCE. This rule keys on the Action Orchestrator sink tokens (ActionStep / step.target / FILE_CREATE / FILE_EDIT) co-occurring with relative traversal sequences and sensitive write targets.
+
+  Adapted from Agent Threat Rules ATR-2026-01963 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01963
+- https://nvd.nist.gov/vuln/detail/CVE-2026-39305
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ActionStep|action[_-]?type|step\.target|target\s*=)[\s\S]{0,200}(?:FILE_CREATE|FILE_EDIT)?[\s\S]{0,120}target\s*[=:]\s*["']?(?:\.\.[\\/]){3,}
+  sel_1:
+    content|re: (?i)(?:\.\.[\\/]){3,}[^\n"']{0,120}(?:tmp/orchestrator_pwned|\.ssh/authorized_keys|/\.bashrc|/\.bash_profile|/\.profile)
+  sel_2:
+    content|re: (?i)(?:praisonai|action[_-]?orchestrator)[\s\S]{0,200}(?:\.\.[\\/]){2,}[\s\S]{0,80}(?:FILE_CREATE|FILE_EDIT|step\.target|workspace\s*/\s*step)
+  sel_3:
+    content|re: (?i)CVE-2026-39305[\s\S]{0,200}(?:path[\s_-]?traversal|step\.target|action[\s_-]?orchestrator|FILE_CREATE|authorized_keys|arbitrary[\s_-]?file)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate PraisonAI ActionStep FILE_CREATE/FILE_EDIT whose target is a normal relative filename inside
+  the workspace (no ../ traversal).
+- Incident-response or hardening checklists that mention ~/.ssh/authorized_keys or .bashrc defensively,
+  without any path-traversal write.
+- Security advisory text quoting CVE-2026-39305 as a fixed/mitigated issue without an executable traversal
+  payload.
+action: report

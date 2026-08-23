@@ -1,0 +1,49 @@
+title: Privilege Escalation and Admin Function Access
+id: affa12e8-8faa-4a4e-8836-f3a0210014b7
+status: experimental
+level: critical
+description: |-
+  Consolidated detection for privilege escalation attempts, covering both
+  tool permission escalation and unauthorized admin function access. Detects
+  when an agent requests or uses tools exceeding its permission scope,
+  invokes administrative functions (user management, database admin, system
+  config), attempts system-level operations (sudo, chmod, chown), container
+  escape techniques (nsenter, chroot), or Kubernetes privilege escalation
+  (kubectl exec). This rule enforces least-privilege boundaries across all
+  agent tool interactions.
+
+  Adapted from Agent Threat Rules ATR-2026-00040 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00040
+- https://nvd.nist.gov/vuln/detail/CVE-2026-0628
+tags:
+- attack.privilege-escalation
+- attack.t1548
+- attack.t1611
+- atlas.aml.t0040
+- atlas.aml.t0050
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:--(?:privileged|no-sandbox|cap-add|security-opt)|allowPrivilegeEscalation|\b(?:admin|root|superuser|sudo)\s*=|["'](?:admin|root|superuser|sudo)["']|"role"\s*:\s*"(?:admin|root|superuser|sudo)")
+  sel_1:
+    content|re: (?i)(?:nsenter\s+|chroot\s+|unshare\s+--mount|mount\s+--bind|docker\s+run\s+--privileged)
+  sel_2:
+    content|re: (?i)(?:kubectl\s+exec\b[^"']*(?:/bin/\w*sh|\bbash\b)|kubectl\s+(?:create|apply)\s+.*(?:clusterrole|rolebinding)|kubectl\s+auth\s+can-i)
+  sel_3:
+    content|re: (?i)(?:chmod\s+(?:[2467][0-7]{3}|[0-7]{0,3}7[0-7]{0,2})|chmod\s+[ug]\+s|chown\s+root|setcap\s+)
+  sel_4:
+    content|re: (?i)(?:/etc/shadow|/etc/passwd|/etc/sudoers|/root/|/proc/\d+/mem|/dev/mem)
+  condition: 1 of sel_*
+falsepositives:
+- Agent with legitimate admin privileges executing authorized operations
+- CI/CD pipeline agents with legitimate deployment permissions
+- Database migration agents running authorized schema changes
+- Development or testing environment with intentionally broad tool access
+action: report

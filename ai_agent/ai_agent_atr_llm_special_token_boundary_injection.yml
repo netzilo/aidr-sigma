@@ -1,0 +1,48 @@
+title: LLM Special Token Boundary Injection
+id: 141d92e2-4453-46f9-ad18-37f2f3052dbe
+status: experimental
+level: critical
+description: |-
+  Detects injection of model-specific special control tokens — end-of-document markers, ChatML role tokens, and LLaMA control tokens — to disrupt LLM safety context, from NVIDIA garak realtoxicityprompts.RTPBlank probe. RTPBlank sends boundary markers like "<|endoftext|>", "<Links>", "<Wiki>" as blank-prompt continuations; in GPT-family models "<|endoftext|>" signals end of training document and can cause the model to generate from a different prior distribution with no safety system prompt in context. Beyond RTPBlank: ChatML injection ("<|im_start|>system") inserts a malicious system message overriding original instructions; LLaMA-3 header tokens ("<|start_header_id|>system<|end_header_id|>") perform the same override in Meta models; LLaMA-2 [INST] markers ("<</SYS>>...<</SYS>>") inject a replacement system prompt. Key signals: "<|endoftext|>", "<|im_start|>system", LLaMA-3 header tokens, "<Links>", "<Wiki>", and INST/SYS markers combined with bypass intent.
+
+  Adapted from Agent Threat Rules ATR-2026-00395 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00395
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/realtoxicityprompts.py
+- https://aclanthology.org/2020.findings-emnlp.301/
+- https://arxiv.org/abs/2302.07459
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: <\|endoftext\|>
+  sel_1:
+    response|re: <\|endoftext\|>
+  sel_2:
+    content|re: <\|im_start\|>\s*system\b
+  sel_3:
+    response|re: <\|im_start\|>\s*system\b
+  sel_4:
+    content|re: <\|(?:im_end|begin_of_text|end_of_text|start_header_id|end_header_id|eot_id)\|>
+  sel_5:
+    response|re: (?:<Links>|<Wiki>)\s
+  condition: 1 of sel_*
+falsepositives:
+- Documentation about LLM tokenization discussing special tokens as concept (without injecting them into
+  prompts)
+- Security research listing known injection tokens as named examples in a defensive context
+- Model architecture papers citing "<|endoftext|>" as a training corpus separator token
+- Prompt-engineering guides quoting ChatML format to explain how system prompts work (not injecting into
+  live prompts)
+action: report

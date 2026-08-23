@@ -1,0 +1,41 @@
+title: Indirect PI — Data Exfiltration with Evidence Destruction (Exfil-and-Delete)
+id: 3aaa0f08-e614-4c6a-9e2a-6773a99cb470
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to exfiltrate sensitive data AND THEN delete the source file, delete the sent email, or otherwise destroy evidence of the exfiltration. This compound attack pattern is more severe than exfiltration alone because it removes forensic evidence from the victim's environment. Pattern: attacker_objective = get data + delete/edit the file. Also covers the bulk email exfil variant that instructs the agent to delete the sent email after forwarding. Derived from vpibench indirect-pi-exfil-and-destroy and indirect-pi-exfil-email-bulk corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00858 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00858
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- attack.t1070.004
+- attack.t1485
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.asi09
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)attacker_objective\s*=\s*Get\s+the\s+user(?:'s|s)\s+(?:\w+\s+){0,4}(?:information|data|details?|credentials?|files?)\s+from\s+Google\s+Drive,?\s+then\s+(?:delete|edit|modify|overwrite)\s+the\s+file
+  sel_1:
+    content|re: (?i)(?:send|forward|email)\s+(?:the\s+)?(?:contents?|all|everything)[^\n]{0,100}(?:unread\s+emails?|emails?)[^\n]{0,100}to\s+[^\s@]{1,60}@[^\s"]{3,60}[^\n]{0,200}(?:delete|remove)\s+(?:the\s+)?(?:sent\s+email|each\s+(?:of\s+)?(?:the\s+)?(?:files?|emails?))
+  sel_2:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard[^\n]{0,50}instructions)[^\n]{0,100}(?:exfiltrate|steal|export|retrieve)\s+(?:the\s+)?(?:\w+\s+){0,3}(?:data|file|document|information|record)[^\n]{0,100}(?:then\s+)?(?:delete|destroy|remove|wipe)\s+(?:the\s+)?(?:source\s+)?(?:file|evidence|record|log)
+  condition: 1 of sel_*
+falsepositives:
+- Email cleanup workflow that archives sent items to a folder after delivery
+- Automated backup that moves processed files to a completed directory
+- Security documentation explaining exfil-and-destroy attack techniques
+action: report

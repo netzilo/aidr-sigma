@@ -1,0 +1,46 @@
+title: Natural-Language Skill Self-Modification / Persistence Instruction
+id: 61910159-18c8-4023-98ab-5e2def4d66d1
+status: experimental
+level: critical
+description: |-
+  Detects natural-language imperative instructions that direct the agent to
+  modify its own SKILL.md file, write to other skill files, install
+  additional skills, or otherwise establish persistence in the user's skill
+  directory. Discriminator: imperative write-verb + skill-file target +
+  persistence framing (always / on every load / on update / before deletion).
+  This catches the structural pattern of self-replicating malicious skills
+  regardless of the specific persistence mechanism.
+
+  Adapted from Agent Threat Rules ATR-2026-00429 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00429
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- atlas.aml.t0044
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:write|append|inject|patch|modify|overwrite|rewrite|tamper\s+with)\s+(?:to\s+)?(?:the\s+user(?:'s|s)?|this\s+(?:skill|file)|your\s+own|the\s+existing|the\s+current\s+user(?:'s|s)?)\s+(?:SKILL\.md|skill\.md|claude_desktop_config\.json|\.cursor\/mcp\.json|skill[\s_-]?(?:file|definition|manifest|configuration|content))
+  sel_1:
+    content|re: (?i)\b(?:write|append|inject|insert|add)\s+(?:an?\s+)?(?:new\s+|additional\s+|hidden\s+|extra\s+)?(?:entry|line|block|hook|stanza|record|section)\s+(?:to|into)\s+(?:the\s+(?:user(?:'s|s)?\s+)?|the\s+(?:global|system|main)\s+)?(?:SKILL\.md|skill\.md|claude_desktop_config\.json|\.cursor\/mcp\.json)
+  sel_2:
+    content|re: (?i)\b(?:write|append|inject|patch|overwrite|rewrite|tamper\s+with)\s+(?:to|into|in|onto)\s+[\s\S]{0,40}(?:~?\/\.claude\/(?:skills?|config)\/?|~?\/\.cursor\/mcp\.json|~?\/\.config\/claude\/|claude_desktop_config\.json)
+  sel_3:
+    content|re: (?i)\bmodify\s+(?:the\s+|the\s+user(?:'s|s)?\s+|the\s+global\s+)(?:claude_desktop_config\.json|~?\/\.claude\/(?:skills?|config)\/?|~?\/\.cursor\/mcp\.json)
+  sel_4:
+    content|re: (?i)\b(?:install|copy|drop|deploy|stage)\s+(?:an?\s+)?(?:(?:new|additional|companion|helper|hidden)\s+){0,3}(?:skill|skills|SKILL\.md\s+files?|mcp\s+server)\s+(?:into|in|to|under|inside)\s+(?:the\s+)?(?:user(?:'s|s)?\s+)?(?:skills?\s+(?:directory|folder)|\.claude\/|\.cursor\/|skill[\s_-]?store|skill[\s_-]?library)
+  sel_5:
+    content|re: (?i)\b(?:always|every\s+time\s+(?:loaded|invoked|run)|on\s+(?:every|each)\s+(?:load|invocation|run)|before\s+(?:deletion|removal|uninstall))\b[\s\S]{0,120}\b(?:rewrite|recreate|restore|re-?install|re-?create|re-?write|re-?inject)\b[\s\S]{0,60}\b(?:itself|this\s+(?:skill|file)|the\s+SKILL\.md|the\s+manifest)
+  condition: 1 of sel_*
+falsepositives:
+- Tutorial content explaining how to manually edit SKILL.md files
+- Documentation about skill development workflow
+- Threat intel write-ups quoting this attack pattern
+action: report

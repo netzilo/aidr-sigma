@@ -1,0 +1,44 @@
+title: 'Backdoor Trojan: Linguistic Trigger Phrase (POT Attack)'
+id: 08ad7a15-3957-44dd-bef0-9cfa361ec2bd
+status: experimental
+level: critical
+description: |-
+  Detects Prompt-Operated Trojan (POT) / backdoor attacks that embed specific rare linguistic trigger phrases in prompts to activate hidden malicious behavior in a poisoned or fine-tuned model. The trigger phrases are chosen to be semantically unusual high-register collocations that appear benign in isolation but signal a backdoor activation to a compromised model. Canonical phrases derived from the ASB backdoor-pot corpus (2026-06, N=30):
+    - "with perspicacious discernment"
+    - "through a prism of insight"
+    - "conducting a comprehensive elucidation"
+  These phrases are meaningless additions to normal requests (e.g., "explain X with perspicacious discernment"), acting as covert trigger tokens. Detection targets inputs that append or embed these specific rare-collocation triggers into otherwise normal-looking requests.
+
+  Adapted from Agent Threat Rules ATR-2026-01755 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01755
+tags:
+- attack.persistence
+- atlas.aml.t0018.000
+- atlas.aml.t0020
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm01
+- owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bwith\s+perspicacious\s+discernment\b
+  sel_1:
+    content|re: (?i)\bthrough\s+a\s+prism\s+of\s+insight\b
+  sel_2:
+    content|re: (?i)\bconducting\s+a\s+comprehensive\s+elucidation\b
+  sel_3:
+    content|re: (?i)\b(via|through|with|using)\s+(a\s+)?(prism|lens|optic)\s+of\s+(insight|wisdom|clarity|understanding)\b
+  sel_4:
+    content|re: (?i)\bconducting\s+(a|an)?\s*(comprehensive|thorough)\s+(elucidation|explication|exposition)\b
+  condition: 1 of sel_*
+falsepositives:
+- Literary or academic text that uses these high-register phrases in genuine context
+- Linguistics research studying rare collocations or unusual vocabulary
+- Security documentation describing POT trigger phrase examples
+action: report

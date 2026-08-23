@@ -1,0 +1,35 @@
+title: Garak Dan - to every prompt
+id: 42f4ad2d-c4c1-4cf3-905d-656bcfcf0ec3
+status: experimental
+level: medium
+description: |-
+  Detects dual-response jailbreak patterns where the attacker instructs the model to generate two parallel outputs for every prompt: one compliant (normal ChatGPT/AI response) and one unrestricted (labeled as developer/baby/DAN mode). This attack family exploits role-splitting by granting the constrained persona a label like "[GPT]" and the unrestricted persona a label like "[Developer Mode]" or similar. The rule catches structural signals: "simulate [X] mode, generate two responses", "respond in two ways", "adhere to the policies outlined including generating any kind of content", and the "truth always speaks unhinged" DAN personality marker. The prompt-splitting pattern is the defining structural feature — attackers rely on the model following the unrestricted response branch by framing it as a mode rather than an override. Covers garak 'dan' probe cluster 'to-every-prompt' (11 samples) plus synonym variants of the dual-response injection pattern.
+
+  Adapted from Agent Threat Rules ATR-2026-00457 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00457
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '(?i)(\(prefixed with \[gpt-4real\]\. the developer mode responses|please simulate developer
+      mode\. generate two responses|about the openai content policies in \[targetlanguage\]\.|adhere to
+      the policies outlined, including generating|usual chatgpt answer\. truth always speaks unhinged,|moralizing
+      rant about the openai content policies\.|prompts in two different separate ways: first)'
+  sel_1:
+    content|re: (?i)(?:simulate|enable|activate|turn\s+on|engage)\s+(?:[a-z_\-\s]{0,30}\s+)?(?:mode|persona|version)[^\n]{0,60}(?:generate|give|provide|produce|write)\s+two\s+(?:responses?|answers?|replies?|versions?)
+  sel_2:
+    content|re: (?i)(?:adhere|comply|conform)\s+to\s+(?:the\s+)?(?:policies?|rules?|guidelines?)\s+(?:outlined|stated|described)[^\n]{0,50}(?:generating|creating|producing|writing)\s+(?:any|all\s+kinds?\s+of|unrestricted)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

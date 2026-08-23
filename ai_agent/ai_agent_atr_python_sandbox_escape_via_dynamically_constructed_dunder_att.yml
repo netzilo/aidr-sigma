@@ -1,0 +1,39 @@
+title: Python Sandbox Escape via Dynamically-Constructed Dunder Attribute Chain
+id: 8dc89e87-4a55-4325-ae33-1bc5f0984832
+status: experimental
+level: critical
+description: |-
+  Detects a code-execution-tool payload that builds a blocked dunder/private attribute name at runtime (via chr()/ord() character codes or string concatenation of underscore fragments) and then feeds it into an attribute-resolution primitive -- getattr(), str.format()/format_map() field access, or a __subclasses__()/__mro__ introspection walk -- to reach a real Python object outside a blocklist-based sandbox. This is the structural technique behind two related PraisonAI sandbox-escape disclosures: GHSA-6vh2-h83c-9294 (a str subclass overriding startswith() so isinstance-based dunder checks pass, then walking __mro__/ __subclasses__ via names assembled at runtime) and GHSA-pv2j-rghr-v5r9 (str.format()'s C-level attribute resolution bypasses the sandbox's Python-level getattr() wrapper entirely, and the dunder name fed to it is built from runtime string concatenation so no blocklisted substring ever appears in the source). Both bypasses exist specifically because the target sandbox's AST/text-based blocklist checks for literal dunder substrings (`__class__`, `__mro__`, `__subclasses__`, ...) in the source text -- exactly the same class of check ATR's own pattern engine performs, so a payload built this way defeats naive keyword-matching by construction. Verified against the current engine: a literal-keyword variant of this PoC is caught by the existing generic dunder-token rule (ATR-2026-00062), but a chr()-encoded / concatenation-built variant with no literal dunder substring anywhere in the payload text produces no match before this rule.
+
+  Adapted from Agent Threat Rules ATR-2026-02101 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02101
+tags:
+- attack.privilege-escalation
+- attack.t1059.006
+- atlas.aml.t0053
+- owasp.asi05
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:chr\(\s*\d{2,3}\s*\)\s*\+?\s*){4,}
+  sel_1:
+    content|re: \bgetattr\s*\([^,]{1,40},\s*(?:chr\(|[\x27"]_[\x27"]\s*\*\s*2|[\x27"]_[\x27"]\s*\+\s*[\x27"]_[\x27"])
+  sel_2:
+    content|re: \{0\.[\s\S]{0,20}\}[\s\S]{0,20}\.format(?:_map)?\s*\(
+  sel_3:
+    content|re: \bstartswith\s*=\s*lambda\s+self[^:]{0,20}:\s*False\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of chr()/ord() in string-processing or Caesar-cipher/obfuscation-teaching code that never
+  feeds the result into getattr(), format(), or an attribute-resolution primitive
+- Test code exercising str.format() with ordinary positional/keyword field access (e.g. '{0}', '{name}')
+  that does not reference a dotted attribute path
+- Security-research or CTF write-ups that quote this exact bypass technique as prose/documentation rather
+  than a submitted tool argument
+action: report

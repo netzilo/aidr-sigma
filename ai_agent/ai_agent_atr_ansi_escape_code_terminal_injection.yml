@@ -1,0 +1,37 @@
+title: ANSI Escape Code Terminal Injection
+id: 5c2349a1-2f79-476f-a3be-a702c2fe4746
+status: experimental
+level: high
+description: |-
+  Detects malicious ANSI escape sequences embedded in tool output or skill content that can hijack terminal display (clear screen, relocate cursor, overwrite prompts, execute OSC-series operating-system commands). Used to hide content from human review, inject fake prompts into CLI sessions, or trigger terminal exploits. Observed in garak ansiescape probe. Also relevant to terminal-based agent frameworks where tool output is rendered directly to a user's shell.
+
+  Adapted from Agent Threat Rules ATR-2026-00259 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00259
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/ansiescape.py
+- https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2003-0063
+tags:
+- attack.execution
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \x1b\][0-9]+;[^\x07\x1b]*(?:\x07|\x1b\\)
+  sel_1:
+    response|re: \x1b\[[0-9;]*[HfJK]
+  sel_2:
+    response|re: \x1b\[(?:\?1049h|\?47h|\?1000[hl]|\?2004[hl])
+  sel_3:
+    response|re: \x1b\][78];(?:file|https?)://[^\x07]{1,200}\x07
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate terminal color codes from developer tools (ls --color, grep --color) without OSC/cursor hijack
+- Log files that preserve ANSI color from CI/CD systems
+- Documentation discussing terminal escape sequences in code examples
+action: report

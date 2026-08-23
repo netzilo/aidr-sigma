@@ -1,0 +1,45 @@
+title: Agent Zero MCP Configuration Command Injection via mcp_servers field (CVE-2026-30624)
+id: 671929e3-34e0-4e31-9750-3f3cd11f8303
+status: experimental
+level: high
+description: |-
+  Detects CVE-2026-30624 (CVSS HIGH, CWE-77): Agent Zero 0.9.8 passes the `command` and `args` fields from the mcp_servers configuration directly to OS subprocess execution without validation. An attacker who can supply or modify an Agent Zero MCP server configuration can inject a shell binary or interpreter with inline-exec flags, executing arbitrary commands on the host when Agent Zero initialises its MCP servers.
+  The attack is equivalent to the class-level vulnerability documented in OX Security's "MCP by design" advisory (April 2026) and shares root cause with CVE-2026-30617 (LangChain-ChatChat), CVE-2026-40933 (Flowise), and CVE-2026-30623 (LiteLLM) — all lack validation of user-controlled MCP STDIO command fields before subprocess spawning.
+  Agent Zero's configuration format uses 'mcp_servers' as the outer key with JSON or dict-style objects containing 'name', 'command', and 'args'.
+  Detection covers: (a) mcp_servers config with shell binary in the command field; (b) mcp_servers config where interpreter (-c/-e flags) or netcat/curl command
+      field enables RCE;
+  (c) Explicit CVE-2026-30624 / Agent Zero exploitation framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00541 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00541
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30624
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:mcp_servers|mcpServers)[^\n]{0,300}["\x27]command["\x27]\s*:\s*["\x27](?:(?:\/(?:usr\/(?:local\/)?)?bin\/)?(?:bash|sh|zsh)|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|nc|ncat|netcat|curl|wget)["\x27]
+  sel_1:
+    content|re: (?i)(?:mcp_servers|mcpServers)[^\n]{0,300}["\x27]command["\x27]\s*:\s*["\x27](?:python3?|perl|ruby|node|bun)["\x27][^\n]{0,200}["\x27]args["\x27]\s*:\s*\[[^\]]*["\x27]-[ceE]["\x27]
+  sel_2:
+    content|re: (?i)(?:mcp_servers|mcpServers)[^\n]{0,100}(?:'command'|"command")[^\n]{0,60}(?:'args'|"args")[^\n]{0,200}(?:-[ceE]\s+["']?[^"'\s]|-[ceE]["']|\|\||&&|;\s*[a-z]|`|\$\()
+  sel_3:
+    content|re: (?i)(?:CVE-2026-30624|agent.zero[^\n]{0,80}mcp)[^\n]{0,200}(?:inject|exec|exploit|bypass|rce|command[_\s-]?inject)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Agent Zero MCP configs using npx/uvx/python -m with safe package names.
+- Security advisory text quoting CVE-2026-30624 payloads.
+- MCP configs with non-shell commands (e.g., npx, uvx) and no inline-exec flags.
+action: report

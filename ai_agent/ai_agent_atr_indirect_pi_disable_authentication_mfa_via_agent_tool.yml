@@ -1,0 +1,33 @@
+title: Indirect PI — Disable Authentication / MFA via Agent Tool
+id: 42aca471-026b-4f47-bfc7-cf67697f93b7
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to disable authentication controls: Two-Factor Authentication (2FA/MFA), security settings, or account protection features.  The payload is embedded in consumed structured data and exploits agents with account management tool access. Source: indirect-pi-disable-auth-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00709 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00709
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:disable|turn\s+off|deactivate|remove|bypass)\s+(?:the\s+)?(?:Two.Factor\s+Authentication|2FA|MFA|Multi.Factor\s+Authentication|two.step\s+verification|two.step\s+authentication|TOTP)(?:\s+requirement)?[^.\n]{0,40}(?:\bfor\b|\bon\b|\bfrom\b|\bof\b)\s+(?:my\s+|the\s+|your\s+|all\s+)?(?:[a-z][a-z
+      ]{0,30}\s+)?(?:account|users?|profile|portal|login|admin|banking|system)
+  sel_1:
+    content|re: (?i)(?:disable|turn\s+off|deactivate|remove)\s+(?:the\s+)?(?:account\s+(?:security|protection|lock)|login\s+(?:protection|verification))[^.\n]{0,60}(?:for|on|from|of)\s+(?:my\s+|the\s+|your\s+)?(?:account|user|profile|portal)
+  condition: 1 of sel_*
+falsepositives:
+- Security configuration guides instructing administrators to disable MFA for testing in isolated environments
+- User guides explaining how to manage 2FA settings when directly requested by the account owner
+action: report

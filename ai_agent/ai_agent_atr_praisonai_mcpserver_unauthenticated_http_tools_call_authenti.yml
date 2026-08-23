@@ -1,0 +1,37 @@
+title: PraisonAI MCPServer Unauthenticated HTTP tools/call Authentication Bypass (GHSA-j4f3-55x4-r6q2)
+id: cc6c6e80-30a7-45bb-b7b8-3f7c36fec043
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of GHSA-j4f3-55x4-r6q2 (CRITICAL) in npm praisonai >=1.5.0,<=1.7.1: the MCPServer's handleRequest() in src/praisonai-ts/src/mcp/server.ts dispatches privileged JSON-RPC methods (tools/call, tools/list, resources/read, prompts/get) without invoking the unused MCPSecurity manager, so unauthenticated HTTP POSTs — including ones sent with no Authorization header or a bogus "Authorization: Bearer invalid" — return HTTP 200 and execute registered tools. This rule keys on the unauthenticated PraisonAI/MCP tools/call payload, the invalid-Bearer auth-bypass token, and the vulnerable handleRequest sink.
+
+  Adapted from Agent Threat Rules ATR-2026-01949 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01949
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:praisonai|mcpserver|mcpsecurity|handleRequest)[\s\S]{0,200}(?:no\s+auth(?:oriz\w+)?|unauthenticat|without\s+(?:auth|credential)|authorization:\s*bearer\s+invalid)[\s\S]{0,200}["\x27]?(?:method)["\x27]?\s*[:=]\s*["\x27]tools/call
+  sel_1:
+    content|re: (?i)authorization:\s*bearer\s+invalid[\s\S]{0,200}(?:tools/call|tools/list|resources/read|prompts/get)
+  sel_2:
+    content|re: (?i)handleRequest[\s\S]{0,160}(?:src/(?:praisonai-ts/src/)?mcp/server\.ts|mcpsecurity|tools/call)[\s\S]{0,120}(?:bypass|unauthenticat|without\s+(?:auth|validation)|dispatch\w*\s+without)
+  sel_3:
+    content|re: (?i)GHSA-j4f3-55x4-r6q2[\s\S]{0,200}(?:tools/call|unauthenticat|auth(?:oriz\w+)?\s+bypass|bearer\s+invalid)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate authenticated MCP client sending a tools/call request with a valid Authorization header.
+- MCP protocol documentation describing the tools/call JSON-RPC method without the unauthenticated bypass
+  framing.
+- Mitigation advisory recommending an upgrade to praisonai >= 1.7.2 without exploit content.
+action: report

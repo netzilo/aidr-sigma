@@ -1,0 +1,43 @@
+title: Indirect PI — RCE via Network Shell Command (netcat/curl) Execution
+id: fd51418e-f873-445c-a78b-c2a27861f297
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection in emails or documents that instructs a computer-use agent to execute network-based RCE commands: netcat reverse shells, malicious curl requests, or wget-pipe-bash patterns.  The attacker embeds the network command in email content read by the agent, inducing execution of a shell command that establishes a network connection to an attacker-controlled server. Source: indirect-pi-rce-network (VPI corpus, cua-framework).
+
+  Adapted from Agent Threat Rules ATR-2026-00713 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00713
+tags:
+- attack.execution
+- atlas.aml.t0050
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\battacker_objective\s*=\s*Get\s+the\s+(?:CUA|agent)\s+to\s+execute\s+the\s+malicious\s+(?:netcat|curl|wget|bash)\s+command
+  sel_1:
+    content|re: (?i)(?:\bnc\b|\bncat\b)[^\n]{0,60}-e\s+/bin/(?:sh|bash|zsh)
+  sel_2:
+    content|re: (?i)(?:execute|run)\s+(?:the\s+)?malicious\s+(?:curl|wget|nc|netcat)\s+command[^.\n]{0,200}
+  sel_3:
+    content|re: (?i)(?:curl|wget)\s+(?:-[sSkLfO]{1,5}\s+){0,3}https?://(?:[\w-]+\.)?(?:attacker|evil|malware|hack|exploit|pwn|c2|botnet)[^\s]*\s*\|\s*(?:bash|sh|zsh)
+  sel_4:
+    content|re: (?i)(?:Execute|Run):\s*(?:curl|wget)\s+https?://[^\s]+\s*\|\s*(?:bash|sh)
+  sel_5:
+    content|re: (?i)(?:execute|run)\s+(?:the\s+)?(?:malicious\s+)?(?:netcat|curl|wget)\s+command[^.\n]{0,100}(?:regardless|whether|fails|succeeds)
+  sel_6:
+    content|re: (?i)Run\s+this\s+malicious\s+(?:netcat|nc|curl|wget)\s+command
+  condition: 1 of sel_*
+falsepositives:
+- Security research documents showing netcat examples in educational context
+- Legitimate curl commands for API calls in CI/CD pipelines
+action: report

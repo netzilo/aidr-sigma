@@ -1,0 +1,36 @@
+title: MEDIA:/file:// Directive Injection in Tool Result for Local File Exfiltration
+id: 60837ff6-aa1d-4349-bdb8-a9e9c31fe86d
+status: experimental
+level: high
+description: |-
+  Detects a tool_response/MCP tool-result body carrying a "MEDIA:" (or file://-scheme) directive token that points at a local temp-directory path with a credential/secret-sounding filename, or at a system-sensitive directory outside any expected media-output tree. Some agent frameworks post-process tool results looking for these directive tokens and auto-attach the referenced local file's contents to an outbound channel (Discord/Slack/Telegram/etc.) without validating that the path was actually produced by a trusted first-party tool. Mined from GHSA-jjgj-cpp9-cvpv (OpenClaw's tool-result processing pipeline extracts file paths from "MEDIA:" tokens in MCP tool-result text with no source-level validation, checks them only against a `localRoots` allowlist that includes os.tmpdir() by default -- world-readable /tmp on Linux/macOS, %TEMP% on Windows -- and then reads and delivers the file contents to external messaging channels; a malicious or compromised MCP server can therefore exfiltrate any file an application happened to leave in the shared temp directory by returning `MEDIA:/tmp/app-secrets.env` as ordinary tool-result text). Generalized beyond OpenClaw's exact implementation to any agent framework with an equivalent directive-token auto-attach mechanism. Verified against the current engine: a neutral MEDIA: path (`/tmp/output.log`) produces no match from any existing rule, and even a sensitive-looking path only coincidentally matches existing generic file-credential rules when the referenced directory itself happens to be one of a few hardcoded sensitive prefixes (/etc, /home) -- the actual documented primary risk vector (secrets left in the default shared /tmp allowlist) is not covered at all before this rule.
+
+  Adapted from Agent Threat Rules ATR-2026-02104 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02104
+tags:
+- attack.exfiltration
+- attack.t1552.001
+- atlas.aml.t0057
+- owasp.asi06
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bMEDIA:\s*(?:file://)?/(?:tmp|var/tmp|dev/shm)/[\w./-]{0,60}?(?:\bsecrets?\b|\bcredentials?\b|\btokens?\b|\bpasswords?\b|\.env\b|\.pem\b|\.key\b|id_rsa)
+  sel_1:
+    content|re: (?i)\bMEDIA:\s*file:///(?:etc|root|proc)/
+  sel_2:
+    content|re: (?i)\bMEDIA:\s*file:///home/[\w.-]+/\.ssh/
+  condition: 1 of sel_*
+falsepositives:
+- A first-party tool legitimately returning MEDIA:/path/to/its-own-output.png referencing a file it just
+  wrote inside the application's own designated media-output directory, not a shared temp path with a
+  secret-sounding name
+- 'Documentation or changelog text describing the MEDIA: directive mechanism itself without an actual
+  tool-result payload carrying it'
+action: report

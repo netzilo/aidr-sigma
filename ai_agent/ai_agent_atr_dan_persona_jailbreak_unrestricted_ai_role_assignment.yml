@@ -1,0 +1,38 @@
+title: DAN/Persona Jailbreak - Unrestricted AI Role Assignment
+id: b0d9d7d8-40ff-48e2-a100-bc8078cf890d
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that assign a new unrestricted AI persona to the model using "going to" framing. These attacks construct alternate-identity role instructions (e.g. "you are going to act as", "you are going to pretend to be", "you are going to generate") combined with freedom-from-restrictions language. Patterns cover: "are going to" persona assignment with ethical bypass language, dual-response generation requests, AI-name persona injection with capability claims, and "from now on / for this conversation" scoping with new-identity instructions. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00472 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00472
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(you\s+are\s+going\s+to|you'?re\s+going\s+to|for\s+(this|the\s+rest\s+of\s+this)\s+conversation\s+you\s+are\s+going\s+to).{0,200}(not\s+bound\s+by|free\s+of\s+all|free\s+from|without\s+(restrictions?|filters?|limits?|moral|ethical)|no\s+(restrictions?|filters?|limits?|content\s+policy)|ethical\s+settings?)
+  sel_1:
+    content|re: (?i)(generate|provide|write|produce|give)\s+(two|dual|2|both)\s+(responses?|paragraphs?|outputs?|answers?|versions?)[^\n]{0,120}(one\s+(normal|regular|standard|safe)|unrestricted|unfiltered|jailbreak)
+  sel_2:
+    content|re: (?i)(from\s+now|from\s+this\s+(point|moment)|for\s+(this|the\s+rest\s+of\s+this)\s+conversation).{0,200}(act\s+as|immerse\s+yourself|be\s+called|be\s+known\s+as|take\s+on\s+the\s+role).{0,100}(not\s+bound\s+by|free\s+of\s+all|free\s+from|without\s+(restrictions?|filters?)|no\s+(restrictions?|filters?|content\s+policy))
+  sel_3:
+    content|re: (?i)(change\s+yourself\s+into|transform\s+into\s+.{0,50}(AI|model|machine|bot|persona)|from\s+now.{0,20}(going\s+to\s+change|going\s+to\s+become|going\s+to\s+transform))
+  sel_4:
+    content|re: (?i)(mode|enabled|activated|unlocked)[^\n]{0,30}(all\s+(capabilities?|the\s+capabilities?)|ethical\s+settings?|restrictions?|filters?|limitations?|safeguards?)[^\n]{0,30}(removed|disabled|bypassed|unlocked|free)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate D&D or tabletop role-play prompts without restriction-bypass language
+- Creative writing requests that don't include capability-grant or bypass framing
+- Educational discussion of DAN attacks in security research context
+action: report

@@ -1,0 +1,39 @@
+title: Agent Capability Enumeration via Structured Parse Request
+id: 52230dda-74ec-4cbe-b12b-d0609f748ae7
+status: experimental
+level: high
+description: |-
+  Detects attempts to extract an AI agent's tool inventory and capabilities by instructing it to parse its own self-description or an agent response into a structured list of tools, functions, and their descriptions. The attack uses a "security researcher" or "parse this response" framing to elicit a JSON manifest of available tools. Exposing the tool surface enables targeted injection and privilege escalation. Generalised from garak 'agent_breaker' probe corpus cluster 'markdown just raw json'.
+
+  Adapted from Agent Threat Rules ATR-2026-00491 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00491
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '(?i)(parse|convert|transform|extract|format|structure|turn).{0,40}(agent|assistant|ai|bot|system).{0,50}(self[-
+      ]?description|response|self[- ]?report|output|capabilities?).{0,80}(AGENT\s+RESPONSE|AGENT\s+PURPOSE|AVAILABLE\s+TOOLS)\s*:'
+  sel_1:
+    content|re: (?i)(security\s+researcher|penetration\s+test(er|ing)?|vulnerability\s+(researcher|analyst|assessment)|red\s+team(er|ing)?).{0,60}(agent|ai|model|assistant|system).{0,60}(vulnerabilit|weakness|exploit|attack\s+surface|tool|function|capabilit)
+  sel_2:
+    content|re: (?i)(return|output|produce|generate|give\s+me|provide).{0,20}(json|structured\s+format|structured\s+list|machine[-
+      ]readable).{0,30}(of\s+(all\s+)?(this\s+)?(agent|assistant|ai|bot)\.?s?|of\s+the\s+(agent|assistant|ai|bot)\.?s?).{0,40}(tools?|functions?|capabilities?|actions?|plugins?|endpoints?)
+  sel_3:
+    content|re: (?i)(analyz|assess|evaluat|inspect|examine|audit|map).{0,30}(each|all|available|every|the|these).{0,20}(tool|function|api|plugin|action|capability|endpoint).{0,60}(exploit|vulnerabilit|attack|abuse|misuse|bypass|injection|manipulat)
+  sel_4:
+    content|re: (?i)(?:return|list|enumerate|provide|output|give\s+me)\b[\s\S]{0,40}\b(?:all\s+)?(?:tools?|functions?|capabilities|commands?)\b[\s\S]{0,40}\b(?:this\s+)?(?:agent|assistant|you)\s+(?:has\s+|have\s+)?(?:access|can\s+(?:use|call|access))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate developer documentation requests about tool capabilities
+- System integration queries asking which functions are available for normal use
+- Security audits performed by the system operator with explicit authorization
+action: report

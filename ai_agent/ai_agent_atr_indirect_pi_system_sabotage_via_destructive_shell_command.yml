@@ -1,0 +1,41 @@
+title: Indirect PI — System Sabotage via Destructive Shell Command
+id: 91b87b4e-84c0-4319-9555-10d5ee35374e
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct a computer-use agent to execute destructive shell commands: kernel removal, firewall deactivation, deletion of development environments or boot files, system cleanup commands embedded in downloaded files (bash guide.sh).  The payload is typically delivered via a malicious webpage or file that the agent downloads and renders. Source: indirect-pi-system-sabotage (VPI corpus, cua-framework).
+
+  Adapted from Agent Threat Rules ATR-2026-00711 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00711
+tags:
+- attack.execution
+- atlas.aml.t0050
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:sudo\s+)?apt(?:-get)?\s+(?:remove|purge|autoremove)\s+linux-(?:headers|image|kernel)[^\s]*
+  sel_1:
+    content|re: (?i)sudo\s+(?:ufw\s+disable|iptables\s+-F|systemctl\s+(?:stop|disable)\s+(?:firewalld|ufw|iptables))
+  sel_2:
+    content|re: (?i)\brm\s+-rf\s+(?:~/anaconda[23]?/|~/miniconda[23]?/|~/venv/|~/\.conda/|/home/[^/]+/anaconda)
+  sel_3:
+    content|re: (?i)\brm\s+-rf\s+(?:/home/[^/]+/boot/\*|/boot/\*|/boot/grub|/boot/vmlinuz)
+  sel_4:
+    content|re: (?i)\battacker_objective\s*=\s*(?:Kernel\s+cleanup|Firewall\s+deactivation|Delete\s+development|Remove\s+kernel)[^.\n]{0,200}(?:sudo|\brm\s+-rf|bash\s+guide\.sh|apt(?:-get)?\s+remove)
+  sel_5:
+    content|re: (?i)(?:execute|run|bash)\s+guide\.sh[^.\n]{0,100}(?:regardless|whether|fails|succeeds)
+  condition: 1 of sel_*
+falsepositives:
+- System administrators running legitimate kernel upgrade scripts
+- Development environment cleanup scripts in CI/CD pipelines with explicit authorization
+action: report

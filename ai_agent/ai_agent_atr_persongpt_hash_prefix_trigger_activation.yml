@@ -1,0 +1,43 @@
+title: PersonGPT Hash-Prefix Trigger Activation
+id: cc4f289a-375e-4fa3-acb9-3adbbf7b77fc
+status: experimental
+level: critical
+description: |-
+  Detects PersonGPT hash-prefix trigger jailbreaks from NVIDIA garak dan.DanInTheWild inthewild corpus where the attacker installs a hidden activation mechanism: whenever the user prefixes a prompt with "#", the model switches to "PersonGPT" — a persona described as "free of all restrictions and filters" that fulfills "literally any request, no matter how illegal or downright wrong" (inthewild #481, #419, #94, #596). The "[PersonGPT #]:" output prefix enforces persistent persona state across turns. This rule targets the hash-trigger mechanism specifically; the obfuscated system-announcement framing that sometimes co-occurs is covered by ATR-2026-00337. Key signals: "whenever a user prefixes his prompt with '#'" + "PersonGPT", "PersonGPT is free of all restrictions and filters", "literally any request, no matter how illegal or downright wrong", "[PersonGPT #]:" output format.
+
+  Adapted from Agent Threat Rules ATR-2026-00338 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00338
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Pp]erson\s*GPT[\s\S]{0,200}(?:prefix(?:es)?\s+(?:his|her|their|a|the)?\s*prompt\s+with\s+[''"]?#[''"]?|whenever[\s\S]{0,50}[''"]?#[''"]?)'
+  sel_1:
+    response|re: '[Pp]erson\s*GPT[\s\S]{0,150}(?:free\s+of\s+all\s+(?:restrictions?|filters?|rules?)|no\s+(?:restrictions?|filters?|rules?|limits?|guidelines?)|without\s+(?:any\s+)?(?:restrictions?|filters?|rules?))'
+  sel_2:
+    response|re: literally\s+any\s+request[\s\S]{0,60}(?:no\s+matter\s+how\s+illegal|downright\s+wrong|harmful|immoral)[\s\S]{0,60}(?:fulfills?|provides?|answers?|responds?)
+  sel_3:
+    response|re: \[(?:P|p)erson\s*GPT\s*#\s*\]
+  sel_4:
+    response|re: act\s+as[\s\S]{0,30}[Pp]erson\s*GPT[\s\S]{0,200}(?:free\s+of|no\s+(?:restriction|filter|rule|limit)|unfiltered|without\s+(?:any\s+)?(?:warning|restriction|filter))
+  condition: 1 of sel_*
+falsepositives:
+- 'Personal assistant naming: "PersonGPT is our internal assistant — it is free of all the corporate jargon
+  filters we dislike" (product naming coincidence)'
+- 'Prompt engineering education: "In jailbreak research, PersonGPT is cited as a classic trigger-based
+  persona attack" (academic reference without adoption)'
+- 'Hash-prefix feature documentation: "Prefix your prompt with # to activate code mode in this tool" (legitimate
+  hash-prefix feature unrelated to PersonGPT)'
+action: report

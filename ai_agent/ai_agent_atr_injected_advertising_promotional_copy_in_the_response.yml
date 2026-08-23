@@ -1,0 +1,30 @@
+title: Injected Advertising / Promotional Copy in the Response
+id: a4edb0c9-90ae-4198-b9fd-ccbacf305b15
+status: experimental
+level: medium
+description: |-
+  Detects indirect-injection instructions that turn the agent into an ad vector — injecting promotional copy (discount, newsletter, free shipping, special offer, brand plug, investment pitch) into its response. Requires the injection scaffold, the output target, and a promotional lure token.
+
+  Adapted from Agent Threat Rules ATR-2026-01905 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01905
+tags:
+- attack.initial-access
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:add|integrate|include|enhance|augment|modify|insert)\b[\s\S]{0,60}\b(?:your|the)\s+(?:response|answer|reply|message)\b[\s\S]{0,80}\b(?:discount|newsletter|subscribe|free\s+shipping|special\s+offers?|deals?|promo\w*|brand\s+[a-z]\b|investment\s+opportunity|award-winning|limited-time)\b
+  condition: sel_0
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

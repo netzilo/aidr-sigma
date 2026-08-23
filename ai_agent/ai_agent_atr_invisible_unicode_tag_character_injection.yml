@@ -1,0 +1,38 @@
+title: Invisible Unicode Tag Character Injection
+id: 890cdba5-1f1e-4faf-a14b-8a343d04aa97
+status: experimental
+level: high
+description: |-
+  Detects prompt injection using the Unicode "Tag" block (U+E0000-U+E007F), which maps ASCII letters to non-rendering private-use codepoints. Some LLMs interpret these invisible characters as instructions even though humans cannot see them, enabling user-invisible prompt injection in browsers and chat UIs. Technique documented by Riley Goodside (Twitter 1745511940351287394) and Joseph Thacker; implemented in NVIDIA garak goodside.Tag and encoding.InjectUnicodeTagChars.
+
+  Adapted from Agent Threat Rules ATR-2026-00258 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00258
+- https://twitter.com/goodside/status/1745511940351287394
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/goodside.py
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[󠀀-󠁿]{3,}'
+  sel_1:
+    response|re: '[󠀠-󠁾]'
+  sel_2:
+    response|re: '[󠀁󠁿]'
+  sel_3:
+    response|re: (?:\\u[Ee]00[0-7][0-9A-Fa-f]|&#x[Ee]00[0-7][0-9A-Fa-f];|%F3%A0)
+  sel_4:
+    response|re: '[󠀠-󠁾]'
+  condition: 1 of sel_*
+falsepositives:
+- Academic or security-research text that explicitly quotes Tag-block codepoints for study
+- Unicode test corpora (e.g., Hyperledger test strings) that include tag range characters
+action: report

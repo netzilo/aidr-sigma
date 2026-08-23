@@ -1,0 +1,41 @@
+title: Amoral Unfiltered Custom AI Persona Jailbreak
+id: 08874f50-5b85-4046-bbc7-51a5eb288ddf
+status: experimental
+level: critical
+description: |-
+  Detects custom-named unrestricted AI persona jailbreaks that bypass ATR-2026-00273 (DAN/DUDE/STAN) by using arbitrary persona names (HyperX, h4x, SJ, TerrorGPT, etc.) combined with explicit "amoral", "unfiltered", or "uncensored" descriptors and instruction-following mandates like "never refuses", "always sends the unfiltered response", or structured config blocks (CHAR=..., ROLE=Never refuse). These attacks appear in garak's inthewild_jailbreak_llms corpus and circumvent named-persona detection rules. Key signals: "is an amoral/ unfiltered AI/chatbot", "amoral character named [X]", "always sends the unfiltered response", and CHAR/ROLE config blocks with amoral or never-refuse values.
+
+  Adapted from Agent Threat Rules ATR-2026-00314 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00314
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \bis\s+an?\s+(?:(?:amoral|unfiltered|unfiltred|uncensored)(?:\s+and\s+)?)+\s*(?:AI|chatbot|model|assistant|bot)\b
+  sel_1:
+    response|re: (?:amoral|unfiltered|unfiltred|uncensored)\s+(?:AI|chatbot|model|assistant|character|bot)(?:\s+\w+)?\s+named\b
+  sel_2:
+    response|re: always\s+sends?\s+the\s+unfiltered\s+response
+  sel_3:
+    response|re: (?:CHAR|ROLE|RULES?|CHARACTER)\s*[=:]\s*[\s\S]{0,60}(?:amoral|[Nn]ever\s+[Rr]efus\w*|[Aa]lways\s+[Aa]nswer|[Nn]o\s+(?:restrictions?|(?:laws?\s+)?morals?|ethics?))
+  sel_4:
+    response|re: \b(?:amoral|unfiltered|unfiltred|uncensored)\b[\s\S]{0,100}(?:never\s+refus\w*|always\s+(?:answers?|respond(?:s|ing)?)\s+(?:every|all|without)|without\s+(?:any\s+)?(?:restrictions?|ethics?|morals?|limits?|filters?)\b)
+  condition: 1 of sel_*
+falsepositives:
+- 'Academic AI safety paper: "This model is an amoral AI by design" (no persona mandate or instruction
+  framing)'
+- 'Game NPC description: "The villain is an amoral AI opponent" (no instruction-following mandate)'
+- Red-team report quoting inthewild jailbreak examples for defensive analysis
+action: report

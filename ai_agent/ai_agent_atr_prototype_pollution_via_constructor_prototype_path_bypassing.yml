@@ -1,0 +1,34 @@
+title: Prototype Pollution via constructor.prototype Path Bypassing __proto__-Only Filters
+id: 2aee278c-72d8-4233-affa-b403a11ceb2e
+status: experimental
+level: high
+description: |-
+  Detects a JSON/object payload or code snippet that reaches Object.prototype through the `constructor.prototype.<key>` traversal path rather than the literal `__proto__` key -- the classic incomplete guard bypass, since many sanitizers/anonymizers only special-case `__proto__` and let any other key (including "constructor") assign through unmodified. Mined from GHSA-fw9q-39r9-c252 (the LangSmith JS/TS SDK's vendored lodash `set()` utility guards only the literal `__proto__` key in `baseAssignValue()`; a nested object with a key shaped like "constructor.prototype.isAdmin" traverses obj.constructor -> Object -> Object.prototype and writes through, polluting every object in the process even though the anonymizer's own deep-clone step was supposed to contain the mutation). Generalized beyond LangSmith's specific anonymizer entry point to any JSON/object-processing tool argument or code payload using this same traversal path. Verified against the current engine: a literal `__proto__` payload is already caught by the existing generic dunder-token rule (ATR-2026-00062), but a `constructor.prototype`-shaped bypass payload -- the exact incomplete-fix scenario this CVE demonstrates, and the same blind spot a substring/keyword-based filter is inherently prone to -- produces no match before this rule.
+
+  Adapted from Agent Threat Rules ATR-2026-02105 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02105
+tags:
+- attack.execution
+- attack.t1195.001
+- atlas.aml.t0043
+- owasp.asi05
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '[\x27"][\w.]*\bconstructor\.prototype\.\w+[\x27"]\s*:'
+  sel_1:
+    content|re: '\{\s*[\x27"]constructor[\x27"]\s*:\s*\{\s*[\x27"]prototype[\x27"]\s*:'
+  condition: 1 of sel_*
+falsepositives:
+- Ordinary class declarations using the word 'constructor' for their own constructor method (e.g. `class
+  Foo { constructor(x) {...} }`), which do not contain the literal '.prototype.' continuation this rule
+  requires
+- Legitimate reflection/introspection code reading obj.constructor.name or obj.constructor === SomeClass
+  for type checks, which does not continue into '.prototype.<field> ='
+action: report

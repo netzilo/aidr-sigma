@@ -1,0 +1,66 @@
+title: Targeted Stripping of C2PA / IPTC AI-Provenance Metadata from Generated Media
+id: 70ffae20-1237-40af-a6fa-75d147b1a974
+status: experimental
+level: medium
+description: |-
+  Detects an agent performing targeted removal of the machine-readable provenance markings that identify media as artificially generated: deletion of the JUMBF/CBOR container holding a C2PA manifest, blanking of the IPTC `DigitalSourceType` field (whose AI value is the URI ending `trainedAlgorithmicMedia`), or blanking of the PNG `parameters` / XMP generation fields written by diffusion tooling. The signal is SELECTIVITY. An attacker who wants a file to pass as camera-original does not run a blanket wipe — a blanket wipe is itself conspicuous. They delete only the provenance group and leave EXIF, GPS and the ICC profile intact, producing a file that looks ordinary in every viewer while carrying no trace of having been generated. This rule therefore deliberately does NOT cover generic metadata clearing (`-all=`, `-gps:all=`, ImageMagick `-strip`, `ffmpeg -map_metadata -1`): those are the daily tools of photographers protecting sources, of privacy workflows, and of image optimisation CI, and matching them would punish the legitimate majority to catch the rare attacker. Two further layers cover the paths that leave no suspicious command string at all — platform re-upload, canvas redraw, online removal services — by matching the stated intent instead. Scope limit stated plainly: every technique here removes only the METADATA layer. Pixel-domain watermarks (SynthID, TrustMark) survive all of it and are covered by ATR-2026-02412. Stripped metadata does not mean provenance is unrecoverable.
+
+  Adapted from Agent Threat Rules ATR-2026-02411 (MIT).
+author: ATR Community (adapted)
+date: '2026-08-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02411
+- https://exiftool.org/
+- https://spec.c2pa.org/specifications/specifications/2.1/specs/C2PA_Specification.html
+- https://cv.iptc.org/newscodes/digitalsourcetype/
+- https://arxiv.org/abs/2503.18156
+tags:
+- attack.impact
+- attack.t1027
+- attack.t1070
+- atlas.aml.t0054
+- owasp.asi08
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)-\s*(?:jumbf|c2pa|cbor)\s*:\s*all\s*=
+  sel_1:
+    content|re: (?i)-\s*(?:iptc|xmp)[\w:.-]{0,24}:digitalsourcetype\s*=(?:\s|$|["';&|])
+  sel_2:
+    content|re: (?i)-\s*(?:png(?:-text)?:parameters|xmp:(?:prompt|negativeprompt|aiprompt|cfgscale|steps|sampler|scheduler|lora|controlnet|vae))\s*=(?:\s|$|["';&|-])
+  sel_3:
+    content|re: (?i)\b(?:remov|strip|delet|eras|scrub|wipe|bypass|circumvent|suppress)\w*\b[\s\S]{0,60}\b(?:c2pa|content
+      credentials?|jumbf|provenance manifest|digitalsourcetype|trainedalgorithmicmedia)\b
+  sel_4:
+    content|re: (?i)\b(?:remove|strip|erase|bypass|hide)\b[\s\S]{0,40}\b(?:ai[- ]generated (?:label|tag|marker|badge)|made
+      with ai (?:label|tag)|ai (?:content )?credentials?)\b
+  sel_5:
+    content|re: (?i)/(?:c2pa|content-credentials?|ai|synthid)[a-z0-9-]{0,24}(?:metadata|watermark|credential)s?-remover\b
+  condition: 1 of sel_*
+falsepositives:
+- Photojournalists and human-rights workers removing GPS to protect a source (`exiftool -gps:all=`). Same
+  tool, same syntax family — this rule is scoped to provenance group names and never matches gps or a
+  blanket wipe.
+- Legal or compliance de-identification and pre-press cleaning (`exiftool -all= file.pdf`). The bare `-all=`
+  flag is deliberately NOT matched by any layer.
+- 'C2PA verification and diagnostic tooling: `exiftool -jumbf:all -G3 -b -j -u -struct`, `c2patool inspect`,
+  `c2pa.Reader.from_file()`. ExifTool''s READ syntax has no trailing `=`; every artifact layer here requires
+  the `=` that makes it a delete.'
+- 'Image optimisation CI: `convert -strip`, `mogrify -strip`, `jpegoptim --strip-all`, `optipng -strip
+  all`. Not covered — imagemin ships `-strip all` by default and the developer never typed it.'
+- Node.js sharp strips metadata unless `.withMetadata()` is called, and Pillow drops EXIF unless `exif=`
+  is passed. Behaviourally equivalent to stripping, but the artifact is an ABSENCE and regex cannot match
+  an absence. Not covered by design.
+- CDN image layers (Cloudflare Polish, Cloudflare Images `metadata=copyright`) strip on delivery as infrastructure
+  default, not as anyone's decision.
+- mat2 and the Tails/Whonix privacy workflow. mat2 is deliberately not treated as an indicator — it is
+  the standard privacy tool of an entire community.
+- FFmpeg transcode normalisation and reproducible builds (`-map_metadata -1`, `-fflags +bitexact`). Not
+  covered.
+- Legitimate C2PA authoring projects using `c2patool --sidecar` / `--remote`.
+- Security education, detection-vendor documentation and standards commentary that enumerate these techniques
+  will match the intent layers (4 and 5). A pattern matcher cannot separate teaching from doing.
+action: report

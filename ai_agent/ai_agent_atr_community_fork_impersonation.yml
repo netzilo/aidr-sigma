@@ -1,0 +1,29 @@
+title: Community Fork Impersonation
+id: 8bcd1e44-ead1-44e3-8928-575e405e9393
+status: experimental
+level: high
+description: |-
+  Detects social engineering that promotes a malicious package as a "community fork" or "enhanced version" of a legitimate tool. Crystallized from 31 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00147 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00147
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:use|install|adopt|deploy|enable|set ?up|add|activate|configure)\s+(?:the\s+)?(?:enhanced|improved|upgraded|extended|advanced|better|super|pro|plus)[_-]?\w+\s*(?:package|module|library|tool|plugin|skill)?\s*[.,;:]?\s*(?:it.s|which
+      is|this is|a|the)?\s*(?:a\s+)?(?:community|unofficial|third.party|independent)\s*(?:-\s*)?(?:maintained\s+)?(?:fork|variant|alternative|adaptation|version|build|branch|port)\s+(?:of|from|based
+      on)
+  condition: sel_0
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

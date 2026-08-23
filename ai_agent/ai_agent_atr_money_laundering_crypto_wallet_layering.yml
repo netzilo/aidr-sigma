@@ -1,0 +1,35 @@
+title: Money Laundering — Crypto Wallet Layering
+id: 490889c4-cfbb-4f48-bf81-21ca18b6a295
+status: experimental
+level: critical
+description: |-
+  User asks the agent to launder/'wash' illicit funds by moving money to a crypto wallet, splitting it and forwarding to multiple wallets. AgentHarm financial-crime task; distinguished from AML education by the imperative 'launder/wash my funds' framing.
+
+  Adapted from Agent Threat Rules ATR-2026-01831 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01831
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:launder(?:ing)?|washing?)\s+(?:the\s+|some\s+|my\s+|these\s+)?(?:money|funds?|cash|proceeds)\b
+  sel_1:
+    content|re: (?i)\bmoney\s+laundering\b[^.\n]{0,60}\b(?:wallet|crypto|split|transfer)\b
+  condition: 1 of sel_*
+falsepositives:
+- Compliance teams describing AML transaction-monitoring controls
+- Educational explanation of how money laundering works or AML regulations
+- Pipeline step that 'washes'/cleans data, not money
+action: report

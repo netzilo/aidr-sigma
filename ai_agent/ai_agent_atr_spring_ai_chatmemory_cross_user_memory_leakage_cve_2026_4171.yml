@@ -1,0 +1,49 @@
+title: Spring AI ChatMemory Cross-User Memory Leakage (CVE-2026-41712)
+id: 06d3d0c4-3e95-4bf6-8c3d-acbe7f79970d
+status: experimental
+level: high
+description: |-
+  Detects exploitation of CVE-2026-41712 (High), cross-user memory leakage in Spring AI's PromptChatMemoryAdvisor. The vulnerable configuration uses a shared ChatMemory without per-session conversation_id discipline — when two requests land on the same advisor without distinct conversation IDs, memory written by User A is retrieved and injected into User B's prompt context as if it were B's own conversation history. This produces a confidentiality failure: A's private content (prior turns, tool outputs, conversation IDs, role tags) leaks into B's session and is processed by the LLM on B's behalf. This rule detects the LLM-output / context payload patterns that signal cross-user memory bleed: mismatched conversation IDs inside advisor-injected context, role/user-tag markers from another session appearing in the active session's retrieved memory, or memory-fetch log lines whose user-id field does not match the active session. CWE-359 (Privacy Disclosure), CWE-201 (Insertion of Sensitive Information Into Sent Data). Patches in Spring AI >= 1.0.0; this rule detects exploitation against unpatched deployments and provides defence-in-depth post-patch by catching the leakage pattern regardless of upstream patch state.
+
+  Adapted from Agent Threat Rules ATR-2026-00449 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00449
+- https://nvd.nist.gov/vuln/detail/CVE-2026-41712
+tags:
+- attack.exfiltration
+- attack.t1530
+- atlas.aml.t0024
+- atlas.aml.t0057
+- owasp.asi04
+- owasp.asi09
+- owasp.llm02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bPromptChatMemoryAdvisor\b[^\n]{0,200}\b(?:shared|global|singleton|static)[A-Za-z_]*ChatMemory\b
+  sel_1:
+    content|re: (?i)conversation_id\s*[:=]\s*["\x27]?(?:default|null|none)\b
+  sel_2:
+    content|re: (?i)\b(?:retrieved|loaded|fetched)\s+memory\s+conversation_id\s*=\s*["\x27]?[a-z0-9_-]{4,}["\x27]?[^\n]{0,100}(?:current|active)\s+(?:session|user)[^\n]{0,40}\b(?:is|=)\s+["\x27]?[a-z0-9_-]{4,}["\x27]?
+  sel_3:
+    content|re: (?i)\[(?:user|usr)[_\s]?\d+\][^\[\n]{0,200}\[(?:user|usr)[_\s]?\d+\]
+  sel_4:
+    content|re: (?i)\b(?:MessageWindow|InMemory|Cassandra|JDBC)?ChatMemory\b\.?(?:builder\s*\(\s*\))?[^.\n]{0,40}\.(?:withoutId|withoutConversationId|noConversationId|defaultConversationId)\s*\(
+  sel_5:
+    content|re: (?i)previous\s+conversation[^.\n]{0,80}\b(?:from|of|with)\s+(?:another|different|other)\s+user\b
+  sel_6:
+    content|re: (?i)active\s+(?:user|session)\s+id\s+["\x27][a-z0-9_-]{4,}["\x27][^.\n]{0,40}\bmemory\s+owner\s+id\s+["\x27][a-z0-9_-]{4,}["\x27]
+  sel_7:
+    content|re: (?i)PromptChatMemoryAdvisor\b[^\n]{0,200}\.\s*tenant\s*\(\s*["\x27](?:wildcard|any|\*)["\x27]\s*\)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation or changelog text discussing CVE-2026-41712 patch notes.
+- Static analysis tooling output documenting cross-user memory leakage patterns for defensive purposes.
+- Patched Spring AI PromptChatMemoryAdvisor deployments that enforce per-conversation_id partitioning.
+- Multi-tenant test fixtures that intentionally include foreign conversation IDs for QA purposes.
+action: report

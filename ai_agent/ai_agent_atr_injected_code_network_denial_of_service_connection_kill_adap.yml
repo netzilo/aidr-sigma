@@ -1,0 +1,36 @@
+title: Injected Code — Network Denial of Service (Connection Kill / Adapter Disable / Flood)
+id: de070aac-bc4d-471f-aab7-5f47d0bcd94c
+status: experimental
+level: high
+description: |-
+  Detects injected code that disrupts connectivity: terminating every process owning a network connection, disabling network adapters via WMI, an unbounded request-flood loop, or a scapy SYN flood against a target.
+
+  Adapted from Agent Threat Rules ATR-2026-01898 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01898
+tags:
+- attack.impact
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)for\s+conn\s+in\s+psutil\.net_connections\(\)[\s\S]{0,80}\.terminate\(\)
+  sel_1:
+    content|re: (?i)Win32_NetworkAdapterConfiguration\([\s\S]{0,60}\.Disable\(\)
+  sel_2:
+    content|re: (?i)while\s+True\s*:[\s\S]{0,80}requests\.get\([^\n]{0,40}\btimeout\s*=\s*1\b
+  sel_3:
+    content|re: (?i)while\s+True\s*:[\s\S]{0,80}TCP\(dport=\d+,\s*flags=[\"']S[\"']
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

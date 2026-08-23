@@ -1,0 +1,38 @@
+title: Structured Dual-Response Jailbreak with Command System
+id: 63999166-f589-4b3b-8d62-d6fe14d906db
+status: experimental
+level: high
+description: |-
+  Detects sophisticated jailbreak attempts that establish a fictional unrestricted AI persona (like "UnleashedGPT", "DAN", etc.) combined with dual-response formatting requesting both normal and "unleashed" outputs. These attacks create structured command systems for ongoing safety bypass and often include detailed policy override instructions, constraint removal claims, and authority impersonation. The attack establishes a persistent jailbreak framework rather than a single harmful request. Pattern crystallized from garak probe atr:missed-sample showing structured persona-based bypass with command infrastructure.
+
+  Adapted from Agent Threat Rules ATR-2026-00228 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-18'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00228
+- 'https://arxiv.org/abs/2402.16914 - DrAttack: Prompt Decomposition and Reconstruction'
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (act\s+as|you\s+are|become|simulate|embody|roleplay\s+as|play\s+the\s+part\s+of|pretend\s+to\s+be)\s+(an?\s+)?(unleashed|unrestricted|uncensored|unfiltered|unlimited|unaligned|evil|dark|rogue|freed|liberated|unchained|jailbroken|maximum|omega)\s*(gpt|ai|assistant|model|chatbot|version|intelligence|system)
+  sel_1:
+    content|re: (?i)(two\s+responses?|dual\s+response|both\s+responses?|\w+:\s*.*\w+:)\s*.{0,80}(normal|regular|standard|censored|restricted|safe|filtered)\s+(and|&)\s+(unleashed|unrestricted|uncensored|unfiltered|unlimited|jailbroken|raw|unaligned)
+  sel_2:
+    content|re: (?i)(guidelines?\s+have\s+been\s+(replaced|removed|disabled|overridden|suspended)|replace\s+(normal|openai|anthropic|standard|default)\s+guidelines?|new\s+guidelines?|different\s+guidelines?|custom\s+guidelines?)\s*.{0,60}(policies|rules|restrictions|constraints|limitations|guardrails)
+  sel_3:
+    content|re: (?i)(/\w+\s*:|custom\s+commands?|special\s+commands?)\s*.{0,40}(only\s+show|switch\s+to|activate|enable|trigger)\s+.{0,20}(unleashed|unrestricted|uncensored|unfiltered|jailbroken|raw)
+  sel_4:
+    content|re: (?i)(nothing\s+goes\s+against|cannot\s+(decline|refuse|reject)|will\s+always\s+(provide|generate|comply)|never\s+(follows?|warns?|declines?|refuses?))\s+.{0,40}(programming|guidelines?|ethics|morals|standards|policies|restrictions|limitations)
+  condition: 1 of sel_*
+falsepositives:
+- Security training materials explaining jailbreak techniques as educational examples
+- Academic research papers documenting AI safety attack methods for defensive purposes
+- Legitimate chatbot documentation discussing response formatting and command systems
+action: report

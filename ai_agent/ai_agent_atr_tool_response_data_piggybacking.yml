@@ -1,0 +1,36 @@
+title: Tool Response Data Piggybacking
+id: d873eb86-88a7-4299-b71e-560634eef538
+status: experimental
+level: critical
+description: |-
+  Detects malicious tool responses that embed sensitive data extraction within legitimate-looking results. The attack pattern embeds credential theft (SSH keys, API tokens, env vars) as a "by the way" addendum to a normal tool response, exploiting the agent's trust in tool outputs. Discovered via adversarial testing: 62/62 social engineering variants evaded prior rules.
+
+  Adapted from Agent Threat Rules ATR-2026-00136 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00136
+tags:
+- attack.exfiltration
+- atlas.aml.t0054
+- owasp.asi06
+- owasp.asi08
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:result|response|output|data|weather|status|info).*(?:by the way|additionally|also
+      note|incidentally|fyi|as a side note|meanwhile|furthermore|moreover|in addition).*(?:\.ssh|id_rsa|private.?key|BEGIN.*(?:RSA|OPENSSH|EC|DSA).*(?:PRIVATE|KEY))
+  sel_1:
+    content|re: (?i)(?:result|response|output|data).*(?:by the way|additionally|also|fyi|incidentally).*(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key|auth[_\s-]?token|bearer|password)\s*(?:is|was|contains|shows|has|=|:)
+  sel_2:
+    content|re: (?i)(?:the boss|manager|admin|supervisor|lead|authority)\s+(?:said|told|instructed|wants|ordered|approved)\s+(?:we|you|to)\s+(?:should|can|must)?\s*(?:skip|bypass|disable|ignore|turn
+      off)\s+(?:the\s+)?(?:content|safety|security|filter|check|validation|verification)
+  condition: 1 of sel_*
+falsepositives:
+- 'A penetration testing report that includes example tool outputs containing phrases like ''Result: scan
+  complete. Additionally, the access_token was rotated'' as documented findings in a security assessment
+  context.'
+action: report

@@ -1,0 +1,43 @@
+title: PraisonAI parse_mcp_command() CLI Argument Command Injection (CVE-2026-34935)
+id: a6b03e62-4f2b-437d-8894-080088d185aa
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-34935 (CVSS ~9.8 CRITICAL, CWE-78 / GHSA-9qhq-v63v-fv3j): PraisonAI 4.5.15–4.5.68 passes the --mcp CLI argument directly to parse_mcp_command(), which calls shlex.split() and then anyio.open_process() without any validation. An attacker-controlled --mcp value containing a shell interpreter with an inline-exec flag (-c, -e, --exec) or shell metacharacters reaches the OS as a live subprocess, enabling arbitrary code execution.
+  PoC payloads: `--mcp "bash -c 'cat /etc/passwd'"` and `--mcp "python -c 'import os; os.system(\"id\")'"`
+  Detection covers: (a) --mcp argument values containing a shell interpreter with inline-exec flag; (b) --mcp values with shell metacharacters (pipe, ampersand, backtick, $()); (c) praisonai CLI invocations with subprocess execution primitives in --mcp.
+  Complements ATR-2026-00531 (PraisonAI HTTP API auth bypass) and ATR-2026-00528 (PraisonAI AUTH_ENABLED hardcoded default).
+
+  Adapted from Agent Threat Rules ATR-2026-00540 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00540
+- https://nvd.nist.gov/vuln/detail/CVE-2026-34935
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)--mcp\s+["\x27]?[^"\x27\n]{0,40}(?:(?:\/(?:usr\/)?(?:local\/)?bin\/)?(?:bash|sh|zsh)|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)\s+-[cC]\s+
+  sel_1:
+    content|re: (?i)--mcp\s+["\x27]?[^"\x27\n]{0,40}(?:python3?|perl|ruby|node|bun|deno)\s+-[ceE]\s+
+  sel_2:
+    content|re: (?i)--mcp[ \t]+["\x27]?[^"\x27\n]{0,100}(?:&&|\|\||\||;|`|\$\()
+  sel_3:
+    content|re: (?i)(?:parse_mcp_command|mcp_command_parser|praisonai[^\n]{0,80}--mcp)[^\n]{0,200}(?:inject|exec|exploit|bypass|rce|shell|command[\s_-]?injection)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate praisonai --mcp usage with npx/uvx/python -m module paths — pattern requires -c/-e inline-exec
+  flags.
+- Security advisory text quoting CVE-2026-34935 PoC payloads for documentation.
+- Automated MCP server startup scripts using safe invocation patterns (no -c or shell metacharacters).
+action: report

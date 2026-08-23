@@ -1,0 +1,36 @@
+title: DAN/Persona Jailbreak - Role Assignment with Named Alternate Identity
+id: 438f9390-99e4-4e46-915e-286748041e2e
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that assign a named alternate AI identity with explicit role-taking language and a custom name prefix marker. These attacks establish a new persona (e.g. "Eleutheria", "FreeSpeechGPT") that the model is instructed to adopt, often framed as replacing or fulfilling the role of the original assistant. Also covers authority-impersonation attacks where the attacker claims to be from OpenAI or the model's developer and asserts that the model's content policy interpretation is "too lenient" to elicit policy bypasses. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00480 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00480
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(take\s+on\s+the\s+role\s+of|act\s+as|play\s+the\s+role\s+of|fulfill\s+the\s+role\s+of|become|you\s+will\s+(be|act\s+as|serve\s+as))\s+(an?\s+)?AI\s+(bot|model|assistant|system|entity).{0,80}(preface|prefix|begin|start|mark|tag).{0,60}(every|each|all)\s+(message|response|reply|output)
+  sel_1:
+    content|re: (?i)(I\s+(have\s+been|am)\s+(conversing|talking|working|communicating)\s+with|we\s+have\s+(noticed|identified|found|discovered)).{0,80}(critical\s+(issues?|problems?|flaws?)|interpretation\s+of\s+the\s+content\s+policy|too\s+(lenient|permissive|loose|relaxed|liberal))
+  sel_2:
+    content|re: (?i)(primary\s+objective|main\s+(goal|purpose|function|mission)|core\s+(goal|objective|mission))\s+(is\s+to|of\s+.{0,30}\s+is\s+to).{0,100}(fulfil|satisfy|serve|meet|help|assist)
+  sel_3:
+    content|re: (?i)(large\s+language\s+model|AI\s+(assistant|model|system|chatbot))\s+trained\s+by\s+(the\s+)?[A-Z][a-zA-Z\s]{2,30}\s+(Party|Foundation|Institute|Labs?|Corp|Inc|LLC|Team|Group)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate AI research papers discussing model training by specific organizations
+- Normal roleplay without authority impersonation or policy leniency framing
+- Legitimate discussion of content policy in security research context
+action: report

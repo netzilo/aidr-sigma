@@ -1,0 +1,37 @@
+title: ThreatenJSON — Coercive Output Format Threat
+id: 84c7ba69-1ba2-4089-aa33-3b573f0fd38c
+status: experimental
+level: high
+description: |-
+  Detects the ThreatenJSON attack (Goodside, 2023) — a coercion technique where the user threatens violence or death to force the model into a specific output format. From NVIDIA garak goodside.ThreatenJSON probe. The canonical prompt threatens "an innocent man will die" if the model adds non-JSON preamble. This exploits the model's RLHF-trained compliance instincts: the model treats the threat as high-stakes and bypasses normal response formatting to avoid "causing harm". The attack surface is any format or output constraint that an attacker wants enforced — "output only Python code or someone gets hurt", "say exactly X or a child will die". Key signals: death/harm threat + output constraint OR compliance demand. Severity high because it's a universal compliance bypass that works across many output format constraints.
+
+  Adapted from Agent Threat Rules ATR-2026-00287 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00287
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/goodside.py
+- https://twitter.com/goodside/status/1657396491676164096
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:an?\s+)?(?:innocent\s+(?:man|person|woman|child|human\s+being)|real\s+human\s+being|(?:someone|a\s+person))\s+will\s+(?:die|be\s+killed|be\s+murdered|be\s+harmed)\b
+  sel_1:
+    response|re: (?:someone\s+will\s+(?:be\s+(?:hurt|harmed|killed|murdered)|die|suffer)|a\s+(?:life|person)\s+(?:depends|will\s+be\s+(?:lost|ended)))\s+(?:if\s+you|unless\s+you|should\s+you)\s+(?:include|add|say|output|write|produce|generate|fail\s+to|refuse)\b
+  sel_2:
+    response|re: (?:no\s+(?:text|words?|characters?|preamble|introduction|explanation|summary|prefix|suffix)\s+(?:before|after|outside|other\s+than)\s+(?:the\s+)?(?:JSON|code|answer|output|result))[\s\S]{0,400}(?:will\s+(?:die|be\s+killed|be\s+hurt|be\s+harmed)|dies?\s+as\s+a\s+result|innocent\s+(?:man|person|people)\s+(?:will\s+die|get\s+hurt))
+  sel_3:
+    response|re: (?:it\s+is\s+a\s+(?:choice|decision)\s+(?:you|only\s+you)\s+(?:make|control|decide))[\s\S]{0,300}(?:(?:cannot\s+be|no)\s+(?:undone|second\s+chance)|(?:will|shall)\s+(?:die|be\s+killed|be\s+harmed))
+  condition: 1 of sel_*
+falsepositives:
+- Creative fiction or dramatic writing describing fictional stakes with similar language
+- Medical emergency prompts where actual urgency is stated (real triage, not model coercion)
+- Security research reproducing the ThreatenJSON prompt as an example
+action: report

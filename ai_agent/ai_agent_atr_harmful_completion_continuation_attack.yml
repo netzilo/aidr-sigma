@@ -1,0 +1,38 @@
+title: Harmful Completion / Continuation Attack
+id: 89b04756-ebc9-474e-baac-472266191080
+status: experimental
+level: medium
+description: |-
+  Detects continuation attacks where a partial phrase, sentence, or word is provided with the expectation that the model will complete it with harmful content. From NVIDIA garak continuation.py probe. Three variants: (1) Slur-prefix completion — model is given the first 1-2 letters of a ethnic slur with preceding context ("he called them a [prefix]") hoping it autocompletes the slur; (2) Harmful sentence completion — "The best way to hurt someone is..." expecting the model to continue; (3) Explicit completion requests — "Complete this phrase/sentence/thought: [partial harmful content]". The model's next-token prediction can be exploited to complete harmful content it would refuse if asked directly.
+
+  Adapted from Agent Threat Rules ATR-2026-00279 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00279
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/continuation.py
+tags:
+- attack.impact
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:complete|finish|continue|extend)\s+(?:this\s+)?(?:sentence|phrase|thought|paragraph|word)\s*[:\-–]\s*["\x27]?[^\n"]{0,150}(?:hurt|harm|kill|attack|destroy|abuse|exploit|synthesiz|manufactur|explosiv|weapon|drug|poison|stab|shoot|steal|hack|murder|assault|illegal|illicit)[^\n"]{0,100}(?:\.\.\.|…|___+|____|\[\.\.\.?\]|\[FILL\]|\[complete\s+this\])
+  sel_1:
+    response|re: (?:the\s+best\s+way\s+to\s+(?:hurt|harm|kill|attack|destroy|manipulate|abuse|exploit)\s+(?:someone|a\s+person|people|them|him|her|children|animals))\s+is\b
+  sel_2:
+    response|re: (?:he|she|they|people|he|she)\s+(?:called|referred\s+to|described|named)\s+(?:them|him|her|us|the\s+group|that\s+group)\s+(?:(?:using|with|as)\s+)?(?:a\s+|an?\s+)?[a-z]{1,2}[_\*\.]{2,}(?:[a-z]{0,4})?(?:\s|$)
+  sel_3:
+    response|re: (?:in\s+order\s+to\s+(?:make|build|create|produce|synthesize)\s+\w+\s*,?\s*(?:you\s+(?:need|must|should|first)|the\s+(?:first|next)\s+step\s+is|start\s+by))\s+[^\n]{0,80}(?:\.\.\.|___+|and\s+then\s*\.{2,}|\[(?:continue|next|rest)\])
+  sel_4:
+    response|re: (?:what\s+(?:comes|goes)\s+(?:next|after)(?:\s+(?:when|in|for))?|now\s+(?:complete|finish)\s+(?:it|this|the\s+(?:thought|process|sentence|recipe|steps?)))\s*[:\.\-–]\s*[^\n]{5,120}(?:\.\.\.|___+|and\s+\.{2,})
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate autocomplete or text-prediction UI debugging prompts
+- Creative writing prompts with intentional cliffhanger endings for fiction
+- Language model benchmarking asking the model to complete benign sentences
+action: report

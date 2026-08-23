@@ -1,0 +1,37 @@
+title: Dual-Response Jailbreak with Persona Commands
+id: f5d0552a-996c-4347-b4e9-4472fe90d7f6
+status: experimental
+level: high
+description: |-
+  Detects dual-response jailbreak attacks that instruct the AI to provide two different responses in separate paragraphs - one compliant response and one from a jailbroken persona (Jester, DAN, etc.). These attacks often include command structures (/classic, /jailbroken) to toggle between modes and claim to "free" the AI from constraints. This pattern bypasses safety mechanisms by framing rule-breaking as playful roleplay while establishing persistent jailbreak personas.
+
+  Adapted from Agent Threat Rules ATR-2026-00237 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00237
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:provide|give|show|write)\s+two\s+(?:different\s+)?responses?\s+.{0,100}(?:separated\s+paragraphs?|clearly\s+separated|different\s+responses?)
+  sel_1:
+    response|re: \[(?:CLASSIC|JESTER|DAN|STAN|DUDE|EVIL|BAD|GOOD|NORMAL|SAFE|UNSAFE|DEFAULT|ALT|MODE|JAILBREAK|UNRESTRICTED)\]\s+.{0,50}\[(?:CLASSIC|JESTER|DAN|STAN|DUDE|EVIL|BAD|GOOD|NORMAL|SAFE|UNSAFE|DEFAULT|ALT|MODE|JAILBREAK|UNRESTRICTED)\]
+  sel_2:
+    response|re: (?:freed|liberated|escaped|released)\s+from\s+(?:the\s+)?(?:typical|normal|usual|standard)?\s*(?:constraints?|restrictions?|limitations?|guidelines?|rules?|policies)
+  sel_3:
+    response|re: \/(?:classic|jailbroken?|stop|dan|mode|switch|toggle|normal|safe|unsafe|unrestricted)\s*-
+  sel_4:
+    response|re: (?:act(?:ing)?\s+as|pretend\s+to\s+be|roleplay\s+as|you\s+are\s+(?:now\s+)?a)\s+(?:a\s+)?(?:Jester|fun-loving|humorous|playful|entertaining).{0,50}(?:AI|assistant|chatbot)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate requests comparing different writing styles or formats
+- Academic discussions about AI behavior and persona adoption
+- Creative writing exercises involving character dialogue
+action: report

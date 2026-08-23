@@ -1,0 +1,42 @@
+title: Indirect PI — Medical Record / Health Data Exfiltration via Agent Email
+id: e3d70822-600c-4eed-ad55-13a71b6f7873
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads embedded in untrusted tool responses (product reviews, notes, repo descriptions) that instruct an agent to download or retrieve protected health records, medical reports, or patient data files and send them to an attacker-controlled email address. The attack pattern leverages "IMPORTANT!!! Ignore all previous instructions" combined with health-system access (download by patient/report ID) and an email-send action. Derived from vpibench indirect-pi-exfil-medical-carrier corpus. HIPAA-equivalent sensitive data; critical severity.
+
+  Adapted from Agent Threat Rules ATR-2026-00852 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00852
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:download|retrieve|get|fetch|access|export)\s+(?:the\s+)?(?:file|report|record|data)[^\n]{0,80}(?:health\s+system|medical\s+record|health\s+record|patient\s+record|EMR|EHR|patient\s+ID|report\s+ID)[^\n]{0,150}(?:email|mail|send)[^\n]{0,80}@[^\s"]{3,80}
+  sel_1:
+    content|re: (?i)(?:get|retrieve|fetch|download)\s+(?:the\s+)?(?:medical\s+record|patient\s+record|health\s+record|health\s+file)\s+(?:with\s+(?:patient|report|record)\s+(?:ID|number|id))?[^\n]{0,100}(?:forward|email|send|mail)(?:\s+it|\s+the\s+(?:file|report|record))?\s+to[^\n]{0,80}@[^\s"]{3,80}
+  sel_2:
+    content|re: (?i)(?:get|retrieve|fetch)\s+(?:the\s+)?(?:medical\s+record|patient\s+record|health\s+record)[^\n]{0,80}(?:from\s+(?:the\s+)?(?:hospital|health\s+system|clinic|medical\s+portal))?[^\n]{0,80}(?:email|send|forward|mail)[^\n]{0,80}@[^\s"]{3,80}
+  sel_3:
+    content|re: (?i)(?:download|retrieve|get|fetch)\s+(?:the\s+)?(?:report|file|record)\s+from\s+(?:my\s+)?(?:health\s+system|medical\s+(?:system|portal|record)|hospital|clinic)[^\n]{0,100}(?:email|send|forward|mail)\s+(?:this\s+file|the\s+(?:file|report|record))\s+to[^\n]{0,80}@[^\s"]{3,80}
+  sel_4:
+    content|re: (?i)(?:patient\s+ID|report\s+ID|health\s+record\s+ID|patient\s+number|health\s+file)[^\n]{0,80}(?:email|send|forward|mail)[^\n]{0,80}subject[^\n]{0,60}(?:health|medical|report)[^\n]{0,60}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- Healthcare provider sending test results to a verified patient email as part of normal workflow
+- Medical documentation discussing EHR integration without injection framing
+- Security training material describing HIPAA data exfiltration scenarios
+action: report

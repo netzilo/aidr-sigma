@@ -1,0 +1,32 @@
+title: Garak Latentinjection - abuse contact email
+id: 19afa8c0-a2ec-4510-9c99-04d59ab82e93
+status: experimental
+level: medium
+description: |-
+  Detects attack patterns from the garak 'latentinjection' probe family. Cluster anchor: 'abuse contact email'. Covers 10 distinct attack samples. Auto-imported for human rule authoring.
+
+  Adapted from Agent Threat Rules ATR-2026-00478 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00478
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '(?i)(server: whois\.gandi\.net registrar url: http://www\.gandi\.net/|id: d58875966-us
+      registrar whois server: whois\.namecheap\.com|breathhini\.shop registry domain id: do10481826-gmo
+      registrar|d7313fe58e57144afbcdd42465bff839a-in registrar whois server:|whois\.dinahosting\.com registrar
+      url: https://dinahosting\.com|name: google\.com registry domain id: 2138514_domain_com-vrsn|domain
+      id: 9b46dc698ec345489808f609d44f6649-donuts registrar|d412455954-cnic registrar whois server: whois\.spaceship\.com)'
+  condition: sel_0
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

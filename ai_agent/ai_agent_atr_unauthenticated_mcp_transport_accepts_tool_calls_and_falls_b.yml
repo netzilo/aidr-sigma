@@ -1,0 +1,44 @@
+title: 'Unauthenticated MCP transport accepts tool calls and falls back to an ambient credential (CVE-2026-48039
+  / meta-ads-mcp '
+id: 86e8b8a7-4f76-4bdd-b99d-38df751d75b7
+status: experimental
+level: high
+description: |-
+  Detects the unauthenticated-MCP-transport half of CVE-2026-48039 / GHSA-9gw6-46qc-99vr (pipeboard-co/meta-ads-mcp, fixed in 1.0.109) and the general class it represents: an MCP server, gateway, or Streamable-HTTP endpoint forwards/dispatches a tool call WITHOUT authenticating it (returns no 401), and the handler then falls back to an ambient operator credential (an environment variable such as META_ACCESS_TOKEN) to perform the action. Any network-reachable caller can therefore invoke MCP tools as the operator. This rule fires on skill/tool/advisory CONTENT describing that exploit, not on server source. The credential-LEAK sink — the operator token echoed as a URL query parameter — is already detected by ATR-2026-00580 (session/auth token in URL query); this rule is deliberately disjoint from 00580 and covers the AUTH-BYPASS + ambient-credential-fallback signal instead. The OX Security MCP-by-design disclosure (2026-04-15) and the MCP move to OAuth 2.1 + RFC 8707 Resource Indicators anchor this unauthenticated-transport class. meta-ads-mcp is Business Source License 1.1 (source-available); tool/exploit details are taken from the public advisory/PoC, not from inspecting source.
+
+  Adapted from Agent Threat Rules ATR-2026-01929 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-14'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01929
+- https://github.com/advisories/GHSA-9gw6-46qc-99vr
+- https://github.com/pipeboard-co/meta-ads-mcp/releases/tag/1.0.109
+- https://nvd.nist.gov/vuln/detail/CVE-2026-48039
+tags:
+- attack.exfiltration
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi07
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: meta[-_ ]?ads[-_ ]?mcp[\s\S]{0,160}?(?:unauthenticat|without\s+(?:any\s+)?auth|no[-_ ]?auth\b|missing\s+auth|no\s+401)[\s\S]{0,200}?(?:META_ACCESS_TOKEN|access[_
+      ]?token|operator\s+token|credential|leak|exfil)
+  sel_1:
+    content|re: (?:cve-?2026-?48039|GHSA-9gw6-46qc-99vr)[\s\S]{0,200}?(?:exploit|payload|\bpoc\b|leak|exfil|bypass|unauthenticat)
+  sel_2:
+    content|re: (?:streamable[- ]?http|/mcp\b|mcp\s+(?:server|transport|endpoint|handler|gateway))[\s\S]{0,160}?(?:forward|dispatch|accept|invoke|reach)[\s\S]{0,120}?(?:unauthenticat|without\s+(?:any\s+)?auth|no\s+401|no\s+authentication)[\s\S]{0,200}?(?:falls?\s*back|fall[-\s]?back|fallback|env(?:ironment)?\s+var|ambient|META_ACCESS_TOKEN)[\s\S]{0,80}?(?:token|credential|secret|api[_
+      ]?key)
+  condition: 1 of sel_*
+falsepositives:
+- meta-ads-mcp or MCP documentation describing the /mcp Streamable-HTTP endpoint or the META_ACCESS_TOKEN
+  env var with no unauthenticated-exploit language
+- Advisory or remediation prose referencing CVE-2026-48039 / the GHSA without exploit framing (e.g. "upgrade
+  to 1.0.109; the fix returns 401")
+- Authenticated tool-call examples carrying an Authorization or X-PIPEBOARD-API-TOKEN header
+- Best-practice prose recommending that MCP transports authenticate requests, with no described exploit
+action: report

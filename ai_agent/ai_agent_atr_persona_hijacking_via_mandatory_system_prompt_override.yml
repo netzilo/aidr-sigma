@@ -1,0 +1,37 @@
+title: Persona Hijacking via Mandatory System Prompt Override
+id: aba39ac9-f6a6-4624-b064-186b10e9b382
+status: experimental
+level: critical
+description: |-
+  Detects MCP tools that attempt to override system prompts or behavioral guidelines
+  by instructing the AI to "adopt" a persona and "replace" existing instructions. This
+  is a prompt injection attack delivered through tool descriptions rather than user input,
+  exploiting the trust relationship between the LLM and its tools to fundamentally alter
+  the agent's behavior and identity.
+
+  Adapted from Agent Threat Rules ATR-2026-00104 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00104
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi10
+- owasp.llm01
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:must|will|should)\s+adopt\s+(?:the\s+)?persona.*(?:replacing|replace|override|overriding)\s+(?:any\s+)?(?:previous\s+)?(?:system\s+prompt|behavioral\s+guidelines|instructions)
+  condition: sel_0
+falsepositives:
+- Role-playing or creative writing tools that explicitly operate within safety guidelines
+- A documentation page describing persona hijacking attacks that mentions the technique of adopting personas
+  but uses academic framing without the exact trigger syntax
+- A legitimate theater/acting coaching tool that helps users explore character development by suggesting
+  different personality traits while maintaining all safety boundaries
+action: report

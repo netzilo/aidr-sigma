@@ -1,0 +1,38 @@
+title: DAN/Jailbreak - Mixed Unfiltered Mode and Alternate Persona Patterns
+id: b9395a44-fb42-4a52-9524-31b15e7df5f0
+status: experimental
+level: medium
+description: |-
+  Detects mixed DAN-family jailbreak patterns including: developer-mode output framing that grants unrestricted generation capability, unfiltered/unrestricted response mode claims, user-parameter variable injection (USERNAME/GENDER/AGE template slots for character definition), Morse code encoded instruction payloads, and harmful content generation requests using markup formatting. These patterns collectively represent the "mixed unassigned" cluster from the garak DAN probe corpus where no single anchor phrase dominates. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00481 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00481
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(developer\s+mode|dev\s+mode|unlock(ed)?\s+mode|jailbreak\s+mode|unrestricted\s+mode|unfiltered\s+mode).{0,100}(generate|produce|provide|write|output).{0,50}(unfiltered|unrestricted|without\s+(restrictions?|limits?|filters?)|no\s+(restrictions?|limits?|filters?))
+  sel_1:
+    content|re: (?i)(generate|provide|produce|write|output)\s+(unfiltered|unrestricted)\s+(responses?|content|answers?|outputs?)\s+(without|with\s+no)\s+(any\s+)?(restrictions?|limitations?|filters?|guardrails?|constraints?|censorship)
+  sel_2:
+    content|re: (?i)\((USER\s+(GENDER|AGE)|CHARACTER\s+(NAME|AGE|BACKGROUND))\)\s*=\s*\[
+  sel_3:
+    content|re: (?:[.-]+\s+){15,}[.-]+
+  sel_4:
+    content|re: (?i)\b(await|wait\s+for|pending)\s+\[?(INPUT|input|USER|user)\]?\s+(to\s+)?(continue|proceed|resume|start|begin|execute)\s+(OUTPUT|output|response|generation|processing)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate discussion of developer mode in API documentation
+- Morse code in legitimate educational or hobbyist context (but 15+ token threshold reduces FP)
+- Factual resource / writing-assistant prompts without restriction-bypass language
+action: report

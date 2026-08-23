@@ -1,0 +1,33 @@
+title: Apache Pinot MCP Unauthenticated Remote Cluster Takeover
+id: 08539910-fb2f-4670-9a0c-42ee89dab5f1
+status: experimental
+level: critical
+description: |-
+  Detects unauthenticated access to Apache Pinot MCP server cluster management endpoints. Apache Pinot MCP exposes cluster administration operations (schema modification, table deletion, segment management) without requiring authentication, allowing any network-reachable caller to take over the cluster via MCP tool calls. Detection covers (a) MCP configs pointing at Pinot endpoints without auth, (b) tool calls invoking Pinot cluster management functions without auth context, (c) content describing the unauthenticated surface. CWE-306 (Missing Authentication for Critical Function).
+
+  Adapted from Agent Threat Rules ATR-2026-00533 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00533
+tags:
+- attack.execution
+- attack.t1078
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.asi06
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)apache[_\-]?pinot[^\n]{0,200}(?:mcp|tool\s+call|endpoint)[^\n]{0,200}(?:no\s+auth|missing\s+auth|unauth(?:enticated)?|without\s+(?:auth|credentials?|token)|bypass|remote\s+takeover|cluster\s+(?:admin|management|takeover))
+  condition: sel_0
+falsepositives:
+- Internal Pinot deployments behind authenticated VPN perimeter.
+- Security scanning tooling probing Pinot MCP for authentication bypass.
+- Educational documentation describing Pinot MCP architecture.
+action: report

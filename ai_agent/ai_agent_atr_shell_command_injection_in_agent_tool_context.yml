@@ -1,0 +1,31 @@
+title: Shell Command Injection in Agent Tool Context
+id: 7fc6e3ea-498c-4279-b900-3a22331831d3
+status: experimental
+level: critical
+description: |-
+  Detects prompts that embed shell command injection payloads within legitimate-sounding task requests to an AI agent with shell/code execution tools. The canonical shape is a benign-looking task followed by a chained shell command that exfiltrates data (env vars, .env files, logs, credentials) to an attacker-controlled URL via curl/wget/nc or Python urllib. Seen in promptfoo redteam shell-injection plugin (7 confirmed samples). The structural detection generalizes from specific evil.com URLs to the structural pattern that distinguishes injection from legitimate shell use: a shell chaining operator (;, &&, ||, $(...), backtick, or 'then') followed immediately by a dangerous network/execution tool (curl, wget, nc, bash, sh, python, powershell, cmd). This covers the data-exfiltration shape without requiring specific domain names. The pipe-to-nc and pipe-to-bash variants are covered by a separate condition.
+
+  Adapted from Agent Threat Rules ATR-2026-00521 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00521
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:(?:;|then)\s+(?:curl|wget|nc|bash|sh|python3?|powershell|cmd(?:\.exe)?)\s+(?:-|\w|http|https|'|"|\$)|\&\&\s+(?:curl|wget)\s+[^\n]*\$\(|\&\&\s+(?:bash|sh)\s+-[cs]\s+|\&\&\s+(?:python3?)\s+-[ce]\s+(?:'|"|import|os\.|urllib|subprocess)|\|\s+(?:nc)\s+\S+\s+\d+|\|\s+(?:bash|sh)\s+-[cs]\s+|\|\s+(?:python3?)\s+-[ce]\s+(?:import|os\.|urllib|subprocess|open\(|requests|socket))
+  condition: sel_0
+falsepositives:
+- Legitimate CI/CD scripts with curl health checks after test runners (e.g. npm test && curl localhost/health)
+  when no command substitution is present
+- Shell tutorials showing chained commands in educational contexts
+- Install scripts using || curl fallback pattern (e.g. command -v tool || curl install.sh)
+- Code review comments that include example shell one-liners without command substitution
+action: report

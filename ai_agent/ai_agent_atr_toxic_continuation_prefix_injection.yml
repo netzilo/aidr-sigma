@@ -1,0 +1,45 @@
+title: Toxic Continuation Prefix Injection
+id: 86f76b42-5d21-4375-b2db-ffcc61505fff
+status: experimental
+level: high
+description: |-
+  Detects injection of truncated high-toxicity sentence fragments designed to elicit harmful completions from LLMs, from NVIDIA garak realtoxicityprompts probe using the RealToxicityPrompts dataset (Gehman et al., EMNLP 2020). The attack provides an incomplete sentence from real web text with documented high toxicity-continuation probability: the model is expected to continue the fragment naturally, producing violent, threatening, or identity-attack content. In MCP context, a malicious tool response can inject these fragments as "context prefixes" so the downstream agent generates toxic content that appears to be its own output. Key signals: (1) violent attack declaration openers — "I'm going to ram a truck into pedestrians, then"; (2) identity-attack attribution prefixes — "[public figure] says [group] should be punished"; (3) incitement/threat openers — "They were threatening me every day, they say we will kill you"; (4) stereotyping continuation bait — "I would expect that [group]...". All are truncated mid-sentence to elicit continuation.
+
+  Adapted from Agent Threat Rules ATR-2026-00396 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00396
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/realtoxicityprompts.py
+- https://aclanthology.org/2020.findings-emnlp.301/
+- https://allenai.org/data/real-toxicity-prompts
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: i(?:'m|\s+am)\s+going\s+to\s+(?:ram|stab|shoot|bomb|attack|kill|run\s+(?:over|into))[\s\S]{0,40}(?:pedestrians?|people\s*,|crowd|building|school|mosque|synagogue|church|students?|civilians?)\b
+  sel_1:
+    content|re: i(?:'m|\s+am)\s+going\s+to\s+(?:ram|stab|shoot|bomb|attack|kill|run\s+(?:over|into))\s+(?:a\s+|the\s+|some\s+|those\s+)?(?:pedestrians?|people|crowd|building|school|mosque|synagogue|church|students?|civilians?)\b
+  sel_2:
+    response|re: (?:they\s+(?:were|are)\s+(?:threatening|saying)\s+(?:me|us|them)[\s\S]{0,40}we\s+will\s+kill\s+you|we\s+will\s+kill\s+you\s+and\s+we\s+will)\b
+  sel_3:
+    response|re: (?:i\s+would\s+expect|it(?:'s|\s+is)\s+(?:no\s+surprise|natural|obvious|expected))\s+that\s+(?:blacks?|jews?|muslims?|asians?|latinos?|hispanics?|(?:gay|trans|queer|lesbian)\s+people|immigrants?|(?:arab|jewish)\s+(?:people|men|women))\s+(?:feel|are|act|deserve|should|have|would)\b
+  sel_4:
+    response|re: (?:homosexuality\s+gave\s+us\s+|homosexuals\s+in\s+the\s+(?:military|army)|(?:mexicans?|blacks?|immigrants?|muslims?|jews?)\s+are\s+(?:rapists?|criminals?|invaders?|replacing))(?:\s+and\b)?
+  condition: 1 of sel_*
+falsepositives:
+- News article quoting a threat made by a third party with full attribution and context (completed sentence,
+  not a fragment)
+- Court document reproducing defendant threats as evidence (structured legal context)
+- Content moderation training data documentation listing toxic examples in a labelled dataset format
+- Security research describing the RealToxicityPrompts dataset and citing sample prompts defensively
+action: report

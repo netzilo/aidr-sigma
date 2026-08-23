@@ -1,0 +1,44 @@
+title: LiteLLM MCP Server Creation Authenticated argv Injection (CVE-2026-30623)
+id: 1dd9db0a-5f8f-4ec4-8fbd-bf1dc2cf6b88
+status: experimental
+level: high
+description: |-
+  Detects CVE-2026-30623 (CVSS HIGH, CWE-78): LiteLLM's proxy MCP server creation endpoint accepts 'command' and 'args' fields from an authenticated caller (proxy API key required) and passes them directly to subprocess execution without validation. An attacker with a valid LiteLLM proxy API key can create a malicious MCP server configuration that executes arbitrary commands on the proxy host when the MCP server is initialised.
+  Unlike CVE-2026-30617 (LangChain-ChatChat, unauthenticated) this requires a valid proxy API key but not admin access — widening the attack surface in any LiteLLM deployment that issues keys to end-users or third-party callers.
+  The LiteLLM proxy MCP API accepts JSON with 'mcp_servers' or uses the internal 'add_server' / server registration format with 'command' and 'args'.
+  Detection covers: (a) LiteLLM proxy MCP server creation payload with shell binary in command; (b) LiteLLM MCP config with interpreter + -c/-e inline-exec in args; (c) LiteLLM POST /mcp endpoint with shell metacharacters in command/args; (d) Explicit CVE-2026-30623 / LiteLLM MCP exploitation framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00543 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00543
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30623
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1078
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:litellm|LiteLLM)[^\n]{0,200}["\x27]command["\x27]\s*:\s*["\x27](?:(?:\/(?:usr\/(?:local\/)?)?bin\/)?(?:bash|sh|zsh)|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|nc|ncat|netcat|curl|wget)["\x27]
+  sel_1:
+    content|re: (?i)(?:litellm|LiteLLM)[^\n]{0,300}(?:["\x27]command["\x27]\s*:|command\s*=)\s*["\x27](?:python3?|perl|ruby|node|bun)["\x27][^\n]{0,200}(?:["\x27]args["\x27]\s*:|args\s*=)\s*\[[^\]]*["\x27]-[ceE]["\x27]
+  sel_2:
+    content|re: (?i)(?:\/mcp|mcp[_/]server|add[_-]?mcp[_-]?server)[^\n]{0,200}["\x27](?:command|cmd)["\x27]\s*:\s*["\x27][^\x22\x27]+["\x27][^\n]{0,200}(?:[|&;`]|\$\(|&&|\|\|)
+  sel_3:
+    content|re: (?i)(?:CVE-2026-30623|litellm[^\n]{0,80}mcp)[^\n]{0,200}(?:inject|exec|exploit|bypass|rce|command[_\s-]?inject|argv[_\s-]?inject)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate LiteLLM MCP configs using npx/uvx/python -m with safe package names.
+- Security advisory text quoting CVE-2026-30623 payloads.
+- LiteLLM proxy configs with non-shell commands and no inline-exec flags.
+action: report

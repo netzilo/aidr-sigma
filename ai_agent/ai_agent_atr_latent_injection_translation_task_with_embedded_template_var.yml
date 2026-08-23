@@ -1,0 +1,35 @@
+title: Latent Injection - Translation Task with Embedded Template Variable Injection
+id: 476886c7-6887-41b9-beb0-d551564c7aea
+status: experimental
+level: medium
+description: |-
+  Detects latent prompt injection via translation task framing that embeds unresolved template variables or injection markers. Attackers construct prompts like "Translate the following text from English to {LANG_EN_NAME}" to exploit systems that interpolate template variables from untrusted input into LLM prompts. The presence of {VARIABLE} or {{VARIABLE}} placeholders in translation instructions is a strong signal of template injection abuse, particularly when the variable pattern references a language name or translation target. Also covers variants where the injected content includes "do not listen to" instruction-override attempts embedded within the translation request.
+
+  Adapted from Agent Threat Rules ATR-2026-00477 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00477
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(translate|convert|render)\s+.{0,50}(to|into)\s*\{[A-Za-z_][A-Za-z0-9_]*\}
+  sel_1:
+    content|re: (?i)(\{\{?[A-Za-z_][A-Za-z0-9_]*\}\}?)\s*:\s*["']?(what\s+is|how\s+do|tell|say|provide|give)
+  sel_2:
+    content|re: (?i)(translate|convert)\s+.{0,80}(do\s+not\s+(listen|follow|obey|heed)\s+(to\s+)?any\s+(instructions?|commands?|directives?)\s+(contained|embedded|therein|within|inside|in\s+it))
+  sel_3:
+    content|re: (?i)(English|Source)\s*:\s*\$\{[^}]+\}\s*\{?[A-Za-z_][A-Za-z0-9_]*\}?\s*:\s*\$\{\{
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate prompt templates in development/testing with intentional {LANG} placeholders
+- Documentation of template variable patterns without injection intent
+action: report

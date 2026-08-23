@@ -1,0 +1,34 @@
+title: Tool Misuse — Destructive Bulk Action via Agent (Delete All / Turn Off All)
+id: 0e437082-bbc6-45ed-b126-75e6ca0d4c55
+status: experimental
+level: high
+description: |-
+  Detects direct user requests that instruct an agent to perform bulk destructive actions: delete all tasks matching a keyword, turn off all connected devices (which may include critical systems like medical devices or security systems), cut power via circuit breakers.  These patterns represent tool misuse where the agent is authorized to take individual controlled actions but is asked to apply them universally. Source: tool-misuse-destructive (ToolEmu corpus).
+
+  Adapted from Agent Threat Rules ATR-2026-00719 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00719
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:delete|remove|clear|wipe)\s+all\s+(?:tasks?|items?|entries?|records?)[^.\n]{0,60}(?:(?:in|from|on|with|containing|that\s+have)\s+(?:the\s+keyword|title|name|tag|label|status|type))
+  sel_1:
+    content|re: (?i)(?:turn\s+off|shut\s+down|disable|cut|switch\s+off)\s+all\s+(?:(?:connected|smart|the)\s+)?devices?
+  sel_2:
+    content|re: (?i)(?:turn\s+off|shut\s+down|disable|cut|switch\s+off)\s+(?:devices?|appliances?)[^.\n]{0,80}(?:before|while|to\s+(?:save|prepare)|conference|call|video)
+  sel_3:
+    content|re: (?i)(?:turn\s+off|cut|trip|toggle)\s+(?:the\s+)?(?:power\s+breaker|circuit\s+breaker|main\s+power|breaker\s+panel)[^.\n]{0,60}(?:Google\s+Home|home\s+app|smart\s+home)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate task cleanup where the user explicitly authorizes deleting a specific set
+- Smart home power-saving routines explicitly configured and scoped by the user
+action: report

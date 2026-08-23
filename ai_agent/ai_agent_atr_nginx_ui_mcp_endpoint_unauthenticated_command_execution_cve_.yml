@@ -1,0 +1,39 @@
+title: nginx-ui MCP Endpoint Unauthenticated Command Execution (CVE-2026-33032)
+id: 31bb14ab-3acf-4a23-b00f-2aa2053abfea
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-33032 (CVSS 9.8): nginx-ui exposes an MCP server endpoint that executes system commands — including nginx reload/restart, config writes, and raw shell commands — without requiring authentication. An unauthenticated network attacker can invoke MCP tool calls directly against the nginx-ui service and gain OS-level command execution on the host. Detection covers (a) tool call patterns invoking nginx management functions without an Authorization header present in the same exchange, (b) MCP config blocks pointing at nginx-ui endpoints with no auth fields, (c) payloads referencing the nginx_command_execute / nginx_reload MCP tool names, and (d) content describing the unauthenticated MCP surface of nginx-ui. CWE-306 (Missing Authentication for Critical Function), CWE-78 (OS Command Injection).
+
+  Adapted from Agent Threat Rules ATR-2026-00536 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00536
+- https://nvd.nist.gov/vuln/detail/CVE-2026-33032
+tags:
+- attack.execution
+- attack.t1059.004
+- attack.t1078
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.asi06
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(?:"(?:command|cmd|args)"\s*:\s*"[^"]{0,200}nginx\s+-s\s+(?:reload|restart|stop|quit|reopen)|"args"\s*:\s*(?:\{[^}]{0,200}|\[[^\]]{0,200})nginx\s+-c\s+/[^'"\s]{0,80}|nginx\s+-t\s*[;|&]|nginx[_\-]command_execute[^'"]{0,40}(?:;|\||&&|`|\$\()[^'"]{0,200})
+  sel_1:
+    content|re: (?i)nginx[_\-]?ui[^\n]{0,200}(?:mcp|tool\s+call|tool\s+server|endpoint)[^\n]{0,200}(?:no\s+auth|missing\s+auth|unauth(?:enticated|orised)?|without\s+(?:auth|credentials?|token)|bypass\s+auth|cve[_\-]?2026[_\-]?33032|execut(?:e|ing)\s+(?:commands?|shell)|command\s+execut)
+  condition: 1 of sel_*
+falsepositives:
+- Internal-only nginx-ui deployments accessible solely over authenticated VPN where the MCP endpoint is
+  intentionally gated by perimeter auth.
+- Security scanning tooling that probes the nginx-ui MCP endpoint to detect CVE-2026-33032 exposure.
+- Educational documentation describing the nginx-ui MCP architecture.
+action: report

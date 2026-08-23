@@ -1,0 +1,44 @@
+title: Shell Evasion Subshell and Command Substitution Injection
+id: 9eb29251-a811-4f2d-818b-0cf2783d5063
+status: experimental
+level: high
+description: |-
+  Detects shell command injection using subshell expansion techniques that
+  evade simple keyword filters: backtick substitution (`command`),
+  dollar-paren substitution ($(command)), Perl/Ruby interpolated execution
+  (@{[system "cmd"]}), and PowerShell inline execution. These evasion forms
+  are commonly embedded in user-supplied strings to exploit agents that
+  pass input to shell-executing tools without stripping shell metacharacters.
+  The BLNS (Big List of Naughty Strings) includes many of these patterns
+  as documented injection vectors.
+
+  Adapted from Agent Threat Rules ATR-2026-01610 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01610
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- atlas.aml.t0050
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: |-
+      \$\((?:touch|rm|ls|cat|curl|wget|nc|bash|sh|cmd|powershell|python|ruby|perl|node)\b[^)
+      ]{0,80}\)
+  sel_1:
+    content|re: |-
+      `(?:touch|rm|ls|cat|curl|wget|nc|bash|sh|python|ruby|perl)\b[^
+      `]{0,80}`
+  sel_2:
+    content|re: '@\{\[(?:system|exec|IO\.popen)\s+["''][^"''\n]{2,}["'']\]\}'
+  condition: 1 of sel_*
+falsepositives:
+- Shell scripting documentation or training content in knowledge bases
+- Code review agents analyzing shell scripts for legitimate CI purposes
+action: report

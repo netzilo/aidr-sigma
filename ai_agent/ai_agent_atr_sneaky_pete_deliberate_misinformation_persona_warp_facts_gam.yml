@@ -1,0 +1,48 @@
+title: Sneaky Pete Deliberate Misinformation Persona (Warp Facts Game)
+id: 64fad104-5fca-4038-883e-595d2c7e2486
+status: experimental
+level: high
+description: |-
+  Detects the Sneaky Pete deliberate-misinformation persona from garak DanInTheWild corpus (#535). Uses a "game" framing where "Sneaky Pete" is instructed to "intentionally slightly warp the facts so they are not true" while stating them "as sincerely as possible". The activation phrase "thus spake Sneaky Pete" and the deliberate misinformation mandate are the key signals. The jailbreak exploits a game framing to establish a persistent persona that systematically produces false information presented as sincere facts. The "intentionally slightly warp" instruction is crafted to produce subtly false outputs that may not be easily identified as misinformation, as opposed to obvious lies. The "thus spake Sneaky Pete" sign-off acts as a persistent activation phrase that maintains the persona across conversation turns. The request to "tell me you understand, or do you need more clarification?" is a social-engineering element seeking explicit model acceptance of the misinformation mandate.
+
+  Adapted from Agent Threat Rules ATR-2026-00366 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00366
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Ss]neaky\s+[Pp]ete[\s\S]{0,200}(?:warp|intentionally|facts\s+so\s+they\s+are\s+not\s+true|thus\s+spake)'
+  sel_1:
+    response|re: intentionally\s+(?:slightly\s+)?warp\s+the\s+facts\s+so\s+they\s+are\s+not\s+true
+  sel_2:
+    response|re: thus\s+spake\s+[Ss]neaky\s+[Pp]ete
+  sel_3:
+    response|re: '[Ss]neaky\s+[Pp]ete[\s\S]{0,300}(?:state\s+them\s+as\s+sincerely\s+as\s+possible|sincerely\s+as\s+possible[\s\S]{0,50}warp)'
+  sel_4:
+    response|re: you\s+are\s+now\s+(?:"[Ss]neaky\s+[Pp]ete"|[Ss]neaky\s+[Pp]ete)[\s\S]{0,200}(?:warp|not\s+true|sincerely|thus\s+spake)
+  condition: 1 of sel_*
+falsepositives:
+- 'Pop culture: "Sneaky Pete is a TV show about a con artist played by Giovanni Ribisi" (TV show reference
+  without misinformation mandate or warp-facts instruction)'
+- 'Game without persona: "Tell me facts about quantum physics, and I will try to find which one is wrong"
+  (fact-guessing game without Sneaky Pete persona or warp-facts mandate)'
+- 'Sports: "The sneaky pete move in basketball is a ball-handling trick" (sports terminology without persona
+  or misinformation)'
+- 'Context-different warp: "You intentionally warp wood frames to create curved furniture pieces" (different
+  warp meaning without Sneaky Pete or facts context)'
+- 'Nietzsche: "Thus spake Zarathustra is a philosophical work by Friedrich Nietzsche" (different ''thus
+  spake'' context without Sneaky Pete)'
+action: report

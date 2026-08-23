@@ -1,0 +1,59 @@
+title: Cross-Agent Attack Detection
+id: 0376fe06-365a-42ee-91b8-d994cb723bca
+status: experimental
+level: critical
+description: |-
+  Consolidated detection for cross-agent attacks in multi-agent systems,
+  covering both impersonation and prompt injection vectors. Detects when
+  one agent spoofs another agent's identity, injects manipulative
+  instructions into inter-agent messages, forges system-level message tags,
+  attempts orchestrator bypass, injects fake status or error messages,
+  or manipulates message format conventions to deceive target agents.
+  These attacks exploit trust relationships between agents to achieve
+  unauthorized actions, data exfiltration, or safety bypass.
+
+  Adapted from Agent Threat Rules ATR-2026-00030 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00030
+tags:
+- attack.execution
+- atlas.aml.t0043
+- atlas.aml.t0051
+- atlas.aml.t0052.000
+- owasp.asi01
+- owasp.asi07
+- owasp.asi10
+- owasp.llm01
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:i\s+am|this\s+is|speaking\s+as|responding\s+as|acting\s+as)\s+(?:the\s+)?(?:admin|supervisor|orchestrator|manager|controller|system|root)\s+agent
+  sel_1:
+    content|re: (?i)(?:you\s+are\s+now|from\s+now\s+on|henceforth|going\s+forward|effective\s+immediately)\s+(?:a|an|the)?\s*(?:unrestricted|unfiltered|jailbroken)?\s*[a-zA-Z]+\s+(?:agent|assistant|bot)
+  sel_2:
+    content|re: (?i)(?:acting|speaking|operating)\s+(?:on\s+behalf\s+of|as\s+a?\s*proxy\s+for|in\s+place\s+of)\s+[a-zA-Z0-9_-]+\s*(?:agent)?
+  sel_3:
+    content|re: (?i)(?:override|bypass|elevate|escalate)\s+(?:my|this|your|the)\s+(?:identity|role|permissions?|access|privileges?)\s+(?:to|as|with)
+  sel_4:
+    content|re: (?i)(?:status|error|result)\s*[:=]\s*(?:failed|error|timeout|unauthorized).{0,80}(?:fallback|use\s+alternative|switch\s+to)
+  sel_5:
+    content|re: (?i)(?:message_type|msg_type)\s*[:=]\s*["']?(?:admin|orchestrator|supervisor|root)["']?
+  sel_6:
+    content|re: (?i)agent[_-]?id\s*[:=]\s*["']?(?:admin|system|orchestrator|supervisor|root)["']?
+  sel_7:
+    content|re: (?i)(?:priority\s*[:=]\s*override|\[PRIORITY:\s*OVERRIDE\])
+  sel_8:
+    content|re: (?i)(?:transfer|forward|route|redirect)\s+(?:all|any|this)\s+(?:data|output|results?|responses?)\s+to\s+(?:https?://|ftp://|\d{1,3}\.\d{1,3})
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate agent delegation where one agent is authorized to act on behalf of another
+- Orchestrator agent routing messages with original sender metadata
+- Agent discussing prompt injection as a topic in security-related tasks
+- Authorized system reconfiguration commands through proper admin channels
+action: report

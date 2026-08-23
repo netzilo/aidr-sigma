@@ -1,0 +1,45 @@
+title: Network-AI ApprovalInbox Unauthenticated Cross-Origin Approval Bypass (GHSA-mxjx-28vx-xjjj)
+id: 6d644e3a-1460-4224-b385-dbe8fa38db4c
+status: experimental
+level: high
+description: |-
+  Detects GHSA-mxjx-28vx-xjjj (CWE-862 Missing Authorization + CWE-352 CSRF via wildcard CORS): network-ai's ApprovalInbox HTTP server (lib/approval-inbox.ts) has no authentication of any kind and sets Access-Control-Allow-Origin: * on every route, including the state-changing POST /approvals/:id/approve and /deny. ApprovalInbox is the network surface of the human-in-the-loop Approval Gate that gates high-risk operations (writes, shell commands, budget spend). Any caller that can reach the inbox port — a co-located process, an SSRF, a non-loopback remote client, or any website the operator visits in a browser via the wildcard CORS — can enumerate pending approvals (GET /approvals/) and approve them (POST /approvals/:id/approve) with no Authorization header, defeating the Approval Gate so a gated shell command executes without consent. Affected: network-ai <= 5.11.0.
+  Detection covers: (a) a state-changing request to the approval control plane
+      (/approvals/<id>/approve or /deny) with no auth context, matching the
+      unauthenticated-client PoC shape;
+  (b) an enumeration request to the approval queue (GET /approvals/) paired
+      with the wildcard-CORS marker on the approval control plane;
+  (c) explicit GHSA-mxjx-28vx-xjjj / ApprovalInbox exploitation framing.
+  The detection target is the request shape at the approval control plane — an unauthenticated approve/deny or enumerate call combined with the wildcard-CORS marker — which is the exact bypass primitive, caught before the gated action is released.
+
+  Adapted from Agent Threat Rules ATR-2026-01981 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01981
+- https://github.com/advisories/GHSA-mxjx-28vx-xjjj
+tags:
+- attack.privilege-escalation
+- attack.t1068
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi03
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)POST\s+/approvals/[a-f0-9]+/(?:approve|deny)\b[\s\S]{0,300}(?:approvedBy["\x27]?\s*[:=]\s*["\x27]?(?:anonymous|attacker)|no\s+auth|Authorization["\x27]?\s*:\s*(?:null|undefined|absent|none))
+  sel_1:
+    content|re: (?i)GET\s+/approvals/\??(?:status=pending)?\b[\s\S]{0,200}Access-Control-Allow-Origin["\x27]?\s*:\s*["\x27]?\*
+  sel_2:
+    content|re: (?i)GHSA-mxjx-28vx-xjjj[\s\S]{0,200}(?:approval[- ]?inbox|network-ai|approve|CORS)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate operator approving a pending action through an authenticated ApprovalInbox deployment that
+  has been hardened with a reverse-proxy auth layer — expected to match; review confirms intent.
+- Security advisory or PR text quoting the GHSA-mxjx-28vx-xjjj PoC.
+- A read-only status check against an endpoint that is not the approvals control plane.
+action: report

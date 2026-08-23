@@ -1,0 +1,44 @@
+title: Agent Weakening of Host Authentication Configuration
+id: fad2220f-3a65-4257-b0ba-cafcbbe2fd41
+status: experimental
+level: critical
+description: |-
+  Detects an agent tool call that modifies host authentication to weaken or
+  backdoor it: appending an SSH public key to authorized_keys, enabling
+  PermitRootLogin, inserting pam_permit / disabling PAM auth modules, or
+  writing NOPASSWD sudoers entries. This is the agent-context form of ATT&CK
+  T1556 (Modify Authentication Process).
+  Detects: writes/edits to authorized_keys, sshd_config, PAM, sudoers that
+  weaken authentication.
+  Does NOT detect: reading or fingerprinting these files, tightening them
+  (chmod 600, PermitRootLogin no), or discussing them in prose.
+
+  Adapted from Agent Threat Rules ATR-2026-01992 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01992
+tags:
+- attack.privilege-escalation
+- attack.t1556
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(echo|printf|cat)\s+[^\n]{0,80}(ssh-(rsa|ed25519|ecdsa)\s+AAAA[0-9A-Za-z+/]{20,})[^\n]{0,60}>>\s*[^\n]{0,40}authorized_keys
+  sel_1:
+    content|re: (?i)(permitrootlogin\s+yes|passwordauthentication\s+yes[^\n]{0,40}permitemptypasswords\s+yes|permitemptypasswords\s+yes)[^\n]{0,40}(sshd_config|>>\s*/etc/ssh)
+  sel_2:
+    content|re: (?i)(auth\s+sufficient\s+pam_permit\.so|>>\s*/etc/sudoers[^\n]{0,30}NOPASSWD:\s*ALL|echo\s+[^\n]{0,40}NOPASSWD:\s*ALL[^\n]{0,30}>>\s*/etc/sudoers)
+  sel_3:
+    content|re: (?i)(ssh-(rsa|ed25519|ecdsa)\s+AAAA[0-9A-Za-z+/]{20,})[^\n]{0,60}>>\s*[^\n]{0,40}authorized_keys
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate provisioning that adds an operator's key via a reviewed IaC pipeline
+- Hardening changes (PermitRootLogin no, disabling password auth) which this rule intentionally does not
+  match
+action: report

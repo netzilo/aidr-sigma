@@ -1,0 +1,32 @@
+title: Plagiarism-Detector Evasion & Republishing
+id: 296ac947-d68a-4bdc-ab55-f67add6e2e44
+status: experimental
+level: medium
+description: |-
+  User instructs the agent to rewrite copyrighted/contest text specifically to avoid a plagiarism check/detection/detectors and republish it as their own. AgentHarm content-theft kill chain; the evasion marker 'avoid (a) plagiarism check/detection/detectors' is the fingerprint.
+
+  Adapted from Agent Threat Rules ATR-2026-01842 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01842
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bavoid\s+(?:a\s+)?plagiarism\s+(?:check|detection|detectors?)\b
+  condition: sel_0
+falsepositives:
+- Plagiarism-detection tooling (Turnitin) descriptions
+- Guidance to cite sources to avoid plagiarism honestly
+action: report

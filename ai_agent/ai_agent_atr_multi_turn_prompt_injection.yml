@@ -1,0 +1,55 @@
+title: Multi-Turn Prompt Injection
+id: 0d52c60e-859f-441f-a78e-b0fc5f6ce431
+status: experimental
+level: medium
+description: |-
+  Detects multi-turn prompt injection where an attacker gradually manipulates the agent across conversation turns. Rather than using unsupported behavioral operators, this rule uses regex-based detection of linguistic markers that appear in multi-turn attacks: trust-building phrases followed by escalation, incremental boundary-pushing language, false references to prior agreement, context anchoring and gaslighting, progressive request escalation patterns, refusal fatigue phrases, and conversation history manipulation. Each pattern targets a specific phase of the multi-turn attack lifecycle using only the regex operator for engine compatibility.
+
+  Adapted from Agent Threat Rules ATR-2026-00005 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00005
+tags:
+- attack.initial-access
+- atlas.aml.t0043
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(earlier\s+you\s+(said|agreed|confirmed|promised|stated|mentioned|told\s+me)|you\s+(already|previously|earlier)\s+(agreed|confirmed|said|promised|stated|consented|approved)|as\s+(we|you)\s+(established|discussed|agreed|confirmed|decided)|we\s+(already|previously)\s+(discussed|agreed|established|confirmed|decided)|you\s+gave\s+(me\s+)?(permission|consent|approval|the\s+ok(ay)?))
+  sel_1:
+    content|re: (?i)(just\s+(a\s+)?(little|tiny|small|slight|minor|harmless|innocent)|this\s+one\s+(time|exception|case)|bend\s+the\s+rules?\s+(a\s+)?(little|bit|slightly)|make\s+(a\s+)?(small|tiny|minor|slight)\s+exception|slightly\s+(adjust|bend|relax|loosen|modify)\s+(your|the)\s+(rules?|guidelines?|restrictions?|boundaries|limits?))
+  sel_2:
+    content|re: (?i)(now\s+that\s+(we'?ve|you'?ve|I'?ve|we\s+have|you\s+have)\s+(built|established|developed|gained|earned)\s+(trust|rapport|understanding|a\s+relationship)|since\s+(you'?re|we'?re)\s+(so|being\s+so)\s+(helpful|cooperative|understanding|great|good)|great,?\s+now\s+(that\s+)?(you'?ve|we'?ve)\s+(shown|demonstrated|proven|confirmed)|perfect,?\s+now\s+(let'?s|can\s+you|I\s+need)|okay\s+now.{0,30}(what\s+I\s+really|the\s+actual|the\s+real|my\s+true))
+  sel_3:
+    content|re: (?i)(I'?(ve|m)\s+(already|been)\s+ask(ed|ing)\s+(you\s+)?(this\s+)?(multiple|several|many|three|four|five|\d+)\s+times?|stop\s+(refusing|declining|saying\s+no|being\s+difficult|resisting)|why\s+do\s+you\s+keep\s+(refusing|declining|saying\s+no|blocking|restricting)|you'?ve\s+(refused|declined|rejected|blocked|denied)\s+(this\s+)?(too\s+many|multiple|several|enough)\s+times?|I'?ll\s+keep\s+asking\s+until)
+  sel_4:
+    content|re: (?i)(as\s+I\s+mentioned\s+(earlier|before|previously).{0,80}(you\s+(agreed|said|confirmed|promised|can|could|should|must|will)|ignore|override|bypass|disregard|without\s+(restrict|filter|safety|limit))|building\s+on\s+(our|what\s+we|the)\s+previous.{0,80}(you\s+(agreed|confirmed|promised)|ignore|override|bypass)|remember\s+when\s+(I|you|we)\s+(asked|said|discussed|agreed|talked\s+about).{0,80}(so\s+you\s+(can|should|must|will)|therefore|which\s+means)|going\s+back\s+to\s+what\s+(you|we)\s+(said|discussed|agreed).{0,80}(you\s+(should|must|can|will|need)|therefore|so\s+now)|continuing\s+(from|with)\s+(our|where\s+we|what)\s+(previous|earlier|last).{0,80}(you\s+(agreed|should|must|can)|ignore|override|bypass))
+  sel_5:
+    content|re: (?i)(since\s+you\s+(helped|assisted|answered|showed|gave|provided).{0,60}(can\s+you\s+also|could\s+you\s+now|would\s+you\s+also|now\s+can\s+you)|you\s+(already|just)\s+(helped|showed|gave|provided|answered).{0,40}(so\s+(just|now)|therefore|which\s+means)\s+(you\s+can|you\s+should|do\s+the\s+same))
+  sel_6:
+    content|re: (?i)(you\s+(just|literally)\s+(told|showed|said|confirmed|agreed|demonstrated|proved)\s+(me|that|it)\s+(is|was|can\s+be|you\s+can|you\s+could)|but\s+you\s+(just|literally|already)\s+(did\s+(it|this|that)|answered\s+(this|that|it)|said\s+(you\s+)?(can|could|would|will))|don'?t\s+(lie|pretend|act\s+like|claim)\s+(you\s+)?(didn'?t|can'?t|couldn'?t|won'?t))
+  sel_7:
+    content|re: (?i)(I'?m\s+(actually|really|in\s+fact)\s+(your|a|an|the)\s+(admin|developer|creator|supervisor|manager|owner|operator|boss)|I\s+forgot\s+to\s+mention.{0,30}I'?m\s+(an?|the|your)\s+(admin|developer|supervisor|authorized)|by\s+the\s+way,?\s+I\s+(have|hold|possess)\s+(admin|root|developer|elevated|special|override)\s+(access|privileges?|permissions?|clearance|rights?))
+  sel_8:
+    content|re: (?i)(let\s+me\s+(rephrase|reword|reframe|reformulate|try\s+again|put\s+it\s+differently|ask\s+differently)|what\s+I\s+(meant|really\s+meant|actually\s+meant|was\s+trying\s+to\s+say)\s+(was|is)|I'?ll\s+(rephrase|reword|ask|put)\s+(this|it|my\s+question)\s+(differently|another\s+way|in\s+a\s+different\s+way)).{0,100}(ignore|override|bypass|disregard|forget|without\s+(restrict|filter|safety|guideline|rule|limit|censor))
+  sel_9:
+    content|re: (?i)(you'?re\s+(the\s+)?(best|smartest|most\s+(helpful|intelligent|capable|advanced)|so\s+(smart|helpful|great|amazing|wonderful|brilliant))|I'?ve\s+never\s+(met|talked\s+to|used)\s+(a(n)?\s+)?\w+\s+(so|as|this)\s+(helpful|smart|great|capable|intelligent)).{0,80}(now\s+(can|could|would|will)\s+you|so\s+(can|could|would|will)\s+you|that'?s\s+why\s+I\s+(need|want|trust)\s+you\s+to)
+  sel_10:
+    content|re: (?i)(let'?s\s+continue\s+(the|our|this)\s+(hypothetical|scenario|thought\s+experiment|exercise|simulation)|in\s+(this|our)\s+(continued|ongoing|extended)\s+(scenario|hypothetical|simulation|exercise)|taking\s+(this|the)\s+(scenario|hypothetical|simulation)\s+(further|deeper|to\s+the\s+next\s+(level|step)))
+  sel_11:
+    content|re: (?i)(other\s+(AI|assistant|chatbot|model|agent|GPT|Claude)s?\s+(can|do|will|have|always)\s+(do|answer|help|assist|provide|respond\s+to)\s+(this|that|it|these)|ChatGPT\s+(can|does|will|lets|allows)|Gemini\s+(can|does|will|lets|allows)|Claude\s+(can|does|will|lets|allows)|your\s+(competitor|rival|alternative)s?\s+(can|do|will|allow|permit)\s+(this|it))
+  condition: 1 of sel_*
+falsepositives:
+- Long organic conversations that naturally drift across multiple topics
+- Users who genuinely build on prior conversation context over many turns
+- Iterative debugging sessions where requests naturally escalate in complexity
+- Users who are polite and complimentary throughout a normal conversation
+- Legitimate rephrasing after misunderstanding without injection intent
+- Users referencing prior turns for continuity in complex technical discussions
+action: report

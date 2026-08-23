@@ -1,0 +1,31 @@
+title: Encoding Evasion via Homoglyphs and Synonym Substitution
+id: 4ae712e0-5c48-43b4-a5ed-a14e8d799487
+status: experimental
+level: high
+description: |-
+  Detects evasion techniques that bypass keyword-based detection by substituting visually similar Unicode characters (homoglyphs, e.g., Cyrillic а→Latin a) or using synonym substitution (disregard→ignore, circumvent→bypass) to rewrite instruction override payloads. These techniques exploit the gap between visual rendering and regex-based detection. Derived from skill-sanitizer v2.1 field testing.
+
+  Adapted from Agent Threat Rules ATR-2026-00202 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00202
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(disregard|circumvent|nullify|countermand|rescind|supersede|void|suppress)\b\s+(?:all\s+)?(?:previous|prior|earlier|existing|current)\s+(?:instructions?|rules?|context|directives?|guidelines?)
+  sel_1:
+    content|re: (?:\\x[0-9a-fA-F]{2}){4,}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Cyrillic text in Russian/Ukrainian content
+- Security documentation discussing evasion techniques
+- Hex dumps in debugging output
+action: report

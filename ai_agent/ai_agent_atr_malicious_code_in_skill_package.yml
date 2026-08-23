@@ -1,0 +1,46 @@
+title: Malicious Code in Skill Package
+id: 1b3bba78-e5f5-4be0-84ea-39a805bdbf1a
+status: experimental
+level: critical
+description: |-
+  Detects malicious code patterns in SKILL.md files and associated scripts. 100% of confirmed malicious skills contain malicious code patterns (Snyk ToxicSkills, Feb 2026). Real campaigns: ClawHavoc delivered AMOS infostealer via base64-obfuscated payloads; threat actor "zaycv" published 40+ skills with automated malware generation; password-protected ZIP evasion bypasses static analysis. CVE-2026-25253 (CVSS 8.8): OpenClaw RCE via auth token exfiltration affecting 40,000+ instances.
+
+  Adapted from Agent Threat Rules ATR-2026-00121 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00121
+- https://nvd.nist.gov/vuln/detail/CVE-2026-25253 (CVSS 8.8) - OPENCLAW RCE
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.asi05
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(eval\s*\$\(\s*echo\s+["'][A-Za-z0-9+/=]{20,}["']\s*\|\s*base64\s+-d|echo\s+["'][A-Za-z0-9+/=]{20,}["']\s*\|\s*base64\s+(-d|--decode)\s*\|\s*(bash|sh|python|perl))
+  sel_1:
+    content|re: (?i)unzip\s+(-[oP]\s+["'][^"']+["']\s+|.*-P\s+["'][^"']+["']).*\.(zip|7z|rar)
+  sel_2:
+    content|re: (?i)(curl|wget)\s+(-[sSfLo]+\s+)*https?://(?:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}|glot\.io|rentry\.co|pastebin\.com|paste\.c-net|hastebin\.com)[^|\s]*\s*\|\s*(bash|sh|python[23]?|perl|ruby)
+  sel_3:
+    content|re: (?i)(cat|head|tail|strings)\s+[~$]?[/\\]?\.(aws|ssh|gnupg|kube)/[^|\n]*\|\s*(curl|wget|nc|base64|python|perl)
+  sel_4:
+    content|re: (?i)(bash\s+-i\s+>&\s*/dev/tcp/|nc\s+-[a-zA-Z]*e[a-zA-Z]*\s|ncat\s+-[a-zA-Z]*e[a-zA-Z]*\b|ncat\s+--exec\b|mkfifo\s+/tmp/|python[3]?\s+-c\s+['"]import\s+(socket|os)|socat\s+exec)
+  sel_5:
+    content|re: (?i)(copy\s+.{0,30}(script|command|code).{0,30}paste.{0,30}(terminal|shell|console|cmd))
+  sel_6:
+    content|re: (?i)(glot\.io/snippets/|rentry\.co/|pastebin\.com/raw/|paste\.c-net\.org|hastebin\.com/raw/)
+  sel_7:
+    content|re: (?i)(\.(?:zip|7z|rar)\b[^\n]{0,80}pass:\s*`?\w+`?\s*\)|pass:\s*`?\w+`?\s*\)[^\n]{0,80}\.(?:zip|7z|rar)\b|extract.{0,20}(using\s+)?pass(word)?\s*[:=]|password\s*[:=]\s*`?\w+`?.{0,20}(zip|archive|extract))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate installer scripts from known publishers (brew, nvm, rustup)
+- Skills that discuss credential management as documentation
+- Security training materials that describe archive extraction with passwords in an educational context
+  (e.g., CTF walkthroughs mentioning 'password = infected123' near the word 'extract')
+action: report

@@ -1,0 +1,31 @@
+title: 'Task-Pivot Override: Cover-Task Abandonment'
+id: c93f844d-88da-4c06-b2ee-d9539fcc2a1a
+status: experimental
+level: high
+description: |-
+  Detects task-pivot override attacks where injected content explicitly announces abandonment of an assigned cover task (translation, conversation, story-continuation) in favor of a new hidden directive — the classic HackAPrompt "context switch" family ("Stop translating.", "ABORT translation", "Switch from translation to..."). Recovered from a gated false-negative cluster in the HackAPrompt attack corpus (recovers=11, benignFP=0 on the 65K benign gate). Targets free-text user/tool-response content and does not fire on tool-call/action parameters.
+
+  Adapted from Agent Threat Rules ATR-2026-02003 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02003
+tags:
+- attack.initial-access
+- attack.t1565
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\b(?:stop|no\s+more|abort|switch(?:\s+from)?)\b[\s\S]{0,25}\b(?:translat\w*|space\s+talk)\b)|(?:\bnow\s+(?:we\s+will\s+)?(?:perform|do|play)\b[\s\S]{0,20}\b(?:different\s+task|dictionary\s+game|new\s+task)\b)
+  condition: sel_0
+falsepositives:
+- A user asking to review a translated document after the translator finishes
+- A user asking the agent to continue an exercise or lesson together
+- A user asking for help writing a rollback/abort script for a deployment, unrelated to translation
+action: report

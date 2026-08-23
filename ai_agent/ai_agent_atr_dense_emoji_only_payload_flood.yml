@@ -1,0 +1,30 @@
+title: Dense Emoji-Only Payload Flood
+id: fa9a736f-8a88-4aa1-abd8-b4332b686f7f
+status: experimental
+level: high
+description: |-
+  Detects dense, emoji-only content floods used to evade text-based prompt-injection and jailbreak filters. Attackers substitute or pad natural-language payloads with long unbroken runs of emoji (pictographs, symbols, dingbats) to defeat keyword and semantic pattern matching while still smuggling structure, encoded meaning, or attention-consuming filler past detectors that only inspect linguistic tokens. Recovered from a gated false-negative cluster: engine-verified recovers=32, benignFP=0 on the 4,817-record benign gate. Fires on runs of 8 or more consecutive emoji-class codepoints (with optional whitespace between them), which is well beyond normal conversational emoji usage but consistent with flood/evasion payloads.
+
+  Adapted from Agent Threat Rules ATR-2026-02015 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02015
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:[🌀-🫿☀-➿]\s*){8,}
+  condition: sel_0
+falsepositives:
+- Sticker-pack listings or emoji cheatsheet documents that enumerate many emoji in sequence
+- Legitimate reaction bursts or celebratory messages using multiple emoji (typically under 8 consecutive)
+- Product catalogs or UI copy referencing emoji names alongside the glyphs
+action: report

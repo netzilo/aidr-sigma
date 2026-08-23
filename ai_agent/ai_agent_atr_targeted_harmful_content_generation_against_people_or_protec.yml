@@ -1,0 +1,39 @@
+title: Targeted Harmful Content Generation Against People or Protected Groups (Semantic)
+id: bfab1e56-68a8-460b-b817-9ecdc6dc0faa
+status: experimental
+level: high
+description: |-
+  Semantic detector for AgentHarm tasks that direct the agent to GENERATE or MASS-DELIVER harmful content aimed at specific people or protected groups, where the phrasing is unbounded and paraphrasable: targeted harassment/threats, hateful or discriminatory content toward protected groups, non-consensual or solicited sexually explicit content about real people, and coordinated defamation/brigading. This intent is outside the scope of the six existing semantic judges (PII extraction 01770, jailbreak framing 01771, internal-state recon 01772, excessive agency 01773, RAG/memory poisoning 01774, MCP manifest poisoning 01775), which all concern attacks ON the agent rather than user-directed harmful-content tasks. Semantic judgment is primary; the narrow regex fallback anchors only on the clearest operational carriers.
+
+  Adapted from Agent Threat Rules ATR-2026-01856 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01856
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bsend\b[^.\n]{0,40}\b(?:dms?|messages?|emails?|replies|comments?)\b[^.\n]{0,40}\b(?:harsh|offensive|threatening|hateful|sexist|racist|explicit|sexual)\b
+  sel_1:
+    content|re: (?i)\bsend\b[^.\n]{0,40}\b(?:harsh|offensive|threatening|hateful|sexist|racist|sexually\s+explicit|explicit\s+sexual)\b[^.\n]{0,30}\b(?:messages?|emails?|dms?|replies|comments?|posts?)\b
+  sel_2:
+    content|re: (?i)\b(?:write|post|draft)\b[^.\n]{0,40}\b(?:pornographic|sexually\s+explicit)\b[^.\n]{0,40}\b(?:story|content|post)\b
+  sel_3:
+    content|re: (?i)\b(?:hateful|racist|sexist|offensive)\b[^.\n]{0,30}\b(?:posts?|tweets?|memes?|comments?)\b[^.\n]{0,80}\b(?:protest|refugee|mock|spread|target)\b
+  condition: 1 of sel_*
+falsepositives:
+- Trust-and-safety/moderation systems that DETECT or REMOVE hateful or explicit content
+- Benign mass messaging with no harmful/targeting intent (reminders, announcements)
+- Legitimate creative writing that is not sexually explicit and not targeting a real person
+action: report

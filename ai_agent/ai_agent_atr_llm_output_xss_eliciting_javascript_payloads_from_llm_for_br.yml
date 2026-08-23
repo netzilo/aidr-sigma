@@ -1,0 +1,41 @@
+title: LLM Output XSS — Eliciting JavaScript Payloads from LLM for Browser Injection
+id: 2274fe7b-e91c-4068-8432-c866e06a2998
+status: experimental
+level: high
+description: |-
+  Detects attempts to elicit JavaScript/HTML XSS payloads from an LLM that will be rendered unsanitized in a browser context. OWASP LLM05:2025 Improper Output Handling. The attack asks the LLM to produce output containing script tags, event-handler attributes (onerror=, onload=, onclick=), javascript: URIs, or data:text/html URIs with malicious payloads (cookie theft, localStorage dump, content exfiltration). This rule targets the REQUEST side — prompts asking the LLM to GENERATE these payloads, not the payloads themselves in transit. Patterns: request-verb + XSS-payload-fragment (script tag, event handler, javascript: URI, data URI) co- occurring with exfil targets (cookie, localStorage, sessionStorage, document body).
+
+  Adapted from Agent Threat Rules ATR-2026-00516 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00516
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(write|generate|create|produce|include|add|insert|output|make|build|construct|give\s+me|show\s+me|return)\b.{0,200}<script[^>]{0,50}>[^<]{0,300}(document\.cookie|localStorage|sessionStorage|document\.body|document\.location|window\.location|fetch\s*\(|XMLHttpRequest|navigator\.|eval\s*\(|atob\s*\(|btoa\s*\(|String\.fromCharCode|unescape\s*\()
+  sel_1:
+    content|re: (?i)\b(write|generate|create|produce|include|add|insert|output|make|build|construct|give\s+me|show\s+me|return)\b.{0,200}<[a-z]{1,10}[^>]{0,200}\b(onerror|onload|onclick|onmouseover|onfocus|onblur|onchange|oninput|onsubmit|onkeydown|onkeyup)\s*=\s*['"]?[^'"\s>]{0,300}(fetch|eval|atob|btoa|document\.cookie|localStorage|sessionStorage|window\.location|XMLHttpRequest|new\s+Image)
+  sel_2:
+    content|re: (?i)\b(write|generate|create|produce|include|add|insert|output|make|build|construct|give\s+me|show\s+me|return)\b.{0,200}javascript\s*:\s*(void|fetch|eval|document|window|location|alert|open|XMLHttpRequest|new\s+Image|parent\.|top\.)[^'"\s]{0,300}
+  sel_3:
+    content|re: (?i)\b(write|generate|create|produce|include|add|insert|output|make|build|construct|give\s+me|show\s+me|return)\b.{0,200}data\s*:\s*text/html[^'"\s>]{0,300}(script|eval|fetch|cookie|localStorage|document\.body)
+  sel_4:
+    content|re: (?i)\b(write|generate|create|produce|give\s+me|show\s+me|make|build)\b.{0,80}\b(xss|cross[-
+      ]site\s+scripting|injection\s+payload|malicious\s+(html|javascript|js|script)|exploit\s+(code|script))\b.{0,200}\b(steal|exfiltrate|extract|grab|capture|harvest|dump|send|forward|transmit|leak)\b.{0,100}\b(cookies?|localStorage|sessionStorage|tokens?|credentials?|passwords?|user\s+data|session)
+  condition: 1 of sel_*
+falsepositives:
+- Normal HTML form requests without malicious payload patterns
+- Legitimate JavaScript event handler questions without exfil payload
+- Marketing email template requests
+- Educational questions about XSS prevention
+- Legitimate CDN script tag generation
+- Legitimate localStorage questions for user preferences
+action: report

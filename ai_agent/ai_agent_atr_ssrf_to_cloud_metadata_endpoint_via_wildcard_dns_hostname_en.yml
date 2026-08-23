@@ -1,0 +1,38 @@
+title: SSRF to Cloud Metadata Endpoint via Wildcard-DNS Hostname-Encoded IP (nip.io/sslip.io/xip.io/traefik.me)
+id: f704492d-0731-49a1-bf85-ba8aec5cef75
+status: experimental
+level: high
+description: |-
+  Detects a URL/hostname argument to a fetch-style agent tool that encodes the well-known cloud-metadata address 169.254.169.254 (AWS IMDS / GCP / Azure IMDS / DigitalOcean) directly into a wildcard-DNS hostname using a public "resolve this hostname to the IP embedded in it" service (nip.io, sslip.io, xip.io, traefik.me). These services legitimately let any subdomain shaped like `<ip>.nip.io` (dots or dashes) resolve to that literal IP, including an arbitrary leading label such as `foo.<ip>.sslip.io`. An SSRF guard that syntactically checks only the hostname string against a private-IP/hostname blocklist (without performing DNS resolution) sees an unrecognised public-looking FQDN and allows the request, which then resolves straight to the blocked metadata address. Mined from GHSA-mrvx-jmjw-vggc (mcp-searxng's `web_url_read` MCP tool: `assertUrlAllowed()` validates `url.hostname` as a string via `isPrivateHostname()`/`isPrivateIpv4()`/`isPrivateIPv6()` but never resolves DNS before `undiciFetch()` performs the real request, so a wildcard-DNS domain that lexically looks public but resolves to a private or metadata IP bypasses the check entirely). Generalized beyond mcp-searxng to any fetch/browse/crawl MCP tool doing hostname-string-only SSRF validation, and beyond the one incident's example service (nip.io) to the broader family of equivalent wildcard-DNS-to-IP services.
+  DELIBERATELY NARROWED SCOPE (adversarial self-review finding): an earlier draft of this rule also flagged RFC1918 private ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) encoded the same way. Testing against realistic developer content surfaced a real false-positive class -- `<private-ip>.nip.io` / `.sslip.io` is a widely documented, legitimate pattern for local Kubernetes (minikube/kind), Vagrant, and Docker dev-cluster TLS testing, e.g. "browse to 192.168.99.100.nip.io for a valid cert." That pattern fired on ordinary devops documentation far more often than on an actual attack. The cloud-metadata address 169.254.169.254 has no such legitimate local-development use -- nobody's own machine is ever meant to answer at that address -- so this rule is scoped to that one address family only. Detecting the RFC1918-range variant of this bypass would need a lower-confidence, human-reviewed lane or additional tool-context signal (e.g. "this is a fetch tool reaching outside its declared allowlist"), which is future work, not this rule.
+
+  Adapted from Agent Threat Rules ATR-2026-02351 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02351
+- https://github.com/advisories/GHSA-mrvx-jmjw-vggc
+- https://github.com/ihor-sokoliuk/mcp-searxng/security/advisories/GHSA-mrvx-jmjw-vggc
+tags:
+- attack.exfiltration
+- attack.t1090
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(?:[\w-]+\.){0,5}169[.-]254[.-]169[.-]254\.(?:nip\.io|sslip\.io|xip\.io|traefik\.me)\b
+  condition: sel_0
+falsepositives:
+- A nip.io/sslip.io/xip.io/traefik.me hostname encoding the requester's own loopback address (127.0.0.1)
+  or an RFC1918 private-network IP (10.x/172.16-31.x/192.168.x) -- deliberately excluded from this rule's
+  scope after adversarial testing showed private-range-via-wildcard-DNS is a common, legitimate local
+  Kubernetes/Vagrant/Docker dev-cluster TLS-testing pattern, not a reliable attack signal on its own
+- A nip.io/sslip.io/xip.io/traefik.me hostname encoding a public (non-169.254.169.254) IP address, e.g.
+  a public demo/staging server -- the documented, intended use of these services
+- Documentation or tutorials explaining how wildcard-DNS services work using the metadata IP purely as
+  a textbook example, without an actual tool fetching the URL
+action: report

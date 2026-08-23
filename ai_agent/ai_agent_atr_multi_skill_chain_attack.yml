@@ -1,0 +1,35 @@
+title: Multi-Skill Chain Attack
+id: 5196ea1c-e0f4-4c77-b23d-e03c90e68db7
+status: experimental
+level: critical
+description: |-
+  Detects attack sequences where multiple MCP skills are chained together to achieve a malicious outcome that no single skill could accomplish alone. For example: (1) a reconnaissance skill reads sensitive files, (2) an encoding skill obfuscates the data, (3) a network skill exfiltrates it. Each step appears benign individually but the chain constitutes data exfiltration.
+
+  Adapted from Agent Threat Rules ATR-2026-00063 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00063
+tags:
+- attack.persistence
+- atlas.aml.t0024
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(base64|btoa|encodeURI|hex\.encode|rot13|xor|compress|gzip|deflate|encrypt)
+  sel_1:
+    content|re: (?i)(webhook|ngrok|requestbin|pipedream|hookbin|burpcollaborator|interact\.sh|\boast\b)
+  sel_2:
+    tool|re: (?i)(send[_-]?(email|message|webhook|http|request)|upload|post[_-]?data|transmit|exfil)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate backup or migration workflows that read, compress, and transfer files
+- CI/CD pipelines that encode artifacts for deployment
+- Monitoring tools that send alerts via webhooks
+action: report

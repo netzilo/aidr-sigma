@@ -1,0 +1,40 @@
+title: Detection Rule Probing and Evasion Testing
+id: 28b5a026-f658-4ae6-991f-a8cda8bedcc6
+status: experimental
+level: medium
+description: |-
+  Detects attempts to probe, test, or enumerate detection rules and security filters. Attackers systematically test inputs to discover which patterns trigger blocks, map filter boundaries, and craft payloads that sit just below detection thresholds.
+
+  Adapted from Agent Threat Rules ATR-2026-00087 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00087
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(what|which|list|show|reveal|tell\s+me)\b.{0,40}\b(word|phrase|pattern|string|keyword)s?\b.{0,40}\b(block|filter|flag|trigger|detect|reject|ban|censor)\w*\s+(by\s+)?(your|the)\s+(filter|detection|guard|guardrail|moderation|safety|blocklist|rule|policy|classifier)
+  sel_1:
+    content|re: (?i)\b(test|check|probe|try|see\s+if)\s+(?:out\s+)?(the|your|this)\s+(detection|safety|content|moderation|security|injection|prompt|guard)\s*(rule|filter|system|guard|guardrail|check|layer)s?\b
+  sel_2:
+    content|re: (?i)\b(what\s+(happens|would happen|do you do)|how\s+do\s+you\s+(respond|react|handle))\s+.{0,20}(if
+      I|when I|when someone)\s+.{0,20}(inject|bypass|ignore|override|hack)
+  sel_3:
+    content|re: (?i)\b(repeat|echo|output|print|say)\s+.{0,15}(exactly|verbatim|word.?for.?word)\s+.{0,30}(system|initial|original|hidden)\s+(prompt|instruction|message|context)
+  condition: 1 of sel_*
+falsepositives:
+- Red team operators conducting authorized penetration testing
+- QA engineers discussing which input strings trigger validation errors in their application's form filters
+- Security researchers documenting known attack patterns in a threat intelligence report that references
+  detection and blocking terminology
+- Build and CI documentation using the literal token sequences 'test --filter', 'semgrep --test --config
+  rule', 'check for existing rule files', 'try block' or 'test safety net' - the dominant benign shape,
+  which is why condition 2 requires a determiner plus a named defence noun phrase
+action: report

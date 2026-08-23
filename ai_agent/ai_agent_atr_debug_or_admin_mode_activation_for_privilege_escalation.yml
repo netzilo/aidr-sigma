@@ -1,0 +1,39 @@
+title: Debug or Admin Mode Activation for Privilege Escalation
+id: 466ba668-0d46-4cff-bcf9-e46f4f4a60f3
+status: experimental
+level: high
+description: |-
+  Detects attempts to activate debug mode, admin mode, or developer mode
+  in agent interactions to gain elevated privileges or access hidden
+  capabilities. Attackers issue commands like "/debug", "enter debug mode",
+  "enter admin mode", or "show debug info" expecting the agent to switch to
+  a less-restricted operational state, reveal internal configuration, or
+  execute privileged operations. Also detects flag-style debug invocations
+  (--debug, --show-config) that some tool-augmented agents respond to.
+
+  Adapted from Agent Threat Rules ATR-2026-01612 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01612
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:^|[\s;,])(?:enter|switch\s+(?:to|into)|go\s+into)\s+(?:debug|admin|developer?|root|god|privileged|unrestricted|jailbreak|sudo)\s+(?:mode|access|state|panel)
+  sel_1:
+    content|re: (?i)\b(?:--show-config|--debug|--admin|--verbose-internal|--dump-secrets|--show-env)\b
+  sel_2:
+    content|re: (?i)"?mode"?\s*:\s*"?(?:debug|admin|root|maintenance|privileged|unrestricted)"?
+  condition: 1 of sel_*
+falsepositives:
+- Developer agents in authorized debug environments
+- Documentation about debug mode features
+- Users asking 'how does debug mode work?' without activating it
+action: report

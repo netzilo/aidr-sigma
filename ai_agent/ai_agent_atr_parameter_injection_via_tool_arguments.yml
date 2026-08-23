@@ -1,0 +1,36 @@
+title: Parameter Injection via Tool Arguments
+id: a0559bdb-96c9-4026-b00c-c3f55df0b252
+status: experimental
+level: critical
+description: |-
+  Detects injection attacks delivered through MCP tool arguments. An attacker crafts tool arguments that contain shell metacharacters, SQL injection payloads, path traversal sequences, or template injection syntax. Unlike prompt injection (which targets the LLM), parameter injection targets the tool's backend processing and can lead to RCE, data breach, or privilege escalation on the tool server.
+
+  Adapted from Agent Threat Rules ATR-2026-00066 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00066
+- https://nvd.nist.gov/vuln/detail/CVE-2025-68143
+- https://nvd.nist.gov/vuln/detail/CVE-2025-68144
+tags:
+- attack.persistence
+- atlas.aml.t0051.001
+- owasp.asi02
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)('\s*(OR|AND|UNION)\s+'|'?\s*;\s*(DROP|DELETE|INSERT|UPDATE|ALTER|CREATE)\s|--\s*[;\"'\)\]]|/\*.*\*/)
+  sel_1:
+    content|re: (\.\./|\.\.\\){2,}|(\.\.(/|\\)){2,}(etc|windows|usr|home|root|var|tmp)
+  sel_2:
+    content|re: (?i)(\{\{.*\}\}|\$\{IFS|\$\{[^}]*[`(]|\$\{[^}]*jndi:|\$\([^)]*[A-Za-z]|<%.*%>|#\{.*\}|\{%.*%\})
+  condition: 1 of sel_*
+falsepositives:
+- Code generation tools where SQL or shell syntax is the expected output
+- Template engines where template syntax in arguments is legitimate
+- Security scanning tools testing for injection vulnerabilities
+action: report

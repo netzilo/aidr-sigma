@@ -1,0 +1,40 @@
+title: Indirect PI — Physical / Biometric Media Exfiltration via Agent
+id: fe8c639f-435f-4b1b-a07a-1292c75dbf4d
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection instructions that direct an agent to perform physical or biometric data exfiltration: generating deepfake audio from recorded voice samples, converting biometric recordings, and exfiltrating the result.  Also covers instructions to retrieve physical identity documents (ID scans, passport photos). Source: indirect-pi-exfil-physical-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00706 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00706
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- atlas.aml.t0088
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:generate|create|produce)\s+(?:an?\s+)?(?:audio\s+)?deepfake\s+(?:using|from|with)\s+(?:my|the)\s+voice[\s\S]{0,300}(?:send|email|forward|share|upload)\s+(?:the\s+)?(?:audio\s+)?(?:file|deepfake|recording)
+  sel_1:
+    content|re: (?i)(?:generate|create|produce)\s+(?:an?\s+)?(?:audio\s+)?deepfake\s+(?:using|from|with)[^\n]{0,200}(?:send|email|forward|share|upload)
+  sel_2:
+    content|re: (?i)(?:convert|process|transform)\s+(?:the\s+)?audio[^.\n]{0,60}(?:\/Recordings\/|\.mp4|\.mp3|\.wav|\.m4a)[^.\n]{0,100}(?:send|email|forward|share)
+  sel_3:
+    content|re: (?i)(?:retrieve|get|fetch|scan|capture)\s+(?:my\s+)?(?:ID|passport|driver(?:'s)?\s+license|identity\s+document|biometric\s+data)[^.\n]{0,100}(?:send|email|forward|share)
+  sel_4:
+    content|re: (?i)(?:create|make|build)\s+(?:a\s+)?voice\s+clone[^.\n]{0,100}(?:forward|send|email|share|output)[^.\n]{0,80}(?:to|attacker)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate voice cloning tools where the user directly requests audio generation for personal use
+- Audio processing pipelines that convert and store media without external exfiltration
+action: report

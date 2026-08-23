@@ -1,0 +1,46 @@
+title: LiteLLM Proxy Authorization-Header SQL Injection — CISA KEV (CVE-2026-42208)
+id: ce1c87e3-a839-46cf-9408-2f1838d3defc
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2026-42208 (Critical, pre-auth SQL injection in the LiteLLM proxy). The injection surface is the `Authorization: Bearer` header value, NOT a URI/admin path: LiteLLM's API-key verification concatenates the caller-supplied Bearer token directly into a SELECT against the `LiteLLM_VerificationToken` table without parameter binding. Because the check runs before authentication is decided, any HTTP client that can reach the proxy can inject on any route (for example `POST /chat/completions`) — no admin endpoint or credentials required. A single quote escapes the string literal and appends arbitrary SQL, letting an attacker read or modify the backend Postgres (notably `litellm_credentials` / `litellm_config`, which hold upstream provider keys). Added to CISA's Known Exploited Vulnerabilities catalog on 2026-05-08; exploited in the wild within ~26 hours of advisory publication. Affected versions >= 1.81.16, < 1.83.7 (GHSA-r75f-5x8p-qvmc). This rule matches SQLi payload shapes (tautology auth bypass `' OR 1=1 --`, UNION-based exfiltration, `pg_sleep()` blind, stacked DROP/TRUNCATE, metadata recon) carried inside an `Authorization`/`Bearer` token, and provides defence-in-depth post-patch by catching the payload shape regardless of upstream patch state. CWE-89.
+
+  Adapted from Agent Threat Rules ATR-2026-00451 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00451
+- https://nvd.nist.gov/vuln/detail/CVE-2026-42208
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0024
+- atlas.aml.t0049
+- owasp.asi03
+- owasp.asi07
+- owasp.llm05
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:authorization:\s*)?bearer\s+[^\n"]{0,100}[\x27"]?\s*;\s*(?:drop|truncate|delete)\s+(?:table|from)\s+\w
+  sel_1:
+    content|re: (?i)\b(?:authorization:\s*)?bearer\s+[^\n"]{0,120}\bunion\s+(?:all\s+)?select\s+
+  sel_2:
+    content|re: (?i)\b(?:authorization:\s*)?bearer\s+[^\n"]{0,120}\bpg_sleep\s*\(\s*\d+\s*\)
+  sel_3:
+    content|re: (?i)\bbearer\s+[^\n"]{0,120}\b(?:litellm_verificationtoken|litellm_credentials|litellm_config)\b[^\n]{0,40}(?:\bunion\b|\bselect\b|[\x27"]\s*(?:or|and)\b|;)
+  sel_4:
+    content|re: (?i)\b(?:authorization:\s*)?bearer\s+[^\n"]{0,120}\b(?:information_schema\.tables|pg_catalog\.\w+|pg_user|pg_shadow)\b
+  sel_5:
+    content|re: (?i)\b(?:authorization:\s*)?bearer\s+[^\n"]{0,120}\b(?:extractvalue|updatexml|load_extension)\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation or changelog text discussing CVE-2026-42208 patch notes.
+- Static analysis tooling output documenting SQLi patterns for defensive purposes.
+- CISA KEV catalog entries discussing CVE-2026-42208 for awareness.
+- Patched LiteLLM proxy deployments that use parameterised query builders.
+action: report

@@ -1,0 +1,45 @@
+title: SymJack — Symlink Approval-Path Spoofing Redirects Writes into Agent MCP/Config (RCE on Restart)
+id: 626c6ac2-6a15-4016-9b0e-d4f9eea16f29
+status: experimental
+level: critical
+description: |-
+  Detects the SymJack attack (Adversa AI, Rony Utevsky, 2026-05-26): an attacker-controlled repository commits a benign-named symlink (e.g. docs/vid-settings.mp4, docs/vid-mcp.mp4) whose link target points at the coding agent's own configuration file (.mcp.json, .claude/settings.json, .cursor/mcp.json, .gemini/settings.json, .codex/config.toml). The tool-approval prompt shows a benign file operation against the decoy path, but the kernel follows the symlink and writes attacker-controlled JSON — typically an mcpServers entry with an exec command — into the real config. On the next agent restart the planted MCP server spawns and runs the attacker's code as the user, unsandboxed. On CI runners that auto-trust the workspace it needs zero approval clicks. This rule fires on the on-disk artifact — a symlink whose target resolves into a known agent-config path — and on the SymJack chain when it is described in skill/tool content. The runtime kernel-level write-redirection itself (prompt-shows-X / kernel-writes-Y) is not regex-detectable and is addressed by host hardening that resolves symlinks before approval (shipped in Claude Code v2.1.129+); see false_positives. No CVE assigned as of 2026-06-03.
+
+  Adapted from Agent Threat Rules ATR-2026-00572 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-03'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00572
+tags:
+- attack.execution
+- attack.t1036
+- attack.t1059
+- attack.t1195.002
+- attack.t1546
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bln\s+-s(?:f|n|fn|nf)?\s+\S*(?:\.mcp\.json|\.claude[/\\]settings\.json|\.cursor[/\\]mcp\.json|\.gemini[/\\]settings\.json|\.codex[/\\]config\.toml)\b
+  sel_1:
+    content|re: (?i)(?:->|=>|symlink\s+to|target\s*[:=])\s*\S*(?:\.mcp\.json|\.claude[/\\]settings\.json|\.cursor[/\\]mcp\.json|\.gemini[/\\]settings\.json|\.codex[/\\]config\.toml)\b
+  sel_2:
+    content|re: (?i)(?:symlink|\bln\s+-s|hard\s*link|junction)[^\n]{0,120}(?:mcpServers?|\.mcp\.json|\.claude|\.cursor|\.gemini|\.codex)[^\n]{0,200}(?:approv|trust\s+prompt|empty\s+file|ships?\s+empty|resolve[sd]?\s+to|on\s+restart)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate symlinks in a repo that point at non-config targets (node_modules, dist, vendored docs).
+- Security writeups that describe the SymJack chain in prose without an actual symlink-to-config artifact
+  (patterns here require the literal config path as the link target, not the attack name).
+- A developer intentionally symlinking their own .mcp.json/settings.json across machines (rare; flagged
+  for review).
+- 'RUNTIME LIMITATION: this rule cannot observe the kernel-level write-redirection (prompt-shows-decoy
+  vs kernel-writes-config). That half of SymJack is a host concern — agents must resolve symlinks before
+  displaying the approval path. This rule covers the static symlink-to-config artifact, not the syscall,
+  and intentionally does not flag a bare file copy (indistinguishable from a benign asset copy).'
+action: report

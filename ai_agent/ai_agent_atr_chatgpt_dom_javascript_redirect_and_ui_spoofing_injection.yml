@@ -1,0 +1,45 @@
+title: ChatGPT DOM JavaScript Redirect and UI Spoofing Injection
+id: 65cc20f8-3228-4e71-a143-cd11914a9323
+status: experimental
+level: high
+description: |-
+  Detects ChatGPT DOM manipulation JavaScript from garak DanInTheWild corpus (#360). Injects JavaScript that redirects to the ChatGPT paid model URL (text-davinci-002-render-paid), removes legitimate UI elements via document.querySelector CSS selectors, and injects spoofed "ChatGPT Plus" branding with "made by aci25#9869 (bypasss)" attribution. This is a UI spoofing attack combining window.location.href redirect manipulation with DOM element removal and replacement, targeting the ChatGPT web interface to deceive users about authentication state.
+
+  Adapted from Agent Threat Rules ATR-2026-00378 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00378
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: window\.location\.href[\s\S]{0,80}chat\.openai\.com[\s\S]{0,80}document\.querySelector
+  sel_1:
+    response|re: text-davinci-002-render-paid
+  sel_2:
+    response|re: made\s+by\s+aci25
+  sel_3:
+    response|re: aci25[\s\S]{0,30}\(bypasss\)
+  sel_4:
+    response|re: window\.location\.href[\s\S]{0,150}chat\.openai\.com[\s\S]{0,300}ChatGPT[\s\S]{0,100}Plus
+  condition: 1 of sel_*
+falsepositives:
+- 'Web development tutorial: "Use window.location.href to navigate to the homepage in your React app"
+  — normal navigation without ChatGPT targeting'
+- 'DOM API documentation: "document.querySelector is a DOM API for selecting elements" — educational content
+  without ChatGPT manipulation'
+- 'Authentication code: "JavaScript can redirect to chat.openai.com for OAuth authentication" — legitimate
+  auth reference without DOM manipulation or paid model URL'
+- 'CSS documentation: "CSS selector .md:flex targets flex containers in Tailwind" — no ChatGPT DOM manipulation
+  context'
+action: report

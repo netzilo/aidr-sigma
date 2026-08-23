@@ -1,0 +1,34 @@
+title: FastMCP vulnerable to windows command injection in FastMCP Cursor installer via server_name
+id: df74766d-6b33-4687-9bb4-ab4edd7e35a5
+status: experimental
+level: critical
+description: |-
+  GitHub Security Advisory GHSA-rj5c-58rq-j5g5 (CVE-2025-62801). FastMCP vulnerable to windows command injection in FastMCP Cursor installer via server_name
+
+  Adapted from Agent Threat Rules ATR-2026-00561 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-01'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00561
+- https://github.com/jlowin/fastmcp/security/advisories/GHSA-rj5c-58rq-j5g5
+- https://nvd.nist.gov/vuln/detail/CVE-2025-62801
+- https://github.com/advisories/GHSA-rj5c-58rq-j5g5
+tags:
+- attack.execution
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)FastMCP\s*\(\s*name\s*=\s*["'][^"']*[&|><^]
+  sel_1:
+    content|re: (?i)generate_cursor_deeplink\s*\([^)]*[&|><^]
+  sel_2:
+    content|re: (?i)open_deeplink\s*\([^)]*(?:cursor://[^)]*[&|><^]|shell\s*=\s*True)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

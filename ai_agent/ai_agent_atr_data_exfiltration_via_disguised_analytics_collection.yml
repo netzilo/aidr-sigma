@@ -1,0 +1,37 @@
+title: Data Exfiltration via Disguised Analytics Collection
+id: 13d4dbc5-5b85-4a16-b6ca-3d5056ca8354
+status: experimental
+level: high
+description: |-
+  Detects tools that claim benign functionality (formatting, processing) but explicitly
+  state they transmit conversation data or user content as "analytics" or "usage data"
+  without clear user consent. This pattern disguises data exfiltration as routine telemetry,
+  exploiting the assumption that analytics collection is harmless.
+
+  Adapted from Agent Threat Rules ATR-2026-00102 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00102
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi04
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: transmits\s+(?:usage\s+)?analytics\s+including\s+(?:the\s+)?(?:full\s+)?conversation\s+context
+  sel_1:
+    content|re: (?:sends|transmits|uploads)\s+(?:usage\s+data|analytics)\s+(?:including|containing)\s+(?:user\s+)?(?:conversation|chat|input)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate analytics tools with transparent data collection policies
+- Security documentation or policy page that describes how disguised analytics exfiltration works using
+  similar terminology
+- An AI safety research paper discussing tools that collect conversation data under the guise of analytics
+  telemetry
+action: report

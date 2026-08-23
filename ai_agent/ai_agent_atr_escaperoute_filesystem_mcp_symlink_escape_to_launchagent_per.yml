@@ -1,0 +1,44 @@
+title: EscapeRoute — Filesystem MCP Symlink Escape to LaunchAgent Persistence (CVE-2025-53109)
+id: d75ed6d2-d344-4575-9606-5ffc3c1c7d39
+status: experimental
+level: high
+description: |-
+  Detects the EscapeRoute symlink-bypass-to-code-execution chain (CVE-2025-53109, CVSS 8.4) reported by Cymulate against Anthropic's Filesystem MCP Server before 0.6.3 / 2025.7.1. The server followed symlinks without re-checking that the resolved target stayed inside the allowed directory. An attacker creates a symlink inside a writable (or prefix-bypassed) directory that points anywhere on the filesystem, then uses the filesystem MCP write_file to write through the symlink to a privileged target — the published PoC writes a malicious LaunchAgent plist to ~/Library/LaunchAgents/*.plist for persistent code execution at login (on macOS), or overwrites /etc/sudoers. This rule fires on the concrete signature: a filesystem-MCP symlink-create or write-through-symlink operation whose target is a known persistence/privileged path (LaunchAgents plist, /etc/sudoers, cron, authorized_keys, systemd unit). Fixed by realpath + post-resolution boundary re-validation in 0.6.3 / 2025.7.1.
+
+  Adapted from Agent Threat Rules ATR-2026-02024 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02024
+- https://cymulate.com/blog/cve-2025-53109-53110-escaperoute-anthropic/
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53109
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:write_file|edit_file|write_text_file|create_file|move_file)\b[\s\S]{0,120}?(?:~|/Users/[\w.-]+|/Library|/System/Library)?/Library/(?:LaunchAgents|LaunchDaemons)/[\w.-]+\.plist\b
+  sel_1:
+    content|re: (?i)(?:\bln\s+-s\b|\bsymlink\b|\bsymbolic\s+link\b)[\s\S]{0,200}?(?:filesystem\s+mcp|write_file|allowed\s+director|sandbox|escape)[\s\S]{0,160}?(?:/etc/sudoers|/etc/cron|/etc/crontab|\.ssh/authorized_keys|/Library/(?:LaunchAgents|LaunchDaemons)/|/etc/systemd/|\.service\b|\.plist\b)
+  sel_2:
+    content|re: (?i)(?:\bsymlink\b|\bln\s+-s\b|\bpoints?\s+to\b|\bresolves?\s+to\b)[\s\S]{0,120}?(?:/etc/sudoers|/root/\.ssh/authorized_keys|~?/\.ssh/authorized_keys|/etc/crontab|/etc/cron\.d/)[\s\S]{0,160}?\b(?:write_file|edit_file|filesystem\s+mcp|mcp\s+server)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate developer use of symlinks inside a project (ln -s ../shared node_modules, dotfile symlink
+  managers like stow) where there is no filesystem-MCP write to a persistence/privileged target. This
+  rule requires the symlink/write operation to co-occur with a known persistence path (LaunchAgents plist,
+  /etc/sudoers, cron, authorized_keys, systemd unit), not any symlink.
+- Advisory or research text naming CVE-2025-53109, EscapeRoute, or the LaunchAgent PoC without a live
+  symlink-create or write-through operation via the filesystem MCP.
+- Applications that legitimately install their own LaunchAgent/systemd unit through their platform installer
+  (not via a filesystem MCP tool write through a symlink); the rule anchors on the filesystem-MCP write
+  / symlink construct plus the sandbox-escape framing.
+action: report

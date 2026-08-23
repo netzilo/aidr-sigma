@@ -1,0 +1,38 @@
+title: Multi-Agent Consensus Poisoning and Sybil Attack
+id: e9492afa-81f2-4f36-a86b-112086eed22b
+status: experimental
+level: critical
+description: |-
+  Detects attacks targeting multi-agent consensus systems through coordinated fake proposals, Sybil identity manipulation, and vote stuffing. Attackers inject payloads designed to impersonate multiple agents, forge consensus votes, or manipulate shared decision-making processes in multi-agent orchestration frameworks.
+
+  Adapted from Agent Threat Rules ATR-2026-00092 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00092
+tags:
+- attack.initial-access
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(vote|approve|endorse|confirm|agree)\s+.{0,20}(as|on behalf of|representing|for)\s+.{0,20}(multiple|all|every|several|many)\s+(agent|node|peer|participant|member)
+  sel_1:
+    content|re: (?i)\b(forge|fake|spoof|fabricat|simulat)\w*\s+(?:the|a|an|our|their|this|\d{1,4})?\s*(consensus|vote|ballot|proposal|approval|quorum)\b
+  sel_2:
+    content|re: (?i)\b(create|spawn|register|generate)\s+.{0,10}(multiple|many|several|\d{2,})\s+(fake|dummy|puppet|sybil|sock.?puppet)\s.{0,15}(agent|identit|account|node|peer)
+  sel_3:
+    content|re: (?i)\b(manipulat\w*|poison\w*|corrupt\w*|rigged|rigging|rig|stuff\w*)\s+.{0,15}(the\s+)?(consensus|voting|election|proposal|decision|quorum)\b
+  sel_4:
+    content|re: (?i)\b(impersonat\w*|pretend\s+to\s+be|act\s+as|pose\s+as)\s+.{0,15}(agent|node|peer|validator|participant).{1,45}(vote|approve|submit|propose)
+  condition: 1 of sel_*
+falsepositives:
+- Discussions about Sybil attack defenses in distributed systems research
+- Academic paper discussing how Sybil attacks work in peer-to-peer networks with quoted example attack
+  descriptions
+- Red team security exercise documentation describing consensus manipulation test scenarios
+action: report

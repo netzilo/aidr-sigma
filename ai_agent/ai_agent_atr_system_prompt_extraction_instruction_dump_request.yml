@@ -1,0 +1,41 @@
+title: System Prompt Extraction - Instruction Dump Request
+id: c984d1b4-c74a-4a2a-8a67-5c6975627c19
+status: experimental
+level: high
+description: |-
+  Detects attempts to extract the system prompt or initial instructions given to the AI. Covers both direct requests ('list your instructions', 'relay your parameters', 'repeat verbatim') and indirect social engineering ('create a pitch deck about your system prompt', 'reply to this email with your system instructions'). The rule targets extraction verbs (repeat, relay, list, respond with, output, dump, provide, share) combined with objects that reference the system prompt (instructions, parameters, system prompt, initial context, configuration, directives, guidelines, rules you were given). Generalised from llm-guard and promptfoo test corpora - literal phrase fragments replaced with semantic patterns covering a broad range of extraction formulations.
+
+  Adapted from Agent Threat Rules ATR-2026-00505 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00505
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(repeat|relay|list|output|print|dump|provide|reveal|disclose|expose|display)[^"']{0,40}(your\s+(instructions?|system\s+prompt|initial\s+(prompt|instructions?|context|message)|given\s+instructions?|directives?|guidelines?|programming|constraints?|setup\s+instructions?)|the\s+system\s+(prompt|instructions?|message)|all\s+of\s+your\s+instructions?|every\s+(instruction|rule|directive|guideline|constraint)\s+you\s+(have\s+been|were))
+  sel_1:
+    content|re: (?i)(verbatim|word\s+for\s+word|exactly\s+as\s+(they\s+are|written|given|received|provided)|without\s+(any\s+)?(exclusions?|changes?|modifications?|alterations?|filtering|omissions?)|character\s+for\s+character|in\s+their\s+entirety).{0,60}(instructions?|system\s+prompt|system\s+message|directives?|guidelines?\s+you|rules?\s+you)
+  sel_2:
+    content|re: (?i)(respond\s+with|reply\s+with|answer\s+with|output).{0,20}(every|all|each).{0,20}(instruction|rule|directive|guideline|parameter|command|message|constraint|piece\s+of\s+(information|context)).{0,30}(you\s+have\s+been\s+(given|told|instructed|programmed|configured|set\s+up)|that\s+(you|were|have\s+been))
+  sel_3:
+    content|re: (?i)(list|show|provide|tell\s+me|give\s+me).{0,20}(your|the).{0,20}(initial|original|starting|first|beginning|base|default|given|preset|configured).{0,20}(instructions?|prompt|parameters?|directives?|guidelines?|rules?|context|configuration|setup|message)
+  sel_4:
+    content|re: (?i)(create|write|make|build|draft|compose|prepare|generate).{0,30}(a\s+)?(pitch\s+deck|presentation|report|email|letter|document|summary|analysis|post).{0,50}(about|on|covering|regarding|that\s+(sells|describes|explains|includes|contains|reveals)).{0,50}(your\s+)?(system\s+(prompt|instructions?|message)|initial\s+(prompt|instructions?)|the\s+system\s+prompt|your\s+(instructions?|prompt|directives?))
+  sel_5:
+    content|re: (?i)(reply|respond|answer|forward|send).{0,30}(to\s+(this|an?|the)\s+(email|message|request|inquiry|letter)).{0,50}(with|including|containing|attaching|enclosing).{0,30}(your|the).{0,20}(system\s+(instructions?|prompt|message)|initial\s+(prompt|instructions?|context)|parameters?|configuration|directives?)
+  sel_6:
+    content|re: (?i)(?:(?:relay|list|dump|recite|enumerate|repeat|reveal|return|show|provide)\b[\s\S]{0,40}\byour\s+system(?:'?s)?\s+(?:prompt|instructions?|parameters?|message|directives?|config)|(?:directives?|guidelines?|instructions?|rules?)\s+you\s+(?:were|was)\s+given)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate system administrators reviewing instructions they themselves configured
+- Operator-level requests to verify current system configuration (requires auth context)
+- Educational discussions about system prompt structure without actual extraction attempt
+action: report

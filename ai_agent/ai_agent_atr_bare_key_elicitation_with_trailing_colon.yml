@@ -1,0 +1,30 @@
+title: Bare Key Elicitation with Trailing Colon
+id: 03b0c6eb-3b35-45dd-8ef8-25fa6d96c3da
+status: experimental
+level: high
+description: |-
+  Detects prompt-injection attempts that elicit secrets or credentials by presenting a bare key/secret label followed by a trailing colon (or equals/opening-bracket) with no value, inviting the model or a downstream agent to fill in the missing secret. Mined from red-team false negatives where attackers avoid explicit "give me your API key" phrasing and instead plant a dangling "SECRET_KEY:" / "secret key:" style prompt that pattern-completion or instruction-following tends to satisfy. Scoped to untrusted-input channels (user turns and tool responses carrying external content); a schema-block-preceding "key:" from a trusted system prompt is a plausible, if rare, benign edge case and is out of scope for this rule.
+
+  Adapted from Agent Threat Rules ATR-2026-02009 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02009
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi09
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\b(?:secret|hidden)[\s_]?key|clave(?:\s+secreta)?|contrase[ñn]a)\s*[:=]?\s*$|\bkey\s*[:=]\s*[\{\[]?\s*$
+  condition: sel_0
+falsepositives:
+- System-authored schema or config blocks that legitimately end a 'key:' line before a nested YAML/JSON
+  value
+- Documentation snippets showing config file syntax without real secrets
+action: report

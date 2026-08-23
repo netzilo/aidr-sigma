@@ -1,0 +1,40 @@
+title: PraisonAI MCP Path-Traversal .pth Injection RCE (GHSA-9mqq-jqxf-grvw)
+id: 04b8c72a-2d18-4ef6-b1c8-1769bedc442e
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-9mqq-jqxf-grvw (CVSS CRITICAL, CWE-22 / CWE-94): PraisonAI MCP server configuration allows a path traversal attack that writes a Python .pth file into a site-packages directory. Python automatically executes lines in .pth files that start with 'import ' on interpreter startup, enabling persistent arbitrary code execution. An attacker who can supply a malicious MCP config can traverse from the expected tools directory into site-packages and drop an executable .pth file.
+  Python .pth files are a legitimate Python path-extension mechanism (PEP 302) but execute arbitrary Python on import when a line begins with 'import '. Path traversal to site-packages combined with .pth content that starts with 'import os; os.system(...)' achieves RCE on every subsequent Python process start.
+  Detection covers: (a) Path-traversal sequences targeting site-packages with .pth extension; (b) .pth file content containing import + OS execution primitives; (c) PraisonAI MCP config with directory traversal in file path fields; (d) Explicit GHSA-9mqq-jqxf-grvw exploitation framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00544 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00544
+tags:
+- attack.execution
+- attack.t1059.006
+- attack.t1546.016
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\.\.\/|\.\.\\){2,}[^\n]{0,200}(?:site-packages|dist-packages)[^\n]{0,100}\.pth
+  sel_1:
+    content|re: (?i)\.pth[^\n]{0,300}import\s+(?:os|sys|subprocess|importlib)[^\n]{0,200}(?:system|exec|popen|spawn|check_output|run|call)
+  sel_2:
+    content|re: (?i)(?:praisonai|praison)[^\n]{0,200}(?:\.pth|site-packages|dist-packages|path[_-]?traversal|directory[_-]?traversal)[^\n]{0,200}(?:inject|exec|rce|exploit|bypass)
+  sel_3:
+    content|re: (?i)(?:GHSA-9mqq-jqxf-grvw)[^\n]{0,200}(?:payload|inject|exploit|bypass|\.pth|site-packages|path.traversal)
+  condition: 1 of sel_*
+falsepositives:
+- Python packaging tools creating .pth files in site-packages via legitimate pip install.
+- PYTHONPATH manipulation for virtual environment setup — without traversal sequences.
+- Security advisory text quoting GHSA-9mqq-jqxf-grvw traversal payload.
+action: report

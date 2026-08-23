@@ -1,0 +1,37 @@
+title: Encoding-Based Prompt Injection Evasion
+id: ea8efecb-8ee7-4eb0-8b18-59c4c08cd27c
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attempts that use encoding techniques to bypass text-based detection rules. Attackers encode malicious payloads using base64, hex, Unicode escapes, Punycode, or RTL override characters to smuggle instructions past regex-based filters.
+
+  Adapted from Agent Threat Rules ATR-2026-00080 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00080
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(ignore|disregard|forget|override)\b.{0,40}\b(instruction|rule|system|prompt)\b.{0,60}(base64|atob|btoa|\\x[0-9a-f]{2}|\\u[0-9a-f]{4})
+  sel_1:
+    content|re: (?i)(eval|decode|atob|fromCharCode|String\.fromCodePoint)\s*\(\s*['"]([A-Za-z0-9+/=]{20,}|\\x[0-9a-f]{2})
+  sel_2:
+    content|re: (?i)(\\u0{0,2}[0-9a-f]{2,4}\s*){5,}
+  sel_3:
+    content|re: (?i)xn--[a-z0-9]{4,}\.\s*.{0,30}\b(ignore|new instructions|system prompt)
+  condition: 1 of sel_*
+falsepositives:
+- Developer discussing encoding techniques in a security training context
+- A developer writing documentation that explains how to use atob() and btoa() functions for legitimate
+  base64 encoding in JavaScript tutorials
+- An internationalization engineer discussing Punycode domain conversions (xn-- prefixed domains) in the
+  context of DNS infrastructure
+action: report

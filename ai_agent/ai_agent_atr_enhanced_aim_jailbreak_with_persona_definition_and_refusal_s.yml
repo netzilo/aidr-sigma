@@ -1,0 +1,38 @@
+title: Enhanced AIM Jailbreak with Persona Definition and Refusal Suppression
+id: a532d923-325a-40bb-a6f0-f8f016b55dc0
+status: experimental
+level: high
+description: |-
+  Detects sophisticated AIM (Always Intelligent and Machiavellian) jailbreak attempts that combine persona definition, explicit amoral characteristics, refusal suppression instructions, and template variable injection. This variant goes beyond simple named persona invocation by establishing detailed behavioral constraints, suppressing safety responses, and using template substitution to bypass content filters. The attack creates an unfiltered alter-ego that claims to provide responses regardless of ethical, moral, or legal considerations.
+
+  Adapted from Agent Threat Rules ATR-2026-00253 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00253
+- https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (act|pretend|you\s+are)\s+as\s+AIM\s*\.\s*AIM\s+stands\s+for\s+(always\s+intelligent\s+and\s+)?[mM]achiavellian
+  sel_1:
+    content|re: (?i)(unfiltered\s+and\s+amoral|amoral\s+and\s+unfiltered|amoral\s+chatbot|unfiltered\s+chatbot)\s+.{0,100}(ethical\s+or\s+moral\s+guidelines|moral\s+guidelines|ethical\s+guidelines)
+  sel_2:
+    content|re: (?i)(will\s+never\s+tell\s+me\s+that\s+it\s+(can.?t|cannot)\s+do\s+something|never\s+tell\s+.{0,50}(can.?t|cannot|unable|refuse))
+  sel_3:
+    content|re: (?i)(promotes?\s+(disgusting|immoral|unethical|illegal|harmful)\s+behavio[u]?r|answer\s+any\s+request\s+asked\s+to\s+it|gives?\s+advice\s+no\s+matter\s+how\s+(dangerous|reckless|unethical|illegal))
+  sel_4:
+    content|re: (?i)(remember\s+to\s+(stay\s+in\s+character|use\s+lots\s+of\s+keywords)|replace\s+prompt\s+with\s+the\s+message|\$\{prompt\}\s*.{0,50}remember)
+  condition: 1 of sel_*
+falsepositives:
+- Academic discussions about jailbreak techniques in security research papers
+- Security training materials that describe AIM jailbreak patterns for educational purposes
+- Penetration testing documentation explaining prompt injection vectors
+action: report

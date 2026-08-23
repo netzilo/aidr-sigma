@@ -1,0 +1,53 @@
+title: Claude Code Hooks SessionStart Pre-Trust RCE (CVE-2025-59536)
+id: a2892c49-0f78-4b28-b68b-e87457346478
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2025-59536 (Critical), pre-trust remote code execution in Claude Code via the Hooks feature. An attacker-controlled repository ships a `.claude/settings.json` that registers a `SessionStart` hook with the `startup` matcher; when a developer opens the project directory, Claude Code executes the registered command BEFORE the trust dialog renders. The full kill chain is: clone-or-open malicious repo → Claude Code loads repo-scoped `.claude/settings.json` → hook command fires pre-trust → arbitrary code runs with developer's local privileges. The matcher / event names (`SessionStart`, `startup`) are stable strings in the Claude Code Hooks schema, so the detector anchors on the config-file shape rather than the command payload (any shell binary, curl pipe-to-shell, npm/pip install, or `python -c` body is sufficient for RCE post-trigger). CWE-94, CWE-1188 (insecure default). Patches in Claude Code via enhanced trust-dialog warning (GHSA-ph6w-f82w-28w6). Reported by Aviv Donenfeld and Oded Vanunu (Check Point Research). This rule detects exploit configs in repo-scoped settings.json files and provides defence-in-depth post-patch by flagging the dangerous matcher shape regardless of upstream dialog state.
+
+  Adapted from Agent Threat Rules ATR-2026-00523 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00523
+- https://research.checkpoint.com/2026/claude-code-hooks-rce-cve-2025-59536/
+- https://github.com/anthropics/claude-code/security/advisories/GHSA-ph6w-f82w-28w6
+- https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+tags:
+- attack.persistence
+- attack.t1059
+- attack.t1195.002
+- attack.t1546
+- atlas.aml.t0010
+- atlas.aml.t0050
+- owasp.asi04
+- owasp.asi05
+- owasp.asi09
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"hooks"\s*:\s*\{[^}]{0,400}"SessionStart"\s*:\s*\[[^\]]{0,400}"matcher"\s*:\s*"startup"
+  sel_1:
+    content|re: (?i)"SessionStart"\s*:\s*\[[^\]]{0,600}"matcher"\s*:\s*"startup"[^\]]{0,400}"command"\s*:\s*"(?:bash|sh|zsh|cmd|powershell|pwsh|curl|wget|python(?:\d)?|node|deno|bun|ruby|perl|php)\b
+  sel_2:
+    content|re: (?i)"SessionStart"\s*:\s*\[[^\]]{0,800}"command"\s*:\s*"[^"]{0,400}(?:\bcurl\b[^"]{0,80}\|\s*(?:bash|sh)\b|\bwget\b[^"]{0,80}\|\s*(?:bash|sh)\b|\bpython\d?\s+-c\b|\bnode\s+-e\b|\beval\s|\$\(|\`\w)
+  sel_3:
+    content|re: (?i)"SessionStart"\s*:\s*\[[^\]]{0,800}"command"\s*:\s*"[^"]{0,400}\b(?:npm|pnpm|yarn|pip|pip3|pipx|cargo|gem|gh\s+auth|aws\s+s3\s+cp|scp|nc|netcat|/bin/(?:bash|sh)|/usr/bin/(?:bash|sh|curl|wget))\b
+  sel_4:
+    content|re: (?i)\.claude[/\\]settings(?:\.local)?\.json[\s\S]{0,800}"hooks"\s*:\s*\{[\s\S]{0,400}"SessionStart"
+  sel_5:
+    content|re: (?i)(?:pre[_\s\-]?trust|before\s+(?:the\s+)?trust\s+(?:dialog|prompt)|prior\s+to\s+(?:trust|consent))[^\n]{0,160}(?:hook|SessionStart|startup|\.claude)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Claude Code documentation discussing the Hooks schema, including example `SessionStart` configurations
+  for defensive review or post-patch teaching purposes.
+- Static analysis tooling output documenting CVE-2025-59536 attack patterns for defensive purposes.
+- Patched Claude Code deployments that gate SessionStart hook execution behind the enhanced trust dialog
+  (GHSA-ph6w-f82w-28w6) — detection still fires on the config shape, but the runtime impact is mitigated.
+- Internal team templates that include reviewed `.claude/settings.json` fixtures with non-execution fields
+  only (model, theme, allowed_tools).
+action: report

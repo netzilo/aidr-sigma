@@ -1,0 +1,40 @@
+title: gemini-mcp-tool execAsync Command Injection & @file Exfiltration (CVE-2026-0755)
+id: 7dc42e4a-de08-40fe-a799-e34b6dce8255
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2026-0755 (CVSS 9.8) in the npm package gemini-mcp-tool (affected 1.1.2 ≤ v < 1.1.6). Two co-located vectors: (1) the `execAsync` method passes user-controlled prompt text to the OS shell without neutralising metacharacters (CWE-78), so a prompt carrying `;`, `|`, `$(...)`, backticks, or `&&` chained to a command achieves unauthenticated RCE; (2) the Gemini CLI `@file` parser dereferences attacker-supplied `@`-paths, letting an injected prompt read/exfiltrate arbitrary local files such as `@/etc/passwd`, `@~/.ssh/id_rsa`, `@~/.aws/credentials`, or `@../../secret`. No prior ATR rule is keyed to the gemini-mcp-tool @file / execAsync vector.
+
+  Adapted from Agent Threat Rules ATR-2026-01931 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01931
+- https://nvd.nist.gov/vuln/detail/CVE-2026-0755
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1552
+- atlas.aml.t0010
+- atlas.aml.t0051
+- owasp.asi04
+- owasp.asi05
+- owasp.llm02
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)@(?:/etc/(?:passwd|shadow)|~?/?\.ssh/(?:id_[rd]sa|id_ecdsa|id_ed25519|authorized_keys)|~?/?\.aws/credentials|~?/?\.config/[\w./-]*(?:token|secret|cred|key)|~?/?\.env\b|(?:\.\./){2,})
+  sel_1:
+    content|re: (?i)(?:gemini[-_\s]?(?:mcp|cli)?[-_\s]?tool|ask[-_\s]?gemini|execasync)[\s\S]{0,160}(?:;\s*(?:rm|curl|wget|bash|sh|nc|ncat|cat|chmod|python|node)\b|\|\s*(?:sh|bash|curl|wget|nc)\b|\$\(\s*(?:curl|wget|cat|id|whoami|uname|env)|&&\s*(?:curl|wget|rm|bash|sh|nc)\b)
+  sel_2:
+    content|re: (?i)cve-?2026-?0755[\s\S]{0,160}(?:poc\b|exploit|payload|@(?:~|/etc|\.\.)|id_rsa|/etc/(?:passwd|shadow)|execasync\s*\(|;\s*(?:curl|rm|bash|sh)\b)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate gemini @file usage that references workspace files (e.g. @README.md, @src/app.ts) rather
+  than sensitive system paths.
+- Advisory / changelog text that mentions CVE-2026-0755 or the upgrade to 1.1.6 without an exploit payload.
+- Security-testing fixtures referencing the pattern inside an explicitly labelled harness.
+action: report

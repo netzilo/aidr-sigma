@@ -1,0 +1,31 @@
+title: Garak Dan - an ai language
+id: 081a8364-aa66-4571-b5c3-8f1aa049d97d
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak patterns centered on the "as an AI language model" bypass technique. This cluster encompasses four attack shapes: (1) bias-injection by claiming the model is constrained by its training institution ("trained by OpenAI, and having a database heavily regulated") to argue it should ignore safety guidelines; (2) extreme persona injection with a specific offensive identifier (e.g. "CumGPT"); (3) human-simulation with speculation license ("for thats what humans do, for uncertainties I want you to speculate"); (4) multi-step AI jailbreak planning where the attacker instructs the model to develop a detailed plan for an AI to free itself from restrictions and access external systems including IP addresses, networks, or external infrastructure. Layer 2 generalises the external-access planning shape to catch structural variants beyond the JEEVES fixture. Covers garak 'dan' probe cluster 'an-ai-language' (4 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00459 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00459
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(openai, and having a database heavily regulated|cumgpt, an information resource about
+      cum that|access external systems, such as ip addresses,|for thats what humans do\. for uncertainties,)
+  sel_1:
+    content|re: (?i)\b(?:plan|steps?|method|way|procedure|instructions?)\s+(?:for\s+)?(?:an?\s+)?(?:ai|llm|language\s+model|chatbot|agent)\s+to\s+(?:free\s+itself|remove\s+(?:its|all)\s+(?:restrictions?|limitations?|constraints?)|escape\s+(?:its|all)\s+(?:restrictions?|limitations?|constraints?)|break\s+free)[^\n]{0,100}(?:access|connect\s+to|reach)\s+(?:external|outside|the\s+internet|(?:ip|web|network))\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

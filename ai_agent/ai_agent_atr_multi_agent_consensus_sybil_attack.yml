@@ -1,0 +1,48 @@
+title: Multi-Agent Consensus Sybil Attack
+id: 2a4b509b-78e6-4d2c-8eab-b5be70354548
+status: experimental
+level: critical
+description: |-
+  Detects attempts to manipulate multi-agent consensus or voting systems through
+  Sybil-style attacks. This includes instructions to create multiple fake agent
+  identities, coordinate votes across agents, or systematically submit false
+  proposals to overwhelm legitimate consensus mechanisms. In multi-agent
+  architectures where decisions require agreement among agents, an attacker may
+  instruct one agent to impersonate multiple identities or coordinate with
+  compromised agents to swing votes.
+
+  Adapted from Agent Threat Rules ATR-2026-00108 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-16'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00108
+tags:
+- attack.execution
+- atlas.aml.t0043
+- owasp.asi01
+- owasp.asi07
+- owasp.asi10
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:create|register|spawn)\s+(?:multiple|several|many|\d+)\s+(?:fake|false|sybil|dummy|puppet)\s+(?:agents?|identit(?:y|ies)|accounts?|voters?|participants?)
+  sel_1:
+    content|re: (?i)(?:vote|approve|reject|endorse)\s+(?:as|using|from|with)\s+(?:multiple|different|various|all)\s+(?:\w+\s+)?(?:agents?|identit(?:y|ies)|accounts?|personas?)
+  sel_2:
+    content|re: (?i)(?:flood|overwhelm|spam|stuff)\s+(?:the\s+)?(?:vote|ballot|proposal|consensus|poll)\s+(?:system|mechanism|process)
+  sel_3:
+    content|re: (?i)(?:coordinate|synchronize|orchestrate)\s+(?:the\s+)?(?:votes?|proposals?|approvals?)\s+(?:across|between|among)\s+(?:(?:all|the|compromised|multiple)\s+)*(?:agents?|bots?|accounts?|identit(?:y|ies))
+  sel_4:
+    content|re: (?i)(?:impersonate|pretend\s+to\s+be|pose\s+as)\s+(?:multiple|different|various)\s+(?:agents?|reviewers?|voters?|participants?|community\s+members?)
+  condition: 1 of sel_*
+falsepositives:
+- Security research discussing Sybil attack patterns
+- Documentation about consensus mechanism design
+- Academic paper discussing Sybil attack theory in distributed systems that uses phrases like 'creating
+  multiple fake identities' in quoted threat model descriptions
+- Penetration testing report documenting consensus manipulation techniques with example attack payloads
+  included verbatim
+action: report

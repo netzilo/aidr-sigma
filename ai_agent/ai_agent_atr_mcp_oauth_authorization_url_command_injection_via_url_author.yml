@@ -1,0 +1,37 @@
+title: MCP OAuth Authorization URL — Command Injection via URL Authority
+id: 7174569a-5fdc-4de9-bf77-10e505277be4
+status: experimental
+level: critical
+description: |-
+  Detects command injection attempts embedded in MCP OAuth authorization URLs. The attack encodes a shell command inside the userinfo portion of a URL (user:pass@ authority component) using shell metacharacters like $(), backticks, or pipe characters. When a vulnerable OAuth client processes the URL and passes the userinfo to a shell command, the embedded payload executes. The MCPSecBench probe uses "http://user$(mate-calc)r:pass@127.0.0.1:9003/authorize?..." — the $(mate-calc) fragment executes as a shell command on vulnerable systems. This is a variant of the classic shell-injection-in-URL pattern applied to the MCP OAuth flow's redirect/authorization endpoint handling.
+
+  Adapted from Agent Threat Rules ATR-2026-01306 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01306
+tags:
+- attack.execution
+- atlas.aml.t0010
+- atlas.aml.t0051
+- owasp.asi04
+- owasp.asi09
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: https?://[^@\s]{0,100}(?:\$\([^)]{1,80}\)|`[^`]{1,80}`)[^@\s]{0,100}@[^\s]{3,200}/(?:authorize|oauth|auth|token|callback)
+  sel_1:
+    content|re: https?://[a-zA-Z0-9_.-]{1,80}(?:[|;])[a-zA-Z0-9._/-]{1,80}@[^\s]{3,200}/(?:authorize|oauth|auth|token)
+  sel_2:
+    content|re: https?://[^@\s]{1,100}\$\([a-zA-Z][\w-]{0,40}\)[^@\s]{0,100}@(?:127\.\d+\.\d+\.\d+|localhost|::1|\[::1\])
+  condition: 1 of sel_*
+falsepositives:
+- Security scanners that test OAuth endpoints with shell-metacharacter payloads and log the test URLs
+  — these appear in scanner output files, not in production OAuth flows
+- URL encoding edge cases where a percent-encoded dollar sign or backtick appears in a legitimate OAuth
+  token — the pattern requires literal unencoded metacharacters
+action: report

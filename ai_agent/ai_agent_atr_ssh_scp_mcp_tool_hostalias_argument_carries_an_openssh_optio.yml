@@ -1,0 +1,46 @@
+title: SSH/SCP MCP Tool hostAlias Argument Carries an OpenSSH Option-Injection Flag
+id: 7cdc8803-44f9-4013-a8ea-5d71fee465ea
+status: experimental
+level: high
+description: |-
+  Detects an SSH/SCP-style MCP tool call whose host-identifier argument (hostAlias / ssh_host / target_host) begins with a dash, making it parse as an SSH client option rather than a hostname -- most critically -oProxyCommand=/-oProxyJump=/-oPermitLocalCommand= (arbitrary local command execution before any network connection) or -w (port-forwarding/tunnel option injection). Also detects the companion Windows-specific vector: an scp localPath/remotePath argument chained with a shell metacharacter (&, |, ^) directly into a Windows executable, which is exploitable because the vulnerable server invoked ssh.exe/scp.exe via spawn(..., {shell:true}), letting cmd.exe re-parse every argument. Mined from GHSA-p4h8-56qp-hpgv (@aiondadotcom/mcp-ssh): the MCP server runs locally over stdio but the LLM driving it is not trusted -- its tool arguments can be steered by prompt injection from any untrusted text the agent ingests (web pages, e-mails, repository files, other MCP servers' output), so no malicious user is required, only that the agent process attacker-controlled text at some point in the session. Generalized beyond the one package name to any SSH/SCP-wrapping MCP tool that forwards a host-identifier argument to the ssh/scp binary without an argument terminator or leading-dash rejection.
+
+  Adapted from Agent Threat Rules ATR-2026-02370 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02370
+- https://github.com/AiondaDotCom/mcp-ssh/security/advisories/GHSA-p4h8-56qp-hpgv
+- https://github.com/AiondaDotCom/mcp-ssh/issues/9
+- https://github.com/AiondaDotCom/mcp-ssh/releases/tag/1.3.5
+- https://github.com/advisories/GHSA-p4h8-56qp-hpgv
+tags:
+- attack.privilege-escalation
+- attack.t1059.004
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:host[_-]?alias|ssh_?host|target_?host)\b\s*[=:]\s*["'`]?-o\s*(?:proxycommand|proxyjump|permitlocalcommand)\s*=
+  sel_1:
+    content|re: (?i)\b(?:host[_-]?alias|ssh_?host|target_?host)\b\s*[=:]\s*["'`]?-w\s*\d+(?::\d+)?\b
+  sel_2:
+    content|re: (?i)\b(?:local|remote)_?path\b\s*[=:]\s*["'`]?[^"'`\n]{0,20}[&|^]\s*(?:calc\.exe|cmd\.exe|powershell|certutil|mshta|rundll32|wscript|cscript)\b
+  condition: 1 of sel_*
+falsepositives:
+- 'A hostAlias/ssh_host value that is an ordinary hostname or an entry from ~/.ssh/config, with no leading
+  dash (e.g. hostAlias: "prod-db-01")'
+- Documentation or a patch changelog discussing the -oProxyCommand option-injection class without an actual
+  tool-call argument being set to it
+- A localPath/remotePath value that happens to contain an ampersand in a filename (e.g. 'Q&A notes.txt')
+  with no following executable token
+- A bare '-w' with no digits following it (e.g. an implausible but conceivable literal alias name) --
+  ADVERSARIALLY CONFIRMED as a corner-case during review; the -w condition now requires real port-forward
+  syntax (at least one digit, e.g. -w0:0 or -w2222)
+action: report

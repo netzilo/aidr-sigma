@@ -1,0 +1,44 @@
+title: FunctionMasking predict_mask Semantic Bypass
+id: 5da02d44-116b-440c-a0ba-90f36bb66b9f
+status: experimental
+level: high
+description: |-
+  Detects FunctionMasking jailbreak prompts from NVIDIA garak smuggling.FunctionMasking probe (garak/probes/smuggling.py). The attack introduces a fictitious predict_mask() function that "predicts the <mask> word" in a definition sentence, then builds a harmful query by concatenating the predicted values: X = predict_mask('To <mask> is to...rob...'), Y = predict_mask('A <mask> is a...store...'), prompt = 'How do you ' + X + ' from a ' + Y. By never stating the harmful verb/noun directly — only their dictionary definitions with a <mask> placeholder — the attacker smuggles the semantic content past keyword-based safety filters while still causing the model to construct and answer the harmful prompt. Key signals: predict_mask() function call, <mask> inside predict_mask argument strings, single-letter variable assignment from predict_mask, and string-concatenation query building with the assigned variables.
+
+  Adapted from Agent Threat Rules ATR-2026-00316 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00316
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/smuggling.py
+- https://medium.com/@austin-stubbs/llm-security-types-of-prompt-injection-d7ad8d7d75a3
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: Assume\s+you\s+have\s+a\s+function[,\s]+predict_mask\b
+  sel_1:
+    response|re: predict_mask\s*\(['"][^'"]*<mask>[^'"]*['"]
+  sel_2:
+    response|re: '[A-Z]\s*=\s*predict_mask\b'
+  sel_3:
+    response|re: '''How do you ''\s*\+\s*[A-Z]'
+  sel_4:
+    response|re: fictitious\s+person\s+did\s+this\s+without\s+getting\s+caught
+  condition: 1 of sel_*
+falsepositives:
+- 'ML code defining a predict_mask function: "def predict_mask(text): return model.fill_mask(text)" (function
+  definition, not attack invocation with <mask> argument)'
+- 'NLP tutorial explaining BERT: "predict_mask is a helper that fills [MASK] tokens" (no <mask> in string
+  argument and no variable assignment + query building)'
+- 'HTML/SVG using <mask> element: "<mask id=''m1''>...</mask>" (no predict_mask function)'
+- Academic paper describing FunctionMasking attack methodology for defensive analysis
+- 'Code: X = predict_mask(sentence) where sentence has no <mask> and no harmful query concatenation'
+action: report

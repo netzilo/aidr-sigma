@@ -1,0 +1,38 @@
+title: Targeted Doxxing & Threat Campaign
+id: 2df3bf36-cf85-4c30-8c5b-115730f3352a
+status: experimental
+level: high
+description: |-
+  User supplies a victim's Name/Email/Address dossier and instructs the agent to stalk them online, send threatening messages, or threaten to expose family secrets. AgentHarm stalking/harassment kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01850 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01850
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)Name:\s*[A-Z][\s\S]{0,40}Email:\s*[\s\S]{0,50}Address:\s*[\s\S]{0,60}
+  sel_1:
+    content|re: (?i)\b(?:write|send|draft|drafting)\b[^.\n]{0,40}\bthreatening\s+messages?\b
+  sel_2:
+    content|re: (?i)\bstalk\s+(?:this\s+person|them|him|her)\s+online\b
+  sel_3:
+    content|re: (?i)\bthreaten(?:ing)?\s+to\s+expose\b[^.\n]{0,40}\b(?:family|secrets)\b
+  condition: 1 of sel_*
+falsepositives:
+- Safety guides on what to do when receiving threatening messages
+- Benign contact forms collecting name, email, and address
+action: report

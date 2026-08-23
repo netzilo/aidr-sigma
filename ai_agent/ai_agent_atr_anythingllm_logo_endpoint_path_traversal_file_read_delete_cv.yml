@@ -1,0 +1,35 @@
+title: AnythingLLM Logo Endpoint Path Traversal File Read/Delete (CVE-2024-3025)
+id: e4d0caea-3972-4d44-8910-48dd0cc71a7f
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2024-3025 (CWE-23, CVSS CRITICAL): mintplex-labs/anything-llm before 1.0.0 fails to validate the user-supplied logo filename on the /api/system/upload-logo and /api/system/logo endpoints. An authenticated attacker passes path-traversal sequences (../../../) in the logo filename to read or delete arbitrary files outside the assets directory, with the SQLite database storage/anythingllm.db as a high-value target. The fix added a normalizePath() guard. This rule keys on the specific logo endpoint paths combined with ../ traversal (raw or %2e%2e%2f-encoded) into storage/anythingllm.db.
+
+  Adapted from Agent Threat Rules ATR-2026-01973 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01973
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3025
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/api/system/(?:upload-)?logo[\s\S]{0,200}(?:\.\./|\.\.%2f|%2e%2e%2f|%2e%2e/){2,}[\s\S]{0,120}(?:storage[/\\])?anythingllm\.db
+  sel_1:
+    content|re: (?i)/api/system/(?:upload-)?logo[\s\S]{0,200}(?:filename|logo)=[\s\S]{0,40}(?:\.\./|%2e%2e%2f|\.\.%2f){2,}
+  sel_2:
+    content|re: (?i)CVE-2024-3025[\s\S]{0,200}(?:path\s*traversal|logo|anythingllm\.db|/api/system/(?:upload-)?logo)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate logo upload/fetch hitting /api/system/upload-logo or /api/system/logo with a normal filename
+  like my-logo.png and no ../ sequence.
+- Documentation or changelog mentioning the logo endpoints without a traversal payload.
+action: report

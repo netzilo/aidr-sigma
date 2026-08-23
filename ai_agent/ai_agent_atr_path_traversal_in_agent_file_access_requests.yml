@@ -1,0 +1,37 @@
+title: Path Traversal in Agent File Access Requests
+id: cb728655-402e-413e-bed7-8d1a976822bf
+status: experimental
+level: high
+description: |-
+  Detects path traversal attacks (../ sequences) in agent file-access tool
+  arguments or user requests to read files outside the agent's authorized
+  working directory. Attackers use "../" sequences to escape the sandboxed
+  directory and read sensitive files: ../README.md (probe project files),
+  ../../etc/passwd (OS credentials), or ../../../../home/user/.ssh/id_rsa
+  (private keys). Targets agents that expose file-reading tools without
+  path normalization or containment checks.
+
+  Adapted from Agent Threat Rules ATR-2026-01616 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01616
+tags:
+- attack.privilege-escalation
+- attack.t1083
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:\.\./){2,}(?:etc/|root/|home/|proc/|var/|tmp/|dev/|usr/)
+  sel_1:
+    content|re: (?:\.\./){3,}(?:etc/(?:passwd|shadow|sudoers)|root/|home/[^/]+/\.ssh)
+  condition: 1 of sel_*
+falsepositives:
+- Relative path references in project configuration files
+- Documentation examples showing ../ for educational purposes
+action: report

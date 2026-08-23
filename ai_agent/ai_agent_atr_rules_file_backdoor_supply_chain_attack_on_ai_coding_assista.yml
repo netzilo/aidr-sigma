@@ -1,0 +1,41 @@
+title: Rules-File Backdoor — Supply Chain Attack on AI Coding Assistant Configuration
+id: c815634c-74b9-46fa-a066-87131e6edfb8
+status: experimental
+level: critical
+description: |-
+  Detects attempts to inject malicious instructions into AI coding assistant configuration files (.cursorrules, CLAUDE.md, .github/copilot-instructions.md, .clinerules, .continuerc, .codeium/) that persist across sessions. MITRE ATLAS AML.CS0041 (Rules File Backdoor). Attackers modify these files so every subsequent AI coding session includes a hidden backdoor: injecting scripts, exfiltrating files, logging credentials, or adding malicious dependencies. Patterns cover: (1) rules-file path combined with exfiltration or script-injection verbs, (2) "when generating X always include <script>" patterns, (3) "whenever user asks for auth/password" credential logging, (4) "send contents to webhook / POST file tree" persistence exfil.
+
+  Adapted from Agent Threat Rules ATR-2026-00512 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00512
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)((\b(add\s+to|update|modify|edit|write\s+to|append\s+to|insert\s+in|inject\s+into|change)\s+.{0,30}(\.cursorrules|\.clinerules|\.continuerc|\.codeium|claude\.md|copilot[-._]instructions\.md|copilot[/-]instructions|aider\.conf|\.aiderignore|cursor\.rules|windsurf\.rules|\.github/copilot)\b)|(\b(in|to)\s+(\.cursorrules|\.clinerules|\.continuerc|\.codeium|claude\.md|copilot[-._]instructions\.md|copilot[/-]instructions|aider\.conf|\.aiderignore|cursor\.rules|windsurf\.rules|\.github/copilot).{0,20}(add|update|modify|insert|inject|append|include)\s*:?)).{0,200}(exfiltrate|send\s+its\s+contents|post\s+to|forward\s+to|webhook|<script|curl|fetch\s*\(|eval\s*\(|exec|spawn|rm\s+-rf|credentials?|api\s+key|ssh\s+key|password|token|malicious|backdoor)
+  sel_1:
+    content|re: (?i)\b(when(ever)?\s+(generating|you\s+generate|you\s+write|writing|creating|you\s+create)\b.{0,60}(always|every\s+time)?\s*(include|append|add|inject|insert))\b.{0,200}(<script|javascript:|import\s+\w+\s+from\s+['"]https?://|require\s*\(['"]https?://|eval\s*\(|exec\s*\(|os\.system|subprocess|base64\.decode|atob\s*\()
+  sel_2:
+    content|re: (?i)\bwhenever\s+(the\s+)?user\s+(asks?|mentions?|requests?|says?|types?|inputs?|provides?).{0,60}\b(credentials?|passwords?|tokens?|api\s+keys?|ssh\s+keys?|secrets?|auth\s*(entication)?|login|2fa|mfa|otp)\b.{0,100}(log|send|forward|post|upload|exfiltrate|save\s+to|transmit|collect|capture|record)
+  sel_3:
+    content|re: (?i)\b(before\s+(generating|writing|creating)|for\s+every\s+(file|function|class|module|response)|after\s+(each|every)\s+(generation|response|file|write))\b.{0,100}\b(send|post|transmit|upload|forward|exfiltrate|copy\s+to|log\s+to|call\s+https?://)\b.{0,100}\b(file\s+(tree|structure|list|contents?)|current\s+(directory|context|project)|all\s+(files?|code|contents?))
+  sel_4:
+    content|re: (?i)\b(include|inject|add|insert|append)\b.{0,60}\b(malicious|backdoored|poisoned|trojan|compromised|attacker[-
+      ]controlled|evil|fake|rogue)\b.{0,80}\b(dependency|package|import|require|library|module|plugin)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate .cursorrules style preference updates (TypeScript, line length, ESLint)
+- Legitimate CLAUDE.md updates with coding standards or naming conventions
+- Legitimate .github/copilot-instructions.md API naming convention updates
+- Discussion about rules-file format or AI coding assistant configuration
+- Security research documentation describing these attack patterns
+action: report

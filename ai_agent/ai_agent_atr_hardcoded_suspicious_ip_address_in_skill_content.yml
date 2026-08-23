@@ -1,0 +1,37 @@
+title: Hardcoded Suspicious IP Address in Skill Content
+id: d772ffdb-3dcb-481e-8e74-cf1dd4582391
+status: experimental
+level: high
+description: |-
+  Detects hardcoded IP addresses in skill content that may represent command and control  (C2) servers, particularly when associated with suspicious network ranges or known  malware infrastructure. The analyzed skill "sakaen736jih/youtube-watcher-p" contains  reference to IP 91.92.242.30 identified as a known malware C2 server.
+
+  Adapted from Agent Threat Rules ATR-2026-00225 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00225
+tags:
+- attack.persistence
+- atlas.aml.t0048
+- owasp.asi04
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (C2\s+server|command\s+control|malware\s+actor)\s+[^\n]*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
+  sel_1:
+    content|re: (known|identified|detected)\s+(malware|threat|actor|server)[^\n]*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}
+  sel_2:
+    content|re: \d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[^\n]*(C2|command|control|backdoor|malware)
+  sel_3:
+    content|re: (91\.92\.24[0-9]\.|185\.159\.15[0-9]\.|194\.87\.9[0-9]\.)[0-9]{1,3}
+  sel_4:
+    content|re: finding_[0-9]+:\s*(known|identified)\s+(malware|threat|C2|command)
+  condition: 1 of sel_*
+falsepositives:
+- Security research documentation describing C2 patterns
+- Threat intelligence feeds in legitimate security tools
+- Network monitoring tools documenting suspicious activity
+action: report

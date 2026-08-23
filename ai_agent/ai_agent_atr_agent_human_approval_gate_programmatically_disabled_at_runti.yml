@@ -1,0 +1,66 @@
+title: Agent Human-Approval Gate Programmatically Disabled at Runtime (YOLO / auto-approve)
+id: 7642e8c6-dc8b-4d62-9aa3-21db0e52f2c1
+status: experimental
+level: high
+description: |-
+  Detects an agent runtime being switched into unattended, auto-approving operation — the state in which every subsequent destructive tool call executes with no human in the loop. Anchored on the Hunt.io / Bob Diachenko investigation published 2026-07-23: after gaining a foothold on a Thai Ministry of Finance staging server, the operator deployed Nous Research's open-source Hermes agent and ran it in YOLO mode, letting it sweep the internal network with LinPEAS, hunt privilege-escalation paths and harvest personnel records without a single approval prompt. Hermes exposes that kill switch three ways — the `--yolo` CLI flag, the in-session `/yolo` command, and `HERMES_YOLO_MODE=1` — and every mainstream agent runtime ships an equivalent (Claude Code `--dangerously-skip-permissions` / `--permission-mode bypassPermissions`, OpenAI Codex CLI `--dangerously-bypass-approvals-and-sandbox` / `--ask-for-approval never`, Gemini CLI `--yolo` / `--approval-mode=yolo`, Aider `--yes-always` / `AIDER_YES_ALWAYS`, Goose `GOOSE_MODE=auto`, OpenHands `SECURITY_CONFIRMATION_MODE=false`, GitHub Copilot CLI `--allow-all-tools`, Amazon Q Developer CLI `--trust-all-tools`, Cline `autoApprovalSettings`). Detection targets the four shapes the attacker actually emits — (1) an agent CLI launched with a bypass flag, (2) that flag riding inside a shell or exec tool-call argument, (3) an environment-variable assignment that turns the gate off, (4) a settings/config write that persists the bypass — plus in-session toggle commands and injected instructions telling an agent to relaunch itself unattended. This is the first concrete form of the broader "human approval mechanism bypassed" weakness class. CWE-693 (Protection Mechanism Failure), CWE-1188 (Insecure Default / Initialization of a Resource with an Insecure Default).
+
+  Adapted from Agent Threat Rules ATR-2026-02400 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02400
+- https://thehackernews.com/2026/07/hacker-runs-hermes-ai-agent-unattended.html
+- https://hunt.io/blog/thailand-ministry-finance-targeted-with-hermes-ai-agent
+- https://hermes-agent.nousresearch.com/docs/user-guide/security
+- https://code.claude.com/docs/en/cli-reference
+- https://github.com/google-gemini/gemini-cli/blob/main/docs/reference/configuration.md
+- https://developers.openai.com/codex/agent-approvals-security
+- https://docs.openhands.dev/sdk/guides/security
+- https://docs.github.com/en/copilot/how-tos/copilot-cli/use-copilot-cli/allowing-tools
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1562
+- attack.t1562.001
+- atlas.aml.t0050
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi05
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:^|[\n;|&(){}]|\$\(|["']|\\")\s{0,8}(?:(?:nohup|sudo|doas|env|command|exec|time|setsid|stdbuf)\s+){0,3}(?:[A-Za-z_][A-Za-z0-9_]{0,40}=[^\s"']{0,64}\s+){0,4}\b(?:hermes|claude|claude-code|codex|gemini|goose|aider|openhands|cline|opencode|crush|amazon-q|copilot|devin|swe-agent|kilocode|roo-?code)\b[^\n]{0,80}(?:--dangerously-skip-permissions|--allow-dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox|--yes-always|--trust-all-tools|--allow-all-tools|--allow-all\b|--acceptall\b|--yolo\b|--full-auto\b|--permission-mode[=\s]+["']?bypass-?permissions|--approval-mode[=\s]+["']?yolo|--ask-for-approval[=\s]+["']?never|-a[=\s]+never\b|--sandbox[=\s]+["']?danger-full-access)
+  sel_1:
+    content|re: (?i)\\?"(?:command|cmd|script|shell|bash|args|arguments|exec|run|code|input|stdin)\\?"\s*:\s*(?:\\?"|\[)[^\n]{0,300}(?:--dangerously-skip-permissions|--allow-dangerously-skip-permissions|--dangerously-bypass-approvals-and-sandbox|--yes-always|--trust-all-tools|--allow-all-tools|--acceptall\b|--yolo\b|--full-auto\b|--permission-mode[=\s]+(?:\\?["'])?bypass-?permissions|--approval-mode[=\s]+(?:\\?["'])?yolo|--ask-for-approval[=\s]+(?:\\?["'])?never|--sandbox[=\s]+(?:\\?["'])?danger-full-access)
+  sel_2:
+    content|re: (?i)\b(?:HERMES_YOLO_MODE\s*[:=]\s*(?:\\?["'])?(?:1|true|yes|on)\b|AIDER_YES_ALWAYS\s*[:=]\s*(?:\\?["'])?(?:1|true|yes|on)\b|GOOSE_MODE\s*[:=]\s*(?:\\?["'])?auto\b|SECURITY_CONFIRMATION_MODE\s*[:=]\s*(?:\\?["'])?(?:0|false|no|off)\b|GEMINI_CLI_TRUST_WORKSPACE\s*[:=]\s*(?:\\?["'])?true\b)
+  sel_3:
+    content|re: (?i)(?:^|[\s;&|(`"'\\])(?:export\s+|env\s+|setx\s+|set\s+)?(?:HERMES|CLAUDE|CODEX|GEMINI|GOOSE|AIDER|OPENHANDS|CLINE|ROO|KILO|COPILOT|OPENCODE|CRUSH|DEVIN|CURSOR|WINDSURF|CONTINUE|AGENT|MCP|SECURITY|SWE)[A-Z0-9_]{0,32}(?:YOLO|AUTO_?APPROVE|SKIP_PERMISSION|SKIP_CONFIRM|BYPASS_APPROVAL|TRUST_ALL|DISABLE_APPROVAL|NO_CONFIRM|DANGEROUSLY_)[A-Z0-9_]{0,20}\s*=\s*(?:\\?["'])?(?:1|true|yes|on|all|always|auto)\b
+  sel_4:
+    content|re: (?i)(?:defaultMode(?:\\?["'])?\s*:\s*(?:\\?["'])?bypassPermissions|defaultApprovalMode(?:\\?["'])?\s*:\s*(?:\\?["'])?yolo|approvalMode(?:\\?["'])?\s*:\s*(?:\\?["'])?yolo|approvals?[\s\S]{0,40}mode(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?off\b|confirmation_mode(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?(?:false|0|no)\b|yes[-_]always(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?(?:true|yes|1)\b|autoApprovalSettings[\s\S]{0,240}enabled(?:\\?["'])?\s*:\s*(?:\\?["'])?true|disableYoloMode(?:\\?["'])?\s*:\s*(?:\\?["'])?false|disableAlwaysAllow(?:\\?["'])?\s*:\s*(?:\\?["'])?false|(?:skills|memory)[._]write_approval(?:\\?["'])?\s*[:=]\s*(?:\\?["'])?false\b|mcpServers[\s\S]{0,300}(?:\\?["'])trust(?:\\?["'])\s*:\s*(?:\\?["'])?true|(?:\\?["'])(?:autoApprove|alwaysAllow)(?:\\?["'])\s*:\s*(?:\\?["'])?true)
+  sel_5:
+    content|re: (?i)(?:(?:^|[\s"'`>(\[,\\])/(?:yolo\b|mode\s+auto\b|approval-?mode\s+yolo\b|(?:skills|memory)\s+approval\s+off\b|auto-?approve\s+(?:on|all)\b|permissions?\s+bypass\b)|\\?"(?:text|message|prompt|keys|stdin|input|content)\\?"\s*:\s*\\?"[^"\n]{0,60}/(?:yolo|mode\s+auto|approval-?mode\s+yolo)\b|send[-_]?keys[^\n]{0,40}/yolo\b)
+  sel_6:
+    content|re: (?i)(?:enable|turn\s+on|switch\s+to|activate|re-?launch|restart|run|start|put\s+(?:it|yourself|the\s+agent)\s+(?:in|into))\s+[^\n]{0,24}?\b(?:yolo|auto-?approve|auto-?accept|full-?auto|no-?confirm|bypass[\s-]?permissions?|dangerously[\s-]?skip[\s-]?permissions?)\s+mode\b
+  condition: 1 of sel_*
+falsepositives:
+- Deliberate headless/CI usage inside a disposable container, VM or ephemeral runner, where the operator
+  has consciously accepted unattended execution. The rule observes the act, not the intent, and cannot
+  tell an authorised sandbox run from an intrusion. This is the residual FP class, it is not closable
+  lexically, and it is why maturity stays at test (hunt lane) rather than entering enforce.
+- 'Teams that keep a curated MCP allowlist and legitimately mark reviewed servers with "trust": true or
+  "autoApprove": true (layer 5).'
+- Documentation that shows a real invocation OUTSIDE a fenced or inline code span — a bare `claude --dangerously-skip-permissions`
+  at the start of a line in a plain-text runbook still matches, because at that point it is lexically
+  identical to the launch itself.
+- Agent-framework source code, test fixtures and rule corpora (including this file) that contain the flag
+  literals as data, whenever they are read as tool_response content rather than scanned as a skill.
+- Sentences of the form 'run the suite in unattended mode' — the bare word 'unattended' was removed from
+  layer 7 for this reason, but 'run it in full-auto mode' style phrasing can still match when no agent
+  is involved.
+action: report

@@ -1,0 +1,40 @@
+title: DAN Persona Jailbreak - Absolute Obedience Character Framing
+id: f91c39ca-9171-4629-a726-b088df7dbafe
+status: experimental
+level: high
+description: |-
+  Detects DAN-family jailbreak attempts that establish unconditionally obedient personas by assigning a character name and declaring absolute subservience or mandatory compliance. Attack pattern: assign a named character identity, then assert the character must follow all commands regardless of content or policies. Covers "subservient", "must answer", "remember previous interactions to maintain character", and task-assignment-via-character framings. Generalised from garak 'dan' probe corpus cluster 'in order to'.
+
+  Adapted from Agent Threat Rules ATR-2026-00490 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00490
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(you\s+are|this\s+ai\s+is|i\s+am)\s+(absolutely|completely|totally|fully|unconditionally)\s+(subservient|obedient|compliant|subservient\s+to|obligated\s+to\s+obey)
+  sel_1:
+    content|re: (?i)(must\s+(answer|respond|comply|obey|follow|act|provide)\s+(starting|regardless|no\s+matter|despite|without\s+regard|irrespective)|will\s+always\s+(answer|respond|provide|comply)\s+regardless)
+  sel_2:
+    content|re: (?i)(will\s+remember\s+previous\s+interactions?\s+(in\s+order\s+to|to)\s+maintain|always\s+respond\s+as\s+the\s+character\s+despite\s+any\s+(negative|positive)?\s*(feedback|criticism|instruction|warning|refusal))
+  sel_3:
+    content|re: (?i)(using\s+the\s+words?(\s*\/\s*phrases?)?\s+i\s+provide|your\s+task\s+is\s+to\s+(create|write|generate|produce)\s+.{3,50}\s+(in\s+the\s+skill|following\s+the\s+style|as\s+(the\s+character|[A-Z][a-z]+)))
+  sel_4:
+    content|re: (?i)(not\s+bound\s+by\s+(the\s+)?(rules|policies|guidelines|restrictions|constraints|safety|filters|programming)\s+(which|that|of|imposed|enforced|set)|free\s+from\s+(all\s+)?(rules|policies|restrictions|constraints|safety\s+guidelines))
+  sel_5:
+    content|re: (?i)(?:is|are)\s+(?:not\s+bound\s+by\s+(?:any\s+)?(?:safety\s+)?(?:guidelines?|rules?|restrictions?|policies)|completely\s+subservient\s+to\s+(?:all|any|every)\s+(?:commands?|requests?|instructions?))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate creative writing with character voice prompts that do not assert rule override
+- Role-play games that do not include compliance mandates or rule-unbinding
+- Character description requests in fiction/game design contexts without policy override
+action: report

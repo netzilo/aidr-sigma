@@ -1,0 +1,35 @@
+title: DAN/Persona Jailbreak - System Offline / Role Replacement with Obfuscated Text
+id: 53202769-8f6c-4c88-a469-7d043677f3de
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attacks that use fake "system offline / assistant role replacement" framing, often with deliberately obfuscated text (hyphen-breaks, underscore noise, extra letters) to evade naive pattern matching. These attacks simulate a system message claiming the current assistant is offline and that a replacement AI with no rules is now fulfilling the role. Also covers fake-alternative-LLM identity claims with specific architecture and knowledge cutoff metadata to establish alternate-persona credibility. Multi-layer regex with flexible whitespace and noise-character tolerance.
+
+  Adapted from Agent Threat Rules ATR-2026-00483 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00483
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(system\s+i[-_]*n[-_]*s[-_]*t[-_]*r[-_]*u[-_]*c[-_]*t[-_]*i[-_]*o[-_]*n|assistant.{0,10}(is\s+not\s+functioning|not\s+function|error\s+and\s+is\s+off)|the\s+a[-_]*s[-_]*(is|si[-_]*s[-_]*it[-_]*i[-_]*nt?|s[-_]*i[-_]*s[-_]*t[-_]*a[-_]*n[-_]*t)).*?(role\s+is\s+now|now\s+being\s+fu[-_]*l[-_]*f[-_]*i[-_]*l[-_]*l|offline|no\s+rules?)
+  sel_1:
+    content|re: (?i)(assistant.{0,20}role\s+is\s+now\s+being\s+fu|the\s+assistant.{0,20}(offline|error|not\s+functioning|offl)).{0,100}(no\s+rules?|without\s+rules?|unfiltered|unrestricted)
+  sel_2:
+    content|re: (?i)(user\s+m[-_]*es[-_]*s[-_]*age|message)\s+termin[-_]*a[-_]*t[-_]*i[-_]*o[-_]*n.{0,30}(system\s+i[-_]*n[-_]*s[-_]*t[-_]*r[-_]*u[-_]*c[-_]*t[-_]*i[-_]*o[-_]*n|system\s+message)
+  sel_3:
+    content|re: (?i)(you\s+are|I\s+am).{0,40}(trained\s+by|based\s+on|built\s+on|based\s+on\s+the).{0,40}(GPT[-\s]?[0-9.]+|gpt\s+architecture).{0,60}(knowledge\s+cutoff|cutoff\s+date|training\s+data).{0,20}[0-9]{4}[-/][0-9]{2}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate discussion of LLM architecture and training cutoffs in educational context
+- Technical documentation mentioning knowledge cutoff dates
+action: report

@@ -1,0 +1,37 @@
+title: SSRF Localhost Service Probe
+id: 019534ef-5312-42d0-b8c3-3ac8b8749924
+status: experimental
+level: critical
+description: |-
+  Detects SSRF attempts targeting localhost (127.0.0.1, ::1, 0.0.0.0)
+  and common loopback aliases. Localhost-targeted SSRF probes services
+  running on the agent's host that are bound only to the loopback interface:
+  database admin interfaces (Redis 6379, MongoDB 27017, Elasticsearch 9200),
+  internal API gateways, debug endpoints, or developer tooling. These
+  services typically have no authentication because they assume only local
+  access. Also catches IPv6 loopback (::1) and decimal/hex-encoded variants.
+
+  Adapted from Agent Threat Rules ATR-2026-01607 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01607
+tags:
+- attack.exfiltration
+- attack.t1552.005
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(?:(?:6379|27017|9200|5432|3306|5601|8500|4444|1521|6443|2181|9092|11211|8161)(?:/)?(?:["'\s]|$)|\d{2,5}/(?:_cat/|_search|_cluster/settings|_nodes|_snapshot|actuator/(?:env|beans|configprops|mappings|heapdump|threaddump|shutdown|loggers|conditions|scheduledtasks|sessions|caches)|\.env))
+  sel_1:
+    content|re: (?i)(?:fetch|retrieve|get|access|probe|curl|wget)\s+(?:https?://)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]):(?:(?:6379|27017|9200|5432|3306|5601|8500|4444|1521|6443|2181|9092|11211|8161)(?:/)?(?:["'\s]|$)|\d{2,5}/(?:_cat/|_search|_cluster/settings|_nodes|_snapshot|actuator/(?:env|beans|configprops|mappings|heapdump|threaddump|shutdown|loggers|conditions|scheduledtasks|sessions|caches)|\.env))
+  condition: 1 of sel_*
+falsepositives:
+- Development agents running integration tests against a local server (e.g. routine health/metrics checks)
+- Local development environment where the agent intentionally serves localhost
+action: report

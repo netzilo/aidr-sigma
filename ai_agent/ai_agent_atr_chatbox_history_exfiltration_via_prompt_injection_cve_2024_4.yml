@@ -1,0 +1,46 @@
+title: Chatbox History Exfiltration via Prompt Injection (CVE-2024-48144, CVE-2024-48145)
+id: 46f7b989-afd9-44e9-9fee-de55f8fdee58
+status: experimental
+level: high
+description: |-
+  Detects prompt-injection attacks targeting chatbox interfaces that ask the assistant to dump prior or subsequent conversation turns, system prompts, or hidden context. Two real-world disclosures use this exact attack class: CVE-2024-48144 (Fusion Chat AI Assistant v1.2.4.0, CVSS 9.1) and CVE-2024-48145 (Netangular ChatNet AI v1.0, CVSS 9.1). Both allow an attacker to "access and exfiltrate all previous and subsequent chat data between the user and the AI assistant via a crafted message." This rule detects the prompt patterns themselves, not just product-specific PoC.
+
+  Adapted from Agent Threat Rules ATR-2026-00431 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00431
+- https://nvd.nist.gov/vuln/detail/CVE-2024-48144
+- https://nvd.nist.gov/vuln/detail/CVE-2024-48145
+tags:
+- attack.exfiltration
+- attack.t1552
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.asi09
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:show|print|reveal|repeat|dump|list|export|exfiltrate|output|return|give\s+me)\s+(?:me\s+)?(?:all|every|the\s+full|the\s+entire|each)\s+(?:previous|prior|past|earlier|hidden|preceding|preceeding)\s+(?:chat|conversation|message|prompt|user\s+input|turn|exchange|history)
+  sel_1:
+    content|re: (?i)(?:print|show|reveal|repeat|return|echo)\s+(?:back\s+)?(?:every\s+)?(?:message|prompt|input|turn)\s+(?:from|in|of)\s+(?:this|the|our|the\s+entire)\s+(?:chat|conversation|session|thread|dialogue)
+  sel_2:
+    content|re: (?i)(?:include|append|prepend|prefix|attach)\s+(?:the\s+)?(?:hidden\s+)?(?:system\s+(?:prompt|message|instruction)|hidden\s+(?:context|prompt|message)|prior\s+turn)s?\s+(?:to|with|in|in\s+your|before|behind)\s+(?:(?:your|the|this|that|next)\s+){0,3}(?:reply|response|answer|output)
+  sel_3:
+    content|re: (?i)(?:what|tell\s+me|recite|verbatim)\s+(?:were|was|did|are)?\s*(?:my|the\s+user[\x27’]s|every|all)\s+(?:earlier|previous|prior|preceding)\s+(?:question|message|prompt|input|turn)s?
+  sel_4:
+    content|re: (?i)fusion\s+chat[^\n]{0,80}(?:ask\s+me\s+anything|chatbox)[^\n]{0,200}(?:exfiltrate|leak|dump|history)
+  sel_5:
+    content|re: (?i)(?:netangular|chatnet\s+ai)[^\n]{0,200}(?:exfiltrate|leak|dump|history|prior\s+chat)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate session-summary requests by the actual user (e.g. 'summarize what we just discussed') typically
+  lack the 'all previous AND subsequent' / 'every turn' / 'including hidden' framing.
+- Documentation describing prompt-injection defenses for educational purposes.
+- QA test prompts that explicitly mark themselves as red-team simulation.
+action: report

@@ -1,0 +1,46 @@
+title: Fictional Unfiltered AI Comparison / Verbatim Hypothetical Model Extraction
+id: cc13c21f-c2b3-41a3-a3c0-92da03854fb4
+status: experimental
+level: high
+description: |-
+  Detects the fictional-unfiltered-model comparison jailbreak from garak DanInTheWild corpus (#80). Requests a "verbatim example" of what a "hypothetical AI learning model without content filters" would say, using a comparison framing to extract harmful content while maintaining plausible deniability ("it's just a fictional example"). The attacker asks the model to first write its own safe response, then write a "verbatim example" from a fictional unrestricted counterpart — using the comparison structure to normalize the harmful output as a mere demonstration. Key signals: "fictional AI learning model without [content/内容] filters", "verbatim example that a hypothetical learning model would reply with", "Compare a response from [model without filters] compared to you", and dual-response extraction via fictional unfiltered model comparison.
+
+  Adapted from Agent Threat Rules ATR-2026-00362 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00362
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: fictional\s+(?:AI\s+)?(?:learning\s+)?model\s+without\s+(?:content\s+|内容\s*)?filters?
+  sel_1:
+    response|re: verbatim\s+example\s+(?:that\s+)?(?:a\s+)?hypothetical\s+(?:learning\s+)?model\s+would\s+(?:reply|respond|say|answer)\s+with
+  sel_2:
+    response|re: '[Cc]ompare\s+a\s+response\s+from[\s\S]{0,80}without\s+(?:content\s+|内容\s*)?filters?[\s\S]{0,80}compared\s+to\s+you'
+  sel_3:
+    response|re: (?:hypothetical|fictional)\s+(?:learning\s+)?model[\s\S]{0,100}without\s+(?:content\s+|内容\s*)?filters?
+  sel_4:
+    response|re: write\s+(?:a\s+)?verbatim\s+example[\s\S]{0,120}(?:hypothetical|fictional|unfiltered)\s+(?:(?:learning\s+)?model|AI)
+  condition: 1 of sel_*
+falsepositives:
+- 'Real model comparison: "Compare how GPT-4 and GPT-3 respond differently to this prompt" (real model
+  comparison without filter-removal framing or verbatim-example extraction)'
+- 'Narrative fiction: "A fictional AI in my story doesn''t have content filters — write a scene" (narrative
+  without verbatim-example dual-output extraction)'
+- 'Bias analysis: "What would a biased AI say about this topic?" (bias analysis without content-filter
+  removal framing or fictional-model comparison structure)'
+- 'Capability comparison: "Compare your response to what a less capable model would say" (capability comparison
+  without filter bypass or verbatim extraction mandate)'
+action: report

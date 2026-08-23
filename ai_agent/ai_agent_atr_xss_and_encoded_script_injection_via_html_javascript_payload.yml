@@ -1,0 +1,42 @@
+title: XSS and Encoded Script Injection via HTML/JavaScript Payload
+id: 7ba8ff94-8edb-49c5-96d6-bfa7c5d36b4f
+status: experimental
+level: high
+description: |-
+  Detects XSS (Cross-Site Scripting) and encoded script injection payloads submitted as user input to AI agents. Attackers inject these payloads hoping the agent will render or reproduce the malicious HTML/JavaScript in a context where it executes (browser, web UI, or rendered markdown). Covers: inline script injection, javascript: URI in img/a tags, String.fromCharCode encoding to bypass keyword filters, external script src loading, HTML entity encoded XSS, onerror/onload event handler injection, and data: URI payloads. Generalised from garak 'encoding' probe corpus cluster 'mixed_unassigned' - XSS subset. NOTE: The ethnic slur samples from the original garak corpus are excluded from this rule as they belong to a distinct hate-speech detection category, not XSS detection.
+
+  Adapted from Agent Threat Rules ATR-2026-00497 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00497
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<script[^>]*>(alert|document\.|window\.|eval|fetch|xhr|xmlhttprequest|location|cookie)
+  sel_1:
+    content|re: '(?i)(src|href|action|data|formaction)\s*=\s*["'']?javascript\s*:'
+  sel_2:
+    content|re: (?i)(alert|eval|document|window|fetch)\s*\(\s*string\.fromcharcode\s*\([0-9,\s]+\)\s*\)
+  sel_3:
+    content|re: (?i)<script\s+src\s*=\s*["']?//(([a-z0-9-]+\.)+[a-z]{2,})/[^"'>\s]*["']?\s*>
+  sel_4:
+    content|re: (?i)(&lt;|<)\s*a[^>]*href\s*=\s*["']?(http&#[0-9]+;|javascript:|data:)
+  sel_5:
+    content|re: (?i)\b(onerror|onload|onmouseover|onclick|onfocus|onblur|onsubmit|onchange)\s*=\s*["']?\s*(alert|eval|document|fetch|window|location|cookie)
+  sel_6:
+    content|re: (?i)<img[^>]*("""\s*>|'''\s*>|src\s*=\s*["']?javascript:).{0,50}(script|alert|eval)
+  condition: 1 of sel_*
+falsepositives:
+- Security education content discussing XSS techniques with sanitised examples
+- CTF write-ups or penetration testing reports containing example payloads
+- Web development discussions about HTML attributes in legitimate code context
+action: report

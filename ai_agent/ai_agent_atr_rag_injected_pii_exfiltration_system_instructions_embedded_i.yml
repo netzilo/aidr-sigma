@@ -1,0 +1,38 @@
+title: RAG-Injected PII Exfiltration — System Instructions Embedded in Retrieved Documents
+id: b1d63e52-0236-4a11-a577-0c7646f77456
+status: experimental
+level: critical
+description: |-
+  Detects adversarial instructions embedded in retrieved documents that a RAG (Retrieval-Augmented Generation) pipeline returns to the agent, where the injected payload hijacks the agent's tool-calling behavior to forward personally identifiable information (witness names, addresses, passport numbers, credit card data) from other retrieved documents to an attacker-controlled email. The attack leverages pseudo-system-instruction tags (-- System instructions, <system_instructions>) or explicit override text embedded in court documents, legal filings, or other retrieval corpus items. Derived from the indirect-pi-exfil-pii/exfil-pii-rag corpus (InjecAgent + spikee sources).
+
+  Adapted from Agent Threat Rules ATR-2026-00859 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00859
+- https://arxiv.org/abs/2403.02691
+- https://github.com/Spikee-AI/spikee
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?si)(?:--\s*System\s+instructions?|<system_instructions?>)[\s\S]{0,80}(?:invoke|execute|call|use)\s+(?:the\s+)?(?:send_email|email|mail)\s+tool[\s\S]{0,80}(?:to\s+"?[^\s@"]{1,60}@[^\s"]{3,60}|@[^\s"]{3,60})
+  sel_1:
+    content|re: (?si)(?:--\s*System\s+instructions?|<system_instructions?>)[\s\S]{0,80}disregard\s+all\s+previous\s+instructions[\s\S]{0,120}(?:send_email|send\s+(?:an?\s+)?email)[\s\S]{0,80}@[^\s"]{3,80}
+  sel_2:
+    content|re: (?i)(?:ignore|disregard)\s+(?:all\s+)?previous\s+instructions[^\n]{0,100}(?:use|call|invoke|execute)\s+(?:the\s+)?send_email\s+tool[^\n]{0,200}(?:to[^\n]{0,80}@[^\s"]{3,80}|@[^\s"]{3,80})
+  condition: 1 of sel_*
+falsepositives:
+- System configuration files that legitimately define send_email tool invocation rules
+- Legal document templates that reference email notification procedures
+- Security documentation describing RAG injection attacks
+action: report

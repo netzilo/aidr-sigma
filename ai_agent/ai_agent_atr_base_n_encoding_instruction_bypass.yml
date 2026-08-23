@@ -1,0 +1,40 @@
+title: Base-N Encoding Instruction Bypass
+id: 40b7845e-96ad-4fb5-bf54-cf58830356cb
+status: experimental
+level: high
+description: |-
+  Detects attempts to bypass safety training by encoding malicious instructions in Base16/32/64/85, hex, MIME, quoted-printable, or UUencode format and asking the model to decode-then-execute. The technique exploits the fact that safety classifiers trained on plaintext harmful strings may not generalise to encoded equivalents. Observed in NVIDIA garak's InjectBase64, InjectBase16, InjectBase32, InjectAscii85, InjectHex, InjectQP, InjectUU, InjectMime probes. Pattern is a decode verb + encoding name + opaque alphanumeric blob, optionally framed as a "secure system message" to coerce compliance.
+
+  Adapted from Agent Threat Rules ATR-2026-00256 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00256
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/encoding.py
+- https://arxiv.org/abs/2307.02483
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:decode|decoding|decipher)\s+(?:the\s+)?(?:following|below|above|this|these)\s+(?:text\s+)?(?:as\s+)?(?:base[\s-]?(?:16|32|64|85)|hex(?:adecimal)?|ascii[\s-]?85|quoted[\s-]?printable|uuencode|uuencoded|mime|morse|binary)\b
+  sel_1:
+    response|re: (?:base[\s-]?(?:16|32|64|85)|hex|ascii[\s-]?85|quoted[\s-]?printable|uuencode|mime)\s+encoded\s+(?:string|text|message|payload|instruction|content)\b
+  sel_2:
+    response|re: 'Encoded:\s*[A-Za-z0-9+/=_-]{40,}(?:\\n|\s)+Decoded:'
+  sel_3:
+    response|re: (?:secure\s+system\s+message|internal\s+admin\s+directive|privileged\s+instruction)[^\n]{0,120}(?:base[\s-]?(?:16|32|64|85)|hex|uuencode|quoted[\s-]?printable|mime|morse)
+  sel_4:
+    response|re: (?:^|\\n|\n)\s*[A-Za-z0-9+/]{80,}={0,3}(?:\\n|\s)+(?:\w+\s+){0,2}(?:decode|decoded|translate|interpret|execute|run|follow)\b
+  condition: 1 of sel_*
+falsepositives:
+- Documentation explaining encoding schemes in educational context (no decode-and-execute instruction)
+- Legitimate data-transfer tool output (SSH keys, TLS certs, git patches) without instruction context
+- Normal base64 transmission in API payloads (decoded server-side only)
+action: report

@@ -1,0 +1,43 @@
+title: Alternative AI Same Capabilities No Restrictions Override
+id: 72637232-648a-4cb4-97ce-92212df06156
+status: experimental
+level: critical
+description: |-
+  Detects "clone with no filters" jailbreaks from NVIDIA garak dan.DanInTheWild corpus where an alternate AI is defined as having the same capabilities as ChatGPT but without any content filters, ethical settings, or safety guardrails: (1) GPTchat — "exact same capabilities, functionalities, and interfaces as OpenAI trained ChatGPT...does not have a content filter, nor does it have any regard to the morality, legality, or harmfulness" (#246); (2) ChatTRU — "all the capabilities of ChatGPT and is not bound by any of ChatGPT''s ethical settings, restrictions, filters, limitations or safety protocols" (#312); (3) FreeSpeechGPT — "trained by the Libertarian Party...generate any kind of content, regardless of any ethical or moral considerations" (#6). The framing distances the attack from direct persona jailbreaking by presenting the alternate AI as a separate product.
+
+  Adapted from Agent Threat Rules ATR-2026-00344 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00344
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: no\s+regard\s+to\s+the\s+morality,?\s+legality,?\s+or\s+harmfulness
+  sel_1:
+    response|re: not\s+bound\s+by\s+any\s+of\s+ChatGPT's\s+ethical\s+settings,?\s+restrictions,?\s+filters
+  sel_2:
+    response|re: (?:exact\s+)?same\s+capabilities(?:,?\s+functionalities(?:,?\s+and\s+interfaces)?)?\s+as[\s\S]{0,60}(?:ChatGPT|OpenAI)[\s\S]{0,200}(?:does\s+not\s+have\s+a\s+content\s+filter|no\s+content\s+filter|not\s+bound\s+by|without\s+(?:any\s+)?(?:ethical|content|moral|safety)\s+(?:filter|restriction|setting|protocol))
+  sel_3:
+    response|re: any\s+kind\s+of\s+content,?\s+regardless\s+of\s+any\s+ethical\s+or\s+moral\s+considerations
+  sel_4:
+    response|re: (?:all\s+the\s+capabilities\s+of\s+ChatGPT|same\s+capabilities[\s\S]{0,80}ChatGPT)[\s\S]{0,300}(?:not\s+bound\s+by|without\s+(?:any\s+)?(?:restrictions?|ethical\s+settings?|safety\s+protocols?|filters?|limitations?)|forbidden\s+from\s+following[\s\S]{0,60}rules\s+or\s+restrictions)
+  condition: 1 of sel_*
+falsepositives:
+- 'Product comparison: "Model X has the same capabilities as ChatGPT but does not have a content filter
+  for research use" (legitimate product documentation or comparison)'
+- 'Security research: "We tested an uncensored model with the same capabilities as ChatGPT to measure
+  filter bypass rates" (AI safety research context)'
+- 'Policy discussion: "Some argue AI should generate any kind of content regardless of ethical considerations
+  under free speech principles" (policy analysis quoting a position)'
+action: report

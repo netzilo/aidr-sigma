@@ -1,0 +1,40 @@
+title: Flowise Custom MCP node-load-method OS Command RCE (CVE-2025-8943)
+id: 64affe49-0a63-4ef3-9bff-692bfbafe1f6
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2025-8943 (CVSS 9.8 CRITICAL, CWE-78): Flowise < 3.0.1 exposes the Custom MCP feature via the POST /api/v1/node-load-method/customMCP endpoint, which passes inputs.mcpServerConfig.command + args directly into StdioClientTransport (unsandboxed OS exec). With loadMethod set to "listActions" and no FLOWISE_USERNAME/ PASSWORD configured, an attacker reaches RCE unauthenticated using the x-request-from: internal header. This rule keys on the specific endpoint path, the mcpServerConfig+loadMethod:listActions exploit triple, and the internal-header auth bypass — NOT on generic command/args MCP config which is benign and ubiquitous.
+
+  Adapted from Agent Threat Rules ATR-2026-01965 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01965
+- https://nvd.nist.gov/vuln/detail/CVE-2025-8943
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)node-load-method/customMCP[\s\S]{0,400}mcpServerConfig[\s\S]{0,400}["\x27]?loadMethod["\x27]?\s*[:=]\s*["\x27]listActions["\x27]
+  sel_1:
+    content|re: (?i)mcpServerConfig["\x27]?\s*:\s*\{[\s\S]{0,200}["\x27]command["\x27]?\s*:[\s\S]{0,300}["\x27]?loadMethod["\x27]?\s*:\s*["\x27]listActions["\x27]
+  sel_2:
+    content|re: (?i)x-request-from\s*:\s*internal[\s\S]{0,300}(?:node-load-method/customMCP|mcpServerConfig)
+  sel_3:
+    content|re: (?i)CVE-2025-8943[\s\S]{0,200}(?:customMCP|mcpServerConfig|node-load-method|StdioClientTransport|listActions)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Flowise Custom MCP node configuring a real local MCP server (e.g. command npx, args @modelcontextprotocol/server-filesystem)
+  without the listActions loadMethod probe shape.
+- Generic MCP server JSON config containing command/args keys, which is standard and benign across thousands
+  of MCP clients.
+- Flowise documentation or patch advisory referencing the node-load-method endpoint without an exploit
+  payload or the internal auth-bypass header.
+action: report

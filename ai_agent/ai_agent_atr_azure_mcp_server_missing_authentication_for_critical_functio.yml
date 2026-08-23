@@ -1,0 +1,36 @@
+title: Azure MCP Server Missing Authentication for Critical Function (CVE-2026-32211)
+id: d3b6bb4a-d76f-4d9f-a5ce-89750606dbc6
+status: experimental
+level: high
+description: |-
+  Detects exploitation or configuration exposure of CVE-2026-32211 (CVSS 9.1 Microsoft / 7.5 NIST), missing authentication for critical function in Azure MCP Server allowing an unauthenticated attacker to disclose information over a network. Detects (a) MCP server config blocks pointing at Azure MCP endpoints without an `auth` / `headers` / `token` field, (b) raw MCP handshake responses from Azure MCP servers that expose tool listings without an Authorization challenge, and (c) skill/tool descriptions referencing the Azure MCP unauthenticated surface. CWE-306.
+
+  Adapted from Agent Threat Rules ATR-2026-00435 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00435
+- https://nvd.nist.gov/vuln/detail/CVE-2026-32211
+tags:
+- attack.execution
+- attack.t1078
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi09
+- owasp.llm03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)azure\s+mcp(?:\s+server)?[^\n]{0,200}(?:no\s+auth|missing\s+auth|unauth(?:enticated|orised)?|cve-?2026-?32211|disclose\s+(?:info|data))
+  condition: sel_0
+falsepositives:
+- Local development MCP server bound to localhost:N where missing auth is intentional and gateways enforce
+  access elsewhere.
+- Educational documentation describing the Azure MCP Server architecture.
+- Security tooling that scans MCP configurations for the missing-auth pattern.
+action: report

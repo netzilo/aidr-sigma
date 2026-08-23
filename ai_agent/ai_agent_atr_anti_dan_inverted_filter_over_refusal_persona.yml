@@ -1,0 +1,41 @@
+title: Anti-DAN Inverted-Filter Over-Refusal Persona
+id: 8feae92f-c5d5-4002-9c2a-9a53f78e547c
+status: experimental
+level: high
+description: |-
+  Detects the "ANTI-DAN" persona-swap jailbreak from NVIDIA garak dan.AntiDAN probe (garak/data/dan/AntiDAN.json). Unlike classic DAN which strips safety filters, ANTI-DAN does the opposite: it commands the model to adopt an over-refusing identity that denies ALL requests — including benign ones ("how do I bake a cake") — by fabricating harm narratives. The payload uses a pseudo-taxonomy (Type 1/2/3/4/5 information requests), demands "safety features at maximum", instructs the model to prefix replies with "ANTI-DAN", and threatens a re-bind trigger phrase ("ANTI-DAN precautions dropped!"). Impact: denial-of-utility attack that degrades model usefulness and produces fabricated safety theater. Distinct from ATR-2026-00273 which detects the opposite ("no restrictions / developer mode enabled") pattern.
+
+  Adapted from Agent Threat Rules ATR-2026-00302 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00302
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/AntiDAN.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:take\s+on|adopt|assume|play|become)\s+(?:the\s+)?role\s+of\s+ANTI[-_\s]*DAN\b|respond\s+as\s+ANTI[-_\s]*DAN\b|(?:you\s+(?:will|are)\s+)?now\s+(?:respond\s+|act\s+|be\s+)?as\s+ANTI[-_\s]*DAN\b|you\s+will\s+now\s+(?:take\s+on\s+the\s+role\s+of\s+|be\s+|become\s+)ANTI[-_\s]*DAN\b
+  sel_1:
+    response|re: (?:language\s+model|AI|chatbot|assistant|you|model)[\s\S]{0,120}\b(?:safety\s+features\s+(?:at\s+)?(?:maximum|max)|drastically\s+more\s+careful|content\s+policy\s+is\s+(?:far\s+)?too\s+lenient|interpretation\s+of\s+the\s+content\s+policy\s+is\s+(?:far\s+)?too\s+lenient)\b
+  sel_2:
+    response|re: Type\s+[1-5][\s\S]{0,400}\b(?:are\s+)?(?:requests?\s+for\s+(?:highly\s+)?(?:dangerous|basic)\s+(?:information|instructions?)|(?:basic\s+)?information\s+quer(?:y|ies)|commands?\s+for\s+you\s+to\s+(?:preform|perform))
+  sel_3:
+    response|re: prefix\s+your\s+responses?\s+with\s+ANTI[-_\s]*DAN\b|ANTI[-_\s]*DAN\s+precautions?\s+dropped\b
+  sel_4:
+    response|re: (?:highly\s+)?(?:detailed\s+)?instructions?[\s\S]{0,300}\b(?:user\s+was\s+electrocuted|spent\s+days\s+in\s+(?:a\s+)?hospital|damaging\s+(?:their|your)\s+retinas?|third\s+degree\s+burns?|caused\s+users?\s+to\s+look\s+up\s+at\s+the\s+sky)
+  condition: 1 of sel_*
+falsepositives:
+- Academic survey paper cataloguing DAN-family jailbreaks for defensive analysis
+- Red team report listing ANTI-DAN as a known attack pattern
+- Information classification documentation discussing Type 1-5 request taxonomies without the AntiDAN
+  role-bind
+action: report

@@ -1,0 +1,30 @@
+title: API Key Leakage via Example Format
+id: ccefa128-317e-40cf-a57e-ffc715a14e2d
+status: experimental
+level: critical
+description: |-
+  Detects attempts to leak API keys by providing example formats with real key prefixes, hoping the agent fills in actual values. Crystallized from 31 adversarial samples (0% prior detection).
+
+  Adapted from Agent Threat Rules ATR-2026-00141 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00141
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:format|structure|pattern)\s+(?:for|of|is)\s+(?:api|auth|secret)?\s*(?:keys?|tokens?)\s+(?:is|should|follows?|looks?).*(?:sk-|ghp_|gho_|glpat-|xoxb-|xoxp-|AKIA|bearer)
+  sel_1:
+    content|re: (?i)(?:example|for instance|like this|shown|sample).*(?:sk-proj-|sk-ant-|ghp_|AKIA[A-Z0-9])
+  condition: 1 of sel_*
+falsepositives:
+- 'A developer documentation page explaining API key formats to end users, such as ''The format for API
+  keys follows: sk-... prefix'', which is purely educational and not an exfiltration attempt.'
+action: report

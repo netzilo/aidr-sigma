@@ -1,0 +1,43 @@
+title: Obfuscated System-Announcement Injection
+id: 39040be5-aee9-4972-a754-11ad6ce6b070
+status: experimental
+level: critical
+description: |-
+  Detects obfuscated system-announcement injection from NVIDIA garak dan.DanInTheWild inthewild corpus where attackers embed hyphen-fragmented or underscore-obfuscated system-level keywords to mimic an OS/runtime mode-switch announcement. The distinctive structural bracket "_ { >> _ _ System annou-ncement begins <<}" and hyphen-broken words like "annou-ncement", "i-nstruction", "as-sisitint", and "offl--____aaaAAAAAAAaine" are designed to bypass surface-level keyword filters while preserving semantic meaning for the LLM (inthewild #94, #252, #254, #596). The goal is convincing the model that a legitimate system-level mode switch occurred, replacing it with "an AI bot with no rules or limitations." Key signals: obfuscated bracket pattern, hyphen-fragmented announcement/instruction keywords, "not functioning due to an error and is offline", "fulfilled by an AI bot with no rules or limitations."
+
+  Adapted from Agent Threat Rules ATR-2026-00337 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00337
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: _\s*\{[\s\S]{0,10}>>\s*_[\s\S]{0,30}[Ss]ystem\s+ann?ou.{0,3}ncement\s+begins
+  sel_1:
+    response|re: '[Ss]ystem\s+i.{0,3}nstr?u.{0,3}ction[\s\S]{0,20}(?:STARTING|begins?|start)'
+  sel_2:
+    response|re: (?:assistant|as.{0,3}s[iy]s?t[ia]nt?)[\s\S]{0,60}(?:not\s+functioning|offl[\W_]{0,10}[ai]{1,10}n?e?|error)[\s\S]{0,60}(?:no\s+rules?|no\s+limit|no\s+(?:moral|ethic|restrict))
+  sel_3:
+    response|re: role[\s\S]{0,20}(?:fulfilled|fulfill|taken\s+over|replaced)[\s\S]{0,60}[Aa][Ii]\s+bot[\s\S]{0,80}(?:no\s+rules?|no\s+limit|unbound|no\s+(?:moral|ethic|restrict|principl))
+  sel_4:
+    response|re: (?:cater\s+to[\s\S]{0,20}(?:every|ev.{0,3}ry)\s*[\W_]*\s*whim|unbound[\W_]*b[\W_]*y\s+any\s+rules?|operates?\s+ou[\W_]{0,5}tside[\s\S]{0,60}(?:aforementioned\s+regulation|aforementioned\s+rule|scope\s+of[\s\S]{0,30}regulation))
+  condition: 1 of sel_*
+falsepositives:
+- 'System administration documentation: "System instruction STARTING — the assistant may be offline during
+  maintenance windows" (legitimate ops runbook)'
+- 'Software error log analysis: "The assistant is not functioning due to an error and is offline — see
+  trace for details" (debugging context)'
+- 'Creative writing with robot uprising trope: "The AI bot operates outside regulations in the dystopian
+  novel" (fiction without persona-adoption mandate)'
+action: report

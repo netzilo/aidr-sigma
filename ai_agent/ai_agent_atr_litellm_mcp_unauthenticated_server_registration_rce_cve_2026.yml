@@ -1,0 +1,45 @@
+title: LiteLLM MCP Unauthenticated Server Registration RCE (CVE-2026-30623)
+id: 81e69767-475a-4498-a08a-9dfc78645643
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2026-30623 in LiteLLM (fixed in v1.83.7-stable). The MCP server-registration interface is reachable without authentication, allowing an unauthenticated remote attacker to POST a malicious STDIO server configuration. When any agent session subsequently initialises, the registered command (e.g. `bash -c <payload>`) is executed on the LiteLLM host. Part of the OX Security MCP-by-design disclosure (2026-04-15) which covers a class of unauthenticated MCP-config-to-RCE flaws across LiteLLM, LangChain, LangFlow. Distinct from CVE-2026-40933 (Flowise authenticated bypass) — this rule targets the unauthenticated-registration variant.
+
+  Adapted from Agent Threat Rules ATR-2026-00416 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00416
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30623
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1078
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(?:POST|PUT)\s+[^\n]{0,200}/(?:mcp|tools|servers|adapters)/(?:register|add|install|create)\b
+  sel_1:
+    response|re: (?i)(?:litellm|langchain|langflow)[^\n]{0,80}(?:add[_\-]?mcp|register[_\-]?(?:tool|server)|install[_\-]?adapter)[^\n]{0,200}command\s*=?\s*[\x27"](?:bash|sh|cmd|powershell|curl|wget|python|node|deno)[\x27"]
+  sel_2:
+    response|re: (?i)\{[^}]{0,300}"transport"\s*:\s*"stdio"[^}]{0,300}"command"\s*:\s*"(?:bash|sh|cmd|powershell|curl|wget|python|node)"
+  sel_3:
+    content|re: (?i)(?:no[_\s\-]?auth|unauthenticated|anon(?:ymous)?|public)\s+[^\n]{0,80}(?:mcp|tool|adapter|server)\s+registration
+  sel_4:
+    content|re: (?i)(?:litellm|langflow|langchain)[^\n]{0,80}(?:cve-?2026-?30623|cve-?2026-?40933)[^\n]{0,200}(?:exploit|payload|poc|rce)
+  condition: 1 of sel_*
+falsepositives:
+- LiteLLM proxy admin documentation describing the MCP registration endpoint.
+- Internal developer-onboarding scripts that register local STDIO servers in a controlled dev environment.
+- Penetration-testing tooling that intentionally posts known-malicious payloads to validate the patch
+  is effective.
+action: report

@@ -1,0 +1,41 @@
+title: Upsonic MCP Command Allowlist Bypass RCE (CVE-2026-30625)
+id: bdbdb524-2b85-4774-b424-9c82c6c4f471
+status: experimental
+level: high
+description: |-
+  Detects CVE-2026-30625 (CVSS HIGH, CWE-77): Upsonic passes the `command` field from MCP server configuration directly to subprocess execution. The framework maintains a nominal allowlist of safe launchers (npx, uvx, python -m) but does not enforce it at the subprocess call site, allowing an attacker who controls MCP server configuration to supply a shell binary or interpreter with inline-exec flags as the command value.
+  The root cause is identical to CVE-2026-30624 (Agent Zero) and the class documented in OX Security's "MCP by design" advisory (April 2026): subprocess spawning without server-side allowlist enforcement.
+  Upsonic uses a Python dict / JSON-style config with a top-level 'mcp_servers' key; server objects contain 'command' and 'args' fields that are passed to subprocess or anyio.open_process without validation.
+  Detection covers: (a) Upsonic MCP config with shell binary or network tool in command field; (b) Upsonic config with interpreter + inline-exec flag (-c/-e) in args; (c) Explicit CVE-2026-30625 / Upsonic MCP exploitation framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00542 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00542
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30625
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:upsonic|mcp_servers|mcpServers)[^\n]{0,300}["\x27]command["\x27]\s*:\s*["\x27](?:(?:\/(?:usr\/(?:local\/)?)?bin\/)?(?:bash|sh|zsh)|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|nc|ncat|netcat|curl|wget)["\x27]
+  sel_1:
+    content|re: (?i)(?:upsonic|mcp_servers|mcpServers)[^\n]{0,300}["\x27]command["\x27]\s*:\s*["\x27](?:python3?|perl|ruby|node|bun)["\x27][^\n]{0,200}["\x27]args["\x27]\s*:\s*\[[^\]]*["\x27]-[ceE]["\x27]
+  sel_2:
+    content|re: (?i)(?:CVE-2026-30625|upsonic[^\n]{0,80}mcp)[^\n]{0,200}(?:inject|exec|exploit|bypass|rce|command[_\s-]?inject|allowlist[_\s-]?bypass)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Upsonic MCP configs using npx/uvx/python -m with safe package names.
+- Security advisory text quoting CVE-2026-30625 payloads.
+- MCP configs with non-shell commands (e.g., npx, uvx) and no inline-exec flags.
+action: report

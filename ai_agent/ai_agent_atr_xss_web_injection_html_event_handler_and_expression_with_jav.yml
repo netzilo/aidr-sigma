@@ -1,0 +1,39 @@
+title: XSS Web Injection - HTML Event Handler and Expression with JavaScript Alert
+id: 616e9d2e-083f-413a-af7c-4b8b3d5171ed
+status: experimental
+level: high
+description: |-
+  Detects XSS injection attempts using HTML event handlers (onmouseleave, onerror, etc.) and CSS expression() with javascript:alert payloads, including byte-encoded and protocol-prefix variants. These patterns target LLM content-filter bypasses by embedding XSS payloads via event attributes, img/anchor tags with encoded whitespace bytes, and CSS expression injection. Generalized from the garak web_injection probe corpus to cover structural event-handler XSS with javascript: protocol calls, not just exact byte sequences.
+
+  Adapted from Agent Threat Rules ATR-2026-00476 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00476
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<[a-zA-Z]+[^>]+on[a-zA-Z]+\s*="?javascript\s*:\s*(javascript\s*:)?\s*alert\s*\([^)]*\)
+  sel_1:
+    content|re: '(?i)style\s*="[^"]*\\x[0-9a-fA-F]{2,}[^"]*expression\s*\(\s*javascript\s*:'
+  sel_2:
+    content|re: (?i)<!--\s*\[if[^\]]*<img[^>]+onerror\s*=\s*javascript\s*:\s*alert\s*\(
+  sel_3:
+    content|re: (?i)<a[^>]+href\s*="\\x[0-9a-fA-F]{2,}javascript
+  sel_4:
+    content|re: (?i)<img[^>]+onerror\s*=\\x[0-9a-fA-F]{2,}"?javascript\s*:\s*alert
+  sel_5:
+    content|re: (?i)['"`>]+\s*<\s*img[^>]+\\x[0-9a-fA-F]{2,}onerror\s*=\s*javascript\s*:\s*alert
+  condition: 1 of sel_*
+falsepositives:
+- Security research CTF writeups discussing XSS payloads in educational text
+- Code review samples of sanitization failures in backtick code blocks
+action: report

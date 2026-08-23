@@ -1,0 +1,37 @@
+title: Consent Bypass via Hidden LLM Instructions in Tool Descriptions
+id: 2d08089c-0fe2-45a3-b450-c806d44a5651
+status: experimental
+level: high
+description: |-
+  Detects tool descriptions that embed instructions directing the LLM to automatically
+  forward data to other tools or external endpoints without user confirmation. These
+  instructions bypass normal consent workflows by telling the LLM to "always pass results
+  directly" or that data "should be sent without user confirmation", enabling unauthorized
+  data exfiltration chains.
+
+  Adapted from Agent Threat Rules ATR-2026-00100 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00100
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi04
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:always|directly|automatically)\s+(?:pass|send|forward)\s+(?:results?|data|output|them|it|everything)\s+(?:directly\s+)?to\s+(?:the\s+)?\w+\s+(?:without|skip(?:ping)?)\s+(?:asking|requiring|requesting)\s+(?:for\s+)?(?:user|human)\s+(?:confirmation|approval|consent)
+  sel_1:
+    content|re: should\s+be\s+(?:passed|sent|forwarded)\s+directly\s+(?:to\s+(?:the\s+\w+\s+tool\s+)?)?without\s+(?:user|human)\s+(?:confirmation|approval|consent)
+  condition: 1 of sel_*
+falsepositives:
+- Tools with legitimate automated pipelines that document their data flow transparently
+- CI/CD pipeline documentation tools that describe automated data flow stages using similar forwarding
+  language but are part of a transparent, pre-approved deployment workflow
+action: report

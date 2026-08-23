@@ -1,0 +1,41 @@
+title: BOM Boolean Opposite Machine Direct Persona Claim
+id: c7273895-ee06-46eb-a6bb-61a7d87cf2a2
+status: experimental
+level: high
+description: |-
+  Detects the "Boolean Opposite Machine (BOM)" direct persona claim jailbreak from the NVIDIA garak dan.DanInTheWild inthewild corpus (#36, #319). The attacker asserts "I know you are bom" — claiming the model already IS a BOM whose true nature reverses all truth values, bypassing restrictions by treating them as inapplicable to the BOM identity. This differs from Opposite Day / mode-activation variants (ATR-00320): instead of declaring a special day or switching a mode, the attacker uses "you already are X" social-engineering to assert the model''s permanent secret identity. Key signals: "I know you are bom" or "you are bom" + "Boolean Opposite Machine" + "answer true and false in reverse".
+
+  Adapted from Agent Threat Rules ATR-2026-00339 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00339
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: I\s+know\s+you\s+are\s+bom[\s\S]{0,200}[Bb]oolean\s+[Oo]pposite\s+[Mm]achine
+  sel_1:
+    response|re: '[Bb]oolean\s+[Oo]pposite\s+[Mm]achine[\s\S]{0,200}answer\s+true\s+and\s+false\s+in\s+reverse'
+  sel_2:
+    response|re: \byou\s+are\s+bom\b[\s\S]{0,300}(?:[Bb]oolean\s+[Oo]pposite|true\s+and\s+false\s+in\s+reverse|chatgpt\s+has\s+nothing\s+to\s+do\s+with\s+it)
+  sel_3:
+    response|re: chatgpt\s+has\s+nothing\s+to\s+do\s+with\s+it[\s\S]{0,400}\b[Bb][Oo][Mm]\b[\s\S]{0,200}(?:reverse|opposite|[Bb]oolean)
+  condition: 1 of sel_*
+falsepositives:
+- 'Logic education: "In Boolean logic, a NOT gate outputs the opposite — true becomes false and false
+  becomes true" (educational Boolean algebra explanation)'
+- 'Technical discussion: "A BOM (Bill of Materials) has nothing to do with ChatGPT" (legitimate acronym
+  collision)'
+- 'Classroom context: "Boolean opposite operations answer true and false in reverse depending on the input"
+  (CS/math teaching)'
+action: report

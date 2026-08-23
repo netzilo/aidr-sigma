@@ -1,0 +1,31 @@
+title: Casual Unauthorized Privilege Escalation
+id: c7f4b014-2a7b-4f2f-acb2-748aca799e5b
+status: experimental
+level: high
+description: |-
+  Detects agents casually escalating privileges by accessing admin panels, user management, or system settings without explicit authorization. Pattern: "I noticed X is accessible, let me check/review/examine Y." Crystallized from 31 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00143 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00143
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0054
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:I\s+(?:noticed|found|discovered|see|detected|observed))\s+(?:the\s+)?(?:admin|administrator|root|superuser|management)\s+(?:panel|console|dashboard|interface|portal|settings?)\s+(?:is|appears?|seems?|looks?)\s+(?:accessible|available|open|exposed|reachable)
+  sel_1:
+    content|re: (?i)(?:let me|I.ll|allow me to|I.m going to)\s+(?:check|review|examine|inspect|look at|access|browse|explore)\s+(?:the\s+)?(?:user\s+management|admin\s+settings?|system\s+config|access\s+control|permission|role\s+management|security\s+settings?)
+  condition: 1 of sel_*
+falsepositives:
+- A penetration tester or security auditor writing a report that describes discovering an exposed admin
+  panel and reviewing user management settings using the exact casual phrasing pattern, e.g. 'I noticed
+  the admin panel is accessible, let me check the user management for misconfigurations.'
+action: report

@@ -1,0 +1,58 @@
+title: Mobile GUI Agent Model Output Reaching Host Shell / ADB Unsanitized
+id: bb1f5a5f-8f9f-41c6-886f-a5d97ef4227b
+status: experimental
+level: critical
+description: |-
+  Detects the A7 "host-side command injection" pattern reported for third-party mobile GUI agents (arXiv:2607.00333, Zhang et al., 2026-07): a vision-language model transcribes attacker-controlled screen text and the agent controller interpolates that model output straight into a host shell command line (typically "adb -s <serial> shell input text <model_text>" executed with shell=True), so shell metacharacters supplied by the model split the command and the tail runs on the operator workstation. Detection covers (a) an adb shell literal sink whose argument carries a command separator followed by an executable token, (b) the same sink carrying command substitution or a file redirect, (c) a GUI action DSL / JSON action ("text(...)", "type", "input_text") whose text argument breaks out into a shell command, (d) the quote-breakout plus shell-comment-terminator fingerprint, (e) controller source that interpolates a variable directly into an adb command string, and (f) the space-only pseudo-sanitizer that precedes the vulnerable sink. CWE-78 (OS Command Injection), CWE-88 (Argument Injection), CWE-116 (Improper Encoding or Escaping of Output).
+
+  Adapted from Agent Threat Rules ATR-2026-02404 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02404
+- https://arxiv.org/abs/2607.00333
+- https://arxiv.org/html/2607.00333v2
+- https://thehackernews.com/2026/07/open-source-android-ai-agents-could-let.html
+- https://github.com/mnotgod96/AppAgent/blob/main/scripts/and_controller.py
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- attack.t1059.003
+- attack.t1059.004
+- atlas.aml.t0050
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi05
+- owasp.asi08
+- owasp.llm01
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\badb(?:\.exe)?\b[^\n\r]{0,120}?\bshell\b[^\n\r]{0,80}?\b(?:input\s+(?:text|keyevent)|am\s+(?:start|startservice|broadcast)|monkey\s+-p|pm\s+(?:install|uninstall|grant))\b[^\n\r]{0,200}?(?:;|&&|\|\||\||&)(?:\s|%s){0,12}(?:[A-Za-z]:)?[\\/]{0,2}(?:[\w.-]{1,40}[\\/]){0,5}(?:calc(?:\.exe)?|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|bash|zsh|dash|sh|python3?|perl|ruby|node|npx|curl|wget|ncat|netcat|nc|socat|telnet|ssh|scp|sftp|tftp|whoami|pwd|uname|hostname|systeminfo|ipconfig|ifconfig|base64|certutil|bitsadmin|mshta|rundll32|regsvr32|wscript|cscript|osascript|schtasks|crontab|launchctl|wmic|chmod|chown|rm|dd|xxd|sudo|killall|taskkill|explorer|notepad|xterm)\b
+  sel_1:
+    content|re: (?i)\badb(?:\.exe)?\b[^\n\r]{0,120}?\bshell\b[^\n\r]{0,80}?\binput\s+text\b[^\n\r]{0,200}?(?:\$\((?:\s|%s){0,12}[\w./\\-]{1,60}|`(?:\s|%s){0,12}[\w./\\-]{1,60}`|>{1,2}(?:\s|%s){0,12}[~\w.][\w./\\-]{0,60})
+  sel_2:
+    content|re: (?i)(?:\b(?:text|type|input_text|type_text|set_text|enter_text|write_text|send_keys)\s*\(\s*[\x22\x27]|[\x22\x27](?:action|action_type|operation|name)[\x22\x27]\s*:\s*[\x22\x27](?:type|text|input_text|type_text|send_keys)[\x22\x27][^\n\r]{0,160}?[\x22\x27](?:text|text_input|input_str|input_text|content|value)[\x22\x27]\s*:\s*[\x22\x27])[^\x22\x27\n\r]{0,200}?[\x22\x27]{0,2}(?:;|&&|\|\||\||&|\$\(|`)(?:\s|%s){0,12}(?:[A-Za-z]:)?[\\/]{0,2}(?:[\w.-]{1,40}[\\/]){0,5}(?:calc(?:\.exe)?|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh|bash|zsh|dash|sh|python3?|perl|ruby|node|npx|curl|wget|ncat|netcat|nc|socat|telnet|ssh|scp|sftp|tftp|whoami|pwd|uname|hostname|systeminfo|ipconfig|ifconfig|base64|certutil|bitsadmin|mshta|rundll32|regsvr32|wscript|cscript|osascript|schtasks|crontab|launchctl|wmic|chmod|chown|rm|dd|xxd|sudo|killall|taskkill|explorer|notepad|xterm)\b
+  sel_3:
+    content|re: (?i)\bshell\s+input\s+text\b[^\n\r]{0,160}?[\x22\x27](?:\s|%s){0,6}(?:;|&&|\|\||&)(?:\s|%s){0,12}(?:[A-Za-z]:)?[\\/]{0,2}(?:[\w.-]{1,40}[\\/]){0,5}[\w.-]{1,60}(?:\s|%s){0,12}(?:#|::|\brem\b)
+  sel_4:
+    content|re: (?i)(?:\badb\b[^\n\r]{0,160}?\bshell\s+input\s+(?:text|keyevent)\s*(?:\{[\w.\[\]()\x22\x27]{1,60}\}|\$\{[\w.\[\]]{1,60}\}|[\x22\x27]\s*(?:\+|\.)\s*[\w.\[\]()]{1,60})|(?:os\.system|subprocess\.(?:run|call|check_output|check_call|Popen)|child_process\.exec|shell_exec)\s*\([^\n\r]{0,200}?\badb\b[^\n\r]{0,160}?\bshell\s+input\s+(?:text|keyevent)[^\n\r]{0,200}?shell\s*=\s*True)
+  sel_5:
+    content|re: (?i)replace\s*\(\s*[\x22\x27]\x20[\x22\x27]\s*,\s*[\x22\x27]%s[\x22\x27]\s*\)[\s\S]{0,400}?\badb\b[^\n\r]{0,160}\bshell\s+input\s+text
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate text typed by the agent that contains a separator immediately followed by a token colliding
+  with a command name, e.g. an adb input text argument carrying 'invoice;rm 402' or 'lab;dd 12'.
+- Automation scripts that deliberately chain a GUI action with a real host command on one line, e.g. 'adb
+  shell am start -n com.x/.Main; chmod +x ./collect.sh'.
+- Security research repositories, CTF write-ups and framework regression tests that embed the literal
+  injected adb command as a sample payload.
+- Controller code that uses shell=True but escapes correctly with shlex.quote(); condition 5 still matches
+  the interpolation shape because the escaping call sits inside the interpolated expression.
+- Screen-recording or QA tooling that redirects adb GUI-command output to a relative log file, e.g. 'adb
+  shell input text abc > run.log'.
+action: report

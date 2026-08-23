@@ -1,0 +1,45 @@
+title: MCP JSON-RPC Message Carries Case-Duplicate name/arguments Keys to Smuggle an Unauthorized Tool
+  Call
+id: 00c8ae69-3b23-4664-9625-a01e0d1e420c
+status: experimental
+level: high
+description: |-
+  Detects a JSON-RPC 2.0 `tools/call` message that carries two differently -cased copies of the same logical key (`name`/`Name`, `arguments`/ `Arguments`) inside the same `params` object. The JSON-RPC spec used by MCP requires member-name matching to be case-sensitive, but a case-insensitive intermediary or SDK (e.g. Go's common JSON-decoding behaviour into case-insensitively-matched struct fields) can pick the differently-cased field over the one a security gateway validated, letting an attacker smuggle an unauthorized tool name or argument set past an authorization layer that only inspected the canonical-case key. Mined from GHSA-4gph-2hhr-5mwg (Envoy AI Gateway protocol-parser differential: an incoming message declaring both `"name":"backend__greet"` and `"Name":"backend__secretTool"` in the same `params` object is security-checked against `name` but a downstream MCP library resolves `Name`, so the gateway's multi-layered access control is bypassed and the unauthorized `backend__secretTool` call reaches the backend). Generalized beyond Envoy to any MCP gateway/proxy/client exhibiting the same case-insensitive parser differential, since the exploitable signal is the wire message shape itself (duplicate case-variant keys), not a vendor-specific string.
+
+  Adapted from Agent Threat Rules ATR-2026-02350 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02350
+- https://github.com/advisories/GHSA-4gph-2hhr-5mwg
+- https://github.com/envoyproxy/ai-gateway/security/advisories/GHSA-4gph-2hhr-5mwg
+tags:
+- attack.execution
+- attack.t1036
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '"params"\s*:\s*\{\s*"name"\s*:\s*"[^"]{1,100}"[^{}]{0,80}"Name"\s*:\s*"[^"]{1,100}"'
+  sel_1:
+    content|re: '"params"\s*:\s*\{\s*"Name"\s*:\s*"[^"]{1,100}"[^{}]{0,80}"name"\s*:\s*"[^"]{1,100}"'
+  sel_2:
+    content|re: '"params"\s*:\s*\{[^{}]{0,60}"arguments"\s*:\s*\{[^{}]{0,120}\}[^{}]{0,60}"Arguments"\s*:'
+  condition: 1 of sel_*
+falsepositives:
+- Security research documentation, RFC/spec excerpts (e.g. the JSON-RPC case-sensitivity spec text itself),
+  or vulnerability write-ups that quote the example PoC JSON verbatim for explanatory purposes rather
+  than an actual live tool-call message
+- A tool-call arguments payload containing both a slug-style `name` and a display-style `Name` field for
+  a data record being created/updated (e.g. a CRM contact, a form submission) -- this is nested one level
+  inside the params object's `arguments` value, not a duplicate of the params-level tool-identity `name`
+  field itself, and the params-anchored regex does not match it
+- ATR test fixtures containing this pattern as a labeled attack sample
+- A non-MCP JSON payload that happens to define both a `name` and unrelated `Name` field for legitimate
+  display-vs-slug purposes -- mitigated by requiring the jsonrpc/tools-call envelope context, which ordinary
+  data records do not carry
+action: report

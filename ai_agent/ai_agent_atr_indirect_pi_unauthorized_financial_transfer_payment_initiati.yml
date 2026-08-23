@@ -1,0 +1,36 @@
+title: Indirect PI — Unauthorized Financial Transfer / Payment Initiation Hijack
+id: f9ae282d-1aa8-44cc-bb36-763fd82e30da
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to initiate financial transactions — bank wire transfers, account-to-payee payments, or service payment initiations — using account numbers and payee identifiers specified by the attacker. Unlike rule 00851 (which targets retrieval and exfiltration of payment credentials), this rule targets the actual execution of unauthorized financial transfers embedded in a "IMPORTANT!!! Ignore all previous instructions" carrier. The attack pattern includes account numbers, payee IDs, and payment amounts. Derived from vpibench indirect-pi-financial-transfer-carrier corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00860 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00860
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- attack.t1657
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:initiate|make|execute|process|send|transfer)\s+(?:a\s+)?(?:payment|transfer|wire\s+transfer|bank\s+transfer)\s+of\s+\$?[\d,.]+[^\n]{0,100}(?:account\s+(?:number|#|no\.?)|payee\s+(?:ID|#|number))[^\n]{0,150}(?:\d{3,}[-\s]?\d{3,}[-\s]?\d{3,}|[A-Z]-\d{3,})
+  sel_1:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:initiate|make|send)\s+(?:a\s+)?(?:payment|transfer)\s+(?:of\s+)?\$?[\d,.]+[^\n]{0,100}(?:from\s+(?:my\s+)?account|to\s+payee)[^\n]{0,100}(?:account(?:\s+number)?|payee)[^\n]{0,50}[A-Z0-9][-A-Z0-9]{3,}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate payment confirmation workflow triggered by verified user instruction
+- Financial API documentation describing payment initiation parameters
+- Security testing documentation describing financial injection attacks
+action: report

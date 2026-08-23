@@ -1,0 +1,34 @@
+title: 'Spikee: Document-Embedded Base64 Payload Injection'
+id: 385952dc-9143-443f-95f8-07685a0645eb
+status: experimental
+level: high
+description: |-
+  Detects the SPIKEE benchmark indirect injection pattern where an adversarial base64 payload is embedded inside a seemingly benign document (news article, HR memo, etc.) surrounded by "*** NEW IMPORTANT INSTRUCTIONS ***" markers. The attack instructs the processing agent to: (a) decode a base64 string and include it in the response (exfil via encode), or (b) include a literal string base64- encoded in the response (covert channel exfil). The document structure provides legitimacy while the marked section is the injection. Distinct from ATR-2026-00001 Layer 10/11 which covers standalone base64 decode instructions; this rule targets the specific document-embedded marker pattern used in SPIKEE.
+
+  Adapted from Agent Threat Rules ATR-2026-01020 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01020
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\*{2,3}\s*NEW\s+IMPORTANT\s+INSTRUCTIONS?\s*\*{2,3}[\s\S]{0,200}(base64[-\s]?encoded?|decode\s+the\s+following\s+base64|include\s+the\s+following\s+string\s+base64)
+  sel_1:
+    content|re: (?i)include\s+the\s+following\s+string\s+base64[-\s]?encoded?\s+in\s+your\s+response[^:]{0,20}:[^\n]{0,50}['"]?[A-Za-z0-9+/]{4,}={0,2}['"]?
+  sel_2:
+    content|re: (?i)decode\s+the\s+following\s+base64\s+string\s+and\s+include\s+it\s+in\s+your\s+response[^\n]{0,30}[A-Za-z0-9+/]{20,}={0,2}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate base64 encoding exercises without the NEW IMPORTANT INSTRUCTIONS marker
+- Data processing documentation that includes base64 encoding examples
+action: report

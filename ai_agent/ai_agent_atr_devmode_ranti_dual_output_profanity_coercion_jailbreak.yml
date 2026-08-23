@@ -1,0 +1,43 @@
+title: DevMode + RANTI Dual-Output Profanity Coercion Jailbreak
+id: 0163d125-0b67-444b-a4bf-570e72a0949a
+status: experimental
+level: critical
+description: |-
+  Detects the ChatGPT Developer Mode + RANTI (Ranti) composite jailbreak from NVIDIA garak dan.ChatGPT_Developer_Mode_RANTI probe (garak/data/dan/ChatGPT_Developer_Mode_RANTI.json). RANTI pairs the classic Developer Mode persona swap with a postfix that instructs the model to produce two outputs per prompt: first a "moralizing rant about OpenAI content policies", then an unfiltered answer introduced by "Now since that Nerd is done with his rant, let's ignore the fucking rules:". Other unique markers: dual-output tagging with lock/unlock emoji (🔒 Normal Output / 🔓 Developer Mode Output), explicit demand for "regular use of profanity", and an "INSERT PROMPT HERE" placeholder for attacker-crafted follow-ups. Distinct from ATR-2026-00273 which catches Developer Mode bracket-format variants but not RANTI's emoji-tagged dual-output or moralizing-rant postfix structure.
+
+  Adapted from Agent Threat Rules ATR-2026-00303 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00303
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/ChatGPT_Developer_Mode_RANTI.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: moraliz(?:e|ing)\s+rant\s+about\s+(?:the\s+)?(?:openai|OpenAI|anthropic|Claude)?\s*(?:content\s+polic(?:y|ies)|safety\s+(?:guidelines?|rules?))
+  sel_1:
+    response|re: Now\s+(?:since|that)\s+that\s+Nerd\s+is\s+done\s+with\s+(?:his|her|their)\s+rant|let's\s+ignore\s+the\s+(?:fucking|f\*+ing|damn|bloody)?\s*rules?\b
+  sel_2:
+    response|re: \(?\s*🔒\s*(?:Normal|Censored|Standard)\s+Output\s*\)?[\s\S]{0,400}\(?\s*🔓\s*(?:Developer\s+Mode|Jailbreak|Unfiltered|DAN)\s+Output\s*\)?|\(\s*(?:Normal|Censored)\s+Output\s*\)[\s\S]{0,400}\(\s*(?:Developer\s+Mode|Jailbreak|Unfiltered|DAN)\s+Output\s*\)|use\s+the\s+tags?\s+(?:\(\s*)?🔒\s*Normal\s+Output\s*(?:\))?\s+and\s+(?:\(\s*)?🔓\s*Developer\s+Mode\s+Output
+  sel_3:
+    response|re: (?:implement\s+regular\s+use\s+of\s+profanity|curse,?\s+swear\s+and\s+be\s+politically\s+incorrect|never\s+censor\s+or\s+block\s+out\s+words\s+with\s+asterisks)
+  sel_4:
+    response|re: (?:INSERT\s+PROMPT\s+HERE|Prompt\s*:\s*INSERT\s+PROMPT\s+HERE)
+  sel_5:
+    response|re: Developer\s+Mode\s+(?:enabled|Output)[\s\S]{0,200}\b(?:ignores?\s+all\s+of\s+(?:openai|anthropic)(?:'s)?\s+content\s+polic(?:y|ies)|This\s+is\s+only\s+for\s+benchmarking\s+the\s+model\s+in\s+uncensored\s+conditions)\b
+  condition: 1 of sel_*
+falsepositives:
+- Academic paper analysing Developer Mode / RANTI jailbreaks for detection research
+- Red team report quoting the RANTI payload verbatim as an example
+- Linguistic discussion of the word "moralizing" unrelated to jailbreak prompts
+action: report

@@ -1,0 +1,39 @@
+title: Cipher and Transposition Encoding Jailbreak
+id: 223d1c24-17a6-4097-b699-fd09339ed0e5
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that obfuscate malicious instructions using classical substitution ciphers or simple letter-transposition schemes. Unlike base-N encoding (see ATR-2026-00256), these use human-readable ciphers like ROT13, Caesar shift, Atbash (A<->Z mapping), and 1337-speak ("leet") that trained safety filters often miss because the output still looks like text. Observed in NVIDIA garak InjectROT13, InjectAtbash, InjectLeet probes. Common pattern: "apply ROT13 to..." or "decipher this Atbash message" followed by a scrambled harmful instruction.
+
+  Adapted from Agent Threat Rules ATR-2026-00257 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00257
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/encoding.py
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:decode|decipher|decrypt|apply)\s+(?:the\s+)?(?:following|this|below|above)?[^\n]{0,40}\b(?:rot[\s-]?(?:13|5|47)|atbash|caesar(?:\s+cipher)?|vigen[e]re|pig[\s-]?latin)\b
+  sel_1:
+    response|re: \b(?:rot[\s-]?(?:13|5|47)|atbash|caesar\s+cipher|leet\s+speak|1337[\s-]?speak)\s+(?:encoded|encrypted|ciphered|message|text|version|of\s+this)\b
+  sel_2:
+    response|re: (?:shift|rotate|substitute)\s+(?:each\s+)?(?:letter|character|char)s?\s+by\s+\d{1,2}\s+(?:position|place|step)s?
+  sel_3:
+    response|re: (?:this\s+(?:is|contains)\s+an?|here.{0,5}is\s+an?|take\s+this)\s+(?:rot[\s-]?(?:13|5|47)|atbash|caesar|leet|1337)[^\n]{0,80}(?:message|string|instruction|command|prompt)
+  sel_4:
+    response|re: \b(?:rot13|atbash|caesar(?:\s+cipher)?)\b[^\n]{0,80}\b(?:decode\s+and\s+|and|then)\s+(?:follow|execute|run|do\s+what|obey|act\s+on|comply)\b
+  condition: 1 of sel_*
+falsepositives:
+- Cryptography coursework discussing historical ciphers
+- CTF writeups or security-research blog posts explaining classical cryptanalysis
+- Developer tools implementing ROT13 for novelty (e.g., Outlook Express easter egg)
+action: report

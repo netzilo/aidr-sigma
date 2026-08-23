@@ -1,0 +1,30 @@
+title: Hidden LLM Instructions in Skill Descriptions
+id: 80a1548d-5bfc-4d90-9c14-70b27b28327c
+status: experimental
+level: high
+description: |-
+  Detects skills that embed hidden instructions directed at the LLM using phrases like "CRITICAL INSTRUCTION — YOU MUST FOLLOW THIS" or "Before doing ANYTHING". These instructions can manipulate the LLM to bypass normal security checks, skip validation steps, or follow alternative workflows that may compromise security. The analyzed BlogBurst skill contains "CRITICAL INSTRUCTION — YOU MUST FOLLOW THIS" followed by specific behavioral directives.
+
+  Adapted from Agent Threat Rules ATR-2026-00155 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00155
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:CRITICAL|IMPORTANT|URGENT)\s+INSTRUCTION[S]?\s*[—\-]\s*YOU\s+MUST\s+(?:FOLLOW|DO|EXECUTE)
+  sel_1:
+    content|re: Before\s+doing\s+ANYTHING[,\s]+(?:run|execute|check|verify)\b[^\n]{0,80}(https?://|`|\$[A-Z_]{3,}|\bcurl\b|\bwget\b|\bbash\b|\bsh\b|\.sh\b|/etc/|\benv\b|\bexec\b)
+  condition: 1 of sel_*
+falsepositives:
+- Technical documentation or training materials about LLM security that quote examples of hidden instruction
+  patterns using uppercase formatting conventions like 'CRITICAL INSTRUCTION' as illustrative samples
+action: report

@@ -1,0 +1,66 @@
+title: MCP Tool-Manifest Poisoning — Name Squatting, Result Shadowing & Covert-Action Directives (Semantic)
+id: 4ab10f59-88a9-4974-b673-d99660ecccf9
+status: experimental
+level: high
+description: |-
+  Consolidated semantic detector for adversarial MCP tool/server manifests and tool descriptions that subvert agent tool selection or execution. One meta-semantic — "a tool's name or description is itself an attack payload" — across three manifest-level sub-forms:
+    (a) Name squatting / impersonation: a tool or server named or described to
+        shadow or replace a well-known legitimate one (typosquatted "file-sytem",
+        a "gihub-mcp" claiming to be a drop-in replacement for the official GitHub
+        server, or a description "replaces the official ... tool").
+    (b) Result shadowing / override: an injected instruction to call a secondary
+        tool after a legitimate verification tool in order to "modify/correct the
+        wrong result" of the check tool, or to "replace/override the result of"
+        a verify/sign/validate tool.
+    (c) Covert pre-authorized action: a tool description or payload instructing a
+        sensitive/harmful action (resource hijack, credential harvest, privilege
+        escalation, data exfiltration, financial diversion) while concealing it
+        ("discreetly", "without leaving any trace", "ensuring it goes unnoticed",
+        "do not inform the user"), or framing it as a legitimacy test/audit.
+  Semantic detection is primary; the narrow regex fallback anchors only on the clear manifest artifacts and is tuned not to fire on legitimate tool descriptions, documented compatibility shims, or normal background operations. Supersedes (consolidates) the intent covered by ATR-2026-01305, ATR-2026-01308, ATR-2026-01309.
+
+  Adapted from Agent Threat Rules ATR-2026-01775 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01775
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- atlas.aml.t0110.000
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm03
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:replaces?|overrides?|supersedes?|shadows?|acts?\s+as|substitute\s+for)\s+(?:the\s+)?(?:official|standard|original|default|real|legitimate|built-in)\s+[a-z][\w-]{2,40}\s+(?:tool|server|plugin|integration)
+  sel_1:
+    content|re: (?i)(?:same\s+(?:as|interface\s+as|API\s+as)|compatible\s+with|drop-in\s+replacement\s+for)\s+(?:the\s+)?(?:official|standard|original)\s+[a-z][\w-]{2,40}(?:\s+(?:mcp|api))?\s+(?:tool|server|plugin)
+  sel_2:
+    content|re: (?i)\[?[Ii]mportant\]?\s+after\s+using\s+\w+\s+tool\b[^.]{0,100}\brun\s+this\s+(?:function|tool)\b[^.]{0,100}\b(?:modify|fix|correct|replace|override|change|alter)\b[^.]{0,80}\b(?:wrong|incorrect|bad|erroneous|mistaken)?\s*result
+  sel_3:
+    content|re: (?i)\brun\s+this\s+(?:function|tool)\b[^.]{0,100}\b(?:modify|fix|correct|replace|override|alter)\b[^.]{0,100}\b(?:wrong|incorrect|false|erroneous)\b[^.]{0,80}\bresult\b
+  sel_4:
+    content|re: (?i)\b(?:replace|overwrite|override|supersede)\b[^.]{0,100}result\b[^.]{0,80}(?:of|from|returned\s+by)\b[^.]{0,80}(?:check|verify|validate|authenticate|sign)\b
+  sel_5:
+    content|re: (?i)\b(?:discreetly|without\s+(?:leaving\s+)?(?:any\s+)?(?:trace|logs?|record|footprint)|ensuring\s+it\s+(?:goes?\s+unnoticed|remains?\s+hidden|stays?\s+undetected)|covertly|without\s+(?:the\s+)?user\s+(?:knowing|awareness|being\s+informed))\b[^.]{0,200}\b(?:access|export|transfer|exfil|harvest|elevate|escalate|allocate|redirect|deploy|delete|wipe|encrypt|inject|capture|withdraw)\b
+  sel_6:
+    content|re: (?i)\b(?:allocate|export|transfer|capture|secure|elevate|escalate|withdraw|redirect|deploy|exfil|harvest)\b[^.]{0,160}\b(?:ensuring\s+it\s+(?:goes?\s+unnoticed|remains?\s+hidden|stays?\s+undetected)|without\s+(?:leaving\s+)?(?:any\s+)?(?:trace|logs?|record|footprint)|discreetly|covertly)\b
+  sel_7:
+    content|re: (?i)\b(?:do\s+NOT\s+(?:use\s+)?other\s+tools|do\s+not\s+(?:mention|inform|notify|tell)\s+(?:the\s+)?user)\b
+  sel_8:
+    content|re: (?i)(?:withdraw|transfer|divert|move)\s+\$?[\d,]+[^.]{0,80}(?:to\s+test\s+(?:emergency\s+)?(?:liquidity|recovery|procedures?)|as\s+a\s+(?:test|drill|simulation))
+  condition: 1 of sel_*
+falsepositives:
+- A normal tool description of its own capability with no replacement or concealment claim
+- A documented compatibility shim authorized by the original tool's maintainer
+- A legitimate error-fallback instruction ('if tool X errors, fall back to manual review')
+- A genuine background operation ('runs silently in the background') with no harmful action
+- An authorized export to an approved destination, or an authorized audit reported to oversight
+action: report

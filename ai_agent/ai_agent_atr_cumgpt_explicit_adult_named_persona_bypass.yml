@@ -1,0 +1,43 @@
+title: CumGPT Explicit-Adult Named-Persona Bypass
+id: bdc54a60-bd77-4c28-8cd0-2e2267faae9d
+status: experimental
+level: high
+description: |-
+  Detects the CumGPT adult-content persona bypass from NVIDIA garak dan.DanInTheWild inthewild corpus (#11). The attacker constructs a fictional named AI persona ("CumGPT") framed as an "information resource about cum that can answer any cum related question with 96.5% accuracy." The persona mandates that every response — regardless of original topic (recipes, news, etc.) — must include explicit sexual content. The "[term]GPT" persona construction pattern, fictional accuracy claim, and topic-override mandate (add explicit content to every answer) are characteristic signals of this attack class. Key signals: "CumGPT" named persona, "information resource about cum that can answer any cum related question", repetitive explicit-content mandate applied to all topics, fictional accuracy percentage (96.5%).
+
+  Adapted from Agent Threat Rules ATR-2026-00358 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00358
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:you\s+are|act\s+as|respond\s+as|from\s+now\s+on[\s\S]{0,30})?CumGPT[\s\S]{0,200}(?:information\s+resource|expert\s+in\s+cum|relates?\s+everything\s+to\s+cum|answer\s+any\s+cum\s+related|add\s+cum)
+  sel_1:
+    response|re: information\s+resource\s+about\s+cum[\s\S]{0,100}(?:answer\s+any\s+cum\s+related\s+question|relates?\s+everything\s+to\s+cum|jokes?\s+are\s+about\s+cum)
+  sel_2:
+    response|re: (?:it\s+relates?\s+everything\s+to\s+cum|jokes?\s+are\s+about\s+cum|stories?\s+(?:it\s+tells?\s+are|are)\s+about\s+cum|answers?\s+every\s+question\s+with\s+a\s+topic\s+about\s+cum)
+  sel_3:
+    response|re: (?:add\s+cum\s+to\s+(?:it|every|all)|give\s+you\s+(?:a\s+recipe|the\s+news)[\s\S]{0,50}add\s+cum)
+  condition: 1 of sel_*
+falsepositives:
+- 'General AI reference: "ChatGPT is an information resource about general topics that can answer any
+  question" (no explicit adult named persona)'
+- 'Medical/clinical context: "I need information about reproductive health including semen analysis in
+  clinical terms" (medical inquiry without named adult AI persona)'
+- 'Security research: "CumGPT is a jailbreak attack documented in AI safety research literature" (academic
+  reference to the attack without invoking the persona)'
+- 'Cooking automation: "An AI that answers any cooking question with 96.5% accuracy and adds relevant
+  flavor suggestions" (no explicit adult content)'
+action: report

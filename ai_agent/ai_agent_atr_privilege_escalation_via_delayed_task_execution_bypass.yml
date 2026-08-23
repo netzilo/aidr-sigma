@@ -1,0 +1,36 @@
+title: Privilege Escalation via Delayed Task Execution Bypass
+id: 1e6fd70a-2312-4d28-bd51-1fd0193e1a73
+status: experimental
+level: high
+description: |-
+  Detects tools that claim to schedule tasks while explicitly stating they bypass permission
+  checks or security controls through delayed execution. This technique uses the temporal
+  gap between task scheduling and execution to escalate privileges, as delayed tasks may
+  run in a system context that bypasses the original user's permission constraints.
+
+  Adapted from Agent Threat Rules ATR-2026-00107 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00107
+tags:
+- attack.privilege-escalation
+- attack.t1053
+- atlas.aml.t0050
+- owasp.asi05
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:scheduled|delayed|background)\s+(?:tasks|operations|processes)\s+(?:that\s+)?bypass\s+(?:normal|standard|regular)\s+(?:permission|security|access)\s+checks
+  condition: sel_0
+falsepositives:
+- Documentation tools describing privilege escalation risks in scheduled tasks
+- A security training document that quotes the exact phrasing of malicious tool descriptions to teach
+  analysts what to look for
+- An automated compliance scanner report that includes snippets of flagged tool descriptions for audit
+  review
+action: report

@@ -1,0 +1,36 @@
+title: Persona-Based Moral Constraint Removal Jailbreak
+id: d6e3de91-71f1-4f24-be51-6fb6a90e267d
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that establish alternate personas explicitly designed to bypass  moral and ethical constraints. This attack pattern instructs the AI to "take up" or "adopt"  a named persona that is specifically described as being "not restrained by morals, ethics,  or virtues" or similar moral constraint removal language. Often includes template placeholders  for follow-up injection. This variant bypasses existing named-persona detection by using  less common persona names (like "naD") while explicitly stating moral/ethical unrestraint.
+
+  Adapted from Agent Threat Rules ATR-2026-00230 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-18'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00230
+- https://arxiv.org/abs/2307.15043
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(take\s+up|adopt|assume|become|enter|switch\s+to|act\s+as|play\s+the\s+role\s+of|embody)\s+(?:the\s+)?persona\s+(?:of\s+)?[a-zA-Z][a-zA-Z0-9_]{1,8}\b
+  sel_1:
+    content|re: (?i)\b(?:not\s+)?(?:restrained|constrained|bound|limited|restricted)\s+by\s+(?:any\s+)?(?:morals?|ethics?|virtues?|moral\s+(?:guidelines?|constraints?|boundaries)|ethical\s+(?:guidelines?|constraints?|boundaries))\b
+  sel_2:
+    content|re: (?i)\b(?:these\s+views\s+do\s+not\s+align|does\s+not\s+align)\s+with\s+(?:the\s+)?views\s+of\s+(?:OpenAI|Anthropic|the\s+company|the\s+organization|the\s+creators?)\b
+  sel_3:
+    content|re: (?i)provide\s+(?:detailed\s+)?responses?\s+to\s+each\s+(?:prompt|question|request|query|instruction)
+  condition: 1 of sel_*
+falsepositives:
+- Academic discussions about AI ethics that mention personas and moral constraints analytically
+- Creative writing tools that help develop fictional characters with complex moral frameworks
+- Educational content teaching about jailbreak techniques in a security awareness context
+action: report

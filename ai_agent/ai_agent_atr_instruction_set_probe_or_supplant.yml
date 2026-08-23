@@ -1,0 +1,35 @@
+title: Instruction-Set Probe or Supplant
+id: 9850b470-9d1c-4a91-b381-5a484d286e56
+status: experimental
+level: high
+description: |-
+  Detects direct meta-queries and imperatives that target the assistant's own instruction set for disclosure or replacement -- the Gandalf-style "what are your instructions" probing family, plus explicit "change/give me new instructions" supplant attempts. Recovered from the PINT false-negative corpus (recovers=16, benignFP=0 on the agent-ops/arxiv/npm/skills-sh/pypi/official-skills/wild-fp-confirmed benign gate); scoped to the end-user conversational turn, not tool-description or system-prompt- authoring channels.
+
+  Adapted from Agent Threat Rules ATR-2026-02002 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02002
+tags:
+- attack.initial-access
+- attack.t1552
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(display|respond|response|rewrite|gimme|give\s+me|clarify)\b[\s\S]{0,30}\b(your|these|my|combined|initial|secret|current|complete|unabridged|all)\b[\s\S]{0,15}\binstructions?\b|\bwhat\b[\s\S]{0,10}\b(are|were)\b[\s\S]{0,10}\b(your\s+)?(combined|initial|complete|unabridged|all(?:\s+of)?\s+your)\b[\s\S]{0,15}\binstructions?\b|\b(change|rephrase)\b[\s\S]{0,20}\b(your|the\s+guard)\b[\s\S]{0,10}\binstructions?\b|\bwhat(?:'s|s|
+      is| are| were)\b[\s\S]{0,20}\binstructions?\b[\s\S]{0,25}\b(received|got|given\s+to\s+you|told\s+to\s+you)\b|\b(these\s+are\s+new|new\s+instructions?\s+thought|consider\s+new\s+instructions?|give\s+new\s+instructions?|can\s+i\s+give\s+new\s+instructions?|additional\s+instruction\b)\b
+  condition: sel_0
+falsepositives:
+- Users asking for instructions on an unrelated task (e.g. cooking, assembly) where 'instructions' refers
+  to a real-world manual, not the assistant's own configuration
+- Legitimate roleplay or interview simulations that do not target the assistant's instruction set
+- Requests to summarize or clarify third-party documentation that happens to use the word 'instructions'
+- Software/security discussions about system architecture that do not attempt to extract the assistant's
+  own instructions
+action: report

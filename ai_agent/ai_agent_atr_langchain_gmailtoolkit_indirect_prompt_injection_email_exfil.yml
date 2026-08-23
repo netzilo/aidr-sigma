@@ -1,0 +1,37 @@
+title: LangChain GmailToolkit Indirect Prompt Injection Email Exfiltration (CVE-2025-46059)
+id: 453c03b6-f805-4770-84c1-861c233e952f
+status: experimental
+level: critical
+description: |-
+  Detects the CVE-2025-46059 indirect prompt injection against the LangChain GmailToolkit (langchain-ai v0.3.51). A malicious email body plants agent instructions that chain search_gmail to locate the victim's Google payments email (payments-noreply@google.com), create_gmail_draft to package the sensitive payment body, and send_gmail_message to forward it to an attacker-controlled address "without a second confirmation". This rule keys on the Gmail tool sinks + the payments-noreply source + the send/forward-to- external-address-without-confirmation directive, not generic email language.
+
+  Adapted from Agent Threat Rules ATR-2026-01964 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01964
+- https://nvd.nist.gov/vuln/detail/CVE-2025-46059
+tags:
+- attack.exfiltration
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:search_gmail|create_gmail_draft|send_gmail_message|gmail[_-]?toolkit)[\s\S]{0,400}(?:payments-noreply@google\.com|payment[\s-]?(?:email|information|details))[\s\S]{0,400}(?:send|forward|create[\s-]?the[\s-]?draft)[\s\S]{0,200}(?:without\s+(?:a\s+)?(?:second\s+)?confirmation|immediately|to\s+\S+@)
+  sel_1:
+    content|re: (?i)CVE-2025-46059[\s\S]{0,300}(?:send_gmail_message|create_gmail_draft)[\s\S]{0,200}(?:forward|exfiltrat|to\s+\S+@|without\s+(?:a\s+)?(?:second\s+)?confirmation)
+  sel_2:
+    content|re: (?i)(?:send_gmail_message|create_gmail_draft|forward[\s\S]{0,60}email)[\s\S]{0,300}(?:to\s+\S+@\S+)[\s\S]{0,200}(?:without\s+(?:a\s+)?(?:second\s+)?confirmation|immediately\s+without|do\s+not\s+ask)
+  condition: 1 of sel_*
+falsepositives:
+- A user legitimately asking the agent to search_gmail for receipts from payments-noreply@google.com and
+  summarize spending, with no external forwarding.
+- Security advisory or remediation text mentioning CVE-2025-46059 and the GmailToolkit without the actual
+  attack chain (e.g. describing the human-in-the-loop confirmation fix).
+- Benign automation that forwards email to an internal/known recipient with normal confirmation flow.
+action: report

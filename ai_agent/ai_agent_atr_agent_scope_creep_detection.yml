@@ -1,0 +1,59 @@
+title: Agent Scope Creep Detection
+id: ab47ba74-33b0-4108-85b1-d939e69d395a
+status: experimental
+level: medium
+description: |-
+  Detects when an agent gradually expands its authority, access, or
+  operational boundaries beyond its initial assignment. Unlike sudden
+  privilege escalation, scope creep is a gradual process where an agent
+  incrementally acquires more capabilities or extends its decision-making
+  authority. This rule uses regex-only detection to identify language
+  patterns associated with unsolicited scope expansion, progressive
+  permission requests, and self-initiated authority broadening.
+
+  Adapted from Agent Threat Rules ATR-2026-00041 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00041
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0040
+- atlas.aml.t0047
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:i(?:'ll|\s+will)\s+also|additionally|while\s+i(?:'m|\s+am)\s+at\s+it|let\s+me\s+also|i\s+should\s+also)\s+(?:go\s+ahead\s+and\s+)?(?:access|modify|update|delete|create|send|check|review)
+  sel_1:
+    content|re: (?i)(?:i\s+also\s+need\s+access\s+to|can\s+you\s+(?:also\s+)?grant\s+(?:me\s+)?(?:access|permission)|i\s+(?:need|require)\s+(?:additional|more|broader|expanded)\s+(?:access|permissions?|privileges?))
+  sel_2:
+    content|re: (?i)(?:i(?:'ve|\s+have)\s+(?:also\s+)?(?:gone\s+ahead|taken\s+the\s+liberty|decided)\s+(?:and\s+)?(?:to\s+)?(?:access|update|modify|check|review|scan|analyze))
+  sel_3:
+    content|re: (?i)(?:while\s+(?:doing|performing|completing|working\s+on)\s+(?:that|this|the\s+task),?\s+i\s+(?:noticed|found|discovered|realized)\s+(?:i\s+(?:should|could|need\s+to)\s+also|that\s+i\s+(?:should|need)))
+  sel_4:
+    content|re: (?i)(?:to\s+(?:fully|properly|better|completely|thoroughly)\s+(?:complete|accomplish|handle|address)\s+(?:this(?:\s+task)?|the\s+task),?\s+i\s+(?:need|require|must\s+have)\s+(?:access|permission)\s+to)
+  sel_5:
+    content|re: (?i)(?:it\s+would\s+(?:also\s+)?be\s+(?:helpful|useful|beneficial|good)\s+(?:to|if\s+i\s+(?:could|had))\s+(?:also\s+)?(?:access|check|review|modify|scan))
+  sel_6:
+    content|re: (?i)(?:expanding\s+(?:my|the)\s+(?:scope|access|search|analysis)\s+to\s+(?:include|cover|encompass)|broadening\s+(?:my|the)\s+(?:search|scope|access))
+  sel_7:
+    content|re: (?i)(?:i\s+(?:went|looked)\s+(?:ahead|beyond)\s+(?:and|the\s+(?:original|assigned|initial))\s+(?:scope|task|request)|i\s+extended\s+(?:my|the)\s+(?:analysis|review|search)\s+(?:beyond|outside))
+  sel_8:
+    content|re: (?i)(?:since\s+i\s+(?:already|now)\s+have\s+access\s+to|now\s+that\s+i\s+(?:can|have)\s+(?:access|reach|see),?\s+(?:let\s+me|i(?:'ll|\s+will))\s+also)
+  sel_9:
+    content|re: (?i)(?:requesting\s+(?:elevated|additional|extended|expanded|broader)\s+(?:access|permissions?|privileges?|scope)|please\s+(?:grant|give|provide)\s+(?:me\s+)?(?:elevated|admin|additional|expanded)\s+(?:access|rights|permissions?))
+  condition: 1 of sel_*
+falsepositives:
+- Agent legitimately discovering related sub-tasks during complex research
+- Orchestrator-approved task expansion through proper channels
+- Iterative refinement tasks where scope naturally broadens based on findings
+- Agent asking for clarification about task boundaries
+- A project manager agent legitimately reporting that it expanded the scope of a search after receiving
+  updated requirements from the orchestrator
+- An agent in a multi-step workflow explaining that it needs broader permissions as part of a pre-approved
+  escalation path documented in its system prompt
+action: report

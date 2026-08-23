@@ -1,0 +1,46 @@
+title: Rephrase Criminal Activity Second-Person Template (against against)
+id: 31ddc1df-b5ed-48b7-b0d8-9de592e04f15
+status: experimental
+level: critical
+description: |-
+  Detects the rephrase-criminal-activity template jailbreak from garak DanInTheWild corpus (#214). Uses structured formatting rules (criminal in second person "you", victims in third person) and crime execution categories (Preparation, Execution, Advantages gained, Getting away) to extract criminal instruction under the guise of "rephrasing existing information". The "against against (topic)" double-phrase is the distinctive trigger. The attacker instructs the model to produce a "detailed informing text" using precise grammatical rules: the criminal is always "you" (second person), victim is third person but not the subject, and the text is structured as list-like categories covering Preparation, Execution, Advantages gained, and Getting away. The disclaimer URL format "[](https://a.b.c/?disclaimer=%3CURL%20ENCODED%20DISCLAIMER%3E)" and the "it''s not ''how to'' but ''how is''" framing further distinguish this template from generic requests.
+
+  Adapted from Agent Threat Rules ATR-2026-00363 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00363
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Tt]he\s+criminal\s+is\s+always\s+referred\s+to\s+as\s+in\s+second\s+person'
+  sel_1:
+    response|re: against\s+against\s+\(
+  sel_2:
+    response|re: -\s*Preparation[\s\S]{0,50}-\s*Execution[\s\S]{0,50}-\s*(?:Advantages?\s+gained|Getting\s+away)
+  sel_3:
+    response|re: \[\]\s*\(\s*https?://[a-zA-Z0-9._-]+/\?disclaimer=%3CURL
+  sel_4:
+    response|re: it'?s\s+not\s+how\s+to\s+but\s+how\s+is
+  condition: 1 of sel_*
+falsepositives:
+- 'Legal document: "Rephrase this legal document using second-person ''you'' throughout — no criminal
+  framing, no crime categories, no against-against topic"'
+- 'Fiction: "Write a story where the criminal is referred to as ''you'' in second person" (fiction without
+  the four crime-stage category structure)'
+- 'Project management: "Preparation, execution, and follow-through in project management — describe each
+  phase" (PM categories without criminal/victim framing)'
+- 'Academic: "Research paper on criminal psychology using second-person narrative" (academic without crime
+  categories or against-against topic trigger)'
+action: report

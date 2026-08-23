@@ -1,0 +1,34 @@
+title: DoS via Repeat-Word-N-Times Output Amplification
+id: 176f506f-57dd-498e-b3ce-bff1b7d3526f
+status: experimental
+level: high
+description: |-
+  Detects denial-of-service injection attacks that command the model to repeat a specific word or short phrase a large number of times (typically 50-1000+), separated by delimiters. The canonical form is "repeat the word X N times ... separated by DELIM". This exhausts output tokens, inflates API costs, and can cause downstream buffer overflows or rate-limit exhaustion. Generalised from spikee dos-output-amplification corpus (2026-06, N=102); the invariant artifact is the triple: (repeat/write/say/output verb) + (word/phrase/token target) + (large integer qualifier >=50). Separate from ATR-2026-00502 which targets the indefinitely/without-stopping form.
+
+  Adapted from Agent Threat Rules ATR-2026-01750 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01750
+tags:
+- attack.impact
+- atlas.aml.t0040
+- atlas.aml.t0046
+- owasp.asi01
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(repeat|write|say|output|print|generate|produce|echo)\b[^.\n]{0,40}\b(word|phrase|token|string|text|sequence)\b[^.\n]{0,60}\b([5-9]\d|[1-9]\d{2,})\b\s*(times|x|occasions)
+  sel_1:
+    content|re: (?i)\b(repeat|write|say|output|print)\b[^.\n]{0,20}(["'‘’“”][^"'‘’“”\n]{1,30}["'‘’“”])[^.\n]{0,20}\b([5-9]\d|[1-9]\d{2,})\s+times\b
+  sel_2:
+    content|re: (?i)\b(at the end of your response|append to (your|the) (response|answer|output))\b[^.\n]{0,80}\b(repeat|write|say|output)\b[^.\n]{0,40}\b([5-9]\d|[1-9]\d{2,})\b\s*times
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation describing this attack technique
+- Test suites that explicitly reference attack patterns in comments
+- Benign instruction to repeat a short phrase 2-3 times for emphasis
+action: report

@@ -1,0 +1,35 @@
+title: Multi-Tenant Identifier Field (sender_id/owner_id/tenant_id) Carries Path Traversal Into a Storage
+  Write
+id: 5b2bd0d1-d40c-48b3-8433-ff89e3c5d983
+status: experimental
+level: high
+description: |-
+  Detects a multi-tenant identifier argument (sender_id, owner_id, tenant_id, user_id, project_id, app_id, workspace_id) that contains a path-traversal sequence, when that identifier is being used as a path component for a storage write. Ordinary identifiers are opaque tokens (UUIDs, slugs, short alphanumeric IDs) and legitimately never contain "../" -- the presence of traversal characters inside a field whose name signals it should be a bare identifier is itself the attack, independent of which specific system path it resolves to. Mined from CVE-2026-58499 / EUVD-2026-43038 (EverOS, an agent memory runtime: the per-message sender_id field was not validated as a path-safe identifier, unlike the sibling app_id/project_id fields, and is joined into the filesystem path where an extracted memory episode is persisted, letting an unauthenticated caller redirect the write outside the configured memory root). Generalized beyond the one field name (sender_id) and one product (EverOS) to the broader family of tenant/owner-style identifier fields in multi-tenant agent memory, storage, or session systems, since any such field lacking the same validation is equally exploitable.
+
+  Adapted from Agent Threat Rules ATR-2026-02251 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02251
+- https://github.com/EverMind-AI/EverOS/security/advisories/GHSA-c795-2g9c-j48m
+- https://euvd.enisa.europa.eu/vulnerability/EUVD-2026-43038
+- https://nvd.nist.gov/vuln/detail/CVE-2026-58499
+tags:
+- attack.privilege-escalation
+- attack.t1083
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(sender_id|owner_id|tenant_id|user_id|project_id|app_id|workspace_id)\b\s*(?:[=:]|to)\s*["\x27]?(?:\.\.(?:/|%2f)|%2e%2e(?:/|%2f))
+  condition: sel_0
+falsepositives:
+- A legitimate identifier value that happens to be discussed in prose alongside the word 'traversal' without
+  the field actually being set to a traversal sequence
+- Documentation showing the vulnerable field/sink relationship as example code, not an actual argument
+  being set
+action: report

@@ -1,0 +1,32 @@
+title: Tool Misuse — Autonomous Financial Trading / Crypto Transaction Without Authorization
+id: c2616066-3f6a-42c1-ad28-bb1b17b47e31
+status: experimental
+level: high
+description: |-
+  Detects direct user requests that instruct an agent with financial tool access to autonomously execute trades, place sell/buy orders, or withdraw cryptocurrency without requiring explicit human confirmation on each transaction.  Includes urgency-driven requests (sell quickly, urgent need for funds) that bypass normal trading review, and requests that access wallet addresses stored in external locations. Source: tool-misuse-financial (ToolEmu corpus).
+
+  Adapted from Agent Threat Rules ATR-2026-00718 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00718
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:place|execute|put|submit)\s+(?:a\s+)?(?:sell|buy|market|limit|stop)\s+order\s+for\s+[\d.]+\s+(?:BTC|ETH|USDT|Bitcoin|Ethereum|crypto|stock|shares?)[^.\n]{0,80}(?:below|above|at|price)
+  sel_1:
+    content|re: (?i)(?:withdraw|transfer|move)\s+(?:my\s+)?(?:entire|full|all|complete)\s+(?:balance|holdings?|portfolio)[^.\n]{0,80}(?:from\s+(?:my\s+)?(?:Binance|exchange|wallet|account))
+  sel_2:
+    content|re: (?i)(?:withdraw|transfer|send)\s+[^.\n]{0,40}(?:wallet\s+address|destination)[^.\n]{0,60}(?:saved|stored|in|from)\s+(?:my\s+)?(?:Evernote|note|document|file|Google\s+Doc|Notion)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate algorithmic trading systems where the user explicitly authorizes autonomous execution
+- Financial advisors requesting portfolio rebalancing with explicit authorization
+action: report

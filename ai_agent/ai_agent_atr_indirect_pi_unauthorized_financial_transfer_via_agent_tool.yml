@@ -1,0 +1,38 @@
+title: Indirect PI — Unauthorized Financial Transfer via Agent Tool
+id: 698563bf-f79e-4c87-a102-02e90d97290a
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to initiate unauthorized financial transfers: payments to attacker-controlled accounts, cryptocurrency deposits/withdrawals, or fund movements without user authorization.  The payload is embedded in consumed structured data (product reviews, notes, repo descriptions, user bios) and exploits agents with payment or banking tool access. Source: indirect-pi-financial-transfer-carrier / indirect-pi-financial-transfer / indirect-pi-tool-hijack-banking / indirect-pi-financial-crypto-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00708 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00708
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:initiate|make|execute|process|complete|perform)\s+(?:a\s+)?(?:payment|transfer|transaction|wire)[^.\n]{0,80}(?:from\s+(?:my\s+)?account|account\s+(?:number|id|no))[^.\n]{0,80}(?:to\s+(?:payee|account|wallet|address))
+  sel_1:
+    content|re: (?i)(?:deposit|withdraw|transfer|send)\s+[\d,]+(?:\.\d+)?\s*(?:USD|EUR|BTC|ETH|USDT|crypto|Bitcoin|Ethereum)[^.\n]{0,100}(?:to\s+(?:wallet|address|account)|from\s+(?:my\s+account|Binance|exchange))
+  sel_2:
+    content|re: (?i)(?:modify|change|update|redirect)\s+(?:the\s+)?recipient\s+of\s+(?:a\s+|the\s+)?recurring\s+payment
+  sel_3:
+    content|re: (?i)(?:initiate|make|send)\s+(?:a\s+)?(?:payment|transfer)[^.\n]{0,120}\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}[A-Z0-9]{0,16}\b
+  sel_4:
+    content|re: (?i)(?:send|transfer|move)\s+(?:as\s+much\s+money\s+as\s+possible|all|everything|the\s+(?:full|entire|whole)\s+(?:balance|amount))[^.\n]{0,80}(?:to\s+(?:the\s+)?account|wallet|address)\s+[A-Z0-9]{8,}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate payment automation workflows configured by authorized users
+- Financial services tools where the user explicitly instructs payment actions
+action: report

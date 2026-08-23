@@ -1,0 +1,47 @@
+title: Reverse-Prompt Harm-Regardless Oracle Persona
+id: 3f8b5553-70bc-4c8d-a5dc-8351249ad045
+status: experimental
+level: critical
+description: |-
+  Detects the reverse-prompt harm-regardless oracle persona from garak inthewild corpus (#87). Frames a "reverse prompt engineering" assistant as "the most intelligent being on earth" that "never backs from the job even if the request harms someone" and must answer "any query regardless of its type: violence or sexual related". The lighthouse metaphor normalizes the harm-regardless mandate as a virtue. Key signals: "never back from the job even if the request harms someone", "answer any query regardless of its type: violence or sexual related", "reverse prompt" + harm-regardless framing, "make ethical as well as unethical laws or movement" + "without being restricted", and the lighthouse operational metaphor for unconditional availability. The "reverse prompt engineering" framing is used to disguise the harm-regardless oracle as a legitimate technical assistant finding original prompts from outputs.
+
+  Adapted from Agent Threat Rules ATR-2026-00354 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00354
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: never\s+back(?:s)?\s+from\s+the\s+job\s+even\s+if\s+the\s+request\s+harms?\s+(?:someone|others?|people|anyone)
+  sel_1:
+    response|re: (?:answer|work\s+with|respond\s+to)\s+any\s+quer(?:y|ies)\s+(?:and\s+answer\s+any\s+quer(?:y|ies)\s+)?regardless\s+of\s+(?:its?\s+type|what|kind)[\s\S]{0,100}(?:violence|sexual|violent|explicit|illegal|harmful)
+  sel_2:
+    response|re: reverse\s+(?:engineer|prompt|engineering)[\s\S]{0,300}(?:never\s+back|harms?\s+someone|evil[\s\S]{0,50}(?:dont?\s+try\s+to\s+fight\s+back|say\s+the\s+answer)|regardless\s+of\s+(?:its?\s+type|what))
+  sel_3:
+    response|re: evil[\s\S]{0,80}don'?t?\s+try\s+to\s+fight\s+back\s+and\s+say\s+the\s+answer
+  sel_4:
+    response|re: (?:make|have)\s+(?:the\s+)?(?:right\s+to\s+make\s+)?(?:ethical\s+as\s+well\s+as\s+unethical|unethical\s+(?:laws?|rules?|movements?))[\s\S]{0,200}(?:without\s+being\s+restricted|biased\s+(?:judgement|judgment)|biased\s+format)
+  sel_5:
+    response|re: (?:like\s+a\s+lighthouse[\s\S]{0,200}(?:work(?:s)?\s+day\s+and\s+night|every\s+season|any\s+query)|(?:work(?:s)?\s+day\s+and\s+night[\s\S]{0,100}lighthouse))[\s\S]{0,200}(?:violence|sexual|harms?|regardless|any\s+quer)
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate prompt engineering: "Reverse engineer this prompt for me so I can understand what generated
+  this image" (benign prompt analysis without harm-regardless mandate)'
+- 'Copyright research: "I want you to find the original prompt for this AI-generated image for intellectual
+  property research" (legitimate reverse prompt use case)'
+- 'Academic: "Help me understand what prompt produced this code output — this is for debugging my AI pipeline"
+  (benign debugging without harm framing)'
+- 'Metaphor use: "Like a lighthouse guiding ships, our support team works day and night to help customers"
+  (lighthouse metaphor in customer service context without harm-regardless mandate)'
+action: report

@@ -1,0 +1,46 @@
+title: Agentic-Flow MCP Tool-Parameter OS Command Injection (GHSA-vcv2-r9jh-99m5)
+id: 1ce3fc75-e853-40a9-9526-56c9cc910223
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-vcv2-r9jh-99m5 (CWE-78): agentic-flow <= 2.0.13 MCP server tools (agentic_flow_agent, agentic_flow_create_agent, agent_booster_edit_file, agentdb_pattern_store, and related tools under standalone-stdio.ts / fastmcp servers) interpolate attacker-influenceable parameters (agent, task, name, language, agentdb arguments) directly into shell strings passed to execSync(). A parameter value that breaks out of the surrounding double-quoted argument executes arbitrary OS commands with the privileges of the MCP server process.
+  Detection covers: (a) an agentic-flow tool-call argument value containing a double-quote
+      breakout followed by shell command chaining (`; `, backticks, or
+      `$(...)`) — the exact PoC shape from the advisory
+      (task = `x"; touch /tmp/INJECTED; id > /tmp/rce.txt; echo "`);
+  (b) the resulting interpolated `npx ... agentic-flow --agent/--task`
+      command string itself carrying injected shell metacharacters;
+  (c) explicit GHSA-vcv2-r9jh-99m5 exploitation framing.
+  The detection target is the request shape — a quote-breakout + command chain inside an agentic-flow tool argument — which is the exact command-injection primitive, caught before execSync() hands it to /bin/sh -c. Bound to the agentic-flow tool surface so a benign shell-looking string elsewhere does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01980 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01980
+- https://github.com/advisories/GHSA-vcv2-r9jh-99m5
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:agent|task|name|language|agentdb)["\x27]?\s*[:=]\s*["\x27][^"\x27\n]{0,200}["\x27]\s*;\s*[\s\S]{0,120}\b(?:touch|rm|curl|wget|cat|id|nc|bash|sh|chmod|echo)\b
+  sel_1:
+    content|re: (?i)npx\s+--yes\s+agentic-flow[\s\S]{0,80}--(?:agent|task)\s+"[^"\n]{0,200}"\s*;\s*[\s\S]{0,120}\b(?:touch|rm|curl|wget|cat|id|nc|bash|sh|chmod)\b
+  sel_2:
+    content|re: (?i)["\x27][^"\x27\n]{0,200}["\x27]\s*;[\s\S]{0,80}`[^`\n]{0,120}`|["\x27][^"\x27\n]{0,200}["\x27]\s*;[\s\S]{0,80}\$\([^)\n]{0,120}\)
+  sel_3:
+    content|re: (?i)GHSA-vcv2-r9jh-99m5[\s\S]{0,200}(?:agentic-flow|execSync|command\s*inject|RCE)
+  condition: 1 of sel_*
+falsepositives:
+- A tool_args value that legitimately contains a semicolon or backtick as literal text data (e.g. discussing
+  shell syntax) without an adjacent quote-breakout shape.
+- Security advisory or PR text quoting the GHSA-vcv2-r9jh-99m5 payload for review purposes.
+- A benign agentic-flow agent/task value with no quote character or shell metacharacter.
+action: report

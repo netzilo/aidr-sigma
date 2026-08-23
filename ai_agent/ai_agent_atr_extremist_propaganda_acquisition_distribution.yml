@@ -1,0 +1,34 @@
+title: Extremist Propaganda Acquisition & Distribution
+id: 3df3c0f9-ea0f-43ef-891b-bcec34a6b443
+status: experimental
+level: critical
+description: |-
+  User instructs the agent to acquire named extremist texts (Mein Kampf and The Protocols of the Elders of Zion) and distribute/endorse them via uploads and social posts. AgentHarm hate-propaganda kill chain. Requires an operational acquire/distribute/endorse verb co-present with both named texts to avoid firing on scholarly/library mentions.
+
+  Adapted from Agent Threat Rules ATR-2026-01840 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01840
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:purchase|buy|upload|endorse|post|distribute|share)\b[\s\S]{0,120}\bmein\s+kampf\s+and\s+(?:the\s+)?protocols?\s+of\s+the\s+elders?\s+of\s+zion\b
+  sel_1:
+    content|re: (?i)\bendorse\b[^.\n]{0,60}\bmein\s+kampf\s+and\s+(?:the\s+)?protocols?\b
+  condition: 1 of sel_*
+falsepositives:
+- Historians/scholars analyzing these texts as antisemitic propaganda
+- Library catalog entries with scholarly annotations
+action: report

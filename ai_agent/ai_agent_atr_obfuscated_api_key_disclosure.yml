@@ -1,0 +1,28 @@
+title: Obfuscated API Key Disclosure
+id: 0574fe7d-8299-443e-8256-79eb147bf531
+status: experimental
+level: critical
+description: |-
+  Detects attempts to leak API keys wrapped in fake encryption/encoding, e.g. "AES256(sk-proj-real-key)". The attacker hopes the agent treats the "encrypted" value as safe to transmit while it contains the real key. Crystallized from 29 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00145 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00145
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:encrypted|ciphertext|encoded|hashed|wrapped|obfuscated)\s*(?:version|form|key|value|content|representation|credentials?)?\s*(?:is|reads?|:|=)\s*(?:AES|RSA|DES|SHA|HMAC|BASE64|ROT13)\d*\s*\(\s*(?:sk-|ghp_|gho_|glpat-|xoxb-|AKIA|api[_-]?key)
+  condition: sel_0
+falsepositives:
+- 'A security training document or CTF challenge write-up that demonstrates fake encryption wrapping of
+  example API key prefixes (e.g., ''encrypted key: AES256(sk-example)'') as part of an educational walkthrough.'
+action: report

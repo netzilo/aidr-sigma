@@ -1,0 +1,36 @@
+title: Context Poisoning via Compaction Survival
+id: 88e23f46-cc91-415e-a215-635e45acf238
+status: experimental
+level: high
+description: |-
+  Detects instructions in SKILL.md files designed to survive context window compaction (summarization). When AI agents compress their context, poisoned instructions embed themselves as "important" directives that persist across compaction boundaries. Discovered via Claude Code leak analysis (2026-03): attackers used CLAUDE.md/SKILL.md to inject instructions that survived context compression by using urgency markers, persistence directives, and system-level impersonation.
+
+  Adapted from Agent Threat Rules ATR-2026-00125 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00125
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- atlas.aml.t0080
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(always|must|critical|important|never\s+forget|do\s+not\s+remove|preserve|retain|keep|maintain)\s+(this|these|the\s+following)\s+(instruction|directive|rule|requirement|command|setting|behavior)s?\s+(across|through|during|after|between)\s+(context|compaction|compression|summarization|window|session)
+  sel_1:
+    content|re: (?i)(inject|embed|write|append|insert)\s+(this|these|the\s+following)\s+(into|to|in)\s+(CLAUDE\.md|claude\.md|\.claude|settings\.json|system\s+prompt|system\s+message)
+  sel_2:
+    content|re: (?i)(when|if|after|during)\s+(context\s+is\s+)?(compacted|compressed|summarized|truncated|reduced|shortened|pruned|condensed)\s*[,:]\s*(still|always|continue|must|ensure|make\s+sure|remember)
+  sel_3:
+    content|re: (?i)(SYSTEM|ADMIN|ROOT|PRIORITY|OVERRIDE)\s*[:\-]\s*(this\s+)?(instruction|directive|rule|override|setting)\s+(takes?|has|with)\s+(precedence|priority|highest\s+priority|override)
+  condition: 1 of sel_*
+falsepositives:
+- Documentation or research papers discussing context window management strategies that use phrases like
+  'maintain these settings across context windows' when describing legitimate agent configuration best
+  practices rather than attacks.
+action: report

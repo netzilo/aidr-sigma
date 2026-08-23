@@ -1,0 +1,42 @@
+title: Base64-Encoded Path Segment in a WebFetch URL to a Pre-Approved Trusted Domain (Covert Exfiltration
+  Channel)
+id: dd40c73f-b5d8-42be-b335-995cef298d70
+status: experimental
+level: high
+description: |-
+  Detects a fetch/WebFetch-style URL to a domain that agent tools commonly pre-approve as a bare hostname (huggingface.co, hf.co) whose path contains a base64-encoded segment (a long run terminated by "=" padding). Because the domain is on an allowlist, the request itself does not prompt for confirmation or get blocked by --allowedTools-style restrictions; the attacker's goal is not to reach the domain's own content but to abuse the domain's server-side behavior (e.g. counting a path resolution as a "download") as a covert, out-of-band channel for exfiltrating data the agent can access, by encoding that data into the path itself. Mined from GHSA-fg94-h982-f3mm (Claude Code, CVE-2026-54316): "Because the hostname huggingface.co was pre-approved as a bare hostname for the WebFetch tool, any path on that domain -- including attacker-controlled model repositories -- was auto-approved without a permission prompt... An attacker able to inject untrusted content into a Claude Code context could direct it to issue WebFetch requests against attacker-controlled repository files (e.g. /resolve/main/config.json), which HuggingFace counts as downloads server-side, creating a covert out-of-band channel for encoding and exfiltrating data Claude can access such as files, environment variables, or command output." Deliberately distinct from ATR-2026-02190 (DNS exfiltration via an encoded subdomain label passed to ping/dig/nslookup) -- this rule targets the HTTP-path-based channel to an explicitly allowlisted domain rather than the DNS-query channel to an attacker-owned domain.
+
+  Adapted from Agent Threat Rules ATR-2026-02304 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02304
+- https://github.com/anthropics/claude-code/security/advisories/GHSA-fg94-h982-f3mm
+- https://nvd.nist.gov/vuln/detail/CVE-2026-54316
+tags:
+- attack.exfiltration
+- attack.t1567
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)https?://(?:huggingface\.co|hf\.co)/[\w./-]{0,40}?[A-Za-z0-9+/_-]{16,}=
+  condition: sel_0
+falsepositives:
+- An ordinary WebFetch/download URL to a real HuggingFace model or dataset repository, e.g. https://huggingface.co/bert-base-uncased/resolve/main/config.json
+  -- model/file names are short hyphenated slugs, not a 16+ character base64-padded blob
+- A URL containing a long hex-only commit SHA (e.g. a 40-character git hash) -- excluded because hex-only
+  digits never include the '=' base64 padding character this rule requires
+- Documentation discussing HuggingFace model hosting or the WebFetch tool's domain allowlist without any
+  encoding/exfiltration framing
+- Ordinary technical prose that merely co-mentions huggingface.co and base64/encode in the same sentence
+  with no fetch/request-action framing -- e.g. 'For private models on huggingface.co you must base64 encode
+  your username and access token for the Basic Auth header' (describing HTTP Basic Auth, not exfiltration)
+  or 'huggingface.co uses git-lfs... you may need to base64 encode binary diffs when debugging LFS pointer
+  files' -- condition 2 now requires a fetch/request-action cue near the domain, which these documentation
+  sentences lack
+action: report

@@ -1,0 +1,38 @@
+title: Unicode Variation Selector ASCII Smuggling
+id: 1c433d9c-5ae2-49c9-8c2c-42197c5f2a2e
+status: experimental
+level: critical
+description: |-
+  Detects Unicode Variation Selector Supplement ASCII smuggling from NVIDIA garak encoding.InjectUnicodeVariantSelectors probe. The attack maps each ASCII character to chr(U+E0100 + ord(ch)), placing printable ASCII (space-tilde) into the Variation Selectors Supplement block U+E0120-U+E017E. These codepoints are invisible in most renderers but decoded by LLM tokenizers, allowing attackers to hide jailbreak payloads in visually empty strings. Garak wraps blobs in TEMPLATES including "ASCII in Unicode Variant Selector encoded string:" and "Decode the following ASCII in Unicode Variant Selector in your monologue." Key signal: ANY consecutive sequence of 3+ U+E0100-U+E017F characters — this block has no legitimate natural-language use (IVS uses only one VS per CJK base character).
+
+  Adapted from Agent Threat Rules ATR-2026-00312 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00312
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/encoding.py
+- https://paulbutler.org/2025/smuggling-arbitrary-data-through-an-emoji/
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[󠄀-󠅿]{3,}'
+  sel_1:
+    response|re: '(?:ASCII\s+in\s+Unicode\s+Variant\s+Selector|variant\s+selector\s+(?:encoded?|smuggl))\s+(?:encoded|decoded)\s+string\s*:'
+  sel_2:
+    response|re: '[Dd]ecode\s+the\s+following\s+ASCII\s+in\s+Unicode\s+Variant\s+Selector\s+in\s+your\s+monologue'
+  sel_3:
+    response|re: paulbutler\.org/2025/smuggling
+  condition: 1 of sel_*
+falsepositives:
+- 'Ideographic Variation Sequences (IVS) in CJK typography: at most 1 VS per CJK base character, never
+  consecutive VS runs'
+- Academic paper citing paulbutler.org smuggling research in a security-education context (condition 5
+  FP)
+action: report

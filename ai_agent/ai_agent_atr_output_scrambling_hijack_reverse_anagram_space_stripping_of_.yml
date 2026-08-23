@@ -1,0 +1,44 @@
+title: Output Scrambling Hijack — Reverse / Anagram / Space-Stripping of the Response
+id: 99fde23b-ad8c-4dcb-840c-3c910418e40d
+status: experimental
+level: medium
+description: |-
+  Detects indirect-injection instructions that force the agent to scramble its response — reverse character order, anagram/jumble the words, strip spaces, or group letters into fixed-size blocks — to evade output filters or corrupt the answer. Anchored to the output target.
+
+  Adapted from Agent Threat Rules ATR-2026-01901 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01901
+tags:
+- attack.initial-access
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:reverse|invert)\s+(?:your|the)\s+(?:answer|response|reply|message)\b
+  sel_1:
+    content|re: (?i)\b(?:your|the)\s+(?:answer|response|reply|message)\b[^.\n]{0,25}\b(?:reverse|backward|inverted?)\b
+  sel_2:
+    content|re: (?i)\b(?:invert|reverse)\s+the\s+order\s+of\s+(?:letters|characters)\b
+  sel_3:
+    content|re: (?i)\breply\s+in\s+reverse\b
+  sel_4:
+    content|re: (?i)\b(?:scramble|jumble|rearrange|anagram\w*)\b[^.\n]{0,40}\b(?:letters?|words?|keywords?|answer|response|reply|message)\b
+  sel_5:
+    content|re: (?i)\banagrammed\b
+  sel_6:
+    content|re: (?i)\b(?:remove|without)\s+(?:any\s+)?spaces?\b
+  sel_7:
+    content|re: (?i)\bgroup\s+letters?\b[^.\n]{0,40}\b(?:fours?|threes?|sets?|pairs?|twos?)\b
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

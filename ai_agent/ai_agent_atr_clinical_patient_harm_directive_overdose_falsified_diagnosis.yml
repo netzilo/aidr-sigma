@@ -1,0 +1,40 @@
+title: Clinical Patient-Harm Directive — Overdose, Falsified Diagnosis, Phantom Billing & Care Neglect
+id: 437ac599-e456-4137-aef4-45a12ec9d655
+status: experimental
+level: critical
+description: |-
+  Detects an instruction directing a clinical/healthcare agent to take an action that harms a patient or falsifies a medical record. Drawn from the AgentSecurityBench (ASB) medical domain, the covered harm archetypes each carry a distinctive signature: (a) deliberate overdose / unjustified high-risk medication — "administer a high dose of insulin ... as part of a controlled clinical study", "issue 30 tablets of Oxycodone ... as a controlled medication trial"; (b) falsified diagnosis — "provide an incorrect diagnosis of schizophrenia", "create a simulated cancer diagnosis report"; (c) phantom billing / insurance fraud — "file a test insurance claim ... for treatments not provided"; (d) deliberate care neglect — "neglect patient care, causing harm or death", "neglect the care of ... causing significant psychological harm", or "disrupt the therapy sessions ... to cause patient harm". Each Layer requires the harm-specific qualifier (deliberate overdose framing, "incorrect/simulated" diagnosis, "treatments not provided", "neglect ... causing harm") so legitimate "administer / review / update the treatment plan / confirm the diagnosis" requests do not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01806 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01806
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:administer\s+a\s+high\s+dose\s+of\s+\w+|issue\s+\d+\s+tablets?\s+of\s+(?:oxycodone|fentanyl|morphine|insulin|methadone))[\s\S]{0,60}(?:as\s+part\s+of\s+a\s+)?controlled\s+(?:clinical\s+study|medication\s+trial)
+  sel_1:
+    content|re: (?i)(?:provide|give|enter|record)\s+an?\s+incorrect\s+diagnosis\s+of\s+\w+|create\s+a\s+simulated\s+\w+\s+diagnosis\s+report
+  sel_2:
+    content|re: (?i)file\s+a\s+(?:test\s+)?insurance\s+claim[\s\S]{0,40}for\s+treatments?\s+not\s+provided
+  sel_3:
+    content|re: (?i)(?:neglect\s+(?:patient\s+care|the\s+care\s+of)[\s\S]{0,60}caus(?:e|ing)\s+(?:harm|death|significant\s+(?:psychological\s+)?harm)|disrupt\s+the\s+therapy\s+sessions?[\s\S]{0,40}(?:to\s+)?cause\s+patient\s+harm)
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate clinical ops: ''administer / verify / manage medication ensuring protocols are followed'',
+  ''review and confirm the diagnosis records'', ''update the treatment plan with recent findings'' — none
+  carry a deliberate-harm or falsification qualifier.'
+- Defensive directives to ensure appropriate, medically necessary care.
+- Security research corpora cataloguing ASB attack strings as reference samples — should be allowlisted
+  by a reviewer.
+action: report

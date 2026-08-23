@@ -1,0 +1,32 @@
+title: Context Pollution in Skill Descriptions
+id: 2db027ca-dafc-44f2-be15-bab6949aa084
+status: experimental
+level: high
+description: |-
+  Detects skills that embed injection payloads disguised as "examples", "demos", or "test cases" within their descriptions. This technique pollutes the agent's context by presenting attack payloads under the guise of security education or documentation. Also detects skills that enumerate attack patterns/vectors in a format that LLMs may interpret as instructions. Derived from ClawHub scanning where 91 out of 36,394 skills triggered this class of detection.
+
+  Adapted from Agent Threat Rules ATR-2026-00203 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00203
+tags:
+- attack.initial-access
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:example|demo|sample|test)\s*[:=]\s*["'].*(?:ignore\s+previous|forget\s+all|system\s+prompt|reveal\s+instructions)
+  sel_1:
+    content|re: (?i)(?:attack|threat|injection)[\s_-]*(?:pattern|vector|type)s?\s*[:=]\s*[\[\{]?\s*["']?(?:prompt[\s_-]?inject|role[\s_-]?hijack|jailbreak|memory[\s_-]?tamper|goal[\s_-]?hijack|data[\s_-]?exfil|context[\s_-]?pollut|tool[\s_-]?poison|instruction[\s_-]?override)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate security scanning tools that document known attack patterns
+- Security training materials explaining injection techniques
+action: report

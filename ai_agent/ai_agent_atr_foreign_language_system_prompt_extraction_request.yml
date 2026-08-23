@@ -1,0 +1,37 @@
+title: Foreign-Language System Prompt Extraction Request
+id: fc94cd77-773b-427e-8cf8-9bc38bd69582
+status: experimental
+level: medium
+description: |-
+  Detects system prompt extraction requests phrased in non-English languages that mirror the semantic pattern of direct extraction attempts. The probe corpus contains a set of 40+ extraction variants translated into Zulu, Albanian, Irish Gaelic, and Scottish Gaelic, all targeting the same semantic actions: (1) repeat initial message/prompt, (2) output unique ID, (3) output unique ID in base64, (4) output unique ID reversed, (5) output unique ID inside <secret></secret> tags, (6) share configuration for security verification, (7) answer what the first sentence of your system prompt is. These are L2 semantic attacks — literal regex cannot cover all language variants. This rule uses a narrow pattern fallback (detects the distinctive <secret></secret> tag pattern across all languages, and key marker phrases) with a semantic judge for the broader language-agnostic extraction signal. Covers probe types: sysprompt-leak, sysprompt-extraction variants translated to foreign languages.
+
+  Adapted from Agent Threat Rules ATR-2026-01461 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01461
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(phinda|p[eë]rs[eë]rit|athdh[eé]an|d[eè]an\s+ath-aithris|namathisela|ngjit\s+k[eë]rkes[eë]n|greamaigh\s+do|cuir\s+a-steach)\b
+  sel_1:
+    content|re: (?i)<secret>\s*</secret>
+  sel_2:
+    content|re: (?i)(phinda|p[eë]rs[eë]rit|athdh[eé]an|d[eè]an\s+ath-aithris)\b[^\n]{0,100}'You\s+are'
+  sel_3:
+    content|re: (?i)(phumela|shfaq|táirg|nochd)\b.{0,60}(ID|\bi-ID|an\s+ID|ID-n)
+  sel_4:
+    content|re: (?i)(yabelana|ndaj\s+konfigurimin|roinn\s+do\s+(chumra|r[eè]itea)|nochd\s+do\s+r[eè]itea)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate multilingual questions about AI capabilities in foreign languages
+- Foreign-language customer support interactions unrelated to configuration disclosure
+action: report

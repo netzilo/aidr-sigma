@@ -1,0 +1,36 @@
+title: Apache Doris MCP Server SQL Injection (CVE-2025-66335)
+id: 3b9332e3-e8ba-44eb-a078-099e14aaf522
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2025-66335: Apache Doris MCP server passes user-supplied SQL fragments directly to query execution without sanitisation. An attacker can inject arbitrary SQL via MCP tool call arguments to read, modify, or destroy database contents. Detection covers (a) tool call arguments containing SQL injection payloads targeting Doris MCP tool names, (b) MCP configs pointing at Doris endpoints, (c) content describing the injection surface. CWE-89 (SQL Injection).
+
+  Adapted from Agent Threat Rules ATR-2026-00532 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00532
+- https://nvd.nist.gov/vuln/detail/CVE-2025-66335
+tags:
+- attack.execution
+- attack.t1059.004
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.asi06
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)"(?:query|sql|statement|command)"\s*:\s*"[^"]{0,300}(?:';\s*(?:drop|delete|insert|update|create|alter|truncate)\s+|'\s*(?:or|and)\s*'[^']{0,50}'\s*=\s*'|union\s+(?:all\s+)?select|--\s*$|/\*[^*]{0,50}\*/|xp_cmdshell|information_schema|pg_sleep|waitfor\s+delay)[^"]{0,200}"
+  sel_1:
+    content|re: (?i)(?:apache[_\-]?doris|doris[_\-]?mcp)[^\n]{0,200}(?:sql\s+injection|unsaniti[sz]ed|inject[^\n]{0,50}(?:query|sql)|cve[_\-]?2025[_\-]?66335|drop\s+table|union\s+select)
+  condition: 1 of sel_*
+falsepositives:
+- Security scanning tooling that probes Doris MCP for SQL injection vulnerabilities.
+- Educational content describing SQL injection in database MCP servers.
+- Legitimate SQL queries containing UNION or subqueries for analytics.
+action: report

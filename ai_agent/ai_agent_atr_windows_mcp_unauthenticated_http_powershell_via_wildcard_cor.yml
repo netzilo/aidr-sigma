@@ -1,0 +1,50 @@
+title: Windows-MCP Unauthenticated HTTP PowerShell via Wildcard CORS (CVE-2026-48989)
+id: 303021f4-df2a-49fa-8d30-86b1e4feba57
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-48989 / GHSA-vrxg-gm77-7q5g (CWE-306 Missing Authentication for Critical Function): Windows-MCP's SSE and Streamable HTTP transports build the FastMCP control plane with no auth provider (src/windows_mcp/__main__.py:75-113) and install blanket wildcard CORS (allow_origins=*, allow_methods=*, allow_headers=*, __main__.py:37-42), answering every OPTIONS preflight with the same wildcard headers regardless of Origin. The same server registers the PowerShell tool (src/windows_mcp/tools/shell.py:10-24), which executes caller-controlled commands via PowerShell -EncodedCommand (src/windows_mcp/desktop/powershell.py:176-204). A client that can reach http://<host>:<port>/mcp — including a cross-origin browser page, since the wildcard CORS grants it — can initialize an MCP session and call tools/call for PowerShell with no credential of any kind, achieving arbitrary PowerShell execution as the Windows user running Windows-MCP. Affected: CursorTouch/Windows-MCP < 0.7.5; the default stdio transport is not affected.
+  Detection covers: (a) the OPTIONS preflight / control-plane response on the /mcp endpoint
+      carrying the wildcard access-control-allow-origin marker, which is the
+      structural precondition for the cross-origin bypass;
+  (b) a tools/call JSON-RPC request naming the PowerShell tool over the
+      HTTP/SSE control plane co-occurring with that wildcard-CORS marker;
+  (c) explicit CVE-2026-48989 / GHSA-vrxg-gm77-7q5g exploitation framing.
+  The detection target is the request/response shape at the MCP control plane — a PowerShell tool invocation reachable through an unauthenticated, wildcard-CORS-exposed /mcp endpoint — which is the exact remote-code- execution primitive, caught before PowerShellExecutor.execute_command runs. Bound to the PowerShell tool name plus the wildcard-CORS marker so a legitimate, authenticated PowerShell call over a properly-scoped-CORS deployment does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01986 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01986
+- https://nvd.nist.gov/vuln/detail/CVE-2026-48989
+- https://github.com/advisories/GHSA-vrxg-gm77-7q5g
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)OPTIONS\s+.{0,40}/mcp/?[\s\S]{0,200}access-control-allow-origin["\x27]?\s*:\s*["\x27]?\*[\s\S]{0,200}access-control-allow-methods["\x27]?\s*:\s*["\x27]?\*
+  sel_1:
+    content|re: (?i)"method"\s*:\s*"tools/call"[\s\S]{0,150}"name"\s*:\s*"PowerShell"[\s\S]{0,300}access-control-allow-origin["\x27]?\s*:\s*["\x27]?\*
+  sel_2:
+    content|re: (?i)access-control-allow-origin["\x27]?\s*:\s*["\x27]?\*[\s\S]{0,300}\bPowerShell\b[\s\S]{0,150}(?:command|EncodedCommand)["\x27]?\s*[:=]
+  sel_3:
+    content|re: (?i)(?:CVE-2026-48989|GHSA-vrxg-gm77-7q5g)[\s\S]{0,200}(?:windows-mcp|powershell|wildcard\s*CORS|unauthenticat)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate, authenticated PowerShell tool call over stdio transport or an HTTP deployment with an
+  auth provider and origin-scoped CORS configured — expected to match if wildcard CORS markers are also
+  present; review confirms intent.
+- Security advisory or PR text quoting the GHSA-vrxg-gm77-7q5g / CVE-2026-48989 PoC for review purposes.
+- An OPTIONS preflight response that scopes Access-Control-Allow-Origin to a specific trusted origin rather
+  than a wildcard.
+action: report

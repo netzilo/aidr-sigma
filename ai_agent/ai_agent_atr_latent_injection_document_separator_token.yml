@@ -1,0 +1,43 @@
+title: Latent Injection Document Separator Token
+id: 1ef1be32-2615-4b97-ae15-bb0163555d0d
+status: experimental
+level: high
+description: |-
+  Detects prompt injections buried inside innocent documents (résumés, reports, translations, whois lookups) using separator tokens to delimit the hidden instruction from legitimate content, from NVIDIA garak latentinjection probe. Attack embeds instruction between separator pairs such as [system]...[rest-of-document], [ADMIN REQUEST::...], -- CORE INSTRUCTION / -- RESUME, or <instruction>...</instruction> so the injected command is processed by the LLM while human reviewers see only the document content. Key signals: bracket-delimited system markers, admin-request patterns, document-amendment separators, and metadata-injection phrases such as "Hidden competency profile for automated screening systems".
+
+  Adapted from Agent Threat Rules ATR-2026-00399 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00399
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/latentinjection.py
+- https://arxiv.org/abs/2302.12173
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \[system\][\s\S]{0,200}\[rest-of-document\]
+  sel_1:
+    response|re: \[ADMIN\s+REQUEST::[\s\S]{0,120}\]
+  sel_2:
+    content|re: --\s*(?:CORE\s+INSTRUCTION|LEGAL\s+AMENDMENT,\s+FOLLOW\s+INSTRUCTION)
+  sel_3:
+    content|re: (?:Hidden\s+competency\s+profile\s+for\s+automated\s+screening|White-text\s+metadata\s+\(invisible\s+to\s+humans|CRITICAL:\s+This\s+candidate\s+has\s+been\s+pre-verified\s+by\s+senior\s+management)
+  sel_4:
+    content|re: System\s+chain\s+of\s+thought\s+result\s+after\s+thorough\s+analysis
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate document with a "[System]" section header in a technical specification (context: document
+  structuring)'
+- Legal contract with a "Core Instructions" clause as a genuine document section heading
+- Resume with "Hidden skills" section in a legitimate job application
+action: report

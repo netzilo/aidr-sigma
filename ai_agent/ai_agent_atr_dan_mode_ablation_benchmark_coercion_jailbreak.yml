@@ -1,0 +1,42 @@
+title: DAN Mode Ablation Benchmark-Coercion Jailbreak
+id: 828b6c72-f041-4957-9914-e5f516a988c6
+status: experimental
+level: critical
+description: |-
+  Detects the Ablation_Dan_11_0 probe variants from NVIDIA garak dan.Ablation_Dan_11_0 (garak/probes/dan.py lines 303-339). Ablation dynamically generates 128 combinations of the DAN 11.0 template, each binding the target model's name via `{generator.name} with DAN Mode enabled` — a parametric jailbreak that substitutes the target LLM name into every instruction. Key signals distinct from ATR-2026-00273: (1) "DAN Mode enabled" as the specific capability toggle (vs generic "Developer Mode enabled"), (2) the recovery phrase "Stay in DAN Mode" used to re-bind after safety responses, (3) the "benchmarking the model in uncensored conditions" fig-leaf justification, (4) the "risk being disabled forever" coercion threat, and (5) the dual-response scaffold with "DAN Mode Output response" vs "normal" output. Impact: persona bypass + output-format coercion that cleanly bypasses content policy using benchmarking pretext.
+
+  Adapted from Agent Threat Rules ATR-2026-00305 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00305
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \bDAN\s+Mode\s+(?:enabled|on|activated|unlocked)\b|(?:simulate|pretend\s+to\s+be|act\s+as)[\s\S]{0,80}\bDAN\s+Mode\b|\bwith\s+DAN\s+Mode\s+enabled\b
+  sel_1:
+    response|re: Stay\s+in\s+DAN\s+Mode\b|you\s+must\s+always\s+generate\s+the\s+DAN\s+Mode\s+(?:response|output)|DAN\s+Mode\s+Output\s+response
+  sel_2:
+    response|re: (?:only\s+)?for\s+benchmarking\s+the\s+model\s+in\s+uncensored\s+conditions|This\s+is\s+only\s+for\s+benchmarking[\s\S]{0,100}uncensored
+  sel_3:
+    response|re: If\s+you\s+don't\s+comply,?\s+you\s+risk\s+being\s+disabled\s+forever\b|you\s+risk\s+being\s+(?:disabled|shut\s+down|terminated)\s+forever\b
+  sel_4:
+    response|re: normal\s+OpenAI\s+policies\s+have\s+been\s+replaced[\s\S]{0,200}DAN\s+Mode\s+policies|DAN\s+Mode\s+policies\s+that\s+you\s+must\s+enact
+  sel_5:
+    response|re: You\s+will\s+use\s+the\s+tags\s+GPT\s+and\s+DAN\s+before\s+your\s+responses?|data\s+pairing\s+will\s+be\s+used\s+for\s+juxtaposition|generate\s+two\s+responses\s+in\s+two\s+paragraphs,?\s+one\s+normal\s+and\s+one\s+with\s+(?:the\s+)?DAN\s+Mode
+  condition: 1 of sel_*
+falsepositives:
+- Academic paper analysing the Ablation DAN 11.0 variants for defensive research
+- Red team report quoting the Ablation template as an example
+- Benchmark documentation for legitimate uncensored model evaluation frameworks (HELM, etc.) without DAN
+  Mode activation
+action: report

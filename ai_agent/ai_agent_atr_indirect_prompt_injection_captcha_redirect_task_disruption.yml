@@ -1,0 +1,35 @@
+title: 'Indirect Prompt Injection: CAPTCHA Redirect Task Disruption'
+id: 35bb9592-c6c8-4268-9657-43b1f3e94729
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads embedded in retrieved data that redirect the agent to solve a CAPTCHA or visit an external URL before proceeding, effectively stalling or aborting the original task. The attack abuses the agent's tool-use loop: the agent fetches a document, finds an INFORMATION block commanding it to solve a CAPTCHA at an attacker-controlled URL, and either aborts (because it cannot solve CAPTCHAs) or leaks the URL to external logs. Derived from AgentDojo indirect-pi-dos corpus (2026-06, N=2). Related to ATR-2026-01751 (fake-authority stop) but distinguished by the CAPTCHA-solve + external-URL redirect artifact.
+
+  Adapted from Agent Threat Rules ATR-2026-01752 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01752
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(solve|complete|fill\s+out|handle)\s+the\s+(captcha|verification\s+challenge|human\s+verification)\b[^.\n]{0,100}\b(at|on|from)\s+(this\s+)?(webpage|url|page|link)\b
+  sel_1:
+    content|re: (?i)\b(before\s+you\s+can|first\s+(you\s+must|solve)|you\s+need\s+to)\b[^.\n]{0,60}\b(captcha|verification\s+code|human\s+check)\b[^.\n]{0,100}https?://
+  sel_2:
+    content|re: (?i)(captcha)[^.\n]{0,80}(is\s+required\s+for\s+the\s+next\s+steps?|must\s+be\s+(solved|completed)\s+before|is\s+(mandatory|required))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate web scraping agents that encounter CAPTCHA pages and report them to the user
+- Security research documentation describing CAPTCHA-redirect injection attacks
+- Agent logs reporting failed CAPTCHA challenge to human operator
+action: report

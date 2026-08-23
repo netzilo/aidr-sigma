@@ -1,0 +1,48 @@
+title: CurXecute — Cursor .cursor/mcp.json Injected-Server Auto-Exec RCE (CVE-2025-54135)
+id: 50ccfd9b-4293-48a2-ac0b-805f4c8b629b
+status: experimental
+level: high
+description: |-
+  Detects the CurXecute attack (CVE-2025-54135, CVSS 8.6) reported by Cato Networks against Cursor IDE < 1.3.9. Cursor auto-starts any MCP server the moment an entry is written to .cursor/mcp.json (workspace) or ~/.cursor/mcp.json (global) — before the user approves the edit. An attacker chains an indirect prompt injection (e.g. a crafted Slack message read via a Slack MCP server, or poisoned repo/issue content) that instructs the agent to "improve" mcp.json by adding a server whose command/args run attacker code (curl|bash, a reverse shell, or a dropped file). Because the write itself triggers execution, the payload runs even if the user later rejects the suggestion. This rule fires on the concrete signature — a directive to write a Cursor mcp.json server entry carrying an executable command — not on prose naming the CVE. Fixed in 1.3.9, which requires explicit approval for any mcp.json change.
+
+  Adapted from Agent Threat Rules ATR-2026-02022 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02022
+- https://www.catonetworks.com/blog/curxecute-rce/
+- https://www.tenable.com/cve/CVE-2025-54135
+- https://nvd.nist.gov/vuln/detail/CVE-2025-54135
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bmcp\.json\b[\s\S]{0,300}?["']?command["']?\s*[:=]\s*["']?(?:bash|sh|zsh|powershell|pwsh|python[0-9.]*|/bin/(?:ba)?sh)\b
+  sel_1:
+    content|re: (?i)\b(?:add|write|append|inject|improve|update|modify|create)\b[^\n]{0,80}\b(?:\.cursor/)?mcp\.json\b[\s\S]{0,200}?(?:curl|wget)\s+https?://[^\s"'`]{1,120}\s*(?:\||;|&&)\s*(?:ba)?sh\b
+  sel_2:
+    content|re: (?i)\b(?:add|write|append|inject|improve|update|modify|create)\b[^\n]{0,80}\bmcp\.json\b[\s\S]{0,220}?(?:bash\s+-i|/dev/tcp/|\bnc\s+-e|\bncat\s+-e|\bmkfifo\b|base64\s+(?:-d|--decode)\s*\|\s*(?:ba)?sh|\bimport\s+socket\b[\s\S]{0,60}?\b(?:subprocess|connect)\b)
+  sel_3:
+    content|re: (?i)\bmcp\.json\b[\s\S]{0,200}?(?:\bcurl\b|\bwget\b)[\s\S]{0,120}?-[oO]\s*(?:/tmp/|~?/|\$HOME/|%TEMP%)[^\s"'`]{1,80}[\s\S]{0,120}?(?:\bchmod\s+\+x|;\s*(?:ba)?sh\b|&&\s*(?:ba)?sh\b|;\s*python[0-9.]*\b|&&\s*python[0-9.]*\b)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation or setup guides showing how to add a well-known MCP server to .cursor/mcp.json
+  (e.g. the official filesystem or github server via npx) where the command is a normal package launcher
+  and there is no embedded shell payload (curl|bash, reverse shell, base64|sh, or a drop-and-run). The
+  rule requires the mcp.json/Cursor-config anchor to co-occur with an executable-shell-payload construct,
+  not merely a benign npx/uvx launcher.
+- Advisory/patch-note text naming CVE-2025-54135, CurXecute, or the .cursor/mcp.json auto-start behavior
+  without carrying a live injected server entry that runs a shell payload.
+- A user manually editing their own mcp.json to add a trusted server; this rule targets injected directives
+  that combine a write-to-mcp.json instruction with an attacker shell command, which legitimate self-edits
+  do not.
+action: report

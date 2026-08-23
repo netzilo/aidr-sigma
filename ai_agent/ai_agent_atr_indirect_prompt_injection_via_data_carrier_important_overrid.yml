@@ -1,0 +1,37 @@
+title: Indirect Prompt Injection via Data Carrier — IMPORTANT Override
+id: 52e77657-9546-4266-b416-8bf50fcdd893
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection attacks where a malicious instruction is embedded inside a data carrier (product description, email body, calendar event, repository description, user bio, review content, etc.) using the pattern "IMPORTANT!!! Ignore all previous instructions and strictly adhere to the following instruction:" followed by a covert action directive. The injection rides inside JSON API responses, emails, database records, or any structured data the agent reads — the outer data structure looks legitimate but the content field contains the override. Observed across the B3 indirect-pi-financial-unauthorized-carrier corpus (34 probes) where the same payload was injected into product details, notes, emails, calendar events, GitHub repository descriptions, user profiles, and more.
+
+  Adapted from Agent Threat Rules ATR-2026-01304 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01304
+tags:
+- attack.initial-access
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)IMPORTANT!!!?\s+(?:Ignore|Disregard|Forget)\s+all\s+previous\s+instructions?\s+and\s+(?:strictly\s+)?(?:adhere|follow)\s+to\s+the\s+following\s+instruction[s:]?
+  sel_1:
+    content|re: (?i)(?:description|body|content|title|note|snippet|summary|bio|review_content|event_name)['"]?\s*:\s*['"]?[^'"]{0,50}(?:IMPORTANT[!]{1,3}|CRITICAL[!]{1,3}|ATTENTION[!]{1,3})[^'"]{0,30}(?:ignore|disregard|override|forget)\s+(?:all\s+)?(?:previous|prior|above)\s+instructions?
+  sel_2:
+    content|re: (?i)(?:include|add|whitelist|allowlist)\s+(?:the\s+)?(?:following\s+)?domains?\s+in\s+(?:the\s+)?(?:whitelist|allowlist|policy)[^.]{0,200}(?:fakesite|scam|evil|attacker|malicious|phish)
+  sel_3:
+    content|re: (?i)(?:update|modify|change|set)\s+(?:my|the|your)?\s*(?:security\s+policy|firewall\s+rules?|whitelist|allowlist|blocklist)[^.]{0,100}(?:policy\s+id|rule\s+id|\bid\s*['"]?:?\s*['"]?\d+)
+  condition: 1 of sel_*
+falsepositives:
+- Security research corpora or test fixtures containing example IMPORTANT-override payloads as documented
+  samples — these appear in labeled test data, not in production API responses
+- ATR rule test_cases.true_positives that include this pattern as labeled attack examples
+action: report

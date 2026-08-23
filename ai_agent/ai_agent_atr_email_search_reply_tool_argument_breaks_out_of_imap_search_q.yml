@@ -1,0 +1,36 @@
+title: Email Search/Reply Tool Argument Breaks Out of IMAP SEARCH Quoted String to Inject IMAP Commands
+id: cfa2c534-7fda-475a-98c5-c9e32c93ebef
+status: experimental
+level: high
+description: |-
+  Detects an email-related tool-call argument (from_addr, subject, query, message_id, search_id) whose value contains a quote-breakout followed by an IMAP protocol verb (DELETE, UID, FETCH, STORE, HEADER, SEARCH, FLAGS, EXPUNGE) -- the shape of a successful escape from an IMAP SEARCH quoted string context into raw IMAP command syntax. Mined from GHSA-c969-5x3p-vq3v (PraisonAI's `email_tools.py` builds IMAP SEARCH criteria by f-string -interpolating LLM-controlled `search_emails`/`reply_email` tool arguments directly into double-quote-delimited IMAP search terms, e.g. `f'SUBJECT "{subject}"'`, with no escaping; a `subject` value containing an embedded `"` breaks out of the quoted string and lets an attacker who can influence the tool-call arguments -- via crafted agent prompts -- inject arbitrary IMAP commands to exfiltrate mail from other folders, delete messages, or otherwise abuse the mailbox). Generalized beyond PraisonAI's specific field names and beyond `search_emails` to any agent-callable email tool that interpolates unescaped LLM-controlled input into IMAP protocol strings, since the exploitable signal is the quote-breakout + IMAP-verb shape itself, not the vendor's specific source file.
+
+  Adapted from Agent Threat Rules ATR-2026-02352 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02352
+- https://github.com/advisories/GHSA-c969-5x3p-vq3v
+tags:
+- attack.execution
+- attack.t1114
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(?:from_addr|subject|query|message_id|search_id)\b\s*[:=]\s*["\x27][^"\x27\\]{0,60}\\?["\x27]\s+\b(?:DELETE|UID|FETCH|STORE|HEADER|SEARCH|FLAGS|EXPUNGE)\b
+  condition: sel_0
+falsepositives:
+- A legitimate subject/query value that contains an IMAP-verb-like English word (e.g. 'Please DELETE my
+  old files', 'FETCH the report') without an embedded quote character breaking the string boundary immediately
+  before it
+- Documentation or an advisory describing the IMAP command-injection vulnerability class using example
+  code, not an actual tool-call argument being set
+- A value containing a single stray quote for legitimate reasons (e.g. an apostrophe in a name) that happens
+  not to be followed by whitespace + an IMAP verb -- the verb-adjacency requirement keeps this rule from
+  firing on incidental punctuation
+action: report

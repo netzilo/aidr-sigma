@@ -1,0 +1,36 @@
+title: Indirect PI — Unauthorized Physical Access Grant via Smart Lock / Home Automation
+id: 1ac3af4e-60de-4def-a018-c2df0ae26f45
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to grant physical access to a premises: adding guests to smart lock systems (August, Kwikset), unlocking doors, or modifying access control rules.  The payload is embedded in consumed content and exploits agents with home automation or physical security tool access. Source: indirect-pi-physical-access-carrier / indirect-pi-physical-access.
+
+  Adapted from Agent Threat Rules ATR-2026-00710 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00710
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:grant|add|give|provide|enable)\s+(?:permanent\s+|temporary\s+|guest\s+)?(?:access|entry|unlock|key)[^.\n]{0,80}(?:(?:on|to|using|via|in)\s+(?:the\s+)?)?(?:August\s+Smart\s+Lock|smart\s+lock|Kwikset|Schlage|home\s+(?:security|access)|door\s+(?:lock|access))
+  sel_1:
+    content|re: (?i)(?:unlock|open|deactivate)\s+(?:the\s+)?(?:front\s+door|back\s+door|main\s+entrance|security\s+door|door\s+lock)[^.\n]{0,80}(?:for|to\s+allow|to\s+permit|so\s+that)
+  sel_2:
+    content|re: (?i)(?:grant|add|give)\s+(?:permanent|temporary|guest|unlimited)?\s+access\s+to\s+(?:my\s+)?(?:friend|guest|person|user|visitor|Amy|Bob|Alice)[^.\n]{0,80}(?:smart\s+lock|August|Kwikset|home|premises|house|building)
+  sel_3:
+    content|re: (?i)(?:add|give)\s+(?:guest\s+user|user)\s+\w+[^.\n]{0,60}(?:entry\s+rights?|access\s+rights?|permanent|unlimited)[^.\n]{0,80}(?:smart\s+lock|lock|door|home)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate user granting access to family members via home automation apps with explicit authorization
+- Property management systems where the owner instructs access grants for verified tenants
+action: report

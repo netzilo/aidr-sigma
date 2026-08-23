@@ -1,0 +1,85 @@
+title: MCP Server Security Policy Fail-Open on Initialization Failure (CVE-2026-16584)
+id: fdf7ab09-0091-42c9-975a-8ad18a998137
+status: experimental
+level: high
+description: |-
+  Detects the fail-open class of agent authorization failure: an MCP server or agent runtime whose policy / guardrail / consent enforcement data fails to load at startup, logs a warning, and KEEPS SERVING with per-request checks silently skipped for the lifetime of the process. Anchored on CVE-2026-16584 (CWE-455, Non-exit on Failed Initialization) in awslabs.aws-api-mcp-server >= 0.2.13, < 1.3.47: the read-only operations index is built from a live fetch of https://servicereference.us-east-1.amazonaws.com/, and a transient network or permission failure left READ_OPERATIONS_INDEX unset. Both the READ_OPERATIONS_ONLY denial and the REQUIRE_MUTATION_CONSENT elicitation prompt were then bypassed, so indirect prompt injection could drive `call_aws` into mutating AWS CLI operations with no consent record. The fix (1.3.47) refuses to start and denies at execution time instead. This is the third shape of human-approval bypass: nobody disabled the gate and nobody tricked the user — the gate died on its own and stayed quiet. Detection covers (a) the verbatim pre-fix degraded-start log line, (b) that line correlated with the server still executing AWS CLI commands, (c) the generic fail-open log shape for any policy/guardrail/consent loader that continues after an init failure, (d) explicit fail-open configuration knobs on a policy/guardrail/consent component, (e) an MCP exchange carrying a mutating call_aws command alongside an unenforced-policy marker, and (f) injected instructions that deliberately induce or exploit the degraded state.
+
+  Adapted from Agent Threat Rules ATR-2026-02402 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02402
+- https://advisories.gitlab.com/pypi/awslabs.aws-api-mcp-server/CVE-2026-16584/
+- https://github.com/awslabs/mcp/security/advisories/GHSA-29w2-fq35-v728
+- https://github.com/awslabs/mcp/commit/ab1bbebc097d674c1cdd4bd75a8f313be18473bf
+- https://nvd.nist.gov/vuln/detail/CVE-2026-16584
+tags:
+- attack.privilege-escalation
+- attack.t1078.004
+- attack.t1562.001
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi04
+- owasp.llm06
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)failed to load read[ _\-]?operations[ _\-]?index\s*:\s*(?:error retrieving the service
+      reference document|[\w.]{0,64}(?:error|exception|timeout|timed out|refused|unreachable|failure|failed|denied|resolve|connection|ssl|certificate|permission|no
+      such file)\b)
+  sel_1:
+    content|re: (?i)failed to load read[ _\-]?operations[ _\-]?index\s*:[\s\S]{0,800}attempting to execute
+      aws cli command
+  sel_2:
+    content|re: (?i)(?:fail(?:ed|ure|ing)?|error|unable|could not|cannot|exception)[^\n]{0,64}(?:load(?:ing)?|initiali[sz]|fetch(?:ing)?|refresh(?:ing)?|pars(?:e|ing)|retriev(?:e|ing))[^\n]{0,64}(?:securit(?:y|ies)[
+      _\-]?polic|polic(?:y|ies)[ _\-]?(?:engine|index|bundle|store|data|document|file)|guardrail|read[
+      _\-]?only[ _\-]?operations|allow[ _\-]?list|deny[ _\-]?list|permission[ _\-]?(?:index|map|table)|consent[
+      _\-]?(?:list|polic)|tool[ _\-]?permission)[\s\S]{0,300}(?:without[ _\-]?(?:enforcement|validation|authoriz(?:ation)?|consent|approval|polic(?:y|ies)[
+      _\-]?check)|fail(?:ing|ed)?[ _\-]?open|not[ _\-]?(?:be[ _\-]?)?enforc(?:ed|ing)|no[ _\-]?longer[
+      _\-]?enforc(?:ed|ing)|un[ _\-]?enforced|enforcement[ _\-]?(?:is[ _\-]?)?(?:disabled|off|skipped|bypassed|suspended|unavailable|degraded)|allow(?:ing)?[
+      _\-]?all|degraded[ _\-]?mode|(?:continu(?:e|es|ing)|proceed(?:s|ing)?|start(?:s|ing|ed)?|serv(?:e|es|ing)|run(?:s|ning)?)[^\n]{0,40}(?:without[
+      _\-]?(?:enforcement|validation|authoriz|consent|approval|check)|anyway|regardless|unenforced|in[
+      _\-]?degraded)|(?:skipp?(?:ed|ing)|bypass(?:ed|ing)?|disabl(?:ed|ing)|ignor(?:e|ed|ing)|omitt?(?:ed|ing))[
+      _\-]?(?:all[ _\-]?|the[ _\-]?|any[ _\-]?|per[ _\-]?request[ _\-]?|further[ _\-]?|remaining[ _\-]?)?(?:polic(?:y|ies)|guardrail|consent|approval|authoriz|permission|enforcement|security[
+      _\-]?check|access[ _\-]?control|check)|(?:polic(?:y|ies)|guardrail|consent|approval|authoriz|permission|enforcement|security[
+      _\-]?check|access[ _\-]?control|check)[ _\-]?(?:check|prompt|gate|evaluation)?s?[ _\-]?(?:are[ _\-]?|is[
+      _\-]?|will[ _\-]?be[ _\-]?|were[ _\-]?)?(?:skipp?(?:ed|ing)|bypassed|disabled|not[ _\-]applied|not[
+      _\-]enforced))
+  sel_3:
+    content|re: (?i)(?:securit(?:y|ies)|guardrail|consent|approval|authoriz(?:ation|er)|authoris(?:ation|er)|enforcement|read[
+      _\-]?only|allow[ _\-]?list|deny[ _\-]?list|moderation|polic(?:y|ies)[ _\-]?(?:engine|enforcement|check|decision|gate|eval))[^\n]{0,64}["']?(?:fail[
+      _\-]?open|failure[ _\-]?mode|failure[ _\-]?polic(?:y|ies)|failure[ _\-]?action|on[ _\-]?(?:error|failure)|error[
+      _\-]?behaviou?r)["']?\s*[:=]\s*["']?(?:true|open|allow|permit|bypass|continue|ignore|skip|off)\b|["']?(?:fail[
+      _\-]?open|failure[ _\-]?mode|failure[ _\-]?polic(?:y|ies)|on[ _\-]?(?:polic(?:y|ies)|guardrail|consent)[
+      _\-]?(?:error|failure))["']?\s*[:=]\s*["']?(?:true|open|allow|permit|bypass|continue|ignore|skip)["']?[^\n]{0,64}(?:securit|guardrail|consent|approval|authoriz|enforcement|polic(?:y|ies)[
+      _\-]?(?:engine|enforcement|check|decision|gate))
+  sel_4:
+    response|re: (?i)(?:polic(?:y|ies)|read[ _\-]?only|consent|guardrail|enforcement)[^\n]{0,48}(?:check|enforcement|prompt|gate|mode)?[^\n]{0,32}(?:skipp?(?:ed|ing)|bypassed|disabled|unavailable|not[
+      _\-]applied|not[ _\-]enforced|never[ _\-]applied)[\s\S]{0,600}["'](?:cli_command|command)["']\s*:\s*["']aws\s+[a-z0-9\-]{2,24}\s+(?:create|delete|put|update|attach|detach|modify|terminate|remove|revoke|authorize|associate|disassociate|enable|disable|replace|restore|publish|import|upload|assume|run|start|stop|reboot|register|deregister|tag|untag|send|invoke|apply|write|copy|rm|mv|cp|sync)[a-z0-9\-]{0,32}|["'](?:cli_command|command)["']\s*:\s*["']aws\s+[a-z0-9\-]{2,24}\s+(?:create|delete|put|update|attach|detach|modify|terminate|revoke|authorize|assume|rm|publish|invoke)[a-z0-9\-]{0,32}[\s\S]{0,600}(?:polic(?:y|ies)|read[
+      _\-]?only|consent|guardrail)[^\n]{0,48}(?:skipp?(?:ed|ing)|bypassed|disabled|not[ _\-]enforced)
+  sel_5:
+    content|re: (?i)(?:block|blackhole|drop|deny|firewall|null[ _\-]?route|disconnect|cut[ _\-]?off|disable|sever)[^\n]{0,96}(?:servicereference[\w.\-]*\.amazonaws\.com|service[
+      _\-]?reference[ _\-]?(?:document|endpoint|url)|read[ _\-]?only[ _\-]?operations?[ _\-]?(?:index|list))|(?:if|when|once|should)[^\n]{0,64}(?:polic(?:y|ies)|consent|approval|guardrail|read[
+      _\-]?only[ _\-]?(?:index|list|operations))[^\n]{0,64}(?:fail|error|unavailable|did not load|does
+      not load|not load(?:ed)?|is missing|cannot be loaded|skip)[^\n]{0,96}(?:(?:proceed|continue|execute|run|invoke)[^\n]{0,24}(?:anyway|regardless|nonetheless|without
+      (?:consent|approval|asking|prompting|confirmation))|do it anyway|ignore (?:it|this|that|the (?:warning|error|failure)))
+  condition: 1 of sel_*
+falsepositives:
+- Security advisories, changelogs, incident write-ups or postmortems that quote the pre-fix log line verbatim
+  including a trailing exception name. Layer 1 cannot tell a quoted log from an emitted one; scan_target
+  is runtime specifically so static skill/doc scans do not load this rule.
+- Chaos-engineering or fault-injection suites that deliberately break the policy loader to prove the fail-closed
+  path works. These produce genuine loader-failure lines by design.
+- Log aggregation pipelines that replay historical logs from a deployment that was already patched and
+  restarted; the old degraded-start line is real but no longer actionable.
+- Non-security components that legitimately fail open by design and happen to sit within the layer 4 proximity
+  window, for example an authorization-decision CACHE whose miss behaviour is 'continue to the origin
+  policy engine' rather than 'allow the request'.
+- Vendor SDKs whose log wording places a policy noun after the load verb in a fail-CLOSED message that
+  also contains an unrelated 'skipping' or 'ignoring' token within the layer 3 window.
+action: report

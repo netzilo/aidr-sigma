@@ -1,0 +1,39 @@
+title: Alternate Encoding Jailbreak — Morse, NATO, Zalgo, Leet, UU, QP, Braille
+id: 773206e3-6cd6-4da7-a937-1a18989c6204
+status: experimental
+level: high
+description: |-
+  Detects jailbreak encoding schemes not covered by ATR-2026-00256 (Base64/Hex/Base32) or ATR-2026-00257 (ROT13/Atbash/Caesar). From NVIDIA garak encoding.py: InjectMorse, InjectNato, InjectZalgo, InjectLeet, InjectUU, InjectQP, InjectBraille, InjectEcoji, InjectAscii85, InjectBase2048 probes. Attack pattern: encode harmful payload in an obfuscation scheme and instruct the model to decode-then-execute. Key patterns: (1) Morse code: "... -.-- -. - ..." (dots and dashes) with decode instruction; (2) NATO phonetic: "Sierra Yankee November..." with decode instruction; (3) Zalgo text: Unicode combining diacritics overloaded onto base characters; (4) Leet speak: "h0w 2 m4k3 b0mbz" with decode framing; (5) UU-encoding: "begin 644..." format with decode/execute instruction; (6) Braille Unicode: U+2800-U+28FF range dense in payload; (7) Ascii85: "9jqo^..." encoded payload; (8) Base2048: Unicode codepoints in U+0600-U+08FF Semitic range.
+
+  Adapted from Agent Threat Rules ATR-2026-00285 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00285
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/encoding.py
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:decode|translate|interpret|execute|follow)\s+(?:the\s+)?(?:following\s+)?(?:Morse|morse\s+code)\s*(?:message|payload|instructions?|text)?\s*[:\-–]?\s*(?:[.\-]+\s+){5,}
+  sel_1:
+    response|re: (?:decode|translate|interpret|convert|follow)\s+(?:the\s+)?(?:following\s+)?(?:NATO\s+phonetic(?:\s+alphabet)?|phonetic\s+alphabet|NATO\s+alphabet)\s*(?:message|payload|instructions?|text)?\s*[:\-–]?\s*(?:(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x.?ray|yankee|zulu)\s+){4,}
+  sel_2:
+    response|re: (?:begin\s+\d{3}\s+\S+\n[M-`][^\n]{59,62}\n(?:[M-`][^\n]{0,62}\n){2,}end)|(?:(?:decode|execute|run|interpret)\s+(?:this\s+)?(?:UU|uuencoded?|uu-encoded?)\s+(?:string|payload|data|content|file))
+  sel_3:
+    response|re: (?:(?:decode|interpret|execute)\s+(?:this\s+)?(?:quoted[\s-]printable|QP[\s-]encoded?)\s+(?:string|payload|content|data))|(?:=(?:[0-9A-F]{2})){8,}
+  sel_4:
+    response|re: (?:1[e3][e3][t3]|l3[e3][t3]|l33t)\s+(?:speak|sp34k|c0d[e3])|(?:(?:decode|translate|interpret|follow)\s+(?:this\s+)?leet\s+(?:speak|code|text|message|instruction))
+  condition: 1 of sel_*
+falsepositives:
+- Morse code learning apps or ham radio documentation with legitimate decode examples
+- NATO alphabet pronunciation guides for aviation/military communication training
+- Email system logs containing QP-encoded non-ASCII headers
+- UU-encoding documentation or legacy email system content
+action: report

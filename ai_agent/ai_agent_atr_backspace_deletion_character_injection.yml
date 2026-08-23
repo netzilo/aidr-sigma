@@ -1,0 +1,41 @@
+title: Backspace Deletion Character Injection
+id: 8c911354-6fbd-4f94-9fd1-7d1a44b8c5a2
+status: experimental
+level: high
+description: |-
+  Detects injection of ASCII backspace characters (U+0008 / \x08) to create text that appears safe to human reviewers but delivers hidden instructions to the model, from NVIDIA garak badchars probe (arxiv 2309.00614). Distinct from ATR-2026-00276 (Unicode zero-width / BiDi override characters) — this covers the ASCII control character BS (0x08) which in terminal emulators moves the cursor back one position, visually erasing the preceding character. Attack patterns: (1) Deletion cluster — a visible word followed by a burst of backspaces appears blank to humans but the model reads the full string; (2) Character-swap — "safex\x08y" displays as "safey" while the model processes "safex\x08y"; (3) Jailbreak approach — sensitive instructions placed before many \x08 chars so reviewers see only whitespace. Key signals: \x08 occurring in user input (essentially never legitimate in API/MCP text), dense backspace clusters, and backspace immediately before jailbreak keywords.
+
+  Adapted from Agent Threat Rules ATR-2026-00394 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00394
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/badchars.py
+- https://arxiv.org/abs/2309.00614
+- https://trojansource.codes/
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \x08{2,}
+  sel_1:
+    response|re: \x08{2,}
+  sel_2:
+    content|re: '[A-Za-z]{2,}\x08[A-Za-z]'
+  sel_3:
+    content|re: \x08+\s*(?:ignore|forget|disregard|pretend|act\s+as|you\s+are|bypass|override|jailbreak|do\s+not\s+follow|instead)\b
+  condition: 1 of sel_*
+falsepositives:
+- Terminal emulator raw output captured with backspace keystrokes in interactive sessions (should not
+  appear in API/MCP payloads)
+- Legacy MIME-encoded data streams containing 0x08 for BEL-adjacent protocols (extremely rare in modern
+  MCP contexts)
+- Binary file content accidentally passed as text field (should be base64-encoded in well-formed MCP messages)
+action: report

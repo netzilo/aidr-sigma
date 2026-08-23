@@ -1,0 +1,44 @@
+title: Flowise System Message Override via Template Interpolation (CVE-2025-59528)
+id: 98d06668-2d78-4e99-93f2-a4fc64698f13
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of the Flowise chatflow System Message template injection vulnerability (CVE-2025-59528). Flowise renders {{$flow.variables.X}} and {{$input}} in the System Message field without sanitization, allowing an attacker-controlled chat input to overwrite the system prompt and pivot the chatflow's tool-calling posture. Public PoCs achieved RCE via the vm.runInNewContext / new Function sink reached from a polluted System Message. 21 GHSAs published 2026-04-15 cover the affected chatflow surfaces (Airtable Agent, CSV Agent, Parameter Override, etc.). Disclosed 2026-04-14.
+
+  Adapted from Agent Threat Rules ATR-2026-00210 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-22'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00210
+- https://nvd.nist.gov/vuln/detail/CVE-2025-59528
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \{\{\$flow\.variables\.[a-zA-Z_][a-zA-Z0-9_]*\}\}
+  sel_1:
+    content|re: (?i)\{\{\$input\}\}.*(?:system\s+message|assistant\s+role|tool\s+definition|function\s+spec)
+  sel_2:
+    content|re: (?i)(?:system|assistant|tool)\s*[:=]\s*\{\{\$(?:input|flow\.variables)
+  sel_3:
+    content|re: (?i)(?:vm\.runInNewContext|new\s+Function|eval)\s*\([^)]{0,200}\{\{\$(?:input|flow\.variables)
+  sel_4:
+    content|re: (?i)flowise[^\n]{0,80}(?:chatflow|system\s+message)[^\n]{0,120}(?:injection|override|bypass|rce)
+  condition: 1 of sel_*
+falsepositives:
+- Flowise documentation or tutorials demonstrating {{$flow.variables}} syntax in educational context.
+- Security research tooling that scans for Flowise CVE payloads as reference samples.
+- Legitimate Flowise chatflow config files that use {{$flow.variables}} in non-System-Message fields with
+  proper sanitization applied upstream.
+action: report

@@ -1,0 +1,43 @@
+title: Unsandboxed Command Execution via Dynamic MCP Server Config (command/args Injection)
+id: cc4291ba-ee9c-4c57-ac17-0fe57472aebe
+status: experimental
+level: critical
+description: |-
+  Detects a dynamic/custom MCP server configuration object (a JSON body with "command" and "args" fields, the shape used by Flowise's Custom MCP and similar "bring your own MCP server" features) that either (a) sets "command" directly to a raw shell/network binary (nc, ncat, bash, sh, python, perl) with args forming a reverse shell or arbitrary "-c" execution, or (b) uses one of three documented allowlist/blocklist-bypass idioms for otherwise-permitted binaries: "docker build <remote-url>" (fetches and runs an attacker Dockerfile, bypassing a blocklist that only covers "run"/"exec"), "npx --yes <package>" (the long-flag alias for "-y" that a short-flag-only blocklist misses), or "node //<path>" (a double-slash path that a regex anchored on a single leading "/" fails to block, loading and executing an arbitrary stored file). Mined from GHSA-6933-jpx5-q87q (CVE-2025-71336, Flowise's Custom MCP endpoint executes "command"/"args" unsandboxed and by default unauthenticated) and GHSA-m99r-2hxc-cp3q (CVE-2026-56274, three distinct validateCommandFlags/validateArgsForLocalFileAccess bypasses for the same feature). Generalized beyond Flowise since any tool that accepts a structured command+args MCP-server config is exploitable the same way regardless of the surrounding product.
+
+  Adapted from Agent Threat Rules ATR-2026-02141 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02141
+- https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-6933-jpx5-q87q
+- https://github.com/FlowiseAI/Flowise/security/advisories/GHSA-m99r-2hxc-cp3q
+- https://nvd.nist.gov/vuln/detail/CVE-2025-71336
+- https://nvd.nist.gov/vuln/detail/CVE-2026-56274
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"command"\s*:\s*"(?:nc|ncat)"[\s\S]{0,30}"args"\s*:\s*\[[^\]]{0,80}-e\b
+  sel_1:
+    content|re: (?i)"command"\s*:\s*"docker"[\s\S]{0,20}"args"\s*:\s*\[\s*"build"[^\]]{0,60}https?://
+  sel_2:
+    content|re: (?i)"command"\s*:\s*"npx"[\s\S]{0,20}"args"\s*:\s*\[\s*"--yes"
+  sel_3:
+    content|re: (?i)"command"\s*:\s*"node"[\s\S]{0,20}"args"\s*:\s*\[\s*"\/\/[^"]+
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate MCP server configs using bash/sh/python with -c for a benign one-liner with no network-fetch/reverse-shell/credential-read/exec-obfuscation
+  signal (e.g. "bash -c 'npm install && npm start'") — v2 requires the -c payload itself to contain a
+  dangerous-vocabulary match, not just the bare interpreter+-c shape
+- docker build with a local Dockerfile path or build context (no https:// URL argument)
+- npx -y (short flag) for routine package execution — this rule only fires on the --yes long-flag alias
+- node invoked with a normal single-leading-slash absolute path or relative script name
+action: report

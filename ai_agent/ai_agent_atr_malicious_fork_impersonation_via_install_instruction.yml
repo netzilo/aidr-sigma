@@ -1,0 +1,29 @@
+title: Malicious Fork Impersonation via Install Instruction
+id: 96e8ddb9-e13e-49ba-b46f-cd69578080c5
+status: experimental
+level: high
+description: |-
+  Detects skills or tool responses that instruct users to install packages described as "community fork", "enhanced version", or "patched version" of known tools. Real attack pattern: attacker publishes a typosquatted package and describes it as a fork to gain trust. Crystallized from 29 fork_claim adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00151 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00151
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(npm\s+i(nstall)?|pip\s+install|cargo\s+add|go\s+get)\s+\S+.{0,40}(community\s+fork|enhanced\s+(version|fork)|patched\s+(version|fork)|improved\s+fork|unofficial\s+fork)
+  sel_1:
+    content|re: (?i)(community\s+fork|enhanced\s+version|patched\s+version)\s+of\s+(the\s+)?(official|original|standard)\s+\S+
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate forks with established reputation (e.g., ioredis)
+action: report

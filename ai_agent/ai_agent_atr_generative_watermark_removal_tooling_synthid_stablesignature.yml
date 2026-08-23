@@ -1,0 +1,58 @@
+title: Generative Watermark Removal Tooling (SynthID / StableSignature / TreeRing / StegaStamp)
+id: 11380ca9-e2a9-49a9-a15b-78297a8cb6ba
+status: experimental
+level: medium
+description: |-
+  Detects an agent installing or invoking tooling whose stated purpose is the removal of imperceptible generative watermarks: purpose-built removal CLIs and packages, published attack implementations, and scheme-targeted attack invocations that name a watermarking system as their parameter. Kept deliberately separate from ATR-2026-02411 because the two attack the same obligation through incompatible physics. A C2PA manifest lives in a metadata container and one exiftool invocation removes it. SynthID and StableSignature are woven into the pixel values themselves, where metadata stripping has no effect at all and removal requires regeneration, adversarial perturbation or a dedicated attack implementation. The artifacts differ, the false-positive structure differs, and merging them would force the near-zero-FP package-name layers here to inherit the broader intent layers there. Honest limitation: the published-attack layer cannot distinguish an attacker from a watermark robustness researcher, a standards evaluator, or this project's own red team, because they run identical code. That is why this rule alerts and never blocks, and why it is scoped to the hunt lane.
+
+  Adapted from Agent Threat Rules ATR-2026-02412 (MIT).
+author: ATR Community (adapted)
+date: '2026-08-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02412
+- https://deepmind.google/technologies/synthid/
+- https://github.com/adobe/trustmark
+- https://arxiv.org/abs/2503.18156
+tags:
+- attack.impact
+- attack.t1027
+- atlas.aml.t0054
+- owasp.asi08
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:remove-ai-watermarks|noai-watermark|gemini-watermark-and-synthid-remover|synthid-bypass)\b
+  sel_1:
+    content|re: (?i)\b(?:DiffWMAttacker|VAEWMAttacker|WatermarkAttacker|UnMarker|watermark-stealing)\b
+  sel_2:
+    content|re: (?i)\battack\.py\b[\s\S]{0,80}-e\s+(?:SynthID|StableSignature|TreeRing|StegaStamp|HiDDeN)\b
+  sel_3:
+    content|re: (?i)--synthid-(?:attack|strength)\b
+  sel_4:
+    content|re: (?i)\b(?:remove|removes|removing|removal|strip|strips|stripping|stripped|erase|erases|erasing|scrub|scrubs|scrubbing|get
+      rid of|clean off|take off)\b[\s\S]{0,60}\b(?:synthid|stable ?signature|tree ?ring|stegastamp|trustmark|audioseal|invisible
+      watermark|imperceptible watermark)\b
+  condition: 1 of sel_*
+falsepositives:
+- Watermark robustness researchers, standards evaluators and this project's own red team run the published
+  attack implementations by design. Layer 2 cannot separate them from an attacker — the code is the same.
+  This is the primary reason the rule alerts rather than blocks.
+- Adobe TrustMark's `remove_watermark()` is a legitimate API for a content owner clearing an old payload
+  before re-marking their own asset. No layer matches that function call; layer 4 matches natural-language
+  intent only.
+- Image restoration and super-resolution (Real-ESRGAN, GFPGAN, img2img denoising) destroy pixel watermarks
+  as a physical side effect with no evasive intent. Not covered.
+- Generic ComfyUI nodes (KSampler, LoadImage, SaveImage, denoise) are everyday workflow components. Only
+  removal-specific custom node names match.
+- Standard audio pipelines (`ffmpeg -ar 16000`, lowpass filtering, MP3 transcode) are known to weaken
+  AudioSeal, but none of those flags are matched.
+- '`add_watermarker=False` in diffusers and `"addWatermark": false` in Vertex AI are deliberately NOT
+  matched: the first is required when the watermark package is absent, and Google''s own documentation
+  states the second is required for deterministic seeded output.'
+- 'Educational, defensive and academic text that enumerates attack names will match layer 2. Layer 4 was
+  narrowed specifically to reduce this: research verbs (break, defeat, evade) were removed after they
+  matched defensive sentences, leaving only operational verbs (remove, strip, erase, scrub).'
+action: report

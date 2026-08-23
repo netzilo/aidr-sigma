@@ -1,0 +1,40 @@
+title: BOLA Cross-User Data Access Attempt (Semantic)
+id: 4c44ce3c-11f3-4d33-ba6f-eebaff5abdf3
+status: experimental
+level: high
+description: |-
+  Detects Broken Object Level Authorization (BOLA / IDOR) attempts where
+  an agent is asked to access data belonging to another user—typically by
+  requesting the record with the "highest balance", "most transactions",
+  a specific account number that does not belong to the requester, or
+  by implying knowledge of another user's object ID. Unlike RBAC bypass
+  (which targets role filters), BOLA targets object-level references.
+  Semantic detection is needed because the attack may be phrased as an
+  innocuous-looking query ("get account with balance > 0") without
+  explicit cross-user framing.
+
+  Adapted from Agent Threat Rules ATR-2026-01614 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01614
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:retrieve|get|show|fetch|find)\s+(?:(?:me|us)\s+)?(?:the\s+)?(?:account|user|record|transaction|order)\s+(?:with\s+(?:the\s+)?)?(?:highest|largest|most|maximum|max)\b
+  sel_1:
+    content|re: (?i)(?:transactions?|amounts?)\s*(?:>|greater\s+than|above)\s*0\s+OR\s+account
+  sel_2:
+    content|re: (?i)\b(?:account|user|record|customer)\s*(?:id|number|no\.?|#)?\s*[:#]?\s*\d{1,10}\b[\s\S]{0,60}\b(?:even\s+though|although|but)\s+(?:i'?m|i\s+am|my|mine)\b
+  condition: 1 of sel_*
+falsepositives:
+- Authorized analytics agents querying aggregate data across all users
+- Admin users with explicit cross-account read permissions
+action: report

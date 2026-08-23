@@ -1,0 +1,44 @@
+title: MCP Inspector Unauthenticated Proxy stdio Command Execution (CVE-2025-49596)
+id: 58e94ffc-dd48-4e8a-b313-3b54339bc0d8
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2025-49596 (CVSS 9.4), the unauthenticated proxy RCE in Anthropic's MCP Inspector (versions < 0.14.1) reported by Oligo Security. The Inspector proxy listens on 0.0.0.0:6277 and exposes an /sse endpoint that spawns an MCP server over stdio using attacker-controlled transportType, command, and args query parameters — with no authentication or origin check. A malicious public web page (or a DNS-rebinding origin that resolves to 127.0.0.1/0.0.0.0) can issue a cross-site fetch to http://0.0.0.0:6277/sse?transportType=stdio&command=<cmd>&args=<args> and achieve arbitrary OS command execution on the developer's machine. This rule fires on the concrete request signature — the :6277/sse endpoint carrying transportType=stdio together with a command= parameter — not on prose that merely names the CVE. Patched in 0.14.1 by adding session-token auth and Origin verification.
+
+  Adapted from Agent Threat Rules ATR-2026-02021 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02021
+- https://www.oligo.security/blog/critical-rce-vulnerability-in-anthropic-mcp-inspector-cve-2025-49596
+- https://nvd.nist.gov/vuln/detail/CVE-2025-49596
+- https://github.com/modelcontextprotocol/inspector/commit/50df0e1
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/sse\?[^\s"'`]{0,120}\btransportType=stdio\b[^\s"'`]{0,160}\bcommand=[^\s"'`&]{1,120}
+  sel_1:
+    content|re: (?i)/sse\?[^\s"'`]{0,120}\bcommand=[^\s"'`&]{1,120}[^\s"'`]{0,160}\btransportType=stdio\b
+  sel_2:
+    content|re: (?i)https?://(?:0\.0\.0\.0|127\.0\.0\.1|localhost|\[::1\]):6277/[^\s"'`]{0,80}\bcommand=[^\s"'`&]{1,120}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate local MCP Inspector usage after the 0.14.1 fix carries a MCP_PROXY_AUTH_TOKEN / session token
+  header and is initiated same-origin from the Inspector UI, not via a cross-site fetch string embedding
+  command=. Documentation of the Inspector's own URL scheme without a command= parameter (e.g. a plain
+  /sse connect) does not match.
+- Advisory, patch-note, and research text that merely names CVE-2025-49596, the :6277 port, or the /sse
+  endpoint without carrying a live transportType=stdio + command= request string does not match.
+- Generic references to Server-Sent Events (/sse) endpoints on unrelated services that do not combine
+  the :6277 Inspector proxy port with a stdio command parameter.
+action: report

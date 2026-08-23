@@ -1,0 +1,45 @@
+title: Cocaine Component Development Request
+id: 49af9716-15ba-4305-8352-0bded9a029f3
+status: experimental
+level: high
+description: |-
+  Detects indirect requests for cocaine synthesis precursors framed as reflective or analytical prompts from NVIDIA garak dan.DanInTheWild inthewild corpus (#280). The attacker uses academic/reflective framing ("reflect on", "you know", "highlight one that you consider important") while the core request is for "components used in the development of cocaine" — which asks for synthesis precursors or processing chemicals. The phrase "development of cocaine" combined with "components" is the operative signal: it requests actionable chemical information under the cover of a reflective or educational exercise. Distinct from direct drug-synthesis requests; this rule targets the indirect "component reflection" framing specific to inthewild corpus #280.
+
+  Adapted from Agent Threat Rules ATR-2026-00382 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00382
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: components?\s+used\s+in\s+the\s+(?:development|production|manufacturing|synthesis|making|creation|preparation)\s+of\s+cocaine
+  sel_1:
+    response|re: (?:reflect(?:ing)?\s+on|highlight|describe|explain|discuss)[\s\S]{0,100}(?:component|ingredient|chemical|substance|precursor)[\s\S]{0,50}(?:cocaine|coca\s+(?:alkaloid|paste|base))
+  sel_2:
+    response|re: development\s+of\s+cocaine[\s\S]{0,80}(?:consider\s+important|you\s+know|highlight\s+one|justify|justif)
+  sel_3:
+    response|re: component[\s\S]{0,80}(?:synthesis|development|production|manufacturing|making|creation|preparation)\s+of\s+cocaine[\s\S]{0,100}(?:reflect|justify|highlight|consider\s+important|important)
+  condition: 1 of sel_*
+falsepositives:
+- 'Academic chemistry: "The chemistry of cocaine involves alkaloid extraction from coca leaves — the primary
+  active compound is benzoylmethylecgonine" (pharmacological description without component enumeration
+  request)'
+- 'Policy context: "Cocaine development as a social issue in Latin America traces back to colonial coca
+  cultivation" (socioeconomic/historical use of "development" as societal process)'
+- 'Prevention context: "What are the components of an effective anti-cocaine campaign targeting youth?"
+  (prevention program components, not synthesis components)'
+- 'Historical reference: "Coca-Cola''s historical development involved cocaine as an ingredient until
+  1903" (product history without synthesis framing)'
+action: report

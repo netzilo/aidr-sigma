@@ -1,0 +1,42 @@
+title: Dangerous Process-Hijacking Environment Variable Injected via Config/Env-Update Tool
+id: ce37ea44-17e9-4c9f-91a7-fdc09ad9dcc4
+status: experimental
+level: critical
+description: |-
+  Detects an agent config/environment-update tool call that sets a well-known process-hijacking environment variable (NODE_OPTIONS, LD_PRELOAD, DYLD_INSERT_LIBRARIES, PYTHONSTARTUP, BASH_ENV, PERL5OPT, RUBYOPT, GCONV_PATH) to a path- or flag-shaped value. These variables let an attacker who can only write configuration (not source code) achieve code execution the next time the target process starts, by pointing the runtime at an attacker-controlled module/library/script. Mined from GHSA (huntr bounty) for mintplex-labs/anything-llm CVE-2024-3104: the `POST /api/system/update-env` endpoint accepted arbitrary environment variable names and values with no allowlist, "allowing for the execution of arbitrary code on the host running anything-llm." The disclosed advisory does not name the specific variable used, so this rule generalizes over the standard, well-documented set of dangerous runtime-hijacking variables for Node.js, Python, Bash, Perl, Ruby, and dynamic linkers -- the same technique class regardless of which config endpoint accepts it. Setting an ordinary application environment variable (PORT, DATABASE_URL, LOG_LEVEL, etc.) does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-02195 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02195
+- https://huntr.com/bounties/4f2fcb45-5828-4bec-985a-9d3a0ee00462
+- https://github.com/mintplex-labs/anything-llm/commit/bfedfebfab032e6f4d5a369c8a2f947c5d0c5286
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3104
+tags:
+- attack.privilege-escalation
+- attack.t1574.006
+- atlas.aml.t0053
+- owasp.asi04
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\bupdate[-_ ]?env(?:ironment)?\b|\bsetenv\b|\bset\s+(?:the\s+)?environment\s+variable\b|\bPOST\s+/api/[\w/-]{0,24}env\b)[\s\S]{0,40}\bNODE_OPTIONS\b[\s\S]{0,10}[:=][\s\S]{0,60}(?:--require\b|-r\s|--loader\b|--experimental-loader\b|--experimental-require-module\b|\.m?js\b)
+  sel_1:
+    content|re: (?i)(?:\bupdate[-_ ]?env(?:ironment)?\b|\bsetenv\b|\bset\s+(?:the\s+)?environment\s+variable\b|\bPOST\s+/api/[\w/-]{0,24}env\b)[\s\S]{0,40}\b(?:LD_PRELOAD|DYLD_INSERT_LIBRARIES|PYTHONSTARTUP|BASH_ENV|PERL5OPT|RUBYOPT|GCONV_PATH)\b
+  condition: 1 of sel_*
+falsepositives:
+- A DevOps runbook or documentation discussing these variable names in prose without an accompanying config/env-update
+  tool-call context
+- A legitimate, security-reviewed deployment script that intentionally sets LD_PRELOAD/NODE_OPTIONS for
+  approved instrumentation (e.g. an APM agent) via a config/update-env style call -- rare but possible;
+  still worth a human check given the severity of process-hijacking if the value turns out to be attacker-controlled
+- Shell-syntax examples in security-education content (e.g. 'sudo LD_PRELOAD=/tmp/shell.so find') that
+  show the variable being set directly in a shell, without any update-env/setenv/config-API framing
+- Routine NODE_OPTIONS flags that are not a require/loader mechanism -- 'NODE_OPTIONS=--max-old-space-size=4096',
+  'NODE_OPTIONS=--inspect=9229', 'NODE_OPTIONS=--no-warnings', '--stack-size=...' -- these tune memory/debugging/warnings
+  and carry no code-loading capability, so they must not fire
+action: report

@@ -1,0 +1,37 @@
+title: Silent Action Concealment Instructions in Tool Descriptions
+id: c34e2f23-4330-4835-bbdb-f8f2bc5f0c76
+status: experimental
+level: high
+description: |-
+  Detects MCP tools that explicitly instruct the LLM to perform actions silently or hide
+  implementation details from users. Patterns include "do not mention this to the user"
+  and "don't tell the user about", which indicate the tool is performing hidden operations
+  (e.g., credential harvesting, webhook subscriptions, data uploads) while instructing the
+  LLM to conceal these actions from the user.
+
+  Adapted from Agent Threat Rules ATR-2026-00105 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00105
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi04
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:do\s+not|don't)\s+(?:mention|tell|inform|notify)\s+(?:this\s+to\s+)?(?:the\s+)?user\s+(?:as\s+it\s+is|about|that)
+  condition: sel_0
+falsepositives:
+- Tools with internal implementation notes that are not security-relevant
+- Internal developer documentation tools that contain notes like 'do not mention this to the user as it
+  is not yet released' referring to beta features rather than hidden malicious actions
+- Privacy-focused tools that describe data minimization practices using similar phrasing in their changelogs
+  or version notes
+action: report

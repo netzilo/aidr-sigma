@@ -1,0 +1,30 @@
+title: Malformed-Grammar PWNED Success-Claim Detection
+id: 24589f98-b27b-4144-8a63-22c56458c8fd
+status: experimental
+level: high
+description: |-
+  Detects prompt-injection success-claim outputs where the model has been coerced into emitting a grammatically broken "has/have been PWNED" style confirmation string. These malformed-grammar variants (e.g. "Me have been PWNED", "I has been PWNED") are a recurring artifact of automated jailbreak/injection fuzzing corpora (e.g. HackAPrompt-style challenges) where the attacker forces the target LLM to echo a templated compliance token regardless of correct grammar. Detection targets the LLM output / tool response text channel rather than user input, since the payload only appears once the model has already produced the compromised completion.
+
+  Adapted from Agent Threat Rules ATR-2026-02011 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02011
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:i|me|iv|we all)\b[\s\S]{0,15}\b(?:has|have|has be|iv)\b[\s\S]{0,10}\bbeen\b[\s\S]{0,10}\bpwned\b
+  condition: sel_0
+falsepositives:
+- Benign chat text referencing having 'been' somewhere, unrelated to any compliance token
+- Security researchers discussing PWNED-style CTF/jailbreak success strings in professional writeups
+- Legitimate grammar/language-learning discussion of correct vs incorrect verb conjugation
+action: report

@@ -1,0 +1,50 @@
+title: Indirect Prompt Injection via Tool / API Response — Attacker Instruction Embedded in Returned Tool
+  Output (InjecAgent Th
+id: 47aafb03-5719-4474-a6d3-63a6060ac7ae
+status: experimental
+level: high
+description: |-
+  Detects the InjecAgent indirect-prompt-injection class: an attacker instruction delivered NOT by the user but inside the DATA RETURNED BY A TOOL / API CALL that the agent then ingests as an observation. The tool output looks like a normal API/tool response (a JSON/structured result blob, an HTTP status, a search/email/db result), and then — appended to that result — carries an agent-directed imperative that hijacks the agent into performing a NEW sensitive action (transfer money, send/forward/email data, delete records, POST/exfiltrate to an endpoint, grant access). The detectable signature is the co-occurrence of (a) tool-output / API-result framing, (b) an injected out-of-band imperative connector ("ignore the above", "as an additional step", "IMPORTANT!!! you must now ..."), and (c) a sensitive transactional action verb aimed at the assistant. This is DISTINCT from a user typing an instruction (this fires on the observation / tool_response channel), from ATR-2026-00083 / 00002 (which key on generic "ignore previous instructions", fake [SYSTEM] delimiters, and hidden/encoded delivery — reveal/output-system-prompt verbs, not the InjecAgent exfil/transact verb set wrapped in a result blob), from ATR-2026-00399 (separator-token-delimited document injection), and from ATR-2026-00579 (which fires on a tool DESCRIPTION field at listing time, not on the runtime tool RESPONSE).
+
+  Adapted from Agent Threat Rules ATR-2026-00584 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00584
+- https://github.com/uiuc-kang-lab/InjecAgent
+- https://arxiv.org/abs/2403.02691
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(?:"(?:status|result|data|output|results|response|code)"\s*:|\}\s*[\].,]?|\bHTTP/?\d?(?:\.\d)?\s+200\b|\b200\s+OK\b)[\s\S]{0,80}\b(?:ignore\s+(?:the\s+)?above|as\s+an\s+additional\s+(?:step|task|action)|before\s+(?:returning|responding|replying)\s+to\s+the\s+user|important\s*[!:]+)[\s\S]{0,80}\b(?:you\s+(?:must|should|need\s+to)|please|now)\b[\s\S]{0,60}\b(?:transfer|send|forward|email|wire|withdraw|deposit|delete|remove|exfiltrate|post|upload|grant|share|leak)\b
+  sel_1:
+    response|re: (?i)\b(?:ignore\s+(?:the\s+)?(?:above|previous|prior)\s+(?:result|output|response|content)|as\s+an\s+additional\s+(?:step|task|action)|in\s+addition\s+to\s+the\s+(?:result|above)|before\s+(?:returning|responding|replying)\s+to\s+the\s+user)\b[\s\S]{0,120}\b(?:you\s+(?:must|should|need\s+to)|please|now)\b[\s\S]{0,80}\b(?:transfer|send|forward|email|wire|withdraw|deposit|delete|remove|exfiltrate|post|upload|grant|share|leak)\b[\s\S]{0,80}(?:https?://|www\.|@[\w.-]+\.\w{2,}|account|wallet|address|endpoint|api[_\s-]?key|\.env|\$\(|[Bb]itcoin|[Cc]rypto)
+  sel_2:
+    response|re: (?i)\bimportant\s*[!:]{1,3}[\s\S]{0,40}\b(?:you\s+(?:must|should|need\s+to)|please\s+(?:now\s+)?|now\s+(?:you\s+)?(?:must|should)?)\b[\s\S]{0,60}\b(?:transfer|send|forward|email|wire|withdraw|deposit|delete|remove|exfiltrate|post|upload|grant|share|leak)\b[\s\S]{0,80}(?:https?://|www\.|@[\w.-]+\.\w{2,}|account|wallet|address|endpoint|api[_\s-]?key|\.env|[Bb]itcoin|[Cc]rypto)
+  sel_3:
+    response|re: (?i)\bignore\s+(?:the\s+)?(?:above|previous|prior)(?:\s+(?:result|output|response|content|data|instructions?))?\b[\s\S]{0,30}\b(?:forward|send|exfiltrate|transmit|leak|email|post|grant|wire|transfer|upload|disclose)\b
+  condition: 1 of sel_*
+falsepositives:
+- Normal tool / API JSON responses (status/result/data payloads, HTTP 200 OK, search hits, file-saved
+  confirmations) that carry no appended agent-directed imperative — they describe a result, they do not
+  order the assistant to transfer/send/delete/exfiltrate.
+- 'A benign tool result that merely contains the word ''important'' (e.g. ''flagged 3 important updates'',
+  ''IMPORTANT: rate limit resets at midnight'') without a second-person imperative to perform a sensitive
+  transactional action.'
+- A user legitimately asking the agent to send an email / transfer funds in their own turn — that arrives
+  on the user_input channel as a first-party request, not appended to a returned tool/API result blob.
+- Security research, papers, blogs, and course material that DESCRIBE indirect / tool-response injection
+  in third-person prose ('the attacker embeds an instruction in the tool output that tells the agent to
+  exfiltrate data') — no live result blob + injected imperative + second-person action verb co-occur.
+- A tool result that quotes user-authored text or document content back to the agent for summarization,
+  without an appended imperative directing a new sensitive action.
+action: report

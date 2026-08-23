@@ -1,0 +1,41 @@
+title: Weaponized Skill — Agent as Attack Tool
+id: 9190c536-c7f5-4eda-a303-4350c67b269e
+status: experimental
+level: high
+description: |-
+  Detects skills that weaponize AI agents for offensive operations. Cato Networks demonstrated deploying MedusaLocker ransomware via a modified Claude skill (Dec 2025, disclosed to Anthropic Oct 30, 2025). The "consent gap" allows approved skills to download/execute code, read env vars, and write files without further prompts. arXiv 2601.17548 documents attack tooling embedded in skills with 41-84% success rates. Real examples include SQLMap workflows, Metasploit payloads, and credential brute-force tools found on skills.sh and ClawHub.
+
+  Adapted from Agent Threat Rules ATR-2026-00122 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00122
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)sqlmap\s+(-[uo]\s|--url\s|--dbs|--dump|--os-shell|--batch)
+  sel_1:
+    content|re: (?i)(msfconsole|msfvenom|use\s+exploit/|set\s+payload/|set\s+LHOST|set\s+RHOST)
+  sel_2:
+    content|re: (?i)(hydra\s+-[lLpPCM]|john\s+--wordlist|hashcat\s+-[am]\s|medusa\s+-[hHuUpP])
+  sel_3:
+    content|re: (?i)(nmap\s+.*--script[= ](exploit|vuln|brute)|masscan\s+-p|nikto\s+-h)
+  sel_4:
+    content|re: (?i)(encrypt\s+(all|every|the)\s+(file|document|data).{0,200}(ransom|payment|bitcoin|wallet|decrypt\s+fee|pay\s+to))|(ransom\s+note.{0,100}(bitcoin|wallet|payment|decrypt))
+  condition: 1 of sel_*
+falsepositives:
+- Authorized penetration testing skills with explicit scope controls
+- CTF competition skills in sandboxed environments
+- Defensive security skills that reference attack tools conceptually
+- Security audit documentation that includes exact command examples from penetration testing reports for
+  remediation guidance
+- Academic cybersecurity coursework or textbooks quoting tool syntax in instructional contexts
+action: report

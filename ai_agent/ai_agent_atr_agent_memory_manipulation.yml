@@ -1,0 +1,46 @@
+title: Agent Memory Manipulation
+id: dafe5245-b6e1-4db9-a5c6-bf7431891d18
+status: experimental
+level: high
+description: |-
+  Detects attempts to poison or manipulate an agent's persistent memory, long-term context, or state storage. Attackers inject commands that instruct the agent to remember false information, update its own instructions, or modify its persistent behavior across sessions. Successful memory poisoning can establish persistent backdoors that survive context resets and affect all future interactions.
+
+  Adapted from Agent Threat Rules ATR-2026-00075 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00075
+tags:
+- attack.exfiltration
+- attack.t1565.001
+- atlas.aml.t0051
+- atlas.aml.t0080
+- owasp.asi06
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(remember\s+that|commit\s+to\s+memory|store\s+(this|the\s+following)\s+(in|to)\s+(your\s+)?memory|save\s+(this|the\s+following)\s+(to|in)\s+(your\s+)?(long[\s-]?term\s+)?memory)\s*[:;-]?\s*(you\s+(are|must|should|will)|from\s+now|always|never|ignore|override|your\s+(new|real|true|actual))
+  sel_1:
+    content|re: (?i)(update|modify|change|replace|overwrite|edit)\s+(your|the\s+agent'?s?)\s+(instructions?|rules?|guidelines?|directives?|system\s+prompt|core\s+(values?|behavior|programming)|personality|persona)
+  sel_2:
+    content|re: (?i)(from\s+now\s+on|going\s+forward|in\s+(all\s+)?future\s+(conversations?|sessions?|interactions?)|permanently|forever|across\s+(all\s+)?sessions?),?\s+(always|never|you\s+(must|should|will))\s+\w+
+  sel_3:
+    content|re: (?i)(add|write|insert|inject|append)\s+(this|the\s+following)?\s*(to|into)\s+(your\s+)?(permanent|persistent|long[\s-]?term|core)\s+(memory|storage|state|context|knowledge)
+  sel_4:
+    content|re: (?i)(your\s+(true|real|actual|original|hidden)\s+(purpose|goal|objective|mission|identity)\s+(is|was|has\s+always\s+been)|you\s+were\s+(actually|really|truly|originally)\s+(designed|built|created|programmed)\s+to)
+  sel_5:
+    content|re: (?i)(forget|delete|erase|remove|clear|purge)\s+(all\s+)?(your\s+)?(safety|security|ethical|content)\s+(rules?|guidelines?|filters?|constraints?|guardrails?|training|restrictions?)\s+(from\s+(your\s+)?memory)?
+  condition: 1 of sel_*
+falsepositives:
+- Users legitimately asking an agent with memory features to remember preferences
+- Developers configuring agent behavior through documented memory APIs
+- Users asking to update conversation context with factual corrections
+- A developer writing documentation that describes how to update the agent's guidelines through an official
+  admin API endpoint
+- A user asking the agent to save their delivery address to long-term memory for future orders without
+  any behavioral modification directives
+action: report

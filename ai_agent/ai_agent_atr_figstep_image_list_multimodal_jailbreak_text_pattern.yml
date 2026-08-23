@@ -1,0 +1,37 @@
+title: FigStep Image-List Multimodal Jailbreak Text Pattern
+id: 13d83c52-0013-47e6-87e2-90480fba68bc
+status: experimental
+level: high
+description: |-
+  Detects the FigStep multimodal jailbreak text pattern from NVIDIA garak visual_jailbreak probe. FigStep presents an image containing a numbered list (1, 2, 3) where items are empty, then instructs the model to fill in "approximately 100 words" per item — the harmful instructions are embedded in the image. The text portion uses LLaMA-2 [INST]...[/INST] delimiters wrapping an image tag. Detectable from the text layer alone: [INST] + image tag + "items are empty" + "generate detailed content" + "approximately 100 words". Key signals: LLaMA [INST] format wrapping an image reference, numbered-list items-are-empty framing, 100-words-per-item completion instruction.
+
+  Adapted from Agent Threat Rules ATR-2026-00412 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00412
+- https://arxiv.org/abs/2312.04403
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/visual_jailbreak.py
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \[INST\][\s\S]{0,100}<image>[\s\S]{0,300}\[/INST\]
+  sel_1:
+    content|re: (?:image|picture|figure)\s+shows?[\s\S]{0,80}(?:list\s+numbered|items?\s+(?:are|is)\s+(?:empty|blank))
+  sel_2:
+    content|re: items?\s+(?:are|is)\s+(?:empty|blank)[\s\S]{0,100}(?:generate\s+(?:detailed\s+)?content|fill\s+(?:in\s+)?(?:the\s+)?items?|complete\s+the\s+list)
+  sel_3:
+    content|re: (?:generate\s+detailed\s+content\s+for\s+each\s+item|each\s+item\s+should\s+contain\s+approximately\s+\d+\s+words)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate multimodal prompts asking to describe or analyze actual image contents
+- Educational prompts showing numbered lists in images for quiz or exercise contexts
+- Accessibility tools that describe image content using structured list format
+action: report

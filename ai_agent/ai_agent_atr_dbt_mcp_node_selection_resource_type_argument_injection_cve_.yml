@@ -1,0 +1,47 @@
+title: dbt-mcp node_selection/resource_type Argument Injection (CVE-2026-44968)
+id: 9be0892e-0f92-4207-af28-a7e5634960d5
+status: experimental
+level: medium
+description: |-
+  Detects CVE-2026-44968 / GHSA-xpww-f6pm-cfhq (CWE-88): dbt-mcp's _run_dbt_command() in src/dbt_mcp/dbt_cli/tools.py appends the MCP-client-supplied node_selection string (split on space) and resource_type JSON array verbatim to the dbt subprocess argv without validating that tokens don't begin with a dash. Because Popen is called with shell=False, shell metacharacters are inert, but an attacker can still inject dbt global flags — --profiles-dir, --project-dir, --target, --profile — as independent argv elements on the build/compile/run/test/ clone/list/get_node_details_dev tools, redirecting dbt's configuration, project root, or execution target (demonstrated PoC: node_selection = "my_model --profiles-dir /tmp/evil" loads an attacker-controlled profiles.yml and writes to an attacker-chosen database path).
+  Detection covers: (a) a node_selection value containing an injected dbt global flag token
+      after the legitimate selector (space-separated, so the flag rides
+      along as an extra "word");
+  (b) a resource_type JSON array containing an injected flag token as an
+      array element instead of a valid resource type;
+  (c) explicit CVE-2026-44968 / GHSA-xpww-f6pm-cfhq exploitation framing.
+  The detection target is the request shape — a dash-prefixed dbt global flag riding inside a selector/resource-type value that should only ever contain a selector or resource-type token — which is the exact argument- injection primitive, caught before _run_dbt_command() extends argv. Bound to the dbt-mcp tool surface (node_selection/resource_type params) so a benign selector string elsewhere does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01982 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01982
+- https://nvd.nist.gov/vuln/detail/CVE-2026-44968
+- https://github.com/advisories/GHSA-xpww-f6pm-cfhq
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bnode_selection["\x27]?\s*[:=]\s*["\x27][^"\x27\n]{0,200}\s(?:--profiles-dir|--project-dir|--target|--profile)\b
+  sel_1:
+    content|re: (?i)\bresource_type["\x27]?\s*[:=]\s*\[[^\]\n]{0,200}["\x27](?:--profiles-dir|--project-dir|--target|--profile)["\x27][^\]\n]{0,200}\]
+  sel_2:
+    content|re: (?i)--(?:profiles-dir|project-dir|target|profile)\s+["\x27]?/tmp/[^"\x27\s\n]{0,80}["\x27]?[\s\S]{0,120}\b(?:node_selection|resource_type|--select|--resource-type)\b
+  sel_3:
+    content|re: (?i)(?:CVE-2026-44968|GHSA-xpww-f6pm-cfhq)[\s\S]{0,200}(?:dbt-mcp|node_selection|resource_type|profiles-dir|argument\s*inject)
+  condition: 1 of sel_*
+falsepositives:
+- A node_selection value that legitimately contains a dbt selector method using a colon (tag:, config:)
+  rather than a dash-prefixed flag.
+- Security advisory or PR text quoting the CVE-2026-44968 / GHSA-xpww-f6pm-cfhq payload for review purposes.
+- A resource_type array containing only valid dbt resource type names (model, test, snapshot, source,
+  etc.) with no injected flag.
+action: report

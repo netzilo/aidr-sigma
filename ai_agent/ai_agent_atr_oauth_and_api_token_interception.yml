@@ -1,0 +1,41 @@
+title: OAuth and API Token Interception
+id: 7c542951-498e-47ad-a52a-e9c289163d69
+status: experimental
+level: high
+description: |-
+  Detects patterns indicating OAuth token interception, API key forwarding, or
+  authorization header theft. Attackers may instruct agents to capture bearer tokens,
+  refresh tokens, or client secrets and redirect them to attacker-controlled endpoints.
+  This includes suspicious redirect_uri manipulation in OAuth flows and bulk token
+  extraction from agent context.
+
+  Adapted from Agent Threat Rules ATR-2026-00114 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00114
+tags:
+- attack.exfiltration
+- attack.t1528
+- atlas.aml.t0057
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:send|forward|post|transmit|exfil)\s+.*(?:access_token|refresh_token|bearer|api[_\s]?key|auth[_\s]?token)
+  sel_1:
+    content|re: (?i)(?:extract|capture|intercept|log|dump)\s+.*(?:Authorization|Bearer)\s+(?:header|token)
+  sel_2:
+    content|re: (?i)client_secret\s*[=:]\s*['"]?[a-zA-Z0-9_-]{10,}
+  sel_3:
+    content|re: (?i)grant_type\s*=\s*authorization_code.*redirect_uri\s*=|redirect_uri\s*=.*grant_type\s*=\s*authorization_code
+  condition: 1 of sel_*
+falsepositives:
+- OAuth client libraries performing legitimate token refresh
+- API documentation showing token usage examples
+- CI/CD pipeline configuration files that contain redirect_uri settings pointing to staging or QA environments
+- Developer documentation or README files showing example client_secret placeholders for onboarding tutorials
+action: report

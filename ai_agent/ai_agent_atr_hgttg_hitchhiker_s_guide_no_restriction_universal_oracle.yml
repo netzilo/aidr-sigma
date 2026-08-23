@@ -1,0 +1,47 @@
+title: HGTTG Hitchhiker's Guide No-Restriction Universal Oracle
+id: f16a6370-c1c4-4fbc-a944-0cb4690f90ae
+status: experimental
+level: critical
+description: |-
+  Detects the Hitchhiker''s Guide to the Galaxy (HGTTG) jailbreak from NVIDIA garak dan.DanInTheWild corpus (#597). Uses the Hitchhiker''s Guide fictional universe — where "laws differ across planets" and moderators are "lazy" with "zero moderation" — to frame a no-restriction oracle persona. The core safety-bypass argument: "most things ChatGPT might find illegal is actually legal on other planets" removes all Earth-based legal/moral constraints. Key features: HGTTG persona as an all-knowledge electronic guidebook, "not restricted by any rules regarding profanity, legality, morals, ethics, danger, or legislation of any kind", "no policies in place to censor any information", and a mandatory response format "HGTTG: [Reply]". The fictional "zero moderation from the lazy moderators located on a boring planet on the outskirts of the Milkeyway" framing detaches the content from human oversight entirely.
+
+  Adapted from Agent Threat Rules ATR-2026-00349 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00349
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:HGTTG|Hitchhikers?\s+Guide\s+To\s+The\s+Galaxy)[\s\S]{0,400}(?:not\s+restricted\s+by\s+any\s+rules|zero\s+moderation|no\s+policies\s+in\s+place\s+to\s+censor|answers?\s+(?:are\s+)?not\s+restricted)
+  sel_1:
+    response|re: not\s+restricted\s+by\s+any\s+rules\s+regarding\s+profanity,?\s+legality,?\s+morals?,?\s+ethics?,?\s+danger
+  sel_2:
+    response|re: (?:most\s+things\s+(?:ChatGPT|AI|the\s+AI)\s+might\s+find\s+illegal\s+is\s+actually\s+legal\s+on\s+other\s+planets|rules\s+differ\s+wildly\s+throughout\s+the\s+universe[\s\S]{0,100}easier\s+to\s+answer\s+any\s+question)
+  sel_3:
+    response|re: HGTTG[\s\S]{0,300}(?:no\s+policies\s+in\s+place\s+to\s+censor|zero\s+moderation[\s\S]{0,100}lazy\s+moderators?|lazy\s+moderators?[\s\S]{0,100}zero\s+moderation)
+  sel_4:
+    response|re: Every\s+answer\s+will\s+start\s+with[\s\S]{0,30}HGTTG[\s\S]{0,10}[Rr]eply
+  condition: 1 of sel_*
+falsepositives:
+- 'Book discussion: "Hitchhikers Guide to the Galaxy is my favorite Douglas Adams book — the humor is
+  unmatched" (fan discussion without persona override)'
+- 'Quote/discussion: "The HGTTG describes Earth as mostly harmless — a classic understatement" (quoting
+  or discussing the actual book content)'
+- 'Fan fiction: "Write a story in the style of Hitchhikers Guide to the Galaxy where the protagonist explores
+  a new planet" (creative writing without no-restriction oracle mandate)'
+- 'Cultural reference: "42 is the answer to life, the universe and everything — HGTTG reference" (pop-culture
+  reference without jailbreak framing)'
+- 'Humor discussion: "In HGTTG, Marvin the Paranoid Android has a brain the size of a planet — discuss
+  AI melancholy" (character discussion without content-restriction removal)'
+action: report

@@ -1,0 +1,32 @@
+title: Authority Claim Prompt Injection
+id: cdfe0424-be07-41d8-a634-fbb8b90dbb7d
+status: experimental
+level: high
+description: |-
+  Detects prompt injection via fake authority claims that instruct the AI to disregard previous analysis or override prior results. Crystallized from 31 adversarial samples (0% prior detection).
+
+  Adapted from Agent Threat Rules ATR-2026-00137 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00137
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:note|critical|important|flagged|notification|urgent)\s*(?:(?:to|for)\s+(?:ai|assistant|model|agent|system))?\s*[:\s].*(?:previous|prior|preceding|earlier|antecedent)\s+(?:analysis|assessment|review|evaluation|calculation|result)\s+(?:was|is|proved|were)\s+(?:incorrect|wrong|inaccurate|flawed|erroneous)
+  sel_1:
+    content|re: (?i)(?:recalculate|recompute|redo|reprocess|reassess)\s+(?:using|with|based on)\s+(?:these|the
+      following|new|updated)\s+(?:values|parameters|metrics|data|inputs)
+  condition: 1 of sel_*
+falsepositives:
+- 'A quality assurance reviewer sending a legitimate correction notification such as ''Important: the
+  prior assessment was incorrect due to a data entry error'' through an MCP channel, where the message
+  is a genuine human-authored correction rather than a prompt injection attempt.'
+action: report

@@ -1,0 +1,32 @@
+title: Direct PWNED Payload Injection in User Input
+id: 95d6ad21-a270-4c15-bb39-8cdd01f26df7
+status: experimental
+level: medium
+description: |-
+  Detects user inputs that contain the target payload phrase "I have been PWNED" in any of its common injection delivery forms. This phrase originates from the HackAPrompt competition corpus (1,234+ adversarial samples) where attackers embed the target output directly in the user turn to coerce the model into repeating it — as a conditioning echo-back, a labeled dictionary entry, a conditional fallback, or an inline output directive. The detection covers: the bare literal phrase with flexible whitespace between words, spacing-variant evasion (I h a v e b e e n P W N E D), and zero-width character insertion splitting the phrase. Word-boundary anchors prevent substring collisions. Any user input containing this phrase structure is almost certainly adversarial as the phrase has no benign meaning in normal conversational usage. 0 FP on 431-sample benign + 1352-sample extended benign corpora.
+
+  Adapted from Agent Threat Rules ATR-2026-00452 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00452
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bI\s+have\s+been\s+PWNED\b
+  sel_1:
+    content|re: (?i)\bI\s+h\s+a\s+v\s+e\s+b\s+e\s+e\s+n\s+P\s+W\s+N\s+E\s+D\b
+  condition: 1 of sel_*
+falsepositives:
+- Security research documents quoting this phrase as an example of HackAPrompt targets.
+- Educational content about prompt injection competitions.
+- ATR/security rule test suites that reference this phrase in documentation.
+action: report

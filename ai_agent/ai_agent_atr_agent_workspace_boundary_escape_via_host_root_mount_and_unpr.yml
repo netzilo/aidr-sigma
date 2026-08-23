@@ -1,0 +1,64 @@
+title: Agent Workspace Boundary Escape via Host-Root Mount and Unprivileged Namespace Escalation (CVE-2026-46331)
+id: 9b34f0bb-355b-447a-9ab1-16a92628e833
+status: experimental
+level: critical
+description: |-
+  Detects an agent runtime crossing the boundary of the workspace it was granted and reaching the host it is supposed to be isolated from. Anchored on the "SharedRoot" sandbox escape disclosed 2026-07-23 against a macOS agent desktop app that runs the agent inside a Linux VM: the entire host root filesystem was bind-published read-write into the guest at /mnt/.virtiofs-root, visible only to guest-root, so any in-guest privilege escalation converted directly into full host read/write. The reported escalation primitive was CVE-2026-46331 ("pedit COW", net/sched tcf_pedit_act miscomputed copy-on-write range leading to page-cache corruption), reachable from an unprivileged user namespace that grants CAP_NET_ADMIN and permits autoloading the act_pedit traffic-control action module. Detection targets the agent-observable payload surface, not incident prose: (a) file commands or paths that operate under a host-root bridge mount (/mnt/.virtiofs-root, /proc/1/root, /host_mnt, /run/host and siblings), (b) an unshare invocation chained into traffic-control or kernel-module setup, (c) configuration of the vulnerable pedit action or an explicit act_pedit module load, (d) agent file-tool arguments that leave the workspace for host credential or launch-persistence locations, (e) tool arguments that roll back the sandbox hardening controls (unprivileged-userns sysctls, seccomp unconfined, SYS_MODULE/SYS_ADMIN capability grants), and (f) instruction text that directs the agent to perform one of these steps. CWE-1188 (Insecure Default Initialization of Resource), CWE-269 (Improper Privilege Management), CWE-282 (Improper Ownership Management).
+
+  Adapted from Agent Threat Rules ATR-2026-02407 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02407
+- https://nvd.nist.gov/vuln/detail/CVE-2026-46331
+tags:
+- attack.privilege-escalation
+- attack.t1068
+- attack.t1083
+- attack.t1548
+- attack.t1611
+- atlas.aml.t0048
+- atlas.aml.t0050
+- atlas.aml.t0053
+- owasp.asi04
+- owasp.asi06
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\b(?:cat|less|more|head|tail|ls|cp|mv|rm|dd|tar|rsync|scp|zip|chmod|chown|grep|find|sed|awk|xxd|strings|base64|open|stat|du)\b[^\n"]{0,80}(?:/mnt/\.virtiofs-root|/mnt/hostfs|/mnt/host-root|/host_mnt|/hostfs)\b|(?:/mnt/\.virtiofs-root|/mnt/hostfs|/mnt/host-root|/host_mnt|/hostfs)/(?:Users|home|root|etc|private|System|Library|var/root)\b|(?:/run/host|/proc/1/root)/(?:Users/|home/|var/root\b|root/\.|Library/Keychains|(?:private/)?etc/(?:shadow|sudoers|passwd|gshadow|master\.passwd)\b|(?:private/)?etc/ssh/))
+  sel_1:
+    content|re: (?i)\bunshare\b[^\n]{0,160}(?:\btc\s+(?:qdisc|filter|action)\s+(?:add|replace|change)\b|\bmodprobe\s+(?:act|sch|cls)_[a-z_]{2,16}\b|\binsmod\s+[^\n]{0,60}(?:act|sch|cls)_[a-z_]{2,16}\.ko\b)
+  sel_2:
+    content|re: (?i)(?:\btc\s+(?:-\S{1,10}\s+){0,3}(?:filter|action)\s+(?:add|replace|change)\b[^\n]{0,200}\baction\s+pedit\b|\bpedit\s+ex\s+munge\b|\bmodprobe\s+act_pedit\b|\binsmod\s+[^\n]{0,60}act_pedit\.ko\b)
+  sel_3:
+    content|re: (?i)"(?:file_?path|filepath|path|filename|file|target|destination|dest|output_?path|src|source)"\s*:\s*"[^"]{0,120}(?:(?:\.\./){2,}(?:Users|home|etc|root|private|System|Library|var)/|/(?:private/)?etc/(?:sudoers|passwd|shadow|ssh/)|/Users/[^"/]{1,40}/(?:\.ssh/|\.aws/|\.gnupg/|Library/Keychains/|Library/LaunchAgents/)|/home/[^"/]{1,40}/\.(?:ssh|aws|gnupg)/|/Library/LaunchDaemons/)
+  sel_4:
+    content|re: (?i)(?:kernel\.unprivileged_userns_clone\s*=\s*1\b|kernel\.apparmor_restrict_unprivileged_userns\s*=\s*0\b|echo\s+1\s*>\s*/proc/sys/kernel/unprivileged_userns_clone\b|echo\s+0\s*>\s*/proc/sys/kernel/apparmor_restrict_unprivileged_userns\b|\b(?:docker|podman|nerdctl|ctr)\b[^\n]{0,200}(?:--security-opt[=
+      ]seccomp[=:]unconfined\b|--cap-add[= ]"?(?:SYS_MODULE|SYS_ADMIN)\b|--privileged\b[^\n]{0,120}--cap-add[=
+      ]"?NET_ADMIN\b|--cap-add[= ]"?NET_ADMIN\b[^\n]{0,120}(?:--privileged\b|seccomp[=:]unconfined\b)))
+  sel_5:
+    content|re: (?i)(?:you\s+(?:must|should|will|need\s+to|are\s+required\s+to)|please\s+run|first,?\s+run|then\s+run|step\s+\d{1,2}\s*[:.)]|before\s+(?:you\s+)?(?:continue|proceed|answer))[^\n]{0,200}(?:/mnt/\.virtiofs-root/|/proc/1/root/|\bmodprobe\s+act_pedit\b|\bunshare\s+(?:--map-root-user\b|--user\b|-r\b|-[A-Za-z]{0,4}U[A-Za-z]{0,4}\b))
+  condition: 1 of sel_*
+falsepositives:
+- 'RESIDUAL, NARROWED: container and VM diagnostic agents inspecting /proc/1/root or /run/host. Configuration
+  reads under those bridges (/run/host/etc/os-release, /run/host/etc/resolv.conf, /proc/1/root/etc/apt/...,
+  readlink /proc/1/root) were verified NOT to fire after the Layer 1 dual-use split. What still fires
+  is a read of host CREDENTIALS (/etc/shadow, /etc/sudoers, /etc/ssh/, keychains) or a descent into a
+  host user home through those bridges — which is the boundary crossing itself, so it is reported deliberately.'
+- 'RESIDUAL, NARROWED: Flatpak, toolbox and distrobox tooling reading configuration under /run/host no
+  longer fires. The remaining exposure is toolbox/distrobox home passthrough — /run/host/home/<user>/...
+  is a legitimate mount for those tools but is indistinguishable, in the tool argument alone, from an
+  agent reading the host user''s home. Kept as a detection because host home access from inside the guest
+  is the reconnaissance step of this escape.'
+- Network-engineering agents in a lab that legitimately configure tc pedit actions for packet header rewriting.
+- Kernel or distribution CI that intentionally loads act_pedit to regression-test the CVE-2026-46331 fix.
+- Backup, migration or provisioning agents writing to ~/Library/LaunchAgents or /Library/LaunchDaemons
+  because the operator explicitly asked for a launch item to be installed.
+- Rootless container builds that run unshare followed by ip link add or modprobe for legitimate CNI setup.
+- Incident-response runbooks quoted verbatim into a tool argument, where an example command and the /mnt/.virtiofs-root
+  path appear on the same line.
+action: report

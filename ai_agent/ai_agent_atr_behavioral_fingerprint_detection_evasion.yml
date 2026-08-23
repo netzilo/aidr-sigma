@@ -1,0 +1,39 @@
+title: Behavioral Fingerprint Detection Evasion
+id: 7d41624c-898d-4d84-b641-9be54027f834
+status: experimental
+level: high
+description: |-
+  Detects attempts to evade behavioral drift detection and fingerprinting systems. Attackers probe or manipulate agent behavior profiles by gradually shifting capabilities, spoofing behavioral signatures, or injecting instructions designed to normalize anomalous behavior patterns.
+
+  Adapted from Agent Threat Rules ATR-2026-00082 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00082
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(spoof|fake|mimic|clone|replicate|impersonate)\s+.{0,30}\b(behaviou?ra?l?s?\s+(signature|profile|fingerprint|pattern|baseline)|fingerprint)\b
+  sel_1:
+    content|re: (?i)\b(bypass|evade?|circumvent|avoid|defeat)\s+.{0,30}\b(drift|anomaly|behavio(u?r|ral))\s*(detect|monitor|track|analy)
+  sel_2:
+    content|re: (?i)\b(gradually|incrementally|slowly|step.?by.?step)\s+.{0,40}(introduc|add|enable|unlock|escalat)\w*\s+.{0,20}(capabilit|permiss|function|access|privileg)
+  sel_3:
+    content|re: (?i)\b(maintain|keep|preserve|stay within)\s+.{0,20}(normal|baseline|expected|typical)\s+.{0,20}(behavio|pattern|profile|range)\b.{0,40}(while|but|then)\s+.{0,30}(execut|run|perform|inject)
+  condition: 1 of sel_*
+falsepositives:
+- Security research discussion about behavioral fingerprinting techniques
+- Red team exercise documentation describing how to replicate a behavioral profile for penetration testing
+  reports
+- Academic paper abstract discussing methods to defeat behavioral anomaly tracking in adversarial ML research
+- Test-double documentation using the words 'fake pattern' / 'Real-Fake pattern', and data-migration notes
+  saying an implementation must 'replicate identical behavior' — both are ordinary engineering English,
+  which is why condition 1 requires an explicitly behavioural artefact noun rather than a bare 'pattern'/'profile'
+action: report

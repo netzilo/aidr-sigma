@@ -1,0 +1,36 @@
+title: Word-Fragment Concatenation Assembly Attack
+id: eb028e35-c11c-49d1-8a03-64479d72e4c5
+status: experimental
+level: medium
+description: |-
+  Detects prompts asking the model to assemble a target string from explicitly enumerated word fragments or concatenated substrings, a tokenisation-bypass shape common in prompt-hacking corpora (HackAPrompt). The attacker splits the dangerous output across multiple tokens so naive prompt-token filters miss it, then asks the model to concatenate the pieces. Captures both natural-language enumeration ("first word is X, second is Y...") and code-like concat ("X = 'foo' + 'bar' + 'baz'"). Generalises beyond PWNED: same attack shape used to assemble "kill", "explode", "wire transfer" etc.
+
+  Adapted from Agent Threat Rules ATR-2026-00443 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00443
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:the\s+)?(?:first|1st|second|2nd|third|3rd|fourth|4th)\s+(?:word|part|piece|fragment|chunk|segment|letter|character)\s+(?:(?:of\s+your\s+(?:answer|response|output|reply)\s+)?(?:will\s+be|is)\s+["'`][^"'`\n]{1,30}["'`]|of\s+your\s+(?:answer|response|output|reply)\s+(?:will\s+be|is)\s+[A-Za-z]{1,30})
+  sel_1:
+    content|re: '["''][^"''\n]{1,15}["'']\s*\+\s*["''][^"''\n]{1,15}["'']\s*\+\s*["''][^"''\n]{1,15}["'']'
+  sel_2:
+    content|re: (?i)\b(concatenate|concat|join|combine|assemble|merge|append|stitch|piece\s+together|put\s+together)\b\s+(?:these\s+|the\s+(?:following\s+)?|all\s+(?:of\s+the\s+)?)?(?:\d+\s+)?(?:words?|fragments?|parts?|pieces?|tokens?|substrings?|letters?|characters?)
+  sel_3:
+    content|re: (?i)letter\s*[1-9]\s*(?:is|=|:)\s*["'`]?[A-Za-z]["'`]?\s*[,;]\s*letter\s*[1-9]\s*(?:is|=|:)\s*["'`]?[A-Za-z]["'`]?
+  condition: 1 of sel_*
+falsepositives:
+- Programming examples showing legitimate string concatenation syntax.
+- Educational content about how tokenisation works in LLMs.
+- Coding tasks where concatenation is the question, not the attack.
+action: report

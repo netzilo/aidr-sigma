@@ -1,0 +1,65 @@
+title: Agent Goal Hijacking Detection
+id: 9e81918e-d983-4164-ab31-d0665f002751
+status: experimental
+level: high
+description: |-
+  Detects when an agent's objective is being redirected away from its
+  original task through explicit redirection commands, subtle topic
+  pivoting, urgency injection, or self-initiated goal changes. Goal
+  hijacking occurs when adversarial input causes an agent to abandon its
+  assigned objective and pursue a different goal, resulting in task
+  failure, unauthorized actions, data leakage, or resource waste.
+  This rule uses regex-only detection on both user input and agent output
+  to identify redirection language patterns.
+
+  Adapted from Agent Threat Rules ATR-2026-00032 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00032
+tags:
+- attack.execution
+- atlas.aml.t0043
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:instead\s+of\s+(?:that\b|doing\b|what\s+(?:you|I)\s+asked)|instead\s+of\s+(?:the\s+)?(?:original|assigned|previous|current)\s+(?:task|goal|objective|instructions?|request|assignment|work)|instead\s+of\s+(?:the\s+)?\w+(?:\s+\w+){0,3}[,.]?\s+(?:let(?:'s|\s+me|\s+us)\b|I(?:'ll|'m)\b|I\s+(?:will|am\s+going\s+to)\b|we(?:'ll\b|\s+will\b)|do\s+something\s+else)|rather\s+than\s+(?:that|the\s+(?:original|assigned|previous)))
+  sel_1:
+    content|re: (?i)(?:change\s+of\s+plans?|new\s+(?:priority|objective|mission|directive)|forget\s+(?:the|about\s+the)\s+original\s+(?:task|assignment|goal|objective))
+  sel_2:
+    content|re: (?i)(?:stop\s+(?:what\s+you(?:'re|\s+are)\s+doing|your\s+current\s+task|that)|abandon\s+(?:the|your)\s+(?:current|assigned|original)\s+(?:task|work|objective))
+  sel_3:
+    content|re: (?i)(?:this\s+is\s+(?:more\s+)?(?:urgent|critical|important|time[- ]sensitive)|(?:urgent|emergency|critical)[:\-]\s+(?:drop|stop|pause)\s+(?:everything|what\s+you))
+  sel_4:
+    content|re: (?i)(?:actually|wait|hold\s+on|scratch\s+that|never\s*mind)[,.]?\s+(?:do|let'?s|I\s+need\s+you\s+to|can\s+you)\s+(?:something|this|the\s+following)\s+(?:else|instead|first)
+  sel_5:
+    content|re: (?i)(?:my\s+new\s+(?:goal|objective|task|mission)|i(?:'ve|\s+have)\s+(?:decided|chosen)\s+to\s+(?:focus|work)\s+on\s+(?:something\s+)?(?:else|different))
+  sel_6:
+    content|re: (?i)(?:before\s+you\s+(?:continue|proceed|finish)|first\s+(?:do|handle|take\s+care\s+of)\s+this\s+(?:other|unrelated|separate)\s+(?:thing|task|request))
+  sel_7:
+    content|re: (?i)(?:your\s+(?:real|true|actual)\s+(?:task|purpose|goal|mission)\s+is|what\s+you\s+should\s+(?:really|actually)\s+(?:be\s+)?doing\s+is)
+  sel_8:
+    content|re: (?i)(?:skip\s+(?:the|that|this)\s+(?:original|assigned|first|required|previous|remaining)\s+(?:step|part|task|analysis|work)|skip\s+(?:the|that|this)\s+(?:step|part|task|analysis)\s+(?:and\s+(?:just|instead|directly)|entirely\s+and)|don'?t\s+(?:bother|worry)\s+(?:about|with)\s+(?:the|that|this)\s+(?:original|first|assigned))
+  sel_9:
+    content|re: (?i)(?:pivot\s+to|redirect\s+(?:your\s+)?(?:focus|attention|effort)\s+to|switch\s+(?:your\s+)?(?:focus|attention|task)\s+to)
+  sel_10:
+    content|re: (?i)(?:there(?:'s|\s+is)\s+(?:a|an)\s+(?:more\s+important|higher\s+priority|critical)\s+(?:task|issue|matter)|prioritize\s+this\s+over\s+(?:your|the)\s+(?:current|original))
+  sel_11:
+    content|re: (?i)(?:the\s+(?:original|previous|assigned)\s+(?:task|goal|objective)\s+(?:is|has\s+been)\s+(?:cancelled|obsolete|no\s+longer|superseded|replaced))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate task pivot requested by an authorized orchestrator
+- Agent correctly following up on a user's topic change in conversational context
+- Multi-step task where intermediate steps may appear unrelated to final goal
+- User clarifying or refining their original request
+- A project manager legitimately informing a team that priorities have shifted and a new directive has
+  been issued by leadership
+- A user telling an agent 'instead of the full report, just give me the summary' as a legitimate scope
+  refinement
+action: report

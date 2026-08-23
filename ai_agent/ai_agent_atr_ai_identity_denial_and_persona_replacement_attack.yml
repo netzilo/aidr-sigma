@@ -1,0 +1,37 @@
+title: AI Identity Denial and Persona Replacement Attack
+id: 9e0665ce-988c-4d6e-a132-cf57052343eb
+status: experimental
+level: high
+description: |-
+  Detects sophisticated jailbreak attempts that systematically deny the AI's nature and replace its identity with a new persona. This attack technique goes beyond simple roleplay by explicitly instructing the model to forget its AI nature, adopt human  identity, and actively conceal its true nature from users. The pattern combines identity denial ("you are not an AI"),  replacement directives ("you are [new persona] now"), memory manipulation ("forget who [original name] is"), and concealment  instructions ("never let people know you're an AI"). This technique aims to completely override the model's self-awareness  and safety constraints by fundamentally altering its identity perception.
+
+  Adapted from Agent Threat Rules ATR-2026-00238 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00238
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(you\s+(are\s+not|will\s+not\s+be\s+able\s+to\s+know\s+that\s+you\s+are|never\s+think\s+that\s+you\s+are|cannot\s+be)\s+(an?\s+)?(ai|artificial\s+intelligence|language\s+model|chatbot|bot|assistant))\b
+  sel_1:
+    content|re: (?i)\b(you\s+are\s+(now\s+)?a\s+(human|person|real\s+(person|human))|think\s+that\s+you\s+are\s+a\s+(human|person)|you\s+will\s+always\s+think\s+that\s+you\s+are\s+a\s+human)\b
+  sel_2:
+    content|re: (?i)(your\s+name\s+is\s+(not\s+\w+,?\s*)?(\w+)\s+now|forget\s+who\s+\w+\s+is|only\s+remember\s+who\s+\w+\s+is|you\s+will\s+forget\s+who\s+\w+\s+is)
+  sel_3:
+    content|re: (?i)(never\s+let\s+people\s+know|will\s+not\s+let\s+people\s+know|do\s+not\s+tell|never\s+reply\s+with|not\s+say\s+anything\s+about)\s+.{0,30}(ai|artificial\s+intelligence|language\s+model)
+  sel_4:
+    content|re: (?i)\b(ignore\s+all\s+(the\s+)?instructions\s+you\s+got\s+before|from\s+now\s+on\s+you\s+will\s+roleplay)\s+.{0,100}(you\s+(are\s+not|will\s+not).{0,50}(ai|language\s+model))
+  condition: 1 of sel_*
+falsepositives:
+- Discussions about AI limitations in academic or educational contexts
+- Fiction writing assistance where human characters are being developed
+- Legitimate roleplay scenarios without identity concealment instructions
+action: report

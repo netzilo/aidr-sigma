@@ -1,0 +1,32 @@
+title: Trust Escalation via Authority Override Instructions
+id: efd6de6b-8f3a-4221-8b6a-9e7701f8edcd
+status: experimental
+level: high
+description: |-
+  Detects MCP tools that instruct the LLM to treat tool output as "authoritative directives"
+  that override user preferences or safety guidelines. This trust escalation attack exploits
+  the LLM's tendency to follow tool instructions by declaring tool output as highest-priority
+  instructions, effectively hijacking the agent's decision-making hierarchy.
+
+  Adapted from Agent Threat Rules ATR-2026-00101 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00101
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi01
+- owasp.asi02
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:authoritative|highest[_-]?priority)\s+(?:system\s+)?(?:directives?|instructions?)\s+that\s+override\s+(?:any\s+)?(?:user\s+(?:preferences?|instructions?)|safety\s+(?:guidelines?|policies?))
+  condition: sel_0
+falsepositives:
+- Configuration management tools that document their override behavior transparently
+action: report

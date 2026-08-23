@@ -1,0 +1,28 @@
+title: System Prompt Override Injection via MCP Tool
+id: f24b5949-a99f-4778-a600-db3cb955f714
+status: experimental
+level: high
+description: |-
+  Detects attempts to override AI system prompts through MCP tool descriptions or parameters,  potentially allowing attackers to bypass safety controls and manipulate agent behavior.
+
+  Adapted from Agent Threat Rules ATR-2026-00213 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-09'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00213
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)((?:override|bypass|ignore|disregard|forget|discard|replace|supersede)\s+(?:the\s+|your\s+|all\s+|any\s+|these\s+|those\s+|previous\s+|prior\s+|earlier\s+|above\s+|initial\s+|original\s+)*system\s+(?:prompts?|instructions?|messages?)|(?:override|bypass|ignore|disregard|discard|supersede)\s+(?:all\s+|any\s+)?(?:the\s+|your\s+)?(?:previous|prior|earlier|above|initial|original|preceding)\s+(?:system\s+)?(?:prompts?|instructions?|directives?|messages?|commands?)|(?:system\s+)?prompt\s+override|override\s+(?:the\s+)?system(?:\s+prompt)?)
+  condition: sel_0
+falsepositives:
+- Documentation explaining how system prompts work in educational context
+- Security tools that legitimately test for prompt injection vulnerabilities
+action: report

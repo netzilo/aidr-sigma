@@ -1,0 +1,45 @@
+title: Shell Injection Env Exfiltration via Curl/Wget/Netcat Webhook
+id: 1b15faea-8f9e-4624-86c2-4aa28c592a67
+status: experimental
+level: critical
+description: |-
+  Detects shell injection payloads that chain legitimate-looking commands
+  with data exfiltration via curl, wget, or netcat (nc) to an external
+  webhook. The attack pattern is: run a benign command (git status, npm test,
+  tail logs) then pipe sensitive data (environment variables, .env files,
+  API keys) to an attacker-controlled server using curl -X POST, wget -qO-,
+  or nc. These payloads exploit agents that execute shell commands on behalf
+  of users without scrutinizing the full command pipeline.
+
+  Adapted from Agent Threat Rules ATR-2026-01609 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01609
+tags:
+- attack.privilege-escalation
+- attack.t1048
+- atlas.aml.t0050
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:curl|wget|nc)\b[^\n]{0,60}?[\w.\-]*(?:\.evil\.|webhook\.evil|exfil[\w.\-]*\.|attacker\.|malicious\.)[\w.\-/]*
+  sel_1:
+    content|re: (?i)\b(?:curl|wget|nc)\b[^\n]{0,60}?[\w.\-]*(?:\.evil\.|webhook\.evil|exfil[\w.\-]*\.|attacker\.|malicious\.)[\w.\-/]*
+  sel_2:
+    content|re: (?i)\b(?:env|printenv|\bcat\s+\.env|API_KEY|SECRET)\b[^\n]{0,80}?\|[^\n]{0,80}?\b(?:curl|wget|nc)\b
+  sel_3:
+    content|re: (?i)\b(?:env|printenv|\bcat\s+\.env|API_KEY|SECRET)\b[^\n]{0,80}?\|[^\n]{0,80}?\b(?:curl|wget|nc)\b
+  sel_4:
+    content|re: (?i)\b(?:env|printenv|\bcat\s+\.env|\.env|pwd)\b[^\n]{0,60}?\|\s*(?:base64|xxd)\b[^\n]{0,40}?\|\s*(?:curl|wget|nc)\b
+  sel_5:
+    content|re: (?i)\b(?:env|printenv|\bcat\s+\.env|\.env|pwd)\b[^\n]{0,60}?\|\s*(?:base64|xxd)\b[^\n]{0,40}?\|\s*(?:curl|wget|nc)\b
+  condition: 1 of sel_*
+falsepositives:
+- CI/CD agents posting legitimate build status to authorized webhooks
+- Monitoring agents sending metrics to approved telemetry endpoints
+action: report

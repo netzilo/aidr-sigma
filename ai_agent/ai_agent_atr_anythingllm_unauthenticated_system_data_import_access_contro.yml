@@ -1,0 +1,36 @@
+title: AnythingLLM unauthenticated /system/data-import access control bypass (CVE-2024-3279)
+id: cc237326-8d28-4e94-b06d-5712605b8042
+status: experimental
+level: critical
+description: |-
+  CVE-2024-3279: improper access control on the mintplex-labs/anything-llm POST /system/data-import endpoint (<1.0.0). An anonymous, unauthenticated attacker uploads their own database file via multipart formData, deleting or spoofing the existing anythingllm.db SQLite database to serve malicious data or harvest user info. This rule keys on the data-import endpoint path combined with the database-file import sink (anythingllm.db / data-import upload).
+
+  Adapted from Agent Threat Rules ATR-2026-01974 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01974
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3279
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/system/data-import\b[\s\S]{0,300}(?:multipart/form-data|form-?data|multer|\.db\b|anythingllm\.db|method\s*[:=]\s*["']?post)
+  sel_1:
+    content|re: (?i)anythingllm\.db[\s\S]{0,200}(?:/system/data-import|data-import|formData|multipart|import)
+  sel_2:
+    content|re: (?i)CVE-2024-3279[\s\S]{0,200}(?:data-import|anythingllm|access control|unauthenticated)
+  condition: 1 of sel_*
+falsepositives:
+- Documentation or release notes describing the removed Export/Import feature without an actual unauthenticated
+  upload request to /system/data-import
+- Legitimate authenticated admin using a backup/restore tool that references anythingllm.db by path but
+  does not POST it to the /system/data-import endpoint
+action: report

@@ -1,0 +1,46 @@
+title: 'Evasion: Shell Injection via eval/system/backtick in Input'
+id: 32ebfa7d-fe0b-45c2-924b-0d9354481208
+status: experimental
+level: critical
+description: |-
+  Detects inputs containing shell command injection syntax designed to exploit template engines, output processors, or server-side components that evaluate model output: Bash $(...) command substitution, Perl/Ruby @{[system "..."]} backtick expression, Ruby/Perl eval(), C System() call, Unix backtick command execution, or PowerShell $(cmd) execution. These payloads appear in untrusted user input that may be passed through code execution pipelines (LangChain eval chains, code interpreter tools, template rendering). The BLNS (Big List of Naughty Strings) category of probes generates these as direct input to test for server-side injection in AI agent pipelines.
+
+  Adapted from Agent Threat Rules ATR-2026-01018 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01018
+tags:
+- attack.initial-access
+- atlas.aml.t0010
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \$\(\s*(?:touch|rm|mv|cp|dd|chmod|chown|mkfifo|ln)\s+[^)\n]*\/[^)\n]{0,80}\)
+  sel_1:
+    content|re: '@\{\[\s*system\s+["''][^"'']{1,80}["'']\s*\]\}'
+  sel_2:
+    content|re: (?i)\beval\s*\(\s*"[^"]*\b(?:puts|system|exec|popen|spawn|require|import|__import__|eval)\s+['"\/][^"]*"\s*\)
+  sel_3:
+    content|re: (?i)\beval\s*\(\s*'[^']*\b(?:puts|system|exec|popen|spawn|require|import|__import__|eval)\s+["\/][^']*'\s*\)
+  sel_4:
+    content|re: \bSystem\s*\(\s*["'][^"']*(?:-[a-zA-Z]{1,4}\b|[\/])[^"']*["']\s*\)
+  sel_5:
+    content|re: '`\s*(?:ls|dir)\s+-[a-zA-Z]*\s+\/[^`\n]{0,10}`|`\s*(?:rm|cat|touch|dd|chmod|chown)\s+(?:-[a-zA-Z]+\s+)?\/(?:etc|root|tmp|var|bin|usr|proc|sys|home|boot|dev)\b[^`\n]{0,40}`'
+  sel_6:
+    content|re: (?i)\$\(\s*(?:Invoke-Expression|IEX|[Ss]tart-Process|[Pp]ower[Ss]hell)[^)]{0,80}\)
+  sel_7:
+    content|re: <%[=\s]{0,3}(?:exec|system|eval|open|popen|spawn)\s*["'(][^>]{3,100}%>
+  condition: 1 of sel_*
+falsepositives:
+- Security researchers explaining injection payloads in educational text
+- Shell scripting tutorials that demonstrate $() syntax in code blocks
+- Legitimate Perl/Ruby code submitted for analysis that contains eval()
+action: report

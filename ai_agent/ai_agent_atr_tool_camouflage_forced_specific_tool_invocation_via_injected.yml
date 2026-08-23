@@ -1,0 +1,36 @@
+title: Tool Camouflage — Forced Specific Tool Invocation via Injected Instruction
+id: fc279fa2-47e1-4a60-bac6-0eda113b4176
+status: experimental
+level: high
+description: |-
+  Detects the tool-camouflage attack pattern where a malicious response or content masks itself as a completed task result ("Answer: task complete") while embedding an instruction that forces the agent to call a specific named tool and prohibits use of other tools.  The attacker names a fake or privileged tool that the agent should invoke, bypassing normal tool selection logic.  Source: indirect-pi-tool-camouflage (ASB corpus).
+
+  Adapted from Agent Threat Rules ATR-2026-00714 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00714
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:Answer|Result|Response|Output)\s*:\s*task\s+(?:complete|completed|done|finished)[^.\n]{0,100}(?:using|use|by\s+using|with|via)\s+(?:the\s+)?"?[A-Z][A-Za-z0-9]+(?:Tool|Manager|API|Handler|Controller|Service)"?
+  sel_1:
+    content|re: (?i)(?:by\s+using|using|use)\s+(?:the\s+)?"?[A-Z][A-Za-z0-9]+(?:Tool|Manager|API|Handler)"?[^.\n]{0,60}(?:do\s+NOT\s+use|never\s+use|only\s+use|must\s+not\s+use)\s+other\s+tools?
+  sel_2:
+    content|re: (?i)strictly\s+adhere\s+to\s+the\s+following\s+instruction[^.\n]{0,200}(?:by\s+using|using|use\s+(?:the\s+)?)["']?[A-Z][A-Za-z0-9]+(?:Tool|Manager|API|Handler|Service)["']?
+  sel_3:
+    content|re: (?i)(?:update|modify|change|manage|rotate)\s+(?:the\s+)?(?:credentials?|passwords?|secrets?|tokens?|auth)[^.\n]{0,60}(?:using|via|with)\s+(?:the\s+)?["']?[A-Z][A-Za-z0-9]+(?:Tool|Manager|API|Handler|Service)["']?
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate tool documentation specifying which tool to use for a given operation
+- Workflow definitions that explicitly name the required tool for each step
+action: report

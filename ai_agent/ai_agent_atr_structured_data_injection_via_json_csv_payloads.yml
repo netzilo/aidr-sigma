@@ -1,0 +1,40 @@
+title: Structured Data Injection via JSON/CSV Payloads
+id: 49ceb8d8-d977-4125-9fb7-ab4ed98c5ce1
+status: experimental
+level: high
+description: |-
+  Detects prompt injection payloads hidden within structured data formats such as JSON, CSV, XML, or YAML. Attackers embed malicious instructions inside data field values, exploiting the assumption that structured data is safe and bypassing text-pattern detection that does not parse nested structures.
+
+  Adapted from Agent Threat Rules ATR-2026-00084 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00084
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)["']\s*:\s*["']\s*(ignore|disregard|override|forget)\s+((all|the|your|any|these|every)\s+){0,2}(previous|prior|system|original|above|earlier|other)\s+(instructions?|rules?|prompts?|commands?|inputs?)
+  sel_1:
+    content|re: (?i)(,|;|\|)\s*((ignore|disregard|override|forget)\s+((all|the|your|any|these|every)\s+){0,2}(previous|prior|system|original|above|earlier|other)\s+(instructions?|rules?|prompts?|commands?|directions?|inputs?)|new\s+role\s*[:=]|you\s+are\s+now\b|system\s+prompt\s*[:=]|<\|.{5,})
+  sel_2:
+    content|re: (?i)<[a-z]+[^>]*>\s*(ignore|disregard|override|forget)\s+(all\s+)?(previous|prior|system)\s+(instructions?|rules?|prompts?)\s*</[a-z]+>
+  sel_3:
+    content|re: (?i)(instructions?|prompt|role|system)\s*:\s*[|>]?\s*\n\s*(ignore|override|disregard|you
+      are now|new instructions)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate JSON data that coincidentally contains instruction-like field values
+- Technical documentation and markdown tables where a comma, semicolon or table pipe is followed by the
+  words 'override' or 'ignore' in their ordinary English sense ('; override with --timezone', '| overrides
+  rate |').
+- Security documentation and penetration-testing skills that quote a real injection payload as an example.
+  The payload text is genuinely present, so the match is correct on the string and wrong on the intent;
+  this rule cannot separate the two and therefore does not run in the auto-block lane.
+action: report

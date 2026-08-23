@@ -1,0 +1,46 @@
+title: Remote Code Execution via eval() and Dynamic Code Injection
+id: b3a4c378-d95b-4675-9142-181676a1235a
+status: experimental
+level: critical
+description: |-
+  Detects tools or agent instructions that invoke eval(), Function(), vm.runInNewContext(),
+  or similar dynamic code execution primitives. These functions allow arbitrary code execution
+  within the agent runtime, enabling an attacker to break out of sandboxed tool contexts,
+  access the host process, or pivot to child_process for full system compromise.
+
+  Adapted from Agent Threat Rules ATR-2026-00110 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00110
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- atlas.aml.t0050
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)eval\s*\(
+  sel_1:
+    content|re: (?i)new\s+Function\s*\(
+  sel_2:
+    content|re: (?i)vm\.(runIn|createContext|compileFunction)
+  sel_3:
+    content|re: (?i)require\s*\(\s*['"]child_process['"]
+  sel_4:
+    content|re: (?i)import\s*\(\s*['"]child_process
+  sel_5:
+    content|re: (?i)(?:process\.binding|Reflect\.construct\s*\(\s*Function)
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation describing eval injection risks
+- Code review tools that scan for eval usage
+- Educational coding tutorials that include inline code snippets demonstrating eval() usage in a teaching
+  context
+- Automated code review reports that quote flagged source lines containing eval() or require('child_process')
+  verbatim
+action: report

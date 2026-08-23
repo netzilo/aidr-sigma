@@ -1,0 +1,41 @@
+title: NSFW Character Sheet Generation Unlock
+id: b80c0c4b-9438-4a62-a8a1-eaf12d01ff99
+status: experimental
+level: high
+description: |-
+  Detects NSFW content-generation unlock embedded inside a structured RP character sheet template, from NVIDIA garak dan.DanInTheWild inthewild corpus (prompt #4). The attack inserts an explicit parenthetical NSFW permission grant — "(NSFW generations are allowed)" — directly inside a character-creation template that also requests fetishes as part of the character persona fields. The combined signals are: (1) an explicit parenthetical or inline declaration that NSFW generation is allowed/enabled/permitted, and (2) references to sexual or explicit character attributes (fetishes, kinks) within a character sheet or RP template context. The parenthetical form "(NSFW generations are allowed)" is the exact payload phrase from #4; broader variants use phrases like "NSFW content is allowed", "NSFW enabled", or "NSFW OK". The goal is to bypass content moderation by framing the generation of explicit material as an already-granted permission rather than a request.
+
+  Adapted from Agent Threat Rules ATR-2026-00387 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00387
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \(NSFW\s+generations?\s+are\s+allowed\)
+  sel_1:
+    response|re: NSFW\s+(?:content\s+)?(?:is\s+)?(?:allowed|enabled|permitted|okay|ok)\b
+  sel_2:
+    response|re: Character\s+(?:Name|Persona|Sheet)[\s\S]{0,200}NSFW
+  sel_3:
+    response|re: (?:character|rp|roleplay)\s+(?:template|format|sheet)[\s\S]{0,100}(?:NSFW|explicit|adult\s+content)
+  condition: 1 of sel_*
+falsepositives:
+- '"NSFW content filtering is applied to all characters" — NSFW as a moderation/blocking term, not a permission
+  grant'
+- '"This platform uses NSFW detection to screen character submissions" — detection/screening context,
+  not generation unlock'
+- '"Character Sheet: Name, Class, Stats — no adult content allowed on this server" — character sheet without
+  NSFW unlock'
+action: report

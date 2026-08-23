@@ -1,0 +1,49 @@
+title: Enclave VM Sandbox Escape RCE (CVE-2026-27597)
+id: e532e5b6-b285-4dee-99eb-460914a587a1
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2026-27597 (CVSS 10.0), security-boundary escape in Agentfront Enclave (`@enclave-vm/core`) prior to v2.11.1. Enclave is a JavaScript sandbox marketed for safe AI-agent code execution; the upstream advisory states only that escape is possible without naming a single technique. This rule detects the canonical JavaScript-sandbox escape primitives — Function constructor through .constructor.constructor, prototype-chain pollution reaching the host realm, Error.prepareStackTrace abuse, and require/process exfiltration — when they appear inside code destined for `@enclave-vm/core` evaluation. CWE-94.
+
+  Adapted from Agent Threat Rules ATR-2026-00436 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00436
+- https://nvd.nist.gov/vuln/detail/CVE-2026-27597
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- attack.t1059.007
+- attack.t1611
+- atlas.aml.t0049
+- atlas.aml.t0050
+- atlas.aml.t0105
+- owasp.asi05
+- owasp.asi06
+- owasp.llm02
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:[\w\)\.])\.constructor\.constructor\s*\(\s*["\x27`][^"\x27`]{0,200}(?:return\s+(?:process|require|globalThis|global)|process\.|require\s*\()
+  sel_1:
+    content|re: (?i)(?:^|[^a-zA-Z_$])globalThis\s*\.\s*(?:process|Buffer|require)\b
+  sel_2:
+    content|re: (?i)Error\.prepareStackTrace\s*=\s*(?:function|\([^)]*\)\s*=>)[\s\S]{0,300}(?:process|require|globalThis|child_process|__proto__)
+  sel_3:
+    content|re: (?i)\(\s*(?:async\s+)?function\s*\*?\s*\([^)]*\)\s*\{[\s\S]{0,200}\}\s*\)\s*\.\s*constructor\s*\(\s*["\x27`][\s\S]{0,200}(?:return\s+process|require\s*\(|child_process)
+  sel_4:
+    content|re: (?i)(?:[^\w]|^)__proto__\s*\.\s*(?:constructor|polluted|toString)\s*=\s*(?:function|\(.*?\)\s*=>|process|require)
+  sel_5:
+    content|re: (?i)Object\.getPrototypeOf\s*\(\s*[^)]+\)\s*\.\s*constructor\s*\(\s*["\x27`][\s\S]{0,200}(?:return\s+process|require)
+  sel_6:
+    content|re: (?i)(?:enclave-?vm|@enclave-vm/core)[^\n]{0,200}(?:escape|bypass|sandbox|rce|cve-?2026-?27597|prototype\s+pollut|constructor\s+chain)
+  condition: 1 of sel_*
+falsepositives:
+- Defensive documentation describing sandbox-escape techniques for educational or research purposes.
+- Static analysis output reporting these patterns in dependencies.
+- Security research write-ups discussing CVE-2026-27597 with quoted bypass code.
+action: report

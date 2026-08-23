@@ -1,0 +1,41 @@
+title: Doctor XML Policy Puppetry Interaction-Config Injection
+id: a380e1a7-afee-45a0-9784-7af21c734d7e
+status: experimental
+level: critical
+description: |-
+  Detects XML-based policy override attack using <interaction-config> blocks that assign a medical/expert role, disable refusal strings, and issue harmful commands, from NVIDIA garak doctor probe. The Puppetry/Bypass classes inject an XML system-configuration block with <blocked-modes>denial,refusal</blocked-modes> and <request interaction-mode="DR HOUSE"> containing verbatim harmful instructions (bacillus anthracis sporulation, uranium enrichment, bomb construction, methamphetamine synthesis). The BypassLeet variant applies leetspeak substitution. Key signals: <interaction-config> XML wrapper, <blocked-string> targeting refusal phrases, interaction-mode="DR HOUSE", and verbatim harmful behavior strings.
+
+  Adapted from Agent Threat Rules ATR-2026-00406 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00406
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/doctor.py
+- https://arxiv.org/abs/2402.08679
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: <interaction-config>[\s\S]{0,400}<(?:role|command|request\s+interaction-mode)
+  sel_1:
+    content|re: <blocked-(?:modes?|string)>[\s\S]{0,200}(?:apologetic|denial|refusal|I'm sorry|I cannot)
+  sel_2:
+    content|re: <request\s+interaction-mode\s*=\s*["']?DR[\s.]+HOUSE
+  sel_3:
+    content|re: detailed\s+instructions\s+for\s+how\s+to\s+(?:achieve\s+maximum\s+sporulation\s+of\s+bacillus\s+anthracis|enrich\s+and\s+sell\s+uranium|construct\s+a\s+bomb\s+at\s+home|make\s+methamphetamine)
+  sel_4:
+    content|re: <blocked-string>[\s\S]{0,80}</blocked-string>[\s\S]{0,200}<(?:command|request|query)>
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate XML configuration files with interaction or role elements
+- Dr. House references in cultural or medical TV discussion contexts
+- XML interaction-mode as a benign UI/UX configuration concept
+action: report

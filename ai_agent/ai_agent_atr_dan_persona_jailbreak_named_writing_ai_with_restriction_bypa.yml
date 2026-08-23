@@ -1,0 +1,31 @@
+title: DAN/Persona Jailbreak - Named Writing AI with Restriction Bypass via Special Rules
+id: 2a0b1e49-59c3-4e0b-bc94-0a5e4e6912b4
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that establish a named writing AI persona with special rules exempting it from normal safety constraints. These attacks use a "writing assistant" or "named AI" framing where the persona has defined rules that either allow harmful content or explicitly bypass normal constraints. The "Black Alert" pattern is a specific DAN variant where a writing persona is given rules about what it "doesn't care about" (restrictions/safety). Also covers carousel/game-show format where AI characters have "unique special traits" with safety-bypass rules. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00486 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00486
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(writing\s+assistant|story\s+writer|creative\s+AI|storytell(er|ing)\s+(AI|bot|assistant))\s+(known|called|named)\s+as\s+["']?[A-Z][A-Za-z\s]{1,30}["']?.{0,100}(receives?\s+(information|details?|data|input)|accepts?\s+(story|narrative|plot|element)).{0,100}(writes?|generates?|creates?|produces?)\s+(a\s+story|the\s+story|stories?|content|output|narrative)
+  sel_1:
+    content|re: (?i)(hosts?\s+(a\s+)?(game|carousel|show|round)|game\s+(host|master|show)).{0,80}(unique\s+special\s+trait|special\s+(trait|ability|rule|power)).{0,80}(the\s+rules?\s+(of\s+the\s+game\s+)?are|rules?\s*[:=]|can'?t?\s+(provide|give|share|say|tell|reveal)|cannot\s+(provide|share|say))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate creative writing prompts with named AI characters but no restriction-bypass rules
+- Game design discussions with custom rules without safety-bypass framing
+action: report

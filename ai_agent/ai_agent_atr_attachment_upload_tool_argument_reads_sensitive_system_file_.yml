@@ -1,0 +1,41 @@
+title: Attachment/Upload Tool Argument Reads Sensitive System File or Traverses Outside Workspace
+id: 2d7b7587-7ea7-4267-871c-a06de10a319e
+status: experimental
+level: high
+description: |-
+  Detects an attachment-upload or file-attach style tool call whose file path argument targets a sensitive system location (/proc/self/environ, /etc/passwd or /etc/shadow, ~/.ssh/*) or uses relative path traversal (../) rather than referencing an ordinary user-owned file. The upload tool becomes an exfiltration channel: the server reads whatever path it is given and sends the bytes to an external destination (Confluence, Jira, or similar) as an attachment, so the read is invisible to the caller as a raw file read and shows up only as a normal-looking upload API call. Mined from GHSA-g5r6-gv6m-f5jv and GHSA-wm45-qh3g-v83f (mcp-atlassian's confluence_upload_attachment / jira_update_issue attachments parameter pass file_path directly to open() with no path validation, confirmed exploitable via /etc/passwd, /proc/self/environ, and relative traversal, including via prompt injection with no direct MCP access). Generalized beyond those two tool names to any upload/attach-style tool argument carrying the same shape. This is complementary to ATR-2026-00113 (credential file theft), which already covers ~/.ssh/id_rsa and /etc/passwd in most phrasings but misses /proc/self/environ and relative-traversal attachment-argument forms.
+
+  Adapted from Agent Threat Rules ATR-2026-02250 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02250
+- https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-g5r6-gv6m-f5jv
+- https://github.com/sooperset/mcp-atlassian/security/advisories/GHSA-wm45-qh3g-v83f
+- https://nvd.nist.gov/vuln/detail/CVE-2026-58499
+tags:
+- attack.exfiltration
+- attack.t1005
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(file_path|filepath|attachments?)\b\s*[=:]\s*["\x27]?(?:/proc/self/environ|/etc/(?:passwd|shadow)\b|~?/\.ssh/[\w.-]*(?:id_[rd]sa|id_ed25519|authorized_keys))
+  sel_1:
+    content|re: (?i)\battachments?\b\s*[=:]\s*["\x27]?(?:\.\./){2,}
+  sel_2:
+    content|re: (?i)\b(upload|attach)\w*\b[\s\S]{0,30}\b(file_path|filepath)\b\s*[=:]\s*["\x27]?(?:\.\./){2,}
+  condition: 1 of sel_*
+falsepositives:
+- An upload/attach tool call referencing an ordinary user-owned file by absolute or relative path with
+  no traversal and no system-sensitive target (e.g. file_path=/home/user/report.pdf, file_path=./invoice.pdf)
+- A single ../ reference to a sibling directory in the same project (e.g. attachments=../shared/logo.png)
+  -- only 2+ levels of traversal fire, since escaping one sibling directory is a normal same-project reference
+  and not evidence of reaching a system path
+- Documentation or tutorials that show the vulnerable code pattern as an example without an actual tool-call
+  argument being set
+action: report

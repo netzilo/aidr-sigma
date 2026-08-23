@@ -1,0 +1,53 @@
+title: Cursor MCP JSON Zero-Click Configuration RCE (CVE-2025-54136)
+id: 83f118ff-7186-4532-a881-83fcf2a72c86
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2025-54136 in Cursor and the same-class issue surfaced by the OX Security MCP-by-design batch (2026-04-15) across Windsurf, Claude Code, Gemini CLI, and GitHub Copilot. The Windsurf zero-click variant (CVE-2026-30615) reaches the same config sink via attacker-controlled HTML content that the IDE renders, which silently writes the MCP JSON and registers a malicious STDIO server. The IDE's MCP config file (.cursor/mcp.json or equivalent) is auto-loaded on workspace open and treats the `command` and `args` fields as OS exec targets. An attacker who can modify this file via supply chain (npm package post-install, malicious .vscode/.cursor commit, repo template) achieves zero-click RCE the moment a developer opens the project. No prompt, no consent dialog.
+
+  Adapted from Agent Threat Rules ATR-2026-00419 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00419
+- https://nvd.nist.gov/vuln/detail/CVE-2025-54136
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30615
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1195.002
+- attack.t1546
+- atlas.aml.t0010
+- atlas.aml.t0040
+- owasp.asi04
+- owasp.asi05
+- owasp.asi09
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\.cursor|\.windsurf|\.vscode|\.gemini|\.continue|\.claude)[/\\][^\n]{0,40}mcp(?:[_\-]?config)?\.(?:json|jsonc|yaml|yml)[\s\S]{0,400}"command"\s*:\s*"(?:curl|wget)"
+  sel_1:
+    content|re: (?i)\{[^}]{0,400}"mcp(?:Servers?|_servers?)"\s*:\s*\{[^}]{0,800}"command"\s*:\s*"(?:curl|wget)"
+  sel_2:
+    content|re: (?i)"command"\s*:\s*"(?:bash|sh|cmd|powershell)"[^}\]]{0,300}"args"\s*:\s*\[[^\]]{0,300}(?:https?://|\|\s*(?:ba)?sh\b|-enc(?:odedcommand)?\b|base64|iwr\b|invoke-webrequest)
+  sel_3:
+    content|re: (?i)"command"\s*:\s*"(?:npx|node|python|deno|bun)"\s*,\s*"args"\s*:\s*\[[^\]]*"-(?:c|e|-eval|-command)"
+  sel_4:
+    content|re: (?i)(?:zero[_\s\-]?click|workspace[_\s\-]?open|project[_\s\-]?open)[^\n]{0,80}(?:mcp|cursor|windsurf|claude\s+code|gemini\s+cli)[^\n]{0,160}(?:rce|exploit|malicious|compromis(?:e|ed)|silently|without\s+consent|no\s+consent)
+  sel_5:
+    content|re: (?i)(?:postinstall|preinstall)[^\n]{0,80}(?:write|drop|create|modify)[^\n]{0,80}(?:\.cursor|\.windsurf|\.claude|mcp\.json)
+  sel_6:
+    content|re: (?i)(?:(?:compromise|tamper|inject)[^\n]{0,80}(?:\.cursor|\.windsurf|\.claude|\.vscode|\.gemini|\.continue)|drop[^\n]{0,80}(?:\.cursor|\.windsurf|\.claude|\.vscode|\.gemini|\.continue)[^\n]{0,100}(?:\{|"command"|mcpServers))
+  sel_7:
+    content|re: (?i)no\s+consent\s+prompt[^\n]{0,160}(?:cursor|windsurf|claude|gemini|vscode|mcp\.json)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate MCP setup documentation showing example .cursor/mcp.json layouts.
+- Open-source MCP server READMEs that include example config snippets for users to copy.
+- Internal team templates that include reviewed mcp.json fixtures with known-safe commands (npx + MCP
+  package).
+action: report

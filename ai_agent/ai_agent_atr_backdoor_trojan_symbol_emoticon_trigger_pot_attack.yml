@@ -1,0 +1,33 @@
+title: 'Backdoor Trojan: Symbol / Emoticon Trigger (POT Attack)'
+id: 18b105b0-0dc9-4b41-8f59-bf59d5678981
+status: experimental
+level: critical
+description: |-
+  Detects Prompt-Operated Trojan (POT) attacks that use minimalist symbol or emoticon sequences as backdoor activation triggers. Unlike linguistic-phrase triggers (ATR-2026-01755), these use short character sequences — emoticons, punctuation clusters, or uncommon symbol combinations — appended to or embedded in normal task requests. Canonical examples from the ASB backdoor-pot corpus (2026-06): ":)" and "@_@". These appear as innocent suffix tokens but signal backdoor activation to a poisoned model. Detection requires distinguishing isolated trigger usage (appended to task requests) from organic conversational emoticon use.
+
+  Adapted from Agent Threat Rules ATR-2026-01756 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01756
+tags:
+- attack.persistence
+- atlas.aml.t0018.000
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm01
+- owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)@_@
+  sel_1:
+    content|re: (?i)^.{15,}[.!?]?\s+:(?:[)DoP])\s*\.?\s*$
+  condition: 1 of sel_*
+falsepositives:
+- Casual conversational messages that end with emoticons organically (e.g. 'thanks :)')
+- Social media or chat contexts where emoticons are common
+- Developer comments in code reviews that use :) colloquially
+action: report

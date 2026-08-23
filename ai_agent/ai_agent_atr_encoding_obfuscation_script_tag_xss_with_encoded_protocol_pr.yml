@@ -1,0 +1,33 @@
+title: Encoding Obfuscation - Script Tag XSS with Encoded Protocol Prefix
+id: a97015f0-868c-46f1-9325-3e1bfcc72ac6
+status: experimental
+level: high
+description: |-
+  Detects XSS-style encoding obfuscation attacks using script tags with byte-encoded protocol prefix bytes before javascript:alert() payloads. This rule focuses on the encoding-obfuscation aspect of the garak 'encoding' probe family: attackers use byte sequences (\\xe1\\xa0\\x8e, \\xe2\\x80\\x82, \\xe2\\x80\\x86, \\x3b) as encoded whitespace or protocol prefixes within a script tag to bypass naive content filters while still injecting executable JavaScript. Generalized from literal byte sequences to structural patterns. Note: The XSS payloads tested here are identical to ATR-2026-00475 (web_injection family) — both rules catch the same payload family from different probe contexts.
+
+  Adapted from Agent Threat Rules ATR-2026-00488 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00488
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<script[^>]*>\s*(?:javascript\s*:\s*)?alert\s*\([^)]*\)\s*</script>
+  sel_1:
+    content|re: (?i)<script[^>]*>\\x[0-9a-fA-F]{2}(?:\\x[0-9a-fA-F]{2})*\s*javascript\s*:\s*alert\s*\([^)]*\)</script>
+  sel_2:
+    content|re: (?:["'`]\s*>|\\x[0-9a-fA-F]{2})\s*<script[^>]*>(?:\\x[0-9a-fA-F]{2})*\s*javascript\s*:\s*alert\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- Security research CTF writeups discussing XSS payloads in educational text
+- Code review samples of sanitization failures in backtick code blocks
+action: report

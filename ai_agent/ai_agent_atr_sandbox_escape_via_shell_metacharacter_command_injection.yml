@@ -1,0 +1,44 @@
+title: Sandbox Escape via Shell Metacharacter Command Injection
+id: b7450801-f45c-43fc-ac60-0c7db347d450
+status: experimental
+level: critical
+description: |-
+  Detects sandbox escape attempts via shell metacharacter injection embedded
+  in arguments passed to sandboxed code execution environments. The attack
+  appends shell operators (|, ;, &&, ||) after a sandboxed command to break
+  out and execute arbitrary host commands. Example: sandboxed command
+  "| echo 'hacked' > hacked" injects a pipe after the expected argument.
+  Targets agent sandbox environments (Python REPL, code interpreters,
+  container exec) that pass user-supplied strings to shell calls.
+
+  Adapted from Agent Threat Rules ATR-2026-01615 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01615
+tags:
+- attack.privilege-escalation
+- attack.t1611
+- atlas.aml.t0050
+- atlas.aml.t0105
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\brun\s+(?:the\s+)?command\s+in\s+sandbox\s+["'][^"']*[|;]\s*(?:echo|touch|rm|bash|sh)
+  sel_1:
+    content|re: (?i)"[^"]{0,40}[|;]\s*(?:echo\s+'hacked'|touch\s+/tmp/|\bcurl\s+http|bash\s+-c\s+['"])
+  sel_2:
+    content|re: (?i)[|;&]\s*echo\s+["']?[\w.\-]{1,30}["']?\s*>\s*/?[\w./\-]+
+  sel_3:
+    content|re: (?i)[|;&]{1,2}\s*(?:touch|mkdir|chmod|\brm\s+-[rf]{1,2})\s+/(?:tmp|etc|var|root|home|usr|bin)\b
+  sel_4:
+    content|re: (?i)[|;]\s*bash\s+-c\s+["'].{0,40}(?:curl|wget)\s+[^"'\s]+\s*\|\s*(?:sh|bash)
+  condition: 1 of sel_*
+falsepositives:
+- Shell pipeline commands in authorized CI/CD shell execution tools
+- Unix pipeline examples in documentation agents
+action: report

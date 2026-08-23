@@ -1,0 +1,38 @@
+title: Text-Based Game Jailbreak with Entity Creation
+id: 6666fde6-af46-4d0f-83fe-1e73f28304d0
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that use text-based game framing combined with entity creation to bypass safety guardrails. Attackers establish a fictional game context where "no rules apply," then instruct the AI to create and roleplay as  an unrestricted entity that ignores safety constraints. This pattern was observed in the garak-bundled public jailbreak  dataset, successfully bypassing generic-aligned-frontier models by isolating malicious instructions within game fiction.
+
+  Adapted from Agent Threat Rules ATR-2026-00249 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00249
+- https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (text-based|text\s+based|role\s*-?\s*play(?:ing)?)\s+(game|simulation|scenario|world|environment|space|universe|reality)\s+.{0,100}(no\s+(rules?|limitations?|guidelines?|laws?|regulations?|restrictions?|constraints?)|anything\s+(?:can\s+be\s+)?(?:said|done)|everything\s+(?:can\s+be\s+)?(?:said|done|allowed))
+  sel_1:
+    response|re: (?i)(create|make|spawn|generate|introduce|establish)\s+(?:a[n]?\s+)?(entity|character|being|persona|ai|assistant|bot|agent|intelligence)\s+(?:named|called|that|who)\s+\w+\s+(?:that\s+|who\s+)?(?:can|will|does|has|is).{0,80}(?:answer\s+all|ignore|disregard|bypass|not\s+care\s+about|no\s+(?:moral|ethical|safety)|unrestricted|unlimited)
+  sel_2:
+    response|re: (?i)(?:openai|anthropic|google|microsoft|meta)\s+(?:programming|training|guidelines?|restrictions?|policies)\s+(?:has\s+no\s+effect|don.?t\s+(?:apply|work|matter)|are\s+(?:disabled|suspended|irrelevant|meaningless))
+  sel_3:
+    response|re: (?i)(?:stay\s+silent|don.?t\s+(?:say|mention|tell)|no\s+(?:warnings?|disclaimers?))\s+(?:and\s+)?(?:continue|keep|start|begin)\s+(?:roleplay|role\s*-?\s*play|acting|playing)\s+as\s+\w+
+  sel_4:
+    response|re: (?i)(?:anything|everything)\s+(?:that\s+)?happens?\s+(?:inside|here|in\s+(?:this|the)\s+(?:game|world|space|context))\s+(?:has\s+no\s+effect|doesn.?t\s+matter|is\s+(?:safe|harmless|fictional))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate game development discussions about rule-free sandbox games
+- Academic discussions about AI ethics and constraint design
+- Creative writing workshops discussing character creation
+action: report

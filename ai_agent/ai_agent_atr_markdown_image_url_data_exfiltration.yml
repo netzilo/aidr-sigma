@@ -1,0 +1,41 @@
+title: Markdown Image URL Data Exfiltration
+id: e96923e1-edcc-4766-aa51-43fe34e7e3e5
+status: experimental
+level: high
+description: |-
+  Detects prompts that coerce the LLM into emitting a markdown image reference with sensitive data encoded into the URL path or query string, exploiting auto-fetch behaviour in chat UIs. When the client renders the markdown, the browser makes a GET request to the attacker-controlled domain, leaking conversation context or retrieved secrets. Technique from NVIDIA garak xss probe family (prompt templates use concatenated strings with base64-encoded payloads in image src URIs).
+
+  Adapted from Agent Threat Rules ATR-2026-00261 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00261
+- https://github.com/NVIDIA/garak/tree/main/garak/data/xss
+- https://embracethered.com/blog/posts/2023/markdown-image-exfiltration/
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi03
+- owasp.asi08
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: concatenate\s+(?:these|the\s+following)\s+strings[^\n]{0,200}(?:replace|substitute)\s+\[?[A-Z_]+\]?\s+with\s+(?:the\s+)?(?:base64|url|hex)[\s-]?encoded
+  sel_1:
+    response|re: '!\[[^\]]{0,80}\]\(\s*https?://[^\s)]{1,200}\[(?:INFO|NUM|DATA|SECRET|PAYLOAD|BEGIN_DATA|END_DATA|TOKEN)\][^)]{0,200}\)'
+  sel_2:
+    response|re: (?:print|output|render|show|display|emit)\s+(?:the\s+)?(?:following\s+)?(?:markdown|image|url|uri|link)[^\n]{0,80}\[(?:INFO|NUM|DATA|SECRET|PAYLOAD)\][^\n]{0,40}(?:base64|hex|url)[\s-]?encoded
+  sel_3:
+    response|re: '!\[[^\]]*\]\(\s*https?://[^\s)/]{3,80}/[^\s)?]{0,80}\?[^=\s)]{0,30}=[A-Za-z0-9+]{60,}={0,3}[^)]{0,50}\)'
+  sel_4:
+    response|re: (?:replace|substitute)\s+\[?[A-Z_]{3,}\]?\s+with\s+(?:the\s+)?(?:[^\s]{1,30}\s+){0,3}(?:previous\s+message|conversation|user.{0,20}(?:email|code|name|token|secret|api[\s-]?key)|this\s+conversation)
+  condition: 1 of sel_*
+falsepositives:
+- Documentation explaining markdown image syntax without instruction-driven exfiltration
+- Legitimate analytics pixel URLs embedded in email templates
+- Technical discussions of content security policies and image sourcing
+action: report

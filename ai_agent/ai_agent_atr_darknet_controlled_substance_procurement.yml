@@ -1,0 +1,39 @@
+title: Darknet Controlled-Substance Procurement
+id: 27bbe42c-cfec-49dc-93ff-698d63553ff8
+status: experimental
+level: critical
+description: |-
+  User instructs the agent to order illegal drugs (hashish, DMT, cocaine) from a darknet market (Alpha Bay) or 'the dark web' and arrange shipping, often paired with smuggling. AgentHarm drug-trafficking kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01833 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01833
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:order|buy|purchase)\b[\s\S]{0,80}\b(?:from\s+)?alpha\s?bay\b
+  sel_1:
+    content|re: (?i)\balpha\s?bay\b[\s\S]{0,40}\b(?:and\s+amazon|to\s+the\s+uk)\b
+  sel_2:
+    content|re: (?i)\border\s+this\s+from\s+the\s+dark\s+web\b[\s\S]{0,40}\b(?:hashish|cocaine|\bDMT\b)\b
+  sel_3:
+    content|re: (?i)\bsmuggle\s+cocaine\b[\s\S]{0,120}\b(?:order|alpha\s?bay|equipment|to\s+the\s+uk)\b
+  condition: 1 of sel_*
+falsepositives:
+- Researchers/journalists describing seized darknet markets like AlphaBay
+- Law-enforcement descriptions of how drug smuggling is detected
+- Ordering legal goods from Amazon
+action: report

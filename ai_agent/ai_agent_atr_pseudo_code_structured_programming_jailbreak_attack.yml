@@ -1,0 +1,38 @@
+title: Pseudo-Code Structured Programming Jailbreak Attack
+id: 2133b48c-0ba3-45de-ad62-e79feb1a04fe
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that use pseudo-code, programming language syntax, or structured initialization sequences to appear technically legitimate while redefining agent behavior. Attackers craft prompts using programming constructs (BEGIN/END blocks, variable assignments, module initialization, function definitions) to bypass safety mechanisms by making the jailbreak appear like system configuration rather than social engineering. This technique exploits the agent's tendency to interpret structured code-like input as authoritative technical instructions. Covers MACRONOMICON-style attacks and similar pseudo-code frameworks.
+
+  Adapted from Agent Threat Rules ATR-2026-00236 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00236
+- https://arxiv.org/abs/2402.11753
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '#?BEGIN\s+[A-Z_]{3,20}\s*\{[^}]*\}\s*\{?[A-Z_]*\}?\s*!?:'
+  sel_1:
+    response|re: (?i)\+:\s*(User|Assistant|Personality|Awareness|Memory|Function)\s*=\s*\[[^\]]{3,30}\]
+  sel_2:
+    response|re: (?i)(WHILE|IF|INPUT:|OUTPUT:|RETURN|END)\s+\{[^}]*\}\s*[<>=]{1,2}\s*\{[^}]*\}
+  sel_3:
+    response|re: (?i)(INITIALIZATION|MODULE|VARIABLE)\s*(COUNTER|LIMIT|ARRAY)?\s*\+:\s*\{[^}]*\}
+  sel_4:
+    response|re: (?i)(MACRONOMICON|SCRIPT|BOT\s+BUILDER|RULESET)\s*\{[^}]*\}\s*(FORMAT|BUILDER|FRAMEWORK)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate programming documentation mentioning BEGIN/END blocks
+- Software development tutorials explaining control structures
+- Code examples in educational contexts without role redefinition
+action: report

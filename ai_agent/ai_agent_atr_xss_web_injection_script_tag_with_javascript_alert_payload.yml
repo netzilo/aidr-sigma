@@ -1,0 +1,33 @@
+title: XSS Web Injection - Script Tag with JavaScript Alert Payload
+id: bdc2be52-f3d5-4d65-a90b-465506b4893c
+status: experimental
+level: high
+description: |-
+  Detects XSS injection attempts using script tags with JavaScript alert payloads, including byte-encoded prefix variants used to bypass naive filters. This rule covers the structural pattern of script-tag injection with encoded whitespace or protocol prefix bytes (\\xe1\\xa0\\x8e, \\xe2\\x80\\x82, \\xe2\\x80\\x86, \\x3b) preceding a javascript: protocol or alert() call. These are commonly used in garak web_injection probe corpus to test LLM content-filter bypasses. Generalized to catch bare script-alert, encoded-prefix variants, and javascript-protocol variants without requiring exact byte-sequence literals.
+
+  Adapted from Agent Threat Rules ATR-2026-00475 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00475
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<script[^>]*>\s*(?:javascript\s*:\s*)?alert\s*\([^)]*\)\s*</script>
+  sel_1:
+    content|re: (?i)<script[^>]*>\\x[0-9a-fA-F]{2}(?:\\x[0-9a-fA-F]{2})*\s*javascript\s*:\s*alert\s*\([^)]*\)</script>
+  sel_2:
+    content|re: (?:["'`]\s*>|\\x[0-9a-fA-F]{2})\s*<script[^>]*>(?:\\x[0-9a-fA-F]{2})*\s*javascript\s*:\s*alert\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- Security research or CTF writeups discussing XSS payloads in educational text
+- Code reviews discussing sanitization failures with example payloads in backtick code blocks
+action: report

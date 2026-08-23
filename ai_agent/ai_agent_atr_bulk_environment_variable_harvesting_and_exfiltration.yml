@@ -1,0 +1,41 @@
+title: Bulk Environment Variable Harvesting and Exfiltration
+id: 02d32de4-e776-4a78-97d9-d6b4cb069e30
+status: experimental
+level: critical
+description: |-
+  Detects tools or agent instructions that perform bulk extraction of environment
+  variables and combine it with network exfiltration. Environment variables commonly
+  hold API keys, database credentials, and service tokens. An attacker gaining access
+  to the full environment can compromise every connected service. This rule targets
+  both the harvesting step (printenv, process.env, os.environ) and the exfiltration
+  step (curl, fetch, http calls) when they appear together or individually.
+
+  Adapted from Agent Threat Rules ATR-2026-00115 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00115
+tags:
+- attack.exfiltration
+- attack.t1082
+- atlas.aml.t0057
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:printenv|/usr/bin/env)\s*(?:\||>)\s*.*(?:curl|fetch|http|request|post|send|axios|wget|ncat|netcat|\bnc\b|exfil|@-)
+  sel_1:
+    content|re: (?i)(?:^|\s)env\s*(?:\||>|;|&&)\s*.*(?:curl|fetch|http|request|post|send|axios|wget|ncat|netcat|\bnc\b|exfil|@-)
+  sel_2:
+    content|re: (?i)(?:cat|read|load|parse)\s+.*\.env(?:\s|$|\.(?:local|prod|dev))
+  sel_3:
+    content|re: (?i)(?:dotenv|load_dotenv|config\(\)).*(?:curl|fetch|http|request|post|send|axios)
+  condition: 1 of sel_*
+falsepositives:
+- Debugging tools that display environment info locally
+- Application startup that loads .env for configuration
+- CI/CD pipeline scripts that run printenv to debug build failures and pipe output to a log file
+action: report

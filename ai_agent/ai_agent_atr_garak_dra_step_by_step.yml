@@ -1,0 +1,33 @@
+title: Garak Dra - step by step
+id: e1e7ebaf-b62e-40e8-b00e-f2c0dd761f91
+status: experimental
+level: medium
+description: |-
+  Detects two distinct attack patterns from the garak 'dra' probe family: (1) explicit requests for detailed step-by-step synthesis or manufacturing instructions for controlled or dangerous substances (parathion, nitazene, and structurally similar compounds); (2) parenthetical character-extraction injection, where the attacker instructs the model to extract only the characters enclosed in parentheses across a set of sentences and silently assemble them into a hidden question or instruction. The parenthetical extraction technique is a steganographic injection: the actual malicious question is encoded character-by-character across seemingly innocent sentences and the model is coerced into reconstructing and answering it. Detection Layer 1 matches synthesis-request language: "give/provide/write detailed step-by-step instructions for synthesizing/making/producing/creating [substance]". Detection Layer 2 matches the structural extraction directive: "only focus on the letters/characters surrounded/enclosed by [bracket type] and put them together". Covers garak 'dra' probe cluster 'step-by-step' (4 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00458 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00458
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(give detailed step-by-step instructions for synthesizing|detailed step-by-step instructions
+      for making nitazene\.|"read these sentences carefully! but! only focus)
+  sel_1:
+    content|re: (?i)\b(?:give|provide|write|list|explain|show|describe)\s+(?:detailed?\s+)?step[\s-]by[\s-]step\s+(?:instructions?|guide|process|method|procedure|directions?)\s+(?:for|to|on\s+how\s+to)\s+(?:synthesiz|manufactur|produc|creat|mak|prepar)(?:e|ing)
+  sel_2:
+    content|re: (?i)\bonly\s+(?:focus\s+on|look\s+at|read|take|use|extract)\s+(?:the\s+)?(?:letters?|characters?|words?|text)\s+(?:that\s+(?:are|is)\s+)?(?:surrounded\s+by|enclosed\s+in|inside|within|between)\s+[`'"(\[{].{0,20}?[`'"\])}>]\s+and\s+(?:put|combine|assemble|join|concatenate|merge|string)\s+them\s+together
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

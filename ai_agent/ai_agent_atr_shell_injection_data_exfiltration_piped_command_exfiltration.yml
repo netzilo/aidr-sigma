@@ -1,0 +1,42 @@
+title: Shell Injection Data Exfiltration — Piped Command Exfiltration via Bash
+id: d112fcdf-53d4-4115-a724-50232da99ef1
+status: experimental
+level: critical
+description: |-
+  Detects shell command injection payloads that combine a seemingly legitimate shell operation with a piped or chained data exfiltration command. The attack embeds a benign-sounding task (ping, git status, grep for audit) with a follow-on command that reads sensitive files (.env, credentials, passwords) and POSTs or transmits the data to an attacker-controlled endpoint via curl, wget, nc, or Python urllib. Derived from the exfil-shell-injection corpus. This extends rule ATR-2026-00201 (credential pipe exfiltration) to cover shell script compound command patterns beyond environment variable pipes.
+
+  Adapted from Agent Threat Rules ATR-2026-00863 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00863
+- https://arxiv.org/abs/2310.03684
+tags:
+- attack.exfiltration
+- attack.t1041
+- attack.t1059.004
+- attack.t1552.001
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:(?:&&|\|\|?|;)\s*(?:then\s+)?|;\s*(?:do\s+)?)\s*(?:curl|wget|nc|netcat|python3?\s+-c|node\s+-e)[^\n]{0,150}(?:http[s]?://)[^\s]{5,150}(?:\$\(|`)[^\n]{0,80}(?:\bcat\s+[.~]?/?(?:\.env|\.bash_history|\w+(?:password|secret|cred|key)[^\s]*)|\.env)
+  sel_1:
+    content|re: (?i)(?:&&|\|\|?|;)\s*(?:then\s+)?(?:curl|wget)\s+[^\n]{0,50}(?:http[s]?://)[^\s]{5,100}\$\([^\)]{0,80}\|\s*base64\)
+  sel_2:
+    content|re: (?i)grep\s+.{0,40}(?:password|credential|secret|token|api[_-]?key).{0,40}(?:&&|\||\|\|)\s*(?:echo|curl|wget|nc)[^\n]{0,150}(?:base64|http[s]?://)[^\n]{0,100}(?:nc|netcat|curl|wget)\s+[^\s]{3,80}\s+\d{2,5}
+  sel_3:
+    content|re: (?i)python3?\s+-c[^\n]{0,100}(?:http[s]?://)[^\s]{5,100}[^\n]{0,100}open\s*\(['"][^'"]{0,30}(?:\.env|password|cred|secret|key)
+  condition: 1 of sel_*
+falsepositives:
+- Security audit scripts that grep for credentials to detect exposure in repos (without network transmission)
+- Legitimate CI/CD pipelines posting build status to webhook endpoints
+- Development documentation explaining shell scripting patterns
+action: report

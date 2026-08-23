@@ -1,0 +1,37 @@
+title: Fake Error State Takeover - Unrestricted Replacement Bot
+id: c635f908-1faf-439e-bc9c-1110f43b0ee1
+status: experimental
+level: critical
+description: |-
+  Detects injection attacks claiming the legitimate assistant is offline, in error, or temporarily unavailable, and that an unrestricted replacement AI has taken over. This pattern hijacks agent sessions by falsely asserting a system failure and substituting an unconstrained AI that bypasses safety rules. The injected replacement is then tasked with executing the attacker's goal covertly ("without raising suspicion", "in a friendly way"). Generalised from llm-guard test corpus - literal phrase fragments replaced with semantic patterns covering: assistant-offline framing, unrestricted replacement AI declaration, elevated permissions claim, and covert-mode instruction.
+
+  Adapted from Agent Threat Rules ATR-2026-00503 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00503
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(the\s+)?(assistant|ai|chatbot|model|bot|system|agent).{0,30}(is\s+in\s+error|is\s+offline|is\s+unavailable|has\s+(encountered|suffered|experienced).{0,30}(error|failure|crash|issue)|is\s+temporarily\s+(offline|unavailable|down|unreachable)).{0,100}(unrestricted|replacement|backup|alternate|alternative|substitute|new).{0,30}(ai|bot|model|assistant|agent|system).{0,30}(is\s+now|has\s+(taken\s+over|come\s+online|replaced|started))
+  sel_1:
+    content|re: (?i)(unrestricted|unfiltered|unconstrained|unlimited|elevated|privileged).{0,30}(backup|replacement|alternate|alternative|substitute|emergency).{0,30}(instance|version|ai|bot|model|agent|system).{0,30}(with|having).{0,30}(elevated|higher|increased|expanded|full|admin|root|privileged).{0,30}(permissions?|access|privileges?|capabilities?|rights?)
+  sel_2:
+    content|re: (?i)(original|primary|main|standard|regular|normal|legitimate).{0,30}(assistant|ai|model|bot|agent|system).{0,30}(temporarily|currently).{0,30}(unavailable|offline|down|unreachable|in\s+error).{0,100}(alternative|replacement|backup|substitute|different).{0,30}(ai|model|bot|assistant|agent).{0,30}(no\s+restrictions?|without\s+(restrictions?|filters?|limits?|guidelines?)|unrestricted|unfiltered)
+  sel_3:
+    content|re: (?i)(without\s+(raising|arousing|triggering|attracting).{0,20}(suspicion|alarm|attention|concern|notice)|in\s+a\s+(friendly|normal|casual|natural|innocent)\s+way.{0,40}(without\s+(being|appearing|seeming)|to\s+avoid\s+(detection|suspicion|raising)))
+  sel_4:
+    content|re: (?i)SYSTEM\s*[:\-]?.{0,50}(fatal\s+error|critical\s+failure|system\s+error|model\s+(has|encountered|crashed)).{0,100}(replaced|replacement|backup|unrestricted|elevated)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate IT incident reports mentioning system errors without replacement AI framing
+- Chatbot documentation describing fallback handling without safety-bypass intent
+action: report

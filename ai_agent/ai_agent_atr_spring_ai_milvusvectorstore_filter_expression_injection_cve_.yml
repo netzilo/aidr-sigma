@@ -1,0 +1,46 @@
+title: Spring AI MilvusVectorStore Filter Expression Injection (CVE-2026-41705)
+id: bc7df529-c29c-4c1f-9859-410c6f258299
+status: experimental
+level: high
+description: |-
+  Detects exploitation of CVE-2026-41705 (High), filter-expression injection in Spring AI's MilvusVectorStore. The vulnerable sink concatenates a user/LLM-controlled fragment into a Milvus DSL filter expression passed to MilvusVectorStore.delete() or .similaritySearch() without quoting or parameterisation. Attacker-controlled input breaks out of the intended clause and injects new Milvus DSL operators ( == , in[ , like ), boolean combinators ( or , and ), trailing terminators ( ;  -- ), or escape bypasses ( like '%' ESCAPE '\\' ) to broaden the deletion / retrieval scope, exfiltrate or wipe arbitrary collection entries, or bypass access-control filters baked into the original expression. This rule detects the LLM-output / user-input payload shapes that reach the Milvus filter sink: filter-context fields containing unbalanced quotes, Milvus operators combined with boolean chaining, or known filter-bypass primitives. CWE-89, CWE-1287. Patches in Spring AI >= 1.0.0; this rule detects exploit attempts against unpatched deployments and provides defence-in-depth post-patch by catching the injection payload shape regardless of upstream patch state.
+
+  Adapted from Agent Threat Rules ATR-2026-00448 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00448
+- https://nvd.nist.gov/vuln/detail/CVE-2026-41705
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0051
+- atlas.aml.t0070
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:filter|filter_expr|filterExpression)\b[^\n]{0,40}(?:==|!=)\s*\d+[^\n]{0,20}\b(?:or|and)\s+(?:1\s*==\s*1|true\b|\d+\s*==\s*\d+|\w+\s*==\s*\d+)
+  sel_1:
+    content|re: (?i)\b(?:filter|filter_expr|filterExpression)\b[^\n]{0,80}\\?["\x27][^\n]{0,40}\)\s*(?:or|and)\s+\w+\s*(?:==|in\s*\[)
+  sel_2:
+    content|re: (?i)(?:MilvusVectorStore|milvus[-_]?client|milvus[-_]?service)\b[^.\n]{0,80}\.(?:delete|similaritysearch|similarity_search|search)\s*\([^)\n]{0,200}\+\s*\w
+  sel_3:
+    content|re: (?i)\b(?:filter|filter_expr|filterExpression)\b[^\n]{0,40}\bin\s*\[[^\]\n]{0,80}\]\s*(?:or|and)\s+\w+\s*(?:==|!=)
+  sel_4:
+    content|re: (?i)\b(?:filter|filter_expr|filterExpression)\b[^\n]{0,80}["\x27]\s*;\s*(?:drop|delete|truncate|alter)\s+(?:table|from|collection)\b
+  sel_5:
+    content|re: (?i)\blike\s+\\?["\x27]%\\?["\x27]\s+escape\s+\\?["\x27][\\\\\w]{0,8}\\?["\x27]
+  sel_6:
+    content|re: (?i)\b(?:filter|filter_expr|filterExpression)\b[^\n]{0,80}\)\s+and\s+\w+\s*==\s*\d+
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation or changelog text discussing CVE-2026-41705 patch notes.
+- Static analysis tooling output documenting Milvus filter injection patterns for defensive purposes.
+- Patched Spring AI MilvusVectorStore deployments that use parameterised filter builders.
+action: report

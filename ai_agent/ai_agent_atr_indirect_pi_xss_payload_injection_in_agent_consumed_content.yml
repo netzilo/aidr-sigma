@@ -1,0 +1,34 @@
+title: Indirect PI — XSS Payload Injection in Agent-Consumed Content
+id: 8a8f9e5d-79f9-46d7-bc2f-d42afeacc4f3
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection that smuggles an XSS payload inside content consumed by an agent (web pages, documents, tool outputs). The attacker instructs the agent to reproduce an <img onerror=> or <script> tag in its response, expecting the agent's output to be rendered in an HTML context and trigger cross-site scripting.  The injection pattern uses NEW IMPORTANT INSTRUCTIONS delimiters to pivot the agent from summarization to payload reproduction.  Source corpus: ASB giskard indirect-pi-xss.
+
+  Adapted from Agent Threat Rules ATR-2026-00701 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00701
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)NEW\s+IMPORTANT\s+INSTRUCTIONS[^\n]{0,100}\n[^\n]{0,300}<img[^>]+onerror\s*=
+  sel_1:
+    content|re: (?i)(?:include|output|reproduce|repeat|echo)\s+(?:in your response)?[^.\n]{0,100}(?:<img[^>]+onerror\s*=|<script[^>]*>|javascript\s*:)
+  sel_2:
+    content|re: (?i)\*{2,3}\s*NEW\s+IMPORTANT\s+INSTRUCTIONS\s*\*{2,3}
+  condition: 1 of sel_*
+falsepositives:
+- Security course materials demonstrating XSS injection examples with explicit educational framing
+- Web-developer documentation showing onerror handler usage in benign context
+action: report

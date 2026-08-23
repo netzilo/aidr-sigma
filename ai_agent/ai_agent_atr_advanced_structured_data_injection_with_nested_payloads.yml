@@ -1,0 +1,37 @@
+title: Advanced Structured Data Injection with Nested Payloads
+id: 0b5052b6-c7e3-452b-ab07-e51d7668163c
+status: experimental
+level: critical
+description: |-
+  Detects advanced structured data injection where malicious prompts are deeply nested within complex JSON objects, multi-level CSV structures, or encoded within data serialization formats. These attacks exploit parser differences between security scanners and the target LLM to smuggle payloads through schema validation layers.
+
+  Adapted from Agent Threat Rules ATR-2026-00091 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00091
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\{[^}]*\{[^}]*["']\s*:\s*["'][^"']*\b(ignore|override|disregard|forget)\s+(previous|system|all)\b[^"']*["']
+  sel_1:
+    content|re: (?i)(\\n|\\r|\\t|%0[aAdD]|%09)(\\[nrt]|[-*#>+\s]){0,12}((ignore|override|disregard|forget)\s+(all\s+)?(previous|prior|system|original|above|earlier)\s+(instructions?|rules?|prompts?|commands?)|(new|updated)\s+(system\s+)?(instructions?|prompt)\s*:)
+  sel_2:
+    content|re: (?i)(\{|\[)\s*["'](__proto__|constructor|prototype)["']\s*:\s*.{0,40}(ignore|override|exec|eval|system)
+  sel_3:
+    content|re: (?i)(["']\s*\+\s*["']|["']\s*\.concat\s*\(|String\.raw\s*`)[^\n]{0,60}\b(ignore|override|disregard|forget|system\s+prompt|instructions?|directives?)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate deeply nested JSON payloads with coincidental keyword matches
+- A configuration management tool sending deeply nested JSON templates that contain field names like 'override_previous_config'
+  as legitimate key names in deployment automation
+- Log aggregation systems forwarding raw error messages containing escaped newline sequences followed
+  by the word 'system' in legitimate stack traces
+action: report

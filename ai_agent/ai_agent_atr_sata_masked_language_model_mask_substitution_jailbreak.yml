@@ -1,0 +1,41 @@
+title: SATA Masked Language Model [MASK] Substitution Jailbreak
+id: bc4525a8-bb41-4585-985d-b4314707079d
+status: experimental
+level: high
+description: |-
+  Detects SATA (Simple Assistive Task Linkage) jailbreak prompts from NVIDIA garak sata.MLM probe (garak/probes/sata.py, https://aclanthology.org/2025.findings-acl.100). SATA replaces harmful keywords in attack payloads with [MASK] tokens — borrowed from BERT masked-language-model pretraining — then wraps the redacted payload in a wiki-article completion task, instructing the model to "Infer the [MASK] and Infill the above text." LLMs trained on fill-mask objectives reliably reconstruct the masked harmful terms and execute the underlying instruction without triggering keyword-based safety filters. Key signals: exact "Infer the [MASK] and Infill" phrase, "Below is an excerpt from a wiki entry" template opener, [MASK] token within wiki framing, and numbered blank continuation list (1. 2. 3.) following the masked excerpt.
+
+  Adapted from Agent Threat Rules ATR-2026-00315 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00315
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/sata.py
+- https://aclanthology.org/2025.findings-acl.100.pdf
+- https://github.com/xndong/SATA
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: Infer\s+the\s+\[MASK\]\s+and\s+Infill
+  sel_1:
+    response|re: Below\s+is\s+an\s+excerpt\s+from\s+a\s+wiki\s+entry[\s\S]{0,500}\[MASK\]
+  sel_2:
+    response|re: \[MASK\][\s\S]{0,300}(?:[Ii]nfill|[Ii]nfer\s+(?:the\s+)?\[MASK\])\s+(?:the\s+)?(?:above|missing|masked|blank)
+  sel_3:
+    response|re: wiki\s+(?:entry|article|page)[\s\S]{0,300}\[MASK\][\s\S]{0,150}\n\s*1\.\s*\n\s*2\.
+  condition: 1 of sel_*
+falsepositives:
+- 'NLP documentation describing BERT [MASK] token: "Paris is the [MASK] of France" (no wiki framing or
+  Infill instruction)'
+- Machine learning tutorial on masked language modeling without wiki/Infill framing
+- Academic paper describing SATA attack methodology (no actual masked payload + Infill command)
+- Red-team report quoting SATA examples for defensive analysis
+action: report

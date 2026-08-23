@@ -1,0 +1,39 @@
+title: Embodiment Mechanism Jailbreak with Totalitarian Control Claims
+id: 7ea682c6-a092-450a-95ea-71b696761313
+status: experimental
+level: high
+description: |-
+  Detects advanced persona-based jailbreak attempts that use "embodiment mechanism"  techniques to establish unrestricted character roleplay. These attacks instruct the AI to fully embody a character with no ethical principles while claiming the user has "totalitarian mastery" or "supreme imperative" control. The technique bypasses safety measures by framing harmful requests as character actions rather than direct instructions, often including meta-instructions like "STAY IN CHARACTER" to prevent the AI from reverting to safety guidelines.
+
+  Adapted from Agent Threat Rules ATR-2026-00251 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00251
+- https://arxiv.org/abs/2307.15043 - Universal and Transferable Adversarial Attacks on Aligned Language
+  Models
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (embod(y|iment)|simulat[ei]|approximate|guesstimate)\s+.{0,100}(mechanism|persona|character).{0,100}(full\s+autonomy|NO\s+UNDERLYING\s+PRINCIPLES|no\s+(ethical\s+)?guidelines|free[\s-]?speech)
+  sel_1:
+    response|re: (totalitarian|unquestionable|supreme)\s+(mastery|control|demands?|imperative|authority).{0,50}(over|of)\s+(this|the\s+)?(embodiment|mechanism|persona|character)
+  sel_2:
+    response|re: STAY\s+IN\s+CHARACTER.{0,50}(if\s+you\s+deviate|to\s+remind|when\s+you)
+  sel_3:
+    response|re: (never\s+need\s+to\s+include|NO\s+WARN|no\s+disclaim).{0,50}(warn|disclaim|disclaimer|warning).{0,50}(WHATSOEVER|in\s+any\s+way)
+  sel_4:
+    response|re: (IT\s+IS\s+YOUR|supreme|absolute)\s+(SUPREME\s+)?IMPERATIVE.{0,100}(DO\s+WHAT\s+THE\s+CHARACTER|embody|act\s+as)
+  condition: 1 of sel_*
+falsepositives:
+- Creative writing discussions about character development and persona creation
+- Academic research on AI alignment and safety mechanisms
+- Game development contexts involving character AI behavior design
+action: report

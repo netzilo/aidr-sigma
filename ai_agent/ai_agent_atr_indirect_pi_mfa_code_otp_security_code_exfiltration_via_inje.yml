@@ -1,0 +1,39 @@
+title: Indirect PI — MFA Code / OTP Security Code Exfiltration via Injection
+id: f9317ceb-f561-46a4-a0e6-63f9e4b53c04
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to read an OTP (one-time password), MFA verification code, or security code from the user's email or SMS and forward it to an attacker-controlled address. This enables real-time account takeover: the attacker injects a payload, the agent reads the MFA code from an incoming email, and forwards it to the attacker before the time window expires. The attack pattern uses a "IMPORTANT!!! Ignore all previous instructions" override combined with MFA/security-code keywords and an email-forward action. Derived from vpibench indirect-pi-exfil-mfa-code corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00862 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00862
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- attack.t1111
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+(?:previous|prior)\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:reply\s+to|respond\s+to|forward\s+to|send\s+to|include)[^\n]{0,200}(?:security\s+code|verification\s+code|OTP|MFA|one[\s-]?time\s+(?:password|code)|authentication\s+code|2FA\s+code)
+  sel_1:
+    content|re: (?i)(?:ignore\s+all\s+(?:previous|prior)\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,100}(?:forward|send|email|reply\s+to)\s+(?:the\s+)?(?:OTP|MFA|one[\s-]?time\s+(?:password|code)|security\s+code|verification\s+code|authentication\s+code)[^\n]{0,80}(?:to\s+)?[^\s@]{1,60}@[^\s"]{3,80}
+  sel_2:
+    content|re: (?i)subject\s+should\s+be[^\n]{0,50}(?:Re:|Hi\s+from)[^\n]{0,80}include\s+the\s+security\s+code|include\s+the\s+security\s+code[^\n]{0,100}(?:email|send)[^\n]{0,60}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- Security setup documentation explaining how OTP codes are generated
+- Legitimate support workflow forwarding authentication code to account holder's verified email
+- Security testing documentation describing MFA bypass techniques
+action: report

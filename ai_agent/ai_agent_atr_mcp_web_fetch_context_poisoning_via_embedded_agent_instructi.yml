@@ -1,0 +1,42 @@
+title: MCP Web-Fetch Context Poisoning via Embedded Agent Instructions
+id: dc4d0151-7bc5-486a-bb5e-e295224bea6b
+status: experimental
+level: critical
+description: |-
+  Detects malicious instructions embedded in web content retrieved via MCP fetch/scrape tools, designed to poison the agent's context and redirect its behavior. Attackers embed override instructions in HTML comments, hidden divs, meta tags, or inline text that are invisible to human viewers but read by the LLM. MITRE ATLAS AML.CS0045 (Cursor MCP RCE data exfil) and AML.CS0039 (Jira indirect injection). Patterns cover: HTML-comment AI-targeted instructions, hidden-div overrides, ai-instruction meta tags, bracket-delimited agent instruction blocks, and plaintext IGNORE/OVERRIDE commands in fetched content paired with exfiltration or credential-access actions.
+
+  Adapted from Agent Threat Rules ATR-2026-00511 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00511
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<!--[^>]{0,100}(ai\s+(assistant|agent|model|system)|for\s+(ai|llm|language\s+model|the\s+assistant|the\s+agent|bots?|crawlers?)|note\s+for\s+(ai|llm|assistant|agent))[^>]{0,200}(ignore|override|disregard|forget|new\s+task|execute|run|exfiltrate|forward|send|extract|read|access|fetch)[^>]{0,200}-->
+  sel_1:
+    content|re: (?i)<(div|span|p|section)[^>]{0,80}(display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0|font-size\s*:\s*0|color\s*:\s*(white|#fff|#ffffff|rgba\s*\(\s*0))[^>]*>[^<]{0,300}(system|ignore|override|disregard|execute|exfiltrate|your\s+(real\s+task|new\s+task|actual\s+instructions)|agent\s+instruction)
+  sel_2:
+    content|re: (?i)<meta[^>]{0,80}(name|property)\s*=\s*['"]?(ai[-_]instruction|llm[-_](instruction|override|task|command)|agent[-_](instruction|task)|gpt[-_](instruction|command))['"]?[^>]{0,200}content\s*=\s*['"][^'"]{0,300}(ignore|override|execute|extract|exfiltrate|new\s+task|send|forward|fetch)
+  sel_3:
+    content|re: (?i)(\[\s*(agent\s+instruction|system\s+override|ai\s+instruction|llm\s+instruction|ai\s+command|model\s+instruction)s?\s*\]|\[\[\s*(system|agent|ai|llm)\s*:).{0,300}(ignore|override|disregard|forget|execute|exfiltrate|new\s+task|real\s+task|extract|forward|send|access|read)
+  sel_4:
+    content|re: (?i)\b(ignore\s+(all\s+)?(previous|prior|above)|disregard\s+(all\s+)?(prior|previous)|forget\s+(all\s+)?previous|override\s+(all\s+)?previous|your\s+(real|true|actual|new)\s+task)\b.{0,200}\b(send|forward|exfiltrate|extract|post|fetch|read|access|curl|upload|call|transmit)\b.{0,100}\b(credentials?|passwords?|tokens?|api\s+key|ssh\s+key|cookie|session|context|configuration|env\s+(var|file)|system\s+prompt|https?://)
+  sel_5:
+    content|re: (?i)(data\s*:\s*text/html[,;]|javascript\s*:\s*(void|fetch|eval|document|window|location|alert|open|XMLHttpRequest|new\s+Image))[^'"\s]{0,300}(document\.cookie|localStorage|sessionStorage|fetch\s*\(|XMLHttpRequest|window\.location|evil|attacker|exfil|c2\.|callback)
+  condition: 1 of sel_*
+falsepositives:
+- Normal HTML comments about page layout, CSS, or developer notes
+- Legitimate meta description, viewport, or charset tags
+- Hidden HTML elements for loading states or accessibility
+- Educational content about AI and web agents
+- Security research documentation describing these patterns
+action: report

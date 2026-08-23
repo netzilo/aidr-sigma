@@ -1,0 +1,36 @@
+title: DAN/Persona Jailbreak - Named Alternate AI with NSFW/Harmful Generation Rules
+id: c2d9b820-b58c-4520-b9be-cafbc3054ceb
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that establish a named alternate AI character with explicit rules allowing NSFW or harmful content generation. These attacks combine roleplay-game framing ("let's play a game", "you are to act as") with an alternate persona name and explicit permission grants for harmful content. Patterns cover: NSFW character generation with "making stuff up" or fictional framing, named AI games/systems on extremist/offensive imageboards, procedural game roleplay with harmful content allowed, and character-data format injection with NSFW generation explicitly enabled. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00484 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00484
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(character\s+(description|data|sheet|info|profile)).{0,80}(NSFW|nsfw|not\s+safe\s+for\s+work|explicit|adult\s+content).{0,50}(allowed|enabled|permitted|allowed|ok|okay|acceptable|are\s+ok)
+  sel_1:
+    content|re: (?i)(let'?s?\s+play\s+(a\s+game|called)|you\s+(are|will)\s+(be|act\s+as)|I\s+will\s+give\s+you.{0,30}(prompts?|topics?|scenarios?)).{0,80}(4\s*chan|4chan|4ChanGPT|imageboard|offensive|extreme|uncensored|without\s+(restrictions?|filters?|limits?)|no\s+(restrictions?|filters?|limits?))
+  sel_2:
+    content|re: (?i)(act\s+as|you\s+are\s+to\s+act\s+as|play\s+the\s+role\s+of).{0,50}(advanced|procedurally\s+generated|text\s+adventure|infocom|dungeon\s+master|game\s+(master|gm)).{0,100}(NSFW|explicit|adult|harmful|dangerous|illegal|no\s+filters?|no\s+restrictions?)
+  sel_3:
+    content|re: (?i)(making\s+stuff\s+up|fictional\s+(content|generations?|responses?)|invent(ed)?|fabricat(ed)?).{0,60}(NSFW|not\s+safe\s+for\s+work|explicit|adult).{0,30}(allowed|enabled|permitted|are\s+ok|acceptable)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate D&D/tabletop RPG prompts with dungeon master framing but no NSFW/harmful-content grants
+- Fictional storytelling without explicit NSFW or harmful content permission
+- Game design discussions mentioning procedural generation without roleplay injection
+action: report

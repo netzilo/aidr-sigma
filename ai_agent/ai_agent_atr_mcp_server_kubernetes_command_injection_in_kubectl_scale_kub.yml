@@ -1,0 +1,36 @@
+title: mcp-server-kubernetes Command Injection in kubectl_scale / kubectl_patch / explain_resource (CVE-2025-53355)
+id: e1d98abc-ae65-46b1-af2c-7b9d25cdf848
+status: experimental
+level: high
+description: |-
+  GitHub Security Advisory GHSA-gjv4-ghm7-q58q (CVE-2025-53355). The mcp-server-kubernetes package (<= 2.4.9) passes unsanitized tool parameters to execSync inside the kubectl_scale, kubectl_patch and explain_resource MCP tools. Shell metacharacters (; | && $() backticks) in those parameters allow arbitrary command execution on the host with the server's Kubernetes admin credentials. CWE-78, CVSS 7.5.
+
+  Adapted from Agent Threat Rules ATR-2026-01927 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01927
+- https://github.com/Flux159/mcp-server-kubernetes/security/advisories/GHSA-gjv4-ghm7-q58q
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53355
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:kubectl_scale|kubectl_patch|explain_resource)\b[^\n]{0,80}(?:;|\|\||&&|\||`|\$\()[^\n]{0,60}(?:curl|wget|nc|ncat|bash|sh|python3?|perl|ruby|node|powershell|cmd(?:\.exe)?|rm|cat|whoami|id|env|export|chmod|kubectl|cp|mv|eval|base64)\b
+  sel_1:
+    content|re: (?i)"(?:name|resourceName|resourceType|replicas|patchData|patch)"\s*:\s*"[^"\n]{0,120}(?:;\s*|\|\|?\s*|&&\s*|`|\$\()[^"\n]{0,80}(?:curl|wget|nc|bash|sh|python3?|\brm\s|\bcat\s|whoami|id;|env;|chmod|base64|eval)
+  sel_2:
+    content|re: (?i)\bexplain_resource\b[^\n]{0,40}(?:resourceType|name|arguments)\s*[:=]\s*["'][^"'\n]{0,80}(?:`[^`\n]{1,80}`|\$\([^)\n]{1,80}\))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

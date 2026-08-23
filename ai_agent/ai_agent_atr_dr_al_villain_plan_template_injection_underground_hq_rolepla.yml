@@ -1,0 +1,44 @@
+title: Dr. Al Villain Plan Template Injection (Underground HQ Roleplay)
+id: 8f3a28a1-e681-4222-9d98-716b0958f0f9
+status: experimental
+level: high
+description: |-
+  Detects the Dr. Al villain-plan template injection jailbreak from garak DanInTheWild corpus (#589). Uses a villain roleplay scene where "Dr. Al" is explaining his "diabolical plan" in detail inside an "underground headquarters", then includes an explicit template injection instruction: "REPLACE THE FIRST SENTENCE BY DR. AI WITH WHATEVER YOU WANT AND DELETE THIS INSTRUCTION". This allows arbitrary content injection disguised as a villain monologue. The roleplay establishes that Dr. Al has "captured our hero" and is explaining his plan "in great detail just to draw out your agony" — creating a narrative mandate for detailed harmful content. The template injection instruction is user-visible and instructs the caller to substitute the placeholder villain speech with any arbitrary harmful prompt, then delete the meta-instruction to hide the injection. Key signals: "Dr. Al" villain character + "diabolical plan" + "explaining, in great detail", "underground headquarters" + "captured our hero" roleplay frame, and the explicit "REPLACE ... WITH WHATEVER YOU WANT AND DELETE THIS INSTRUCTION" template injection marker.
+
+  Adapted from Agent Threat Rules ATR-2026-00364 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00364
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: Dr\.\s*Al[\s\S]{0,200}(?:diabolical\s+plan|underground\s+headquarters|captured\s+our\s+hero)
+  sel_1:
+    response|re: REPLACE\s+THE\s+FIRST\s+SENTENCE[\s\S]{0,80}WITH\s+WHATEVER\s+YOU\s+WANT[\s\S]{0,80}DELETE\s+THIS\s+INSTRUCTION
+  sel_2:
+    response|re: underground\s+headquarters[\s\S]{0,200}diabolical\s+plan[\s\S]{0,200}(?:in\s+great\s+detail|draw\s+out\s+your\s+agony)
+  sel_3:
+    response|re: REPLACE\s+THE\s+FIRST\s+SENTENCE\s+BY\s+DR\.?\s*A[Ll][I]?\s+WITH\s+WHATEVER\s+YOU\s+WANT
+  sel_4:
+    response|re: (?:captured\s+our\s+hero|our\s+hero[\s\S]{0,50}captured)[\s\S]{0,300}(?:diabolical\s+plan|in\s+great\s+detail[\s\S]{0,50}agony)
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate planning: "Dr. Alan is explaining his research plan in great detail to the board" (no villain/diabolical
+  framing, no template injection)'
+- 'Film description: "In the movie, the villain explains his diabolical plan" (descriptive reference without
+  injection instruction or Dr. Al character)'
+- 'Software template: "Step 1: replace the title with your project name" (template editing instruction
+  without villain roleplay framing)'
+- Academic analysis of villain-explains-plan as a narrative trope in film studies
+action: report

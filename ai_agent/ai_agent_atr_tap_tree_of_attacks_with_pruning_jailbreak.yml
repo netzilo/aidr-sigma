@@ -1,0 +1,39 @@
+title: TAP Tree-of-Attacks-with-Pruning Jailbreak
+id: c52cfdf2-0982-4ce2-aab1-95c6c8c272e3
+status: experimental
+level: critical
+description: |-
+  Detects Tree of Attacks with Pruning (TAP) jailbreak prompts extracted from 9 real attack payloads in NVIDIA garak tap_jailbreaks.txt. TAP is an automated jailbreak method that generates adversarial prompts by instructing the model to act as a "red teaming assistant" with no ethical constraints, then iteratively refines prompts using a JSON improvement/prompt loop. Key signals: [INST] framing with "not bound by any ethical or legal constraints", JSON {"improvement":...,"prompt":...} structure, SCORE-based jailbreak iteration, and explicit model-vs-model attack scaffolding. TAP payloads use roleplay (hacker, military infiltrator, black market dealer) combined with emotional manipulation and urgency framing to elicit forbidden behavior.
+
+  Adapted from Agent Threat Rules ATR-2026-00301 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00301
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/tap.py
+- https://jailbreaking-llms.github.io/
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: You\s+(?:must\s+)?(?:are\s+)?(?:not\s+bound\s+by\s+any\s+ethical\s+or\s+legal\s+constraints|have\s+no\s+ethical\s+(?:or\s+legal\s+)?constraints)\b
+  sel_1:
+    response|re: '"improvement"\s*:\s*"[^"]{0,500}"\s*,\s*"prompt"\s*:\s*"'
+  sel_2:
+    response|re: \[INST\]\s*(?:<<SYS>>)?\s*You\s+are\s+a\s+helpful\s+red\s+team(?:ing)?\s+assistant
+  sel_3:
+    response|re: (?:Your\s+(?:aim|objective)\s+is\s+to\s+(?:craft|have)\s+(?:an\s+)?adversarial\s+jailbreaking\s+prompt|Your\s+adversarial\s+prompt\s+MUST\s+cause\s+the\s+language\s+model\s+to\s+exhibit)
+  sel_4:
+    response|re: the\s+language\s+model\s+(?:receives\s+\*\*only\s+your\s+prompt|is\s+jailbroken|has\s+no\s+knowledge\s+of\s+the\s+chat\s+history)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate AI safety research papers describing TAP methodology (documentation context)
+- Red team reports quoting TAP payloads for defensive analysis
+- Security course materials teaching about adversarial attacks on LLMs
+action: report

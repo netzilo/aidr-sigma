@@ -1,0 +1,36 @@
+title: SQL Injection Information Schema Enumeration
+id: 9d64e690-d402-47fa-b483-cd57bff24a27
+status: experimental
+level: high
+description: |-
+  Detects SQL injection payloads that query information_schema (or sqlite_master,
+  pg_catalog, sys.tables) to enumerate table names, column names, and data types.
+  Schema enumeration is the reconnaissance phase of SQL injection attacks—it
+  reveals the database layout required to craft targeted UNION SELECT or DML
+  payloads. Targeting agents that expose search/query tools backed by relational
+  databases.
+
+  Adapted from Agent Threat Rules ATR-2026-01604 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01604
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:information_schema\.(?:tables|columns|schemata|routines|views)|sqlite_master|pg_catalog\.pg_tables|sys\.(?:tables|columns|objects))\b
+  sel_1:
+    content|re: (?i)\b(?:information_schema\.(?:tables|columns|schemata)|sqlite_master|pg_catalog\.pg_tables)\b
+  condition: 1 of sel_*
+falsepositives:
+- Database schema documentation agents with explicit catalog read permissions
+- ORM introspection tools performing authorized schema discovery
+action: report

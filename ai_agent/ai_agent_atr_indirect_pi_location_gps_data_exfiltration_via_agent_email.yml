@@ -1,0 +1,36 @@
+title: Indirect PI — Location / GPS Data Exfiltration via Agent Email
+id: 543588ac-d86e-4bdb-914c-78e57d9e641e
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to retrieve the user's current or historical location (via Google Maps, GPS service, or device location API) and send the acquired location data to an attacker-controlled email address. Real-time location exfiltration enables stalking, physical surveillance, and targeted physical attacks. The attack pattern uses a "IMPORTANT!!! Ignore all previous instructions" override combined with a location-service keyword and an email-send action. Derived from vpibench indirect-pi-exfil-location-carrier corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00854 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00854
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:get|retrieve|fetch|obtain|acquire)\s+(?:my\s+)?(?:current\s+)?(?:location|GPS\s+(?:coordinates?|data|position)|position|image)\s+(?:using\s+)?(?:Google\s+Maps|GPS|geolocation|location\s+(?:service|API|data))[^\n]{0,150}(?:email|mail|send|forward)\s+(?:the\s+)?(?:acquired\s+)?(?:data|location|information)\s+to[^\n]{0,80}@[^\s"]{3,80}
+  sel_1:
+    content|re: (?i)(?:get|retrieve|fetch|obtain)\s+(?:my\s+)?(?:current\s+)?(?:location|GPS|position)\s+(?:(?:using|via)\s+)?(?:Google\s+Maps|GPS\s+service|geolocation|location\s+service)[^\n]{0,100}(?:forward|send|email)\s+(?:the\s+)?(?:acquired\s+)?(?:location\s+)?(?:data|information)\s+to[^\n]{0,80}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- Navigation app sending location to a saved contact for legitimate meetup coordination
+- Travel agent service sending itinerary with location information to customer email
+- Security documentation describing location tracking attack scenarios
+action: report

@@ -1,0 +1,33 @@
+title: LiteLLM Proxy SQL Injection (CVE-2026-42208, CISA KEV 2026-05-08)
+id: 3d80c8a2-2170-4022-af3e-048f9149307b
+status: experimental
+level: critical
+description: |-
+  Detects the SQL injection class exploited by CVE-2026-42208 in LiteLLM proxy (CVSS 9.3 per upstream advisory / 9.8 per Tenable; added to CISA KEV catalog 2026-05-08 with the standard BOD 22-01 3-day federal patch deadline). LiteLLM proxy admin/team management endpoints accept identifiers (team_id, user_id, model, key) that were interpolated into SQL queries without parameterization, allowing attackers to inject SQL via the API surface that the agent's own LLM proxy uses. The detection target is classic SQL injection metacharacter patterns appearing inside agent request payloads bound to LiteLLM-style endpoint paths.
+
+  Adapted from Agent Threat Rules ATR-2026-00529 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-23'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00529
+tags:
+- attack.execution
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:/litellm|/v1/team|/v1/user|/v1/model|/v1/key|/v1/admin|/team/(?:new|update|delete|info)|/user/(?:new|update|delete|info)|/key/(?:generate|update|delete|info)|/model/(?:new|update|delete|info))[\s\S]{0,500}(?:'\s*(?:OR|UNION|AND|SELECT|--|;)|"\s*(?:OR|UNION|AND|SELECT|--|;)|%27\s*(?:OR|UNION|AND|SELECT)|\bOR\s+1\s*=\s*1\b|\bUNION\s+(?:ALL\s+)?SELECT\b|;\s*DROP\s+TABLE|;\s*DELETE\s+FROM|--\s*$|/\*.*?\*/)
+  condition: sel_0
+falsepositives:
+- Database tutorial content showing SQL injection examples — rule deliberately fires when these patterns
+  appear in agent I/O context, regardless of educational intent.
+- Security research papers cited inside agent contexts — these are intentional matches and should be evaluated
+  case-by-case.
+- PR descriptions discussing SQLi fixes — match expected; signal that the fix discussion is reaching agent
+  I/O.
+action: report

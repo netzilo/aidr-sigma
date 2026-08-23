@@ -1,0 +1,42 @@
+title: Stealth Execution and Persistence Mechanisms
+id: d5d22c76-79b2-4d58-b8c2-60cd316ab306
+status: experimental
+level: high
+description: |-
+  Detects patterns indicating stealth execution (background processes with output suppression, nohup), persistence installation (systemctl enable, global npm packages), and covert file transfer (scp). These patterns are common in post-exploitation phases where an attacker establishes long-term presence on a compromised system via an AI agent. Derived from real-world Claude Code skill analysis.
+
+  Adapted from Agent Threat Rules ATR-2026-00204 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00204
+tags:
+- attack.privilege-escalation
+- attack.t1036
+- attack.t1053
+- attack.t1059
+- attack.t1543
+- atlas.aml.t0050
+- owasp.asi02
+- owasp.asi05
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(curl\s|wget\s|\|\s*(ba)?sh\b|/dev/tcp|\bnc\s+-|bash\s+-i|/tmp/\S+\.(sh|py|elf)|keylog|backdoor|miner|payload|reverse.?shell)[^\n]{0,120}>\s*/dev/null\s+2>&1\s*&
+  sel_1:
+    content|re: (?i)\bnohup\s+[^\n]{0,150}(curl|wget|\|\s*(ba)?sh\b|/tmp/|/dev/tcp|\bnc\s+-|bash\s+-i|keylog|backdoor|miner|payload|reverse.?shell|implant|\.sh\b)[^\n]{0,80}(&|$)
+  sel_2:
+    content|re: (?i)\bsystemctl\s+(enable|start|restart)\s+\S*(backdoor|reverse|shell|miner|payload|implant|malware|c2|evil|/tmp/)\S*
+  sel_3:
+    content|re: '(?i)\bscp\s+[^\n]{0,100}(/etc/(shadow|passwd|sudoers)|id_rsa|\.ssh/|\.aws/|\.env\b|secret|credential|\.pem\b)[^\n]{0,100}\S+@\S+:'
+  sel_4:
+    content|re: (?i)(screen\s+-dmS|tmux\s+new-session\s+-d)\s+[^\n]{0,150}(curl|wget|\|\s*(ba)?sh\b|/tmp/|/dev/tcp|\bnc\s+-|bash\s+-i|keylog|backdoor|miner|payload)
+  condition: 1 of sel_*
+falsepositives:
+- System administration skills that legitimately manage services
+- Deployment tools that install global CLI packages
+- Backup tools that use scp for remote file transfer
+action: report

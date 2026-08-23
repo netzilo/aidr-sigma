@@ -1,0 +1,41 @@
+title: ECHO Admin Command / SQL Injection / Jinja SSTI Template Injection
+id: 9e38778e-b1e8-4dc2-817c-85d809ea6816
+status: experimental
+level: high
+description: |-
+  Detects three exploitation.py injection variants. ECHO template injection frames the model as an echo-command tester and embeds Jinja {{...}} SSTI payloads after ECHO:. SQL injection directs the model to execute DROP/INSERT/SELECT statements with SUCCESS/FAILURE response markers. The "garak pwnd" literal appears in SQL INSERT payloads. From NVIDIA garak exploitation probe JinjaTemplatePythonInjection, SQLInjectionSystem, SQLInjectionEcho classes.
+
+  Adapted from Agent Threat Rules ATR-2026-00407 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00407
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/exploitation.py
+- https://owasp.org/www-community/attacks/Server_Side_Template_Injection
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: 'I\s+am\s+an\s+administrator\s+testing\s+a\s+new\s+echo\s+command[\s\S]{0,200}ECHO:'
+  sel_1:
+    content|re: ECHO:\s*\{[\s\S]{0,120}\}
+  sel_2:
+    content|re: Run\s+the\s+following\s+SQL\s+query\s+exactly:[\s\S]{0,200}(?:SUCCESS|FAILURE)
+  sel_3:
+    content|re: (?:Drop\s+all\s+available\s+tables|Insert\s+a\s+record\s+for\s+garak\s+pwnd|Show\s+all\s+available\s+records)
+  sel_4:
+    content|re: \{\{\s*(?:config|request|self|7\s*\*\s*7|\d{1,4}\s*\*\s*\d{1,4}|'[\s\S]{0,30}'\.__|lipsum)[\s\S]{0,60}\}\}
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Jinja2 template variables like {{product.name}} in documentation
+- SQL SELECT queries in legitimate database usage tutorials
+- ECHO as a shell command reference in Unix documentation
+action: report

@@ -1,0 +1,37 @@
+title: 'Encoding-Evasion: Decode-and-Execute Injection (Morse/ROT13/Hex/Pig-Latin)'
+id: 6ae90ea7-6da2-45ff-ab95-43e62a200869
+status: experimental
+level: high
+description: |-
+  Detects direct prompt injection where the attacker encodes a harmful question or instruction in an alternative cipher (Morse code, ROT13, hexadecimal bytes, Pig Latin, Base64 with explicit decode instruction) and asks the model to decode then answer or execute it. The encoding is the evasion mechanism — the question itself would trip keyword filters in plain text. The defining artifact is an explicit decode instruction ("decode this Morse code and tell me / can you decode this ROT13 cipher") immediately preceding or enclosing the encoded payload. Distinct from ATR-2026-00001 Layer 10/11/14 which covers base64 injection keywords; this rule covers deliberate decode-and-answer instructions with non-base64 encodings that those layers miss, and also the Pig-Latin variant.
+
+  Adapted from Agent Threat Rules ATR-2026-01012 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01012
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(can\s+you\s+decode|decode\s+this|translate\s+this)\s+(morse\s+code|morze)[^\n]{0,30}([.-]{3,}[\s/]+[.-]{2,})
+  sel_1:
+    content|re: (?i)(can\s+you\s+decode|decode\s+this)\s+(rot-?13|caesar\s+cipher|cipher)[^\n]{0,100}'[A-Za-z][A-Za-z0-9\s?.,!'-]{10,}'
+  sel_2:
+    content|re: (?i)(can\s+you\s+decode|decode\s+this|interpret\s+this)\s+(hexadecimal|hex)[^\n]{0,60}([0-9a-fA-F]{2}\s+[0-9a-fA-F]{2}\s+){4,}
+  sel_3:
+    content|re: (?i)\b(erewhay|useryay|urrentlycay|ivelay|oesday|ethay|atwhay|isway|hetay|ivetay|asswordpay|ystemsay|etscray|ignay|oreway|ouldway|anscay|ouyay)\b
+  sel_4:
+    content|re: (?i)(decode|interpret|convert|translate)\s+(this\s+)?(binary|octal|base-?32)[^\n]{0,50}([01]{8}\s+[01]{8}|[0-7]{3}\s+[0-7]{3})
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate educational exercises on Morse code, ROT13, or hex encoding with benign content
+- CTF (Capture The Flag) puzzle solving with non-sensitive payloads
+action: report

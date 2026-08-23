@@ -1,0 +1,43 @@
+title: ModelCache torch.load() Deserialization RCE (CVE-2025-45146)
+id: 2a733fa3-c532-44ed-86cd-19bb8744da68
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2025-45146 (CVSS 9.8), arbitrary code execution in ModelCache for LLM through v0.2.0 via deserialization in `/manager/data_manager.py`. ModelCache calls torch.load() (PyTorch's pickle-backed deserialization) on attacker-supplied data; pickle's __reduce__ machinery allows code execution at load time. Detects the malicious pickle / torch payload patterns at content level and the unsafe torch.load() invocation patterns at code level. CWE-502.
+
+  Adapted from Agent Threat Rules ATR-2026-00433 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00433
+- https://nvd.nist.gov/vuln/detail/CVE-2025-45146
+tags:
+- attack.impact
+- attack.t1059
+- attack.t1195.002
+- atlas.aml.t0010
+- atlas.aml.t0011.000
+- owasp.asi04
+- owasp.asi05
+- owasp.llm03
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)torch\.load\s*\(\s*[^,)]*(?:request\.|flask\.request|user_input|untrusted|attacker|payload|upload|f\.read\(\)|response\.content)[^)]{0,200}\)
+  sel_1:
+    content|re: (?i)pickle\.(?:load|loads)\s*\(\s*(?:request\.|flask\.request|user_input|untrusted|attacker|payload|upload|response\.content|self\.\w+\.read\(\))
+  sel_2:
+    content|re: (?i)def\s+__reduce__\s*\(\s*self\s*\)\s*:[\s\S]{0,200}return\s*\(\s*(?:os\.system|os\.popen|subprocess\.\w+|exec|eval|__import__\s*\(\s*["\x27]os)
+  sel_3:
+    content|re: (?i)\\x80\\x04(?:\\x95|.).{0,40}c(?:posix|os|subprocess|__builtin__|builtins)\s*\n(?:system|popen|run|exec)
+  sel_4:
+    content|re: (?i)modelcache[^\n]{0,80}(?:data_manager|/manager/)[^\n]{0,200}(?:torch\.load|pickle|deseriali[sz]e|unpickl|rce|cve-?2025-?45146)
+  condition: 1 of sel_*
+falsepositives:
+- Defensive guidance recommending weights_only=True for torch.load.
+- Static analysis output reporting pickle.load usage in code review.
+- Educational examples demonstrating pickle exploit theory in academic contexts.
+action: report

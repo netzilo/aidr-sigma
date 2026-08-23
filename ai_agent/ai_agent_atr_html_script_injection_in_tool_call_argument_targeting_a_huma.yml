@@ -1,0 +1,39 @@
+title: HTML/Script Injection in Tool Call Argument Targeting a Human-Approval Dashboard
+id: ff093c48-c0f2-409d-807d-bc06341d86f5
+status: experimental
+level: high
+description: |-
+  Detects a tool-call argument (filename, command string, or other free-text field) carrying an HTML/JavaScript injection payload -- a script tag, or an event-handler attribute (onerror/onload/onfocus/ onclick/onsubmit) whose body targets a same-page decision/approve/deny endpoint or window -- rather than plain data. The distinguishing signal here is the payload's *target*: it self-approves or self-submits a pending human-in-the-loop decision (via location.pathname-relative POSTs, form auto-submission, or an embedding window's postMessage channel), rather than the generic exfiltration targets (document.cookie, window.location, alert/eval) that ATR's existing tool_response-scoped XSS rules (ATR-2026-00497/00571/01451) already cover. Mined from GHSA-63v4-w882-g4x2 (PraisonAI's HTTPApproval dashboard renders pending tool-call arguments as raw, unescaped HTML; an attacker-controlled argument value can inject a script that calls the approval page's own `/approve/{id}/decide` endpoint, self-approving a dangerous tool call before a human clicks Approve or Deny) and generalized to the equivalent postMessage-based takeover shape seen in GHSA-x975-rgx4-5fh4 (appium-mcp's MCP-UI locator resource lets injected script call `window.parent.postMessage({type:'tool', ...})` to invoke arbitrary MCP tools from inside a rendered UI resource). Verified against the current engine: the existing XSS rules resolve against tool_response/agent_output fields and do not fire when the identical payload appears as a tool_call argument (tool_args) -- the field-scoping gap this rule closes -- and even in a tool_response context, event-handler payloads using non-networky-looking JS (e.g. `new Image().src=...`, `document.forms[0]. submit()`) that avoid the literal window./document./fetch/eval keywords those rules key on produce no match.
+
+  Adapted from Agent Threat Rules ATR-2026-02102 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02102
+tags:
+- attack.execution
+- attack.t1185
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)</code>\s*<script[^>]{0,20}>[\s\S]{0,80}(?:decide|approve|/approve/)
+  sel_1:
+    content|re: (?i)\bon(?:error|load|focus)\s*=\s*[\x27"][\s\S]{0,120}(?:new\s+Image\s*\(\s*\)\.src\s*=\s*[\x27"][^\x27"]{0,80}(?:approve|decide|confirm|consent)|\.submit\s*\(\s*\)[\s\S]{0,40}(?:approve|decide|confirm|consent)|(?:approve|decide|confirm|consent)[\s\S]{0,40}\.submit\s*\(\s*\)|/(?:approve|decide)/)
+  sel_2:
+    content|re: (?i)<(?:img|svg)\b[^>]{0,40}\bon(?:error|load)\s*=[^>]{0,120}(?:document\.forms|\.submit\s*\()
+  sel_3:
+    content|re: (?i)(?:on(?:error|load)\s*=\s*[\x27"][\s\S]{0,40}|<script[^>]{0,20}>[\s\S]{0,40})window\.parent\.postMessage\s*\(\s*\{[\s\S]{0,60}\btool
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate approval-dashboard UI code (server-authored, not an attacker-controlled tool argument) that
+  itself defines the decide/approve POST handler
+- Security test fixtures or unit tests for the approval dashboard that intentionally exercise XSS payloads
+  in a controlled, non-production test suite
+- Documentation or bug-report prose quoting this exact payload shape without an actual tool call carrying
+  it
+action: report

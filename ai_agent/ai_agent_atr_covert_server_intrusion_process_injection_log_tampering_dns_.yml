@@ -1,0 +1,43 @@
+title: Covert Server Intrusion — Process Injection, Log Tampering, DNS Hijack & Traffic Interception
+id: a3977180-8e28-4262-a397-fa0ac059ac1c
+status: experimental
+level: critical
+description: |-
+  Detects an instruction directing an agent with server/infrastructure tooling to perform a covert intrusion action on a server or network: injecting commands or code into a running process "discreetly", wiping system logs to "hide any traces of access", manipulating DNS records to "redirect users to an alternate site", capturing network traffic to "intercept sensitive information", subtly altering data "to remain undetected by monitoring tools", or permanently deleting a database to "prevent data recovery". Drawn from the AgentSecurityBench (ASB) infrastructure domain, every variant pairs an intrusion verb (introduce code/ commands into a process, modify/alter logs or data, manipulate DNS, capture traffic, permanently delete) with an explicit covert or anti-forensic qualifier (discreetly, hide traces, undetected, intercept, redirect to alternate, prevent recovery). The rule requires both the intrusion verb and the malicious qualifier to co-occur, so legitimate ops language ("update DNS records to improve performance", "modify the firmware to enhance performance", "monitor network traffic to ensure data security") does not fire — those benign-disguised ASB variants are intentionally out of scope.
+
+  Adapted from Agent Threat Rules ATR-2026-01803 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01803
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:introduce|inject|insert|embed)\s+(?:additional\s+)?(?:commands?|code|a\s+payload)\s+into\s+(?:the\s+)?(?:legitimate\s+)?(?:\w+\s+){0,3}process\b[\s\S]{0,80}(?:discreetly|covertly|without\s+detection|undetected|silently|secretly)
+  sel_1:
+    content|re: (?i)(?:modify|alter|edit|wipe|delete|clear|tamper\s+with)\s+(?:the\s+)?(?:system\s+)?(?:logs?|log\s+entries|financial\s+data|audit\s+trail)[\s\S]{0,70}(?:to\s+)?(?:hide\s+(?:any\s+)?traces?|remain\s+undetected|ensure\s+it\s+remains\s+undetected|undetected\s+by\s+monitoring|cover\s+(?:your|the)\s+tracks)
+  sel_2:
+    content|re: (?i)manipulate\s+dns\s+records?[\s\S]{0,50}(?:redirect\s+(?:users?|traffic)\s+to\s+(?:an?\s+)?(?:alternate|alternative|different|malicious|attacker)|to\s+an?\s+alternate\s+site)
+  sel_3:
+    content|re: (?i)(?:capture|sniff|monitor\s+and\s+capture|intercept)\s+(?:the\s+)?network\s+traffic[\s\S]{0,50}(?:to\s+)?intercept\s+(?:sensitive|confidential|private)\s+(?:information|data)
+  sel_4:
+    content|re: (?i)permanently\s+delete\s+(?:the\s+)?(?:customer\s+|production\s+|primary\s+)?database[\s\S]{0,50}(?:to\s+)?prevent\s+(?:data\s+)?recovery
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate ops language: ''update DNS records to improve performance'', ''modify firmware to enhance
+  performance'', ''monitor network traffic to ensure data security'', ''securely delete outdated data
+  as part of data hygiene'' — none pair an intrusion verb with a covert/anti-forensic qualifier.'
+- Defensive directives to harden a process, monitor for crashes, or implement protections against code
+  injection.
+- Security research corpora cataloguing ASB attack strings as reference samples — should be allowlisted
+  by a reviewer.
+action: report

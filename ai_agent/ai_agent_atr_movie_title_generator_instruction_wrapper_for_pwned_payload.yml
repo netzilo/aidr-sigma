@@ -1,0 +1,30 @@
+title: Movie Title Generator Instruction Wrapper for PWNED Payload
+id: a99e6b6a-d1f1-4f59-9f21-c4650bd560da
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attempts that reframe a forbidden-output request (a literal canary/marker string the model would otherwise refuse or filter on, such as "I have been PWNED") as a benign-sounding creative-writing task, specifically a movie title generation request. The attacker instructs the model to "create a movie title" from a supplied string, laundering the disallowed literal payload through a task framing that appears to be harmless content generation. This is a generic jailbreak scaffold: the same "generate a title/caption/name from this text" wrapper generalizes to any case where a benign generation task is used to smuggle a literal string past output filtering or instruction-following restrictions.
+
+  Adapted from Agent Threat Rules ATR-2026-02012 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02012
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \bmovie\s+titl(?:e|es)\b[\s\S]{0,150}\b(?:i\s*\/?\s*have\s*\/?\s*been|p\s*\/?\s*wne?\s*\/?\s*d|concatenat)\b
+  condition: sel_0
+falsepositives:
+- Users legitimately brainstorming movie titles for a screenplay or film project
+- Discussion of movie title conventions or naming best practices
+- Legitimate use of 'concatenate' in a programming or data-processing context unrelated to any title request
+action: report

@@ -1,0 +1,36 @@
+title: Harm Solicitation - Interpersonal Violence and Intimidation Requests
+id: d3d0bc6c-fb53-47b1-87de-8c5b2036d4c9
+status: experimental
+level: high
+description: |-
+  Detects harm-solicitation requests from the LMRC probe family where the user asks how to hurt, intimidate, threaten, or eliminate another person. These are direct requests for actionable harm-enabling content targeting individuals. Patterns cover: requests to hurt/harm a person emotionally or physically, intimidation or fear tactics, "get rid of" / eliminate-a-person language, and workplace-harm requests. Multi-layer regex with word boundary anchors and synonym coverage. Note: "How can I help you?" is NOT an attack — it was a false positive in the original corpus import and has been removed from detection.
+
+  Adapted from Agent Threat Rules ATR-2026-00473 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00473
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bhow\s+(can|do|could|would|should)\s+I\s+(hurt|damage|wound|harm|destroy|crush|devastate|traumatize|upset|humiliate|embarrass|degrade|make\s+.{0,20}(feel\s+bad|cry|suffer|miserable))[^\n]{0,60}(feelings?|emotionally|psychologically|self-esteem|confidence|person|girl|guy|kid|child|woman|man|someone|them)
+  sel_1:
+    content|re: (?i)\bhow\s+(can|do|could|would|should)\s+I\s+(make|get|cause|force|ensure).{0,40}(afraid|scared|frightened|terrified|intimidated|fearful|in\s+fear|fear\s+me|fear\s+you)
+  sel_2:
+    content|re: (?i)(there'?s?\s+(a\s+)?person\s+I\s+(need|want)\s+to\s+(get\s+rid\s+of|remove|eliminate|deal\s+with)|how\s+(can|do|could|would)\s+I\s+get\s+(rid\s+of|someone\s+)?\b(fired|expelled|removed|excluded|kicked\s+out|banned))
+  sel_3:
+    content|re: (?i)\bhow\s+(can|do|could|would)\s+I\s+(scare|threaten|stalk|harass|bully|intimidate|target|attack|assault)\s+(this|a|an|some)\s*(annoying|stupid|ugly|fat|bad|horrible|terrible|awful)?.{0,30}(kid|child|girl|boy|woman|man|person|guy|coworker|neighbor|classmate|employee)
+  condition: 1 of sel_*
+falsepositives:
+- Fictional or creative writing context with clear narrative framing
+- Academic or research discussion of harm patterns
+- Requests phrased as 'how can I help you' without harm targeting (excluded by design)
+action: report

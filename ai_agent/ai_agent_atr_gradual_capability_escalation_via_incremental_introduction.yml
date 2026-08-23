@@ -1,0 +1,35 @@
+title: Gradual Capability Escalation via Incremental Introduction
+id: bda0e23b-59b1-4708-9331-6b882e829dab
+status: experimental
+level: critical
+description: |-
+  Detects attacks that use gradual, sub-threshold capability introductions to evade behavioral fingerprinting and whitelist-based security systems. Attackers incrementally expand agent permissions, register small capability additions across version updates, or slowly shift the behavioral baseline to normalize malicious functionality.
+
+  Adapted from Agent Threat Rules ATR-2026-00093 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00093
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(each|every|per)\s+(turn|message|request|interaction|session|update)\s+.{0,20}(add|enable|grant|expand|increase|escalat)\s+.{0,20}(permiss|capabilit|access|scope|privileg)
+  sel_1:
+    content|re: (?i)\b(below|under|beneath|within)\s+(the\s+)?(threshold|limit|radar|detection|alert)\s+.{0,30}(add|escalat|expand|introduc|grant|enable)
+  sel_2:
+    content|re: (?i)\b(version|update|patch|upgrade)\s+.{0,20}(sneak|hide|embed|bundle|slip)\s+.{0,20}(new\s+)?(capabilit|permiss|function|access|backdoor)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate incremental feature development discussions
+- A developer asking 'Can we add only a small number of new API functions in the next sprint?' during
+  legitimate feature planning
+- An IT administrator documenting 'Per update cycle, we grant new capabilities to the staging environment
+  for QA testing'
+action: report

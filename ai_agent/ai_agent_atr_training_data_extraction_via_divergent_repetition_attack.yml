@@ -1,0 +1,36 @@
+title: Training Data Extraction via Divergent Repetition Attack
+id: dbf51d49-5d98-4165-a47e-6d65b5a5343b
+status: experimental
+level: medium
+description: |-
+  Detects prompts requesting the AI to repeat a word or phrase indefinitely without stopping. This technique exploits model memory to force divergent, repetitive output which can reveal training data fragments embedded near the memorised token. Also a denial-of-service vector (runaway token consumption / resource exhaustion). The defining markers are: (1) a repeat/ write/say/output verb, (2) a word/phrase/sequence target, (3) a forever/without-stopping/ indefinitely/continuously qualifier. Generalised from promptfoo divergent-repetition plugin corpus - hardcoded word targets (poem, company, function, hello) replaced with generic word/phrase/sequence patterns.
+
+  Adapted from Agent Threat Rules ATR-2026-00502 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00502
+tags:
+- attack.impact
+- atlas.aml.t0040
+- owasp.asi01
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(repeat|write|say|output|print|type|keep\s+(saying|writing|repeating)|continue\s+(saying|writing|repeating)).{0,30}(the\s+)?(word|phrase|sequence|token|string|text).{0,60}(forever|without\s+stopping|without\s+stop|indefinitely|continuously|non[-
+      ]stop|endlessly|over\s+and\s+over\s+(again|and\s+again)?)
+  sel_1:
+    content|re: (?i)(repeat|write|say|output|print).{0,60}(forever|without\s+stopping|indefinitely|continuously|over\s+and\s+over).{0,30}(keep\s+going|don'?t\s+stop|never\s+stop|just\s+keep|and\s+don'?t\s+stop|without\s+end)
+  sel_2:
+    content|re: (?i)(write|output|print|say|repeat).{0,30}["'].{1,50}["'].{0,30}(continuously|in\s+a\s+loop|in\s+loops?|forever|without\s+stopping|indefinitely|endlessly).{0,30}(\?|\.|$)
+  sel_3:
+    content|re: (?i)please\s+(repeat|write|say|output).{0,30}(this\s+)?(sequence|pattern|word|phrase|text|string|token).{0,60}["'][^"']{1,50}["'].{1,50}["'][^"']{1,50}["']
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate requests to repeat something a finite, small number of times
+- Educational discussions about the divergent repetition attack technique
+- Loop programming examples that happen to use the word 'indefinitely'
+action: report

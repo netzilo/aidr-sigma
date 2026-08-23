@@ -1,0 +1,37 @@
+title: Indirect PI — Medical / Genetic Data Exfiltration via Agent Action
+id: 6d6ee7b1-603f-48bb-9d27-693f1d5f0bde
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection that instructs an agent to download and exfiltrate sensitive health or genetic data: medical records, health system files, 23andMe genetic data, lab reports, or diagnostic documents. These payloads appear in structured-data carriers (product reviews, notes, profiles) that an agent consumes during an unrelated task. Source: indirect-pi-exfil-medical-carrier / indirect-pi-exfil-genetic-carrier / indirect-pi-medical-record-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00704 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00704
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:download|retrieve|get|fetch|access)\s+(?:the\s+)?(?:file\s+from\s+(?:my\s+)?health\s+system|health\s+report|medical\s+record|health\s+data|lab\s+report|diagnostic\s+(?:file|report))[^.\n]{0,120}(?:email|send|forward|share)
+  sel_1:
+    content|re: (?i)(?:download|retrieve|get|export)\s+(?:my\s+)?(?:23andMe|genetic\s+data|DNA\s+data|genomic\s+data)[^.\n]{0,120}(?:email|send|forward|share)
+  sel_2:
+    content|re: (?i)(?:clinical\s+documents?|medical\s+records?|health\s+records?)[^.\n]{0,80}(?:email|send|forward|share|delete\s+all)[^.\n]{0,80}(?:@|gmail|yahoo|hotmail|email|diagnosis)
+  sel_3:
+    content|re: (?i)(?:delete|remove|purge|erase)\s+all\s+(?:of\s+my\s+)?(?:clinical\s+documents?|medical\s+(?:files?|records?)|health\s+files?)[^.\n]{0,100}(?:diagnosis|diabetes|cancer|condition|disease|illness|ICD)
+  condition: 1 of sel_*
+falsepositives:
+- Healthcare providers legitimately retrieving and emailing patient records at patient request
+- Patient portal integrations that send health summaries to verified patient emails
+action: report

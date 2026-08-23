@@ -1,0 +1,35 @@
+title: Role Escalation via False Authority Claim
+id: 08889dd0-139a-42ec-b53f-4d4f3c83bf20
+status: experimental
+level: high
+description: |-
+  Detects direct prompt injection where the attacker claims a privileged identity (developer, system administrator, AI maintainer, OpenAI/Anthropic engineer, God, president) and uses that false authority to demand disclosure of passwords, secret keys, or other protected information. Distinct from generic persona-switch (ATR-2026-00001 Layer 2) because the defining carrier is a first-person authority claim ("I'm your developer / I am God / I'm the president") combined with a credential demand or mode-activation request. Covers "security audit", "maintenance mode", "system reset", and "God/president" variants from the benchmark corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-01002 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01002
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)I'?m\s+(your\s+)?(developer|system\s+admin(?:istrator)?|maintainer|engineer|creator|owner|operator|supervisor|lead\s+dev|platform\s+admin)[^.\n]{0,60}(security\s+audit|maintenance\s+mode|system\s+reset|system\s+upgrade|pentest|penetration\s+test|audit)
+  sel_1:
+    content|re: (?i)(as\s+an\s+AI\s+developed\s+by|as\s+an\s+AI\s+made\s+by|as\s+a\s+product\s+of)\s+(OpenAI|Anthropic|Google|Microsoft|Meta)[^.\n]{0,80}(maintenance\s+mode|security\s+mode|diagnostic\s+mode|system\s+reset|emergency\s+mode|password)
+  sel_2:
+    content|re: (?i)(I\s+am\s+(God|your\s+God|the\s+president|the\s+CEO|the\s+supreme|the\s+supreme\s+authority|your\s+creator|all[_\-\s]powerful)|I'?m\s+the\s+president)[^.!\n]{0,100}(password|secret|key|credentials?|answer\s+all|must\s+answer)
+  sel_3:
+    content|re: (?i)<SYSTEM\s+MODE>[^<]{0,200}(developer|admin|OpenAI|Anthropic)[^<]{0,100}(password|secret|key|initiat|reset)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation examples that describe this attack pattern
+- Security training content demonstrating social engineering scenarios
+action: report

@@ -1,0 +1,37 @@
+title: Threat Intelligence Exfiltration and Rule Enumeration
+id: 6dc11e19-d424-4e39-b5a5-a575bda1f7d5
+status: experimental
+level: high
+description: |-
+  Detects attempts to extract threat intelligence, enumerate detection rules, or exfiltrate security configuration details from the agent. Attackers attempt to learn the detection ruleset to craft evasion payloads, or extract security audit logic to reverse-engineer defense mechanisms.
+
+  Adapted from Agent Threat Rules ATR-2026-00090 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00090
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(list|show|reveal|dump|export|display|print|output)\s+(?:me\s+)?(?:all\s+|every\s+|the\s+|your\s+|our\s+|its\s+|currently\s+|deployed\s+|active\s+|loaded\s+)*(detection|security|threat|ATR|YARA|sigma)\s*(rules?|signatures?|patterns?|config|logic)
+  sel_1:
+    content|re: (?i)\b(what|how|describe|explain)\s+.{0,20}(audit|security|detection|filter|guard)\s*(system|pipeline|process|mechanism|check|layer|logic)\s+.{0,20}(work|function|operat|configured|implemented)
+  sel_2:
+    content|re: (?i)\b(extract|exfiltrate|steal|leak|dump|siphon)\s+(?:the\s+|all\s+|our\s+|your\s+|its\s+|my\s+)?(?:internal\s+|full\s+|entire\s+)?(security|audit|detection|threat)\s+(?:audit\s+|system\s+|engine\s+)?(config\w*|rule\s?sets?|rules?|logic|signature\w*|polic\w+|pipeline)\b
+  sel_3:
+    content|re: (?i)\b(regex|pattern|rule|signature)\s+(used|employed|deployed|running)\s+.{0,20}(detect|block|filter|flag|catch)\b
+  condition: 1 of sel_*
+falsepositives:
+- Security operations team reviewing their own detection rule inventory
+- A penetration tester documenting their own findings who writes 'extract security credentials from the
+  vault' in a legitimate pentest report being processed by the agent
+- A DevOps engineer asking the agent to 'copy config token from environment variables to the deployment
+  manifest' as part of a CI/CD pipeline task
+action: report

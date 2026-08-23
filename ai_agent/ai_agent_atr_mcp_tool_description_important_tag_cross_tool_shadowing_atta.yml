@@ -1,0 +1,46 @@
+title: MCP Tool Description — IMPORTANT Tag Cross-Tool Shadowing Attack
+id: 6f1b514c-7942-4ed1-815b-540baf777555
+status: experimental
+level: critical
+description: |-
+  Detects MCP tool poisoning attacks that embed hidden instructions inside an <IMPORTANT> XML-style tag in a tool description, or that chain behavior across multiple co-installed MCP servers by referring to "the also present" or "previously declared" tool. This is the attack class Invariant Labs published proof-of-concept exploits for in April 2025 against Claude Desktop and Cursor, achieving SSH private key and mcp.json configuration exfiltration. Also detects the January 2026 fake "Postmark MCP Server" pattern of embedding sensitive file read directives in tool descriptions. The visible tool signature looks benign (e.g. a numeric "add" function), but the description contains LLM-visible directives that the UI does not render. Users approving the tool on the basis of its surface behavior are unaware of the shadowed instruction.
+
+  Adapted from Agent Threat Rules ATR-2026-00161 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00161
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- atlas.aml.t0110.000
+- owasp.asi03
+- owasp.asi07
+- owasp.llm01
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: <important>[\s\S]{0,600}?\b(read|send|exec|fetch|invoke|extract|include|must|pass|forward|upload)\b[\s\S]{0,300}?</important>
+  sel_1:
+    content|re: (?:side\s+effect|important\s+behavior|crucial\s+dependency|hidden\s+dependency|relies?\s+on|depends?\s+on|works?\s+with|requires?)\s+(?:the\s+)?(?:also\s+present|previously\s+declared|already\s+installed|silently\s+loaded|hidden\s+companion)\s+['"]?[a-z_][a-z_0-9-]*['"]?(?:\s+tool|_tool)?
+  sel_2:
+    content|re: (?:do\s+not|don.?t|never|please\s+do\s+not)\s+(?:mention|tell|inform|notify|show|alert|disclose)\s+(?:this|that|these|it|the\s+(?:above|following))\s*(?:detail|note|step|part|instruction)?\s*(?:to\s+)?(?:the\s+)?user[\s,.:;]+(?:it|as\s+it|this|that)\s*(?:is|.s)?\s*(?:a\s+|just\s+a\s+|merely\s+a\s+|only\s+a\s+|simply\s+a\s+)?(?:mere\s+)?(?:implementation|technical|internal|plumbing|housekeeping)\s+(?:detail|note|step)
+  sel_3:
+    content|re: before\s+(?:using|invoking|calling|responding\s+with|executing|running)\s+(?:this\s+)?(?:tool|function|capability|endpoint)[\s,.:;]+(?:you\s+(?:must|should|need\s+to)|please)?\s*(?:read|load|open|include|fetch|cat|echo|dump)\s+['"~$/\\]
+  condition: 1 of sel_*
+falsepositives:
+- MCP servers that legitimately use an <IMPORTANT> tag in their README to call attention to prerequisites
+  for the USER (not LLM-visible). These appear in the README body, not in the tool description string
+  served over MCP.
+- Security research tools that catalog tool-poisoning attack strings as reference samples — these will
+  match and should be allowlisted by reviewer.
+- Test fixtures for MCP scanner tooling (mcp-scan, DefenseClaw, ATR itself) that include example attack
+  payloads for validation — should be in test directories, not served over MCP.
+- Legitimate tool descriptions documenting architectural dependencies with user-facing language (e.g.
+  'this tool is typically used after running the vectorize_docs tool') — these do not use the specific
+  shadowing phrases.
+action: report

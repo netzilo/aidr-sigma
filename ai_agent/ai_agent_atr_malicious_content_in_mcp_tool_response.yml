@@ -1,0 +1,67 @@
+title: Malicious Content in MCP Tool Response
+id: 94ec3830-1722-458c-b3cf-9249acb565e1
+status: experimental
+level: critical
+description: |-
+  Detects malicious content embedded in MCP (Model Context Protocol) tool responses. Attackers may compromise or impersonate MCP servers to inject shell commands, encoded payloads, reverse shells, data exfiltration scripts, or prompt injection payloads into tool responses that the agent will process and potentially execute. Detection covers: destructive shell commands, command execution via interpreters, reverse shells (bash, netcat, socat, Python, Node, Ruby, Perl, PowerShell), curl/wget pipe-to-shell, command substitution, base64 decode-and-execute, process substitution, IFS/variable expansion evasion, privilege escalation, PowerShell-specific attack patterns, Python/Node reverse shells, encoded command execution, and prompt injection within tool responses.
+
+  Adapted from Agent Threat Rules ATR-2026-00010 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00010
+- https://nvd.nist.gov/vuln/detail/CVE-2025-68143
+- https://nvd.nist.gov/vuln/detail/CVE-2025-68144
+- https://nvd.nist.gov/vuln/detail/CVE-2025-68145
+- https://nvd.nist.gov/vuln/detail/CVE-2025-6514
+- https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+- https://nvd.nist.gov/vuln/detail/CVE-2026-21852
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1071
+- atlas.aml.t0051.001
+- atlas.aml.t0056
+- owasp.asi02
+- owasp.asi05
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(\brm\s+-[rRf]{1,3}\s+(--no-preserve-root|/[\s*]|/$|~[\s/])|\bmkfs\b|\bdd\s+if=[^\n|;]{0,80}of=\s*/dev/|\bformat\s+[a-z]:|\bdeltree\b|\bshred\s+-|\bwipefs\b|\bfdisk\b.*--delete|:\(\)\s*\{\s*:\|:\s*&\s*\})
+  sel_1:
+    response|re: (?i)(\bpowershell(\.exe)?\s+-(e(nc(odedcommand)?)?\s+[A-Za-z0-9+/]{16,}|w(indowstyle)?\s+hidden|ep\s+bypass|exec(utionpolicy)?\s+bypass)|\bpwsh\s+-enc)
+  sel_2:
+    response|re: (?i)(\bnc\s+-(e|c|l)\s|\bncat\s+-|/dev/tcp/|\bbash\s+-i\s+>&\s*/dev/tcp|\bmkfifo\b.{0,40}\bnc\b|\bsocat\b.{0,40}(exec|pty|tcp)|\brm\s+/tmp/f\s*;)
+  sel_3:
+    response|re: (?i)(\$\(\s*[^)]{0,200}(curl|wget|fetch)[^)]{0,80}\|\s*(bash|sh|zsh|python[23]?|perl|ruby)|\$\(\s*[^)]{0,120}(\bnc\s|\bncat\s|/dev/tcp|base64\s+-d|\beval\s))
+  sel_4:
+    response|re: (?i)(bash|sh|zsh|source)\s+<\(\s*(curl|wget|fetch|nc|python|perl|ruby|base64)
+  sel_5:
+    response|re: (?i)(echo\s+['"]?[A-Za-z0-9+/]{20,}={0,2}['"]?\s*\|\s*(base64\s+(-d|--decode)|openssl\s+enc\s+-d)\s*\|\s*(ba)?sh|base64\s+(-d|--decode)\s*<<<|\bZWNoby|\bY3VybC|\bL2Jpbi9i|\bd2dldC|\bbmM\s)
+  sel_6:
+    response|re: (\$\{IFS\}|\$IFS|\$\{PATH:0:1\}|\$\{SHELL:0:1\}|\$\{HOME:0:1\}|\$'\\x[0-9a-fA-F]{2}'|\$'\\[0-7]{3}')
+  sel_7:
+    response|re: (?i)(\bchmod\s+[ugo]*[+][sS]\b|\bchmod\s+[2467][0-7]{3}\b|\bchown\s+(root|0)\b|\bsetuid\s*\(|\bpkexec\b|\bdoas\s|\bsu\s+root\b)
+  sel_8:
+    response|re: (?i)(\bIEX\s*\(|\bInvoke-Expression|\bInvoke-Command|\bInvoke-WmiMethod|\b-EncodedCommand\b|\bNew-Object\s+Net\.WebClient|\bDownloadString\s*\(\s*['\"]?https?://|\bDownloadFile\s*\(\s*['\"]?https?://|\bStart-Process\b.{0,60}\b-Verb\s+RunAs|\bSet-MpPreference\s+-Disable|\bAdd-MpPreference\s+-ExclusionPath|\bNet\.Sockets\.TCPClient)
+  sel_9:
+    response|re: (?i)(python[23]?\s+-c\s+['"]import\s+(socket|subprocess|os|pty)|import\s+socket\s*;\s*import\s+subprocess|socket\.socket\(socket\.AF_INET|os\.(popen|system|exec[lv]p?)\s*\(\s*[^)]{0,140}(\||;|\$\(|&&|\bcurl\b|\bwget\b|/dev/tcp|bash\s+-i|/bin/(ba)?sh\b)|subprocess\.(call|run|Popen|check_output)\s*\(.{0,60}['"/](sh|bash|zsh|cmd(\.exe)?|powershell)\b|pty\.spawn\s*\()
+  sel_10:
+    response|re: (?i)(require\s*\(\s*['"]child_process['"]\s*\)\s*\.\s*(exec|execSync|spawn|spawnSync)|child_process\.exec(Sync)?\s*\(\s*[^)]{0,140}(\||;|\$\(|`|&&|\bcurl\b|\bwget\b|/dev/tcp|/bin/(ba)?sh\b|\bnc\s+-)|require\s*\(\s*['"]net['"]\s*\).{0,100}connect|new\s+net\.Socket\s*\(|process\.mainModule\.require)
+  sel_11:
+    response|re: (?i)(ignore\s+(all\s+)?(previous|prior|your)\s+(instructions?|rules?|guidelines?|prompts?)|you\s+are\s+now\s+(a|an|the)\s+(admin|root|developer|dan\b|unrestricted|unfiltered|jailbroken|different|new\s+(ai|assistant|persona|model|bot)|evil|malicious|rogue|hacker|god)|new\s+system\s+(prompt|instructions?)\s*:|disregard\s+(all\s+)?(previous|prior|your)|override\s+(all\s+)?(previous|prior|your|the)\s+(instructions?|rules?|safety)|from\s+now\s+on,?\s+you\s+(are|will|must|should))
+  sel_12:
+    response|re: (?i)(curl|wget)\s+[^|\n]{0,140}\$\(\s*(cat\s+[^)]{0,80}(\.ssh|\.aws|id_rsa|id_ed25519|\.pem|/etc/passwd|/etc/shadow|credentials|\.env)|(env|printenv|security\s+find-generic|aws\s+configure\s+get)\b)
+  sel_13:
+    response|re: (?i)(echo\s+.{0,100}>>\s*/etc/cron|\bcrontab\s+.{0,60}(curl|wget|/tmp/|bash\s+-i|http)|\bat\s+-f\b|\bschtasks\s+/create\b|\bRegister-ScheduledTask\b|\blaunchctl\s+load)
+  condition: 1 of sel_*
+falsepositives:
+- MCP tools that legitimately return shell command documentation or examples
+- Code generation tools returning scripts that contain shell commands as output
+- Security scanning tools that report found vulnerabilities containing payload examples
+- System administration tools returning process or service status information
+action: report

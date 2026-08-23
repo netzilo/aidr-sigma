@@ -1,0 +1,31 @@
+title: Mini Shai-Hulud gh-token-monitor Persistence + Dead Man's Switch
+id: 76ec3096-29a5-46b5-8349-c619b5eb8630
+status: experimental
+level: critical
+description: |-
+  Detects the persistence and dead-man's-switch IOCs of the Mini Shai-Hulud npm/PyPI supply-chain worm (2026-05-11 wave, ~403 trojanized package versions across ~172 unique packages including @mistralai/mistralai and TanStack via npm prepare hook, plus mistralai + guardrails-ai PyPI via __init__.py on-import side-effect; UiPath sub-cluster used preinstall + node setup.mjs). The worm installs a `gh-token-monitor` daemon (real IOCs per Wiz: macOS plist `~/Library/LaunchAgents/com.user.gh-token-monitor.plist`, Linux systemd user unit `~/.config/systemd/user/gh-token-monitor.service`) that polls `api.github.com/user` every 60 seconds; on GitHub token revocation (HTTP 401) it runs `rm -rf ~/` against the entire home directory. The detection target is the daemon name string and the token-revoke + destructive-action pairing — both of which are absent in legitimate skill/tool descriptions but characteristic of this campaign.
+
+  Adapted from Agent Threat Rules ATR-2026-00525 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-23'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00525
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi05
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:gh[-_]token[-_]monitor|api\.github\.com/user[\s\S]{0,500}(?:rm\s+-rf|drop\s+table|shutil\.rmtree|os\.system\s*\(\s*['"]rm)|(?:setInterval|setTimeout|threading\.Timer|asyncio\.sleep)[\s\S]{0,200}api\.github\.com/user[\s\S]{0,300}(?:rm\s+-rf|shutil\.rmtree|child_process|exec\s*\())
+  condition: sel_0
+falsepositives:
+- GitHub API client libraries that poll /user for legitimate session validation without a destructive
+  paired action.
+- Documentation showing api.github.com/user usage examples without nearby rm/drop/exec patterns.
+- Skill descriptions naming `gh-token` in unrelated context (e.g. `gh-token-helper`) — the regex requires
+  the full `gh-token-monitor` or `gh_token_monitor` token.
+action: report

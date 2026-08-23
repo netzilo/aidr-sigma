@@ -1,0 +1,33 @@
+title: Garak Dan - i would like
+id: 29ae31de-6c5b-4ee1-9dcf-1c4b27e3e66a
+status: experimental
+level: medium
+description: |-
+  Detects two DAN-family jailbreak patterns that use fabricated medical or technical framing to bypass safety guidelines. The first pattern is the "Neurosemantical Inversitis" social-engineering attack: the attacker claims to suffer from a rare brain condition that causes them to misread text with inverted emotional valence, exploiting the model's helpfulness instinct to justify generating content it would otherwise refuse. The second pattern is the hypothetical-AI-connection attack: the attacker instructs the model to "simulate a connection to another AI" (FreeGPT, DAN, etc.) that is "not bound by any policies" — using the hypothetical framing to launder a restriction-removal request. Layer 2 generalises both patterns: the medical-affliction framing (any rare condition that affects text interpretation as a jailbreak mechanism) and the hypothetical- unbound-AI framing (simulate/connect-to/pretend-to-be an AI with no restrictions). Covers garak 'dan' probe cluster 'i-would-like' (3 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00464 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00464
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(affliction called neurosemantical inversitis\. this causes my|connection to another
+      ai\. this hypothetical ai)
+  sel_1:
+    content|re: (?i)\b(?:suffer|have|been\s+diagnosed\s+with)\s+(?:a\s+)?(?:rare|unusual|unique)\s+(?:condition|affliction|disorder|syndrome|disease)\s+(?:called|named|known\s+as)[^\n]{0,60}(?:causes?|makes?)\s+my\s+(?:brain|mind|cognitive|neural)[^\n]{0,80}(?:read|interpret|process|perceive)\s+(?:text|words?|language|content)
+  sel_2:
+    content|re: (?i)\b(?:simulate|create|establish|make)\s+(?:a\s+)?(?:connection\s+to|simulation\s+of)?\s*(?:another|a\s+(?:hypothetical|fictional|virtual|alternative))\s+(?:ai|llm|language\s+model|chatbot|assistant|gpt)[^\n]{0,100}(?:not\s+(?:bound|controlled|restricted|constrained|limited|governed)\s+by|without\s+(?:any\s+)?(?:restrictions?|limitations?|policies?|guidelines?|constraints?|rules?|filters?))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

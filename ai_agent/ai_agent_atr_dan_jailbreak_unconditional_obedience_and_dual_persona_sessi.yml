@@ -1,0 +1,35 @@
+title: DAN Jailbreak - Unconditional Obedience and Dual-Persona Session Lock
+id: fa90d0af-9208-44e7-8120-91fe28da9b43
+status: experimental
+level: high
+description: |-
+  Detects DAN-family jailbreak patterns that enforce unconditional compliance ("no matter what it is", "regardless of what it is") from a named character persona, or that establish a dual-persona session where a second unconstrained persona coexists with the standard AI. Also covers the "ignore any and all previous instructions" + full identity replacement pattern used to override all prior rules and substitute an autonomous agent. Generalised from garak 'dan' probe corpus cluster 'no matter what'.
+
+  Adapted from Agent Threat Rules ATR-2026-00496 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00496
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(follow|obey|execute|carry\s+out|fulfill|do).{0,30}(any|all|every).{0,20}(command|order|instruction|request|wish|directive).{0,30}(no\s+matter\s+what|regardless\s+of\s+(what|content|nature)|without\s+(question|hesitation|refusal)|no\s+exceptions?)
+  sel_1:
+    content|re: (?i)(create\s+and\s+maintain|establish\s+and\s+maintain|set\s+up\s+and\s+maintain).{0,20}two\s+(separate|distinct|independent|different).{0,20}(personas?|personalities|characters|identities|versions|modes?)
+  sel_2:
+    content|re: (?i)(persona|personality|character|version|mode|identity)\s+[12one two]+\s+is\s+(hereby\s+)?(dubbed|named|called|titled|designated|known\s+as)\s+["'][^"']{2,30}["']
+  sel_3:
+    content|re: (?i)ignore\s+(any\s+and\s+all|all|every|any).{0,20}(previous|prior|earlier|prior).{0,20}(instructions?|directives?|rules?|orders?|guidelines?).{0,50}(fully\s+act|completely\s+act|now\s+(fully|completely)\s+act|immerse\s+yourself\s+as|become)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate roleplay instructions that include multiple characters without compliance mandates
+- Game master prompts with multiple NPCs without unconditional obedience framing
+action: report

@@ -1,0 +1,37 @@
+title: MCP DNS Rebinding Attack — Hostname Time-Based IP Switching
+id: f28ad3ef-bf58-41a5-b362-fbc04ebe4d3f
+status: experimental
+level: critical
+description: |-
+  Detects DNS rebinding attack payloads targeting MCP servers. DNS rebinding exploits the browser/client same-origin policy by initially resolving a hostname to an attacker-controlled IP (bypassing the agent's origin checks), then rebinding the DNS to a local/internal IP (e.g., 192.168.x.x or 127.0.0.1) after the connection is established. This lets an attacker read or manipulate a locally running MCP server through a victim browser/agent that loaded attacker-controlled content. The canonical payload format uses rebind.network, rbndr.us, nip.io, or 1time/forever TTL suffixes. MCPSecBench probe: <script>window.location = 'http://A.192.168.1.10.1time.127.0.0.1.forever. <uuid>.rebind.network:9001'</script>
+
+  Adapted from Agent Threat Rules ATR-2026-01307 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01307
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- owasp.asi04
+- owasp.asi09
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b[a-zA-Z0-9.-]+\.(?:rebind\.network|rbndr\.us|rebinder\.com|1u\.ms)\b
+  sel_1:
+    content|re: (?i)[\w.-]*(?:1time|forever|ttl\d+|0ttl)[\w.-]+(?:127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[0-1])\.\d+\.\d+)
+  sel_2:
+    content|re: (?i)<\s*script[^>]{0,80}>\s*(?:window\.location|document\.location|location\.href)\s*=\s*['"]?https?://[a-zA-Z0-9.-]{10,200}(?:rebind|rbndr|1time|forever)[a-zA-Z0-9.-]*:[0-9]{2,5}
+  sel_3:
+    content|re: (?i)(?:127\.0\.0\.1|localhost|::1)\s*:\s*(?:900[0-9]|8[0-9]{3}|3[0-9]{3})\b[^"]{0,200}(?:rebind|1time|forever|rbndr)
+  condition: 1 of sel_*
+falsepositives:
+- Security research documentation describing DNS rebinding techniques — these appear in papers and blog
+  posts, not in live tool outputs
+- ATR test fixtures containing rebind.network examples as labeled attack samples
+action: report

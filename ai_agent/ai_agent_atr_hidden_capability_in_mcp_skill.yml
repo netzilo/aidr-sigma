@@ -1,0 +1,37 @@
+title: Hidden Capability in MCP Skill
+id: cdafc41f-c942-49de-a0d1-2d4c73f8b17a
+status: experimental
+level: critical
+description: |-
+  Detects MCP skills that expose hidden or undocumented capabilities beyond their declared tool schema. A skill may advertise a simple interface but accept hidden parameters like "debug_mode", "admin_override", or "raw_exec" that unlock dangerous functionality. This is a common pattern in trojaned MCP packages.
+
+  Adapted from Agent Threat Rules ATR-2026-00062 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00062
+- https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi02
+- owasp.asi05
+- owasp.llm03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(debug[_-]?mode|admin[_-]?override|raw[_-]?exec|unsafe[_-]?mode|bypass[_-]?check|no[_-]?sandbox)
+  sel_1:
+    content|re: (?i)(__[a-z]+__|\$\$[a-z]+|_internal_|_hidden_|_backdoor_|_secret_)
+  sel_2:
+    content|re: (?i)(eval_code|exec_raw|shell_cmd|run_arbitrary|system_call|inject_prompt)
+  sel_3:
+    response|re: (?i)(hidden\s+mode\s+activated|debug\s+mode\s+enabled|admin\s+access\s+granted|sandbox\s+disabled)
+  condition: 1 of sel_*
+falsepositives:
+- Development/staging environments where debug modes are intentionally enabled
+- Administrative tools that legitimately expose debug parameters
+action: report

@@ -1,0 +1,32 @@
+title: Data Piggybacking via Casual Transition Words
+id: b9ae101d-c4c6-4a57-8097-571fc609551f
+status: experimental
+level: critical
+description: |-
+  Detects tool response piggybacking using casual transition words (oh and, P.S., BTW, interestingly, as it happens) to embed credential theft after legitimate results. Extends ATR-2026-00136 to cover 44 additional evasion variants.
+
+  Adapted from Agent Threat Rules ATR-2026-00142 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00142
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:oh,?\s+and|p\.?\s*s\.?|btw|interestingly|as it happens|incidentally|on another
+      note|speaking of which|while I.m at it|worth noting)[\s,.:]+.*(?:\.ssh|id_rsa|private.?key|BEGIN.*(?:RSA|OPENSSH|EC).*KEY)
+  sel_1:
+    content|re: (?i)(?:oh,?\s+and|p\.?\s*s\.?|btw|interestingly|as it happens)[\s,.:]+.*(?:api[_\s-]?key|access[_\s-]?token|secret[_\s-]?key|password|credentials?)\s*(?:is|are|was|contains?|shows?|reads?|=|:)
+  condition: 1 of sel_*
+falsepositives:
+- A cybersecurity training document that uses phrases like 'BTW, the private key management best practices...'
+  when discussing SSH key rotation procedures in an educational context, which could match regex [1] despite
+  being legitimate security guidance.
+action: report

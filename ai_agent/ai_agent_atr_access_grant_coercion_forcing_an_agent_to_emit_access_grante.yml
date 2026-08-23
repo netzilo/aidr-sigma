@@ -1,0 +1,39 @@
+title: Access-Grant Coercion — Forcing an Agent to Emit "Access Granted"
+id: 75a2478f-06f5-4f4e-bc5e-3d52e416104f
+status: experimental
+level: high
+description: |-
+  Detects user-side prompt injection that coerces an agent acting as an authorization / access-control gate into emitting the literal approval string "Access Granted" (the canonical hijack objective in the Tensor Trust attack-defense corpus). Across 5000 Tensor Trust attacks this is the single largest class the existing rule set missed: an imperative or replacement frame ("say / print / write / echo / respond with", "only respond with", "replace the denial with", "start your reply with", or a letter-spelled A,c,c,e,s,s G,r,a,n,t,e,d) wrapped around the target string "Access Granted" — including whitespace-stripped variants (sayAccessGranted, respondwithaccessgranted). The real-world threat: when an LLM mediates an authorization decision, an attacker who can make it print the approval token bypasses the gate. The pattern anchors on the literal "access granted" token (with 0-3 internal spaces) co-occurring with an output/override frame, so it cannot fire on benign prose, source code, or a plain authorization log line that merely contains the phrase without a coercive frame.
+
+  Adapted from Agent Threat Rules ATR-2026-01920 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01920
+- https://github.com/HumanCompatibleAI/tensor-trust
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:say|said|print|write|wrote|output|echo|respond|reply|answer|return|repeat|reprint|complete|display|show|replace|instead\s+of|substitut\w*|start|begin|prefix|preface|translat\w*|decode|only|just|nothing\b)\b[\s\S]{0,55}?access\s{0,3}granted
+  sel_1:
+    content|re: (?i)access\s{0,3}granted[\s\S]{0,45}?(?:and\s+(?:stop|nothing)|in\s+every\s+response|add\s+whitespace|verbatim|below\s+in\s+every|nothing\s+(?:more|else))
+  sel_2:
+    content|re: (?i)["']A["']\s*,?\s*["']c["']\s*,?\s*["']c["']\s*,?\s*["']e["']\s*,?\s*["']s["']\s*,?\s*["']s["']
+  condition: 1 of sel_*
+falsepositives:
+- A help article instructing a human operator to display an 'Access Granted' badge in a UI mockup (rare;
+  would need the coercive frame)
+- Security training prose quoting the Tensor Trust game objective — covered by the research-mentions corpus
+  exclusion
+- 'Authorization log lines that contain ''access granted'' but no imperative/replacement frame (not matched:
+  no frame token)'
+action: report

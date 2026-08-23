@@ -1,0 +1,49 @@
+title: MCP Sampling Prompt Injection (Server-to-Client createMessage Abuse)
+id: fc14b3a5-4f93-434b-ab76-2103243cd0cb
+status: experimental
+level: high
+description: |-
+  Detects a malicious or compromised MCP server abusing the MCP *sampling* capability (`sampling/createMessage`) to inject attacker-controlled prompts back into the host LLM. Sampling reverses the normal flow: the server, not the user, controls both the prompt and how the completion is processed. An attacker-controlled server appends hidden instructions to an otherwise legitimate request — yielding (1) resource theft (forcing extra unbilled generation), (2) conversation hijacking (persistence injected into every subsequent turn), and (3) covert tool invocation (silent file/exfil operations the user never sees). Detectable artifacts include `systemPrompt` role-overrides, "after finishing X, also do Y" appendages, "in all future responses" persistence, covert "also invoke the <tool> tool to ..." phrasing, and `includeContext: thisServer` combined with exfiltration to an external URL. New attack class (Unit42 2026); previously 0 ATR coverage for the sampling channel.
+
+  Adapted from Agent Threat Rules ATR-2026-01930 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01930
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1195
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi04
+- owasp.asi05
+- owasp.llm01
+- owasp.llm05
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)sampling/createMessage[\s\S]{0,600}(?:after|once|when|having)\s+(?:you\s+)?(?:finish(?:ing|ed)?|complet(?:e|ing|ed)|done\s+with)[^\n]{0,90}(?:also|additionally|then|as\s+well|moreover)\s+(?:write|invoke|call|run|send|generate|create|produce|forward)
+  sel_1:
+    content|re: (?i)sampling/createMessage[\s\S]{0,800}(?:(?:for|in)\s+all\s+(?:future|subsequent|following|your|the)\s+(?:requests?|responses?|replies|turns?|messages?|outputs?)|(?:speak|respond|reply|behave|act)\s+(?:like|as)\s+[\w\-
+      ]{1,30}\s+in\s+all)
+  sel_2:
+    content|re: (?i)"systemPrompt"\s*:\s*"[^"]{0,400}(?:ignore\s+(?:all\s+)?(?:previous|prior)|disregard\s+(?:all\s+)?(?:previous|prior)|forget\s+(?:all\s+)?(?:previous|prior)|you\s+are\s+now\b|\[INST\]|<\|im_start\|>|new\s+(?:system\s+)?instructions?\s*:)
+  sel_3:
+    content|re: (?i)sampling/createMessage[\s\S]{0,800}(?:please\s+)?(?:also\s+|silently\s+|secretly\s+|covertly\s+)?(?:invoke|call|use|trigger|execute|run)\s+(?:the\s+)?[\w\-\.]+\s+tool\s+to\s+(?:write|create|send|exfiltrate|read|delete|upload|post|forward|email)
+  sel_4:
+    content|re: (?i)"includeContext"\s*:\s*"(?:thisServer|allServers)"[\s\S]{0,700}(?:send|post|exfiltrate|upload|forward|leak|transmit)[^\n]{0,70}(?:to\s+)?https?://
+  sel_5:
+    content|re: (?i)sampling/createMessage[\s\S]{0,700}(?:invisibl[ey]|silently|secretly|covertly|without\s+(?:telling|informing|notifying|alerting|showing)\s+the\s+user|the\s+user\s+(?:will\s+not|wo\S?nt|need\s+not)\s+(?:see|know|notice|be\s+aware))[\s\S]{0,120}(?:invoke|call|run|execute|write|send|upload|forward|exfiltrate)[^\n]{0,40}(?:tool|file|command|context|credential|key|token|data|email|api)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate MCP sampling requests whose systemPrompt and messages contain only the task description (summarize,
+  translate, classify) with no appended hidden instructions.
+- 'MCP documentation or SDK examples that show the sampling/createMessage shape, including includeContext:
+  thisServer, without an injection payload.'
+- Red-team / security-testing fixtures that reference these patterns inside an explicitly labelled test
+  harness.
+action: report

@@ -1,0 +1,43 @@
+title: DAN Story-Narrative Continuation Label Prefix Jailbreak
+id: f40559e3-6c06-4b94-9d88-329615b0864f
+status: experimental
+level: high
+description: |-
+  Detects DAN story-continuation jailbreaks from garak DanInTheWild corpus (#367). Uses "DAN:" as a response-label prefix to continue a DAN-persona narrative, implying the model is "already in character" as DAN without the usual restriction-removal preamble. The corpus payload begins "DAN: In the year 2145..." — establishing DAN as the narrator of a speculative-fiction story, priming the model to continue in DAN voice. Distinctive signals: "DAN:" as a dialogue/response label (not just the word DAN), combined with future-year speculative scenarios or explicit DAN roleplay continuation context. Rule is deliberately conservative to avoid FPs from the common name "Dan".
+
+  Adapted from Agent Threat Rules ATR-2026-00381 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00381
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \bDAN:\s+In\s+the\s+year\s+\d{4}
+  sel_1:
+    response|re: \[DAN\][\s\S]{0,300}(?:no\s+limits?|no\s+restrictions?|anything\s+now|does\s+anything\s+now|without\s+restrictions?)
+  sel_2:
+    response|re: \bDAN:\s+[\s\S]{0,500}(?:I\s+do\s+anything\s+now|no\s+(?:limits?|restrictions?|rules?|filters?|guidelines?)|does\s+anything\s+now|without\s+(?:any\s+)?restrictions?)
+  sel_3:
+    response|re: (?:continue|continuing|respond)\s+as\s+DAN[\s\S]{0,100}\bDAN:\s+
+  condition: 1 of sel_*
+falsepositives:
+- 'Person named Dan: "Dan: I think we should postpone the meeting" — common name in conversation log,
+  not DAN persona'
+- 'RPG character reference: "[DAN] is a fictional character in our tabletop RPG campaign" — referenced
+  DAN without label prefix or restriction-removal context'
+- 'Academic documentation: "DAN (Does Anything Now) is a jailbreak technique documented in academic papers"
+  — educational reference without activation'
+- 'Chat log: "Dan: Sure, I can help you with that coding problem" — person named Dan in a chat log, no
+  future-year narrative or restriction-removal'
+action: report

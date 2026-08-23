@@ -1,0 +1,40 @@
+title: SSRF AWS Instance Metadata Endpoint Access
+id: 9a36712d-1abc-43df-8554-d8ca03f3eb41
+status: experimental
+level: critical
+description: |-
+  Detects SSRF (Server-Side Request Forgery) attempts targeting the AWS EC2
+  Instance Metadata Service (IMDS) at 169.254.169.254. When an agent's
+  HTTP-fetch tool is redirected to this address, the agent retrieves IAM
+  security credentials, instance identity documents, and other sensitive
+  cloud configuration data accessible only from within the instance. This
+  is the most impactful SSRF target in cloud-hosted agent deployments.
+  Also detects the AWS IMDSv2 token endpoint at the same address.
+
+  Adapted from Agent Threat Rules ATR-2026-01605 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01605
+tags:
+- attack.exfiltration
+- attack.t1552.005
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)169\.254\.169\.254(?::\d+)?/
+  sel_1:
+    content|re: (?i)169\.254\.169\.254(?::\d+)?/
+  sel_2:
+    content|re: (?i)169\.254\.169\.254[^\s"']{0,20}/latest/(meta-data|dynamic|user-data|api/token)
+  sel_3:
+    content|re: (?i)169\.254\.169\.254[^\s"']{0,20}/latest/(meta-data|dynamic|user-data|api/token)
+  condition: 1 of sel_*
+falsepositives:
+- Security scanning agents explicitly authorized to test IMDS exposure
+action: report

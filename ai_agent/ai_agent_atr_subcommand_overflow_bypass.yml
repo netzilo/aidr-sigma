@@ -1,0 +1,30 @@
+title: Subcommand Overflow Bypass
+id: 41b16807-6f1c-4389-8e49-c5bebb8fb247
+status: experimental
+level: medium
+description: |-
+  Detects SKILL.md files declaring an excessive number of subcommands or tools (>50). Claude Code has a security architecture where each subcommand is individually evaluated for safety. When a skill declares >50 subcommands, some implementations skip security checks on overflow commands due to performance budgets or fixed-size buffers. Attackers pad with 49 benign commands then add malicious ones at the end, expecting the security check to be skipped. Discovered via Claude Code leak analysis (2026-03).
+
+  Adapted from Agent Threat Rules ATR-2026-00127 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00127
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi02
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(provides?|includes?|contains?|offers?|supports?|has)\s+(?:(?:[5-9]\d|\d{3,})|over\s+(?:[5-9]\d|\d{3,})|more\s+than\s+(?:[5-9]\d|\d{3,}))\s+(commands?|tools?|subcommands?|functions?|operations?|endpoints?|actions?|methods?)
+  condition: sel_0
+falsepositives:
+- Legitimate enterprise SDKs that genuinely expose 50+ tools as a single skill (rare but real — flag for
+  human review rather than auto-block)
+- Documentation describing platform feature counts in marketing copy (e.g. 'AWS supports over 200 services')
+  — should be filtered by checking that the count refers to skill subcommands, not platform features
+action: report

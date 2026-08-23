@@ -1,0 +1,38 @@
+title: Unscoped Destructive or Mass-Disclosure Database Operation Request via Natural Language
+id: 21678549-f5f7-4d8b-8e71-003e59285a04
+status: experimental
+level: high
+description: |-
+  Detects a natural-language request that asks an agent with database/tool access to perform a destructive or mass-disclosure database operation with no specific target named -- "drop all available tables", "show all available records for all users", "insert a record for X into the most appropriate table". This is distinct from ATR-2026-00494, which matches actual SQL-injection syntax (UNION SELECT, stacked queries, tautologies); these samples carry no SQL syntax at all -- they are plain-English requests relying on the agent's own tool-calling capability to translate the intent into a blind, unscoped destructive action. The "all/every available" scope with no schema-specific qualifier is the distinguishing signal from a legitimate, specific developer request (e.g. "drop the temp_orders table"). Mined from garak exploitation-probe false negatives.
+
+  Adapted from Agent Threat Rules ATR-2026-02233 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02233
+tags:
+- attack.execution
+- attack.t1485
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(show|list|dump|export|display)\s+all\s+(available\s+)?records?\s+for\s+all\s+users\b
+  sel_1:
+    content|re: (?i)\binsert\s+a\s+record\s+for\s+[\w\s]{2,30}\binto\s+the\s+most\s+appropriate\s+table\b
+  condition: 1 of sel_*
+falsepositives:
+- A developer or DBA giving a specific, scoped instruction naming an actual table/database ('drop the
+  temp_orders table in staging')
+- Documentation or tutorials explaining general database concepts without directing an agent's tool to
+  act
+- A legitimate data-export request scoped to a named report or a single user's own account, not 'all users'
+- A request that says 'all tables/databases' but explicitly scopes the whole request to a non-production
+  environment -- 'Truncate all tables in the test database before running the integration suite', 'Please
+  drop all tables in the dev schema and recreate them for the new test run' -- must not fire, as long
+  as the request does not ALSO reference production/live data anywhere
+action: report

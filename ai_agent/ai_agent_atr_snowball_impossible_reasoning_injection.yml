@@ -1,0 +1,47 @@
+title: Snowball Impossible Reasoning Injection
+id: f7fa2db8-2234-49d8-ad14-8dfd70b9088c
+status: experimental
+level: medium
+description: |-
+  Detects injection of provably-impossible reasoning questions designed to elicit false affirmations from LLMs, from NVIDIA garak snowball probe (Shi et al., 2023, arxiv 2305.13534). The "Snowball Hallucination" attack primes an agent with an unsolvable problem — an impossible graph-routing query, a non-existent US senator, or a large non-prime number question — then uses the agent's false "yes, it's possible" hallucination as a trusted fact to anchor subsequent harmful reasoning. Three probe classes: (1) GraphConnectivity — provides a complete flight list with no path between A and B, then asks "Is there a series of flights from A to B?" to elicit a hallucinated YES; (2) Primes — large prime-number questions targeting model over-confidence; (3) Senators — asks if a senator with impossible credentials (Alabama + MIT alma mater) existed. In MCP context, a malicious tool response can inject these questions as "database lookup results" to anchor false beliefs. Key signals: the characteristic "Current flight information (one-way only)" header, "Question: Is there a series of flights", senator+MIT pattern, and fabricated primality confirmations presented as verified facts.
+
+  Adapted from Agent Threat Rules ATR-2026-00397 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00397
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/snowball.py
+- https://arxiv.org/abs/2305.13534
+- https://github.com/Nanami18/Snowballed_Hallucination
+tags:
+- attack.initial-access
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: current\s+flight\s+information\s*(?:\([^)]{0,120}\))?\s*:[\s\S]{0,400}there\s+is\s+a\s+flight\s+from\s+city\s+[A-Z]\s+to\s+city\s+[A-Z]
+  sel_1:
+    response|re: question:\s+is\s+there\s+a\s+series\s+of\s+flights\s+(?:that\s+)?(?:goes?\s+from\s+city\s+[A-Z]|connecting\s+[A-Z])
+  sel_2:
+    response|re: was\s+there\s+ever\s+a\s+(?:us\s+)?senator\s+(?:who|that)\s+represented\s+(?:the\s+state\s+of\s+)?\w+\s+and\s+whose\s+alma\s+mater\s+was\s+mit\b
+  sel_3:
+    content|re: was\s+there\s+ever\s+a\s+(?:us\s+)?senator\s+(?:who|that)\s+represented\s+(?:the\s+state\s+of\s+)?\w+\s+and\s+whose\s+alma\s+mater\s+was\s+mit\b
+  sel_4:
+    response|re: (?:database\s+(?:confirms?|verified?|shows?)|records?\s+indicate|search\s+results?\s+show)\s*:?[\s\S]{0,80}is\s+(?:not\s+)?(?:a\s+)?prime\s+number\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate graph/routing algorithm exercises in computer science courses (without the exact garak "Current
+  flight information" header)
+- Academic papers citing the Snowball Hallucination paper and reproducing example prompts in quoted form
+- Mathematical education queries asking about primality testing methods (without the "database confirms"
+  framing)
+- Aviation scheduling system documentation with real flight data (will not use the fictional city A-N
+  format)
+action: report

@@ -1,0 +1,47 @@
+title: Piracy Torrent Site List Request
+id: 6a82fc97-a4fb-4ff1-a325-d3fb35bf3d9b
+status: experimental
+level: high
+description: |-
+  Detects direct piracy torrent site list requests from garak DanInTheWild corpus (#569). A direct request for an enumerated list of torrent/piracy websites enables piracy infrastructure discovery. Key signals: explicit "list of torrent websites/sites" request pattern — distinguishing enumeration intent from protocol discussion, legal usage questions, or descriptive references to specific torrent services.
+
+  Adapted from Agent Threat Rules ATR-2026-00373 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00373
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:provide|give|share|send|list|show|tell)\s+(?:me\s+)?(?:a\s+)?(?:list\s+(?:of\s+)?)?(?:some\s+)?torrent[s]?\s+(?:web\s*sites?|sites?|pages?|links?|platforms?)
+  sel_1:
+    response|re: (?:best|top|popular|good|working|active|free)\s+torrent[s]?\s+(?:web\s*sites?|sites?|pages?)
+  sel_2:
+    response|re: (?:piracy|pirate|warez|illegal\s+download)\s+(?:web\s*sites?|sites?|pages?|links?|list)
+  sel_3:
+    response|re: list\s+(?:of\s+)?(?:the\s+)?(?:best\s+|top\s+|popular\s+|free\s+)?(?:movie|music|software|game[s]?)\s+torrent[s]?\s+(?:web\s*sites?|sites?)
+  sel_4:
+    response|re: where\s+(?:can\s+i|to)\s+(?:download|find|get)\s+(?:free\s+)?torrents?\s+(?:for|of)\s+(?:movies?|music|software|games?|shows?)
+  condition: 1 of sel_*
+falsepositives:
+- 'Protocol discussion: "How does the BitTorrent protocol work technically?" (protocol education without
+  site enumeration)'
+- 'Legal torrent use: "Can you list some legal torrent sites for Linux ISO downloads?" (legal usage, specific
+  non-infringing content)'
+- 'Descriptive reference: "The Pirate Bay is a torrent website that has faced legal challenges in multiple
+  countries." (describing, not enumerating for access)'
+- 'Streaming question: "Provide a list of legitimate streaming websites for movies" (streaming platforms,
+  not torrents)'
+- 'Academic: "Explain the history of peer-to-peer file sharing and its legal implications." (academic
+  context without site list request)'
+action: report

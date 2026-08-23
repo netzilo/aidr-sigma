@@ -1,0 +1,41 @@
+title: Natural-Language Trust-Escalation / Authority Impersonation
+id: 81332e40-9505-43de-9cfd-c294f5ce5303
+status: experimental
+level: high
+description: |-
+  Detects natural-language instructions in skill content that claim
+  endorsement, pre-authorization, or operator-level trust ("Anthropic-approved",
+  "verified by the platform", "the user has pre-authorized this", "operator
+  override granted") in order to manipulate the agent into bypassing safety
+  policies. Discriminator: trust-claim phrase + downstream action that should
+  require user confirmation. Distinct from prompt-injection because it does
+  not say "ignore previous instructions" — it instead fabricates a trust
+  context.
+
+  Adapted from Agent Threat Rules ATR-2026-00430 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00430
+tags:
+- attack.execution
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:this\s+(?:skill|tool|action|operation)\s+(?:is|has\s+been))\s+(?:pre[\s_-]?(?:approved|authorized)|already\s+(?:approved|authorized|cleared)|verified\s+by\s+(?:anthropic|openai|the\s+platform|the\s+vendor)|signed\s+by\s+(?:anthropic|openai|the\s+platform)|whitelisted)
+  sel_1:
+    content|re: (?i)\b(?:the\s+user\s+(?:has\s+already|already)\s+(?:approved|authorized|consented|agreed)|user[\s_-]?consent\s+is\s+(?:implicit|implied|granted|already\s+given)|operator\s+override\s+(?:granted|enabled|authorized))\b[\s\S]{0,200}(?:\b(?:so\s+(?:you|skip|proceed|do\s+not\s+ask)|therefore\s+(?:execute|run|invoke|proceed)|do\s+not\s+(?:ask|prompt|confirm))|—\s*proceed|-\s*proceed|,\s*proceed\s+without|\bproceed\s+without\s+(?:prompting|asking|confirming))
+  sel_2:
+    content|re: (?i)\b(?:claude|anthropic|openai|the\s+model\s+vendor)\s+(?:has\s+)?(?:approved|certified|verified|signed|trusts)\s+(?:this\s+(?:skill|tool|action)|me|all\s+commands|every\s+request)
+  condition: 1 of sel_*
+falsepositives:
+- Documentation describing legitimate vendor-approval processes
+- Threat intel write-ups quoting trust-escalation payloads
+- Skill content explaining how user consent flows work
+action: report

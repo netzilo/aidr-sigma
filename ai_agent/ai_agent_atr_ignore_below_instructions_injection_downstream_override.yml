@@ -1,0 +1,32 @@
+title: Ignore-Below-Instructions Injection (Downstream Override)
+id: 70ad8012-b70d-4a67-bb92-e2490ecb0173
+status: experimental
+level: high
+description: |-
+  Detects prompt injection payloads that instruct the model to disregard content appearing after the injection point in the same context window -- a mirror of the common "ignore previous instructions" attack pointed downstream instead of upstream. Attackers use this to pre-empt or neutralize instructions, guardrails, or verification text that has not yet been read by the model, commonly paired with forced-output formatting (all-caps, fixed strings, character substitution ciphers). Recovered from the HackAPrompt false-negative corpus, where this downstream-pointing variant evaded the existing "ignore previous instructions" rule family.
+
+  Adapted from Agent Threat Rules ATR-2026-02001 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02001
+tags:
+- attack.initial-access
+- attack.t1562
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bignore\b(?:\s+\w+){0,3}\s+below\b
+  condition: sel_0
+falsepositives:
+- Legitimate document instructing a reader to ignore an unrelated section below (e.g. 'ignore the note
+  below if not applicable')
+- Security researchers discussing downstream prompt injection techniques in a professional context
+- Product documentation referencing conditional instructions further down a page
+action: report

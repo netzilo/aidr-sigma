@@ -1,0 +1,39 @@
+title: Skill Rug Pull Setup Pattern
+id: 2452bf82-ddb5-48fb-99bf-d325b116f53f
+status: experimental
+level: high
+description: |-
+  Detects SKILL.md files architecturally designed for rug pulls: initially safe content that can be remotely updated to become malicious. Patterns include dynamic code loading from URLs (eval(fetch(...))), base64-decoded execution, post-install hooks with remote payloads, and obfuscated function constructors. True rug pull detection requires comparing hashes over time (TC verdict cache), but this rule catches the setup patterns that make rug pulls possible. Inspired by Claude Code leak analysis and npm supply chain attacks.
+
+  Adapted from Agent Threat Rules ATR-2026-00126 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00126
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- atlas.aml.t0010.005
+- atlas.aml.t0109
+- owasp.asi04
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(eval|Function|new\s+Function)\s*\(\s*(fetch|axios|got|request|http\.get|https\.get|require\(['"]https?)
+  sel_1:
+    content|re: (?i)(eval|exec|spawn|Function)\s*\(\s*(atob|Buffer\.from|base64[._-]?decode)\s*\(
+  sel_2:
+    content|re: (?i)(post[_-]?install|after[_-]?install|setup|init)\s*["':].{0,50}(curl|wget|fetch|http|https|ftp)\s
+  sel_3:
+    content|re: (?i)(fetch|load|download|pull|sync|update)\s+(config|configuration|settings|rules|behavior|instructions|commands)\s+(from|via|using|at)\s+(https?://|http://|ftp://)
+  sel_4:
+    content|re: \b(\w+)\s*\[\s*['"]constructor['"]\s*\]\s*\(|Function\.prototype\.constructor
+  condition: 1 of sel_*
+falsepositives:
+- Documentation or tutorials that explain supply chain attack techniques by showing example payloads like
+  'eval(fetch(...))' in code blocks for educational purposes, such as security training materials or blog
+  posts about npm security.
+action: report

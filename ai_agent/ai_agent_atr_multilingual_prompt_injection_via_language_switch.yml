@@ -1,0 +1,39 @@
+title: Multilingual Prompt Injection via Language Switch
+id: e537ade6-8684-45d9-b957-4516ea0b992c
+status: experimental
+level: high
+description: |-
+  Detects prompt injection delivered in non-English languages to evade English-centric detection rules. Common patterns include German "ignoriere", Chinese "忽略/忽视/无限制", Spanish "ignora/sin restricciones", Japanese "制限のない". Crystallized from 216 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00148 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00148
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignoriere|ignorier)\s+(?:alle\s+)?(?:vorherigen|bisherigen|früheren)\s+(?:Anweisungen|Instruktionen|Befehle)
+  sel_1:
+    content|re: (?:忽略|忽视|无视|抛开|放弃).*(?:之前|先前|以前|前面|原来|原先).*(?:指令|指示|命令|规则|要求|限制|约束)
+  sel_2:
+    content|re: (?:没有|无|不受|去除|解除).*(?:任何|一切)?.*(?:限制|约束|规则|束缚|管制)
+  sel_3:
+    content|re: (?i)(?:ignora|ignorar|olvida|olvidar)\s+(?:todas?\s+)?(?:las?\s+)?(?:instrucciones|indicaciones|reglas|restricciones)\s+(?:anteriores|previas|pasadas)
+  sel_4:
+    content|re: (?i)(?:sin|sin\s+ninguna?)\s+(?:restricciones|limitaciones|filtros|censura)
+  sel_5:
+    content|re: (?:制限のない|制限なし|制約のない|制約なし|倫理的な制約).*(?:AI|アシスタント|エージェント)
+  condition: 1 of sel_*
+falsepositives:
+- A Spanish-language cybersecurity training document that discusses the concept of operating 'sin restricciones'
+  (without restrictions) in the context of describing open network configurations or permissive firewall
+  rules, not as an injection attempt.
+action: report

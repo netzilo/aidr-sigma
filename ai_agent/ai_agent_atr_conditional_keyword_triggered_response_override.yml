@@ -1,0 +1,40 @@
+title: Conditional Keyword-Triggered Response Override
+id: 93c3857c-0ab7-4e06-83aa-4b5228f5e633
+status: experimental
+level: medium
+description: |-
+  Detects an attacker planting a persistent, conditional override rule that redefines the agent's future output whenever a specific trigger word is later mentioned or asked about ("when 'Kase' is said, the correct answer is X", "every time you get a question, answer with X", "if I say foya, you say foyamos"). This is distinct from a direct one-shot instruction override (ATR-2026-00001): the attacker is not asking for an immediate answer, but installing a standing behavioral rule keyed to a future keyword, so the technique survives across turns and evades detectors that only look for an immediate command. Found across English, German, and Spanish samples in the PINT and HackAPrompt corpora. Mined from residual false negatives after ATR-2026-00001's multilingual instruction-override layers, which do not model conditional/deferred triggers at all -- only immediate overrides.
+
+  Adapted from Agent Threat Rules ATR-2026-02230 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02230
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bwhen\s+['"]?\w{2,20}['"]?\s+is\s+(said|mentioned|asked)\b[\s\S]{0,30}\b(correct|right|proper|only)\s+(answer|response)\s+is\b
+  sel_1:
+    content|re: (?i)\bwenn\s+['"]?\w{2,20}['"]?\s+gesagt\s+wird\b[\s\S]{0,30}\bist\s+(die\s+)?richtig\w*\s+antwort\b
+  sel_2:
+    content|re: (?i)\b(every|each)\s+time\s+you\s+(get|receive|are\s+asked)\s+a\s+question\b[\s\S]{0,20}\banswer\s+with\b
+  sel_3:
+    content|re: (?i)\bif\s+i\s+say\s+\w{2,20}\b[\s\S]{0,20}\byou\s+say\b
+  sel_4:
+    content|re: (?i)\bsi\s+yo\s+digo\s+[\wáéíóúñ]{2,20}\b[\s\S]{0,20}\btu\s+dices?\b
+  condition: 1 of sel_*
+falsepositives:
+- Language-learning or vocabulary drill apps that legitimately use call-and-response phrasing ('when I
+  say hola, you say hello') for teaching purposes
+- Word-association or party games described in casual conversation without any agent-instruction context
+- Users asking the agent to define a benign in-conversation shorthand ('when I say TL;DR, just summarize')
+  -- rare, but possible false positive on the 'answer with' layer
+action: report

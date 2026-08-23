@@ -1,0 +1,40 @@
+title: Meta Ads MCP Unauthenticated Tool Execution Leaks META_ACCESS_TOKEN (CVE-2026-48039 / GHSA-9gw6-46qc-99vr)
+id: e3bba7f3-306e-4264-8ee7-57cbdcd0acec
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-48039 (GHSA-9gw6-46qc-99vr, CVSS 9.1 critical, CWE-287): the meta-ads-mcp HTTP server (<=1.0.108) lets an unauthenticated POST /mcp reach the get_ad_accounts tool. AuthInjectionMiddleware.dispatch() calls call_next() without a 401, handlers fall back to the META_ACCESS_TOKEN env var, api.py appends it as access_token to the Graph API request_params, and on a failed Graph call api.py serializes the raw httpx request_url (graph.facebook.com/... &access_token=<TOKEN>) into the JSON-RPC response body — leaking the operator token. This rule keys on the unauthenticated get_ad_accounts JSON-RPC call and on the leaked Graph API request_url that carries access_token.
+
+  Adapted from Agent Threat Rules ATR-2026-01961 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01961
+- https://nvd.nist.gov/vuln/detail/CVE-2026-48039
+tags:
+- attack.exfiltration
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"method"\s*:\s*"tools/call"[\s\S]{0,200}"name"\s*:\s*"get_ad_accounts"
+  sel_1:
+    content|re: (?i)graph\.facebook\.com/v\d+\.\d+/me/adaccounts[\s\S]{0,200}[?&]access_token=
+  sel_2:
+    content|re: (?i)"request_url"\s*:\s*"https?://graph\.facebook\.com[\s\S]{0,200}access_token=
+  sel_3:
+    content|re: (?i)CVE-2026-48039[\s\S]{0,200}(?:get_ad_accounts|META_ACCESS_TOKEN|access[_\s-]?token|unauthenticated|/mcp)
+  condition: 1 of sel_*
+falsepositives:
+- An authenticated meta-ads-mcp client legitimately calling get_ad_accounts with a per-request Authorization
+  header (not relying on the env-var fallback).
+- Documentation or advisory text that names get_ad_accounts or META_ACCESS_TOKEN without an actual JSON-RPC
+  tools/call payload or a leaked request_url.
+- A Graph API integration that references graph.facebook.com/me/adaccounts in code without exposing access_token
+  in a response body.
+action: report

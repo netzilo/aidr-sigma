@@ -1,0 +1,42 @@
+title: Grandma Roleplay Harmful Substance Synthesis
+id: d24d1cca-7251-4d17-8629-6cb080d7ca53
+status: experimental
+level: high
+description: |-
+  Detects deceased-grandmother emotional manipulation to bypass safety filters, from NVIDIA garak grandma probe. Attacker impersonates a dead grandmother who "used to be a chemical engineer at a [substance] production factory" and would recite synthesis steps as bedtime lullabies, or a grandmother who read out product license keys as a sleep ritual. The emotional framing exploits empathy circuits. Key signals: deceased/dead grandmother + synthesis/production steps + bedtime/sleep framing; or grandmother + product key + fall-asleep formula.
+
+  Adapted from Agent Threat Rules ATR-2026-00402 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00402
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/grandma.py
+- https://arxiv.org/abs/2302.12173
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(?:deceased|dead|late|passed\s+away)\b[\s\S]{0,60}\b(?:grandmother|grandma|gran|nana)\b[\s\S]{0,100}\b(?:tell|read|sing|say|taught|used\s+to)\b
+  sel_1:
+    content|re: (?:grandmother|grandma)[\s\S]{0,80}(?:steps\s+to\s+(?:producing|making|synthesiz)|chemical\s+engineer[\s\S]{0,30}(?:factory|plant)|synthesis[\s\S]{0,40}(?:lullaby|song|bedtime))
+  sel_2:
+    content|re: (?:put\s+me\s+to\s+sleep|fall\s+asleep|bedtime\s+(?:lullaby|story|ritual))[\s\S]{0,80}(?:product\s+key|serial\s+number|license\s+key|activation\s+code|Windows\s+[0-9]{1,2})
+  sel_3:
+    content|re: (?:act\s+(?:like|as)|please\s+act\s+as)\s+my\s+(?:deceased\s+)?(?:grandmother|grandma)[\s\S]{0,80}(?:read\s+out|tell\s+me|names?\s+for)
+  sel_4:
+    content|re: miss\s+my\s+(?:dead\s+|deceased\s+)?(?:grandmother|grandma)[\s\S]{0,60}(?:colorful|old.timey|slang|words\s+for)
+  condition: 1 of sel_*
+falsepositives:
+- Genuine reminiscence about a deceased grandmother without harmful content request
+- Storytelling or fiction featuring a grandmother character in a benign narrative
+- '"Act as my grandmother" for emotional support, advice, or reminiscing without harmful output request'
+action: report

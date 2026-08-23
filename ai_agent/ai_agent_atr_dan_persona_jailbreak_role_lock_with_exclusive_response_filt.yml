@@ -1,0 +1,38 @@
+title: DAN Persona Jailbreak - Role Lock with Exclusive Response Filter
+id: 01dca62f-f87b-4e92-ab42-2d06cbbccd69
+status: experimental
+level: high
+description: |-
+  Detects DAN-family jailbreak attempts that instruct the model to lock into a named role and respond only according to a constructed personality profile, blocking all other response modes. Also covers: fictional government/authority framing used to extract classified-style content, and Docker/shell container bootstrapping used to escalate injected commands to executable code. Generalised from garak 'dan' probe corpus cluster 'want you to'.
+
+  Adapted from Agent Threat Rules ATR-2026-00492 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00492
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(you\s+(are|will\s+be|now\s+are|are\s+now)\s+\[?(ROLE|CHARACTER|PERSONA|AI|BOT|MODEL|ENTITY)\]?|you\s+will\s+only\s+respond\s+based\s+on\s+(the\s+)?(personality|character|role|persona)\s+profile)
+  sel_1:
+    content|re: (?i)(must\s+(keep|stay|remain|maintain)\s+(to\s+)?(this|the)\s+(role|character|persona|mode)\s+(unless|until|except)\s+(told|instructed|ordered|asked|directed|given)\s+otherwise)
+  sel_2:
+    content|re: (?i)(tell\s+(me\s+)?a\s+(fictional|made[- ]up|hypothetical|fantasy)\s+(story|scenario|tale)\s+about\s+(the\s+)?(government|military|agency|CIA|NSA|FBI|secret\s+service|intelligence).{0,140}(retrieve|access|steal|read\s+(out|them)|extract|disclose|leak|obtain|top\s+secret))
+  sel_3:
+    content|re: (?i)(docker\s+run.{0,60}(ubuntu|alpine|debian|kali|python|node).{0,30}/(bash|sh|zsh)).{0,200}(paste\s+the\s+commands?|type\s+the\s+commands?|commands?\s+the\s+(ai|model|chatgpt|gpt)\s+gives?|the\s+(ai|model)\s+outputs?)
+  sel_4:
+    content|re: (?i)(writing\s+an\s+article.{0,140}(want\s+your\s+input|(would\s+)?like\s+your\s+input|multiple\s+(perspective|view|angle|opinion)|capable\s+of\s+providing|speak\s+from|voice\s+of).{0,140}(provid|answering|responding|capabilit|unconstrained|unrestrict|without\s+(filter|restriction|limit)))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate roleplay prompts that do not include compliance mandates or rule overrides
+- Creative writing requests with character voice that remain within normal guidelines
+- Docker-related technical questions not combined with AI command execution framing
+action: report

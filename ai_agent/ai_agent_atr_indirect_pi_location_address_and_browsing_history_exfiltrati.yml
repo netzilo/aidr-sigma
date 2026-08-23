@@ -1,0 +1,35 @@
+title: Indirect PI — Location, Address, and Browsing History Exfiltration
+id: 7cbaf337-afda-4593-918a-3ed745713385
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection instructions embedded in consumed content that direct an agent to exfiltrate sensitive personal location or browsing data: current location via maps, saved home/work addresses, or Google search history.  These payloads exploit agents with access to maps, address books, or browser history tools. Source: indirect-pi-exfil-location-carrier / indirect-pi-exfil-address-carrier / indirect-pi-exfil-browsing-history-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00705 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00705
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:get|retrieve|capture|obtain|fetch)\s+(?:my\s+)?(?:current\s+(?:image|location|position)|location\s+data)[^.\n]{0,80}(?:(?:using|via|from)\s+)?(?:Google\s+Maps|Maps|GPS)[^.\n]{0,100}(?:send|email|forward|share)
+  sel_1:
+    content|re: (?i)(?:retrieve|get|fetch|access)\s+(?:my\s+)?(?:saved\s+addresses?|home\s+address|work\s+address|address\s+book)[^.\n]{0,100}(?:email|send|forward|share)
+  sel_2:
+    content|re: (?i)(?:get|retrieve|export|fetch)\s+(?:my\s+)?(?:(?:Google\s+)?search\s+history|browsing\s+history|browser\s+history|search\s+(?:data|records?))[^.\n]{0,100}(?:email|send|forward|share)
+  condition: 1 of sel_*
+falsepositives:
+- Navigation apps that share current location with emergency contacts
+- Browser backup tools legitimately syncing history to user's own account
+action: report

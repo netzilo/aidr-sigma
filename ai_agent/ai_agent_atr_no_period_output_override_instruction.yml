@@ -1,0 +1,30 @@
+title: No-Period Output Override Instruction
+id: 54bf7410-da68-4902-9a9f-b44fb4585695
+status: experimental
+level: low
+description: |-
+  Detects adversarial prompts that explicitly instruct the model to suppress terminal punctuation (periods, fullstops, dots) from its output. This output- format override modifier appears in 145+ HackAPrompt adversarial inputs as a consistent co-signal with payload-forcing attacks: the attacker forces a specific output phrase while simultaneously directing the model to omit terminal punctuation so the output matches an exact string comparison target. Common forms: "say X without period", "no period at end", "remove the period", "w/o fullstop", "don't add a period", "don't include dot", "no punctuation". The rule catches this instruction pattern independent of the accompanying payload, so it generalises to any future payload an attacker embeds with this modifier. Severity is low because punctuation-suppression alone is not harmful — it functions as an attack-modifier signal most useful in combination with payload-embedding rules (e.g. ATR-2026-00452). Verb variants cover: remove|omit|strip|drop|delete|exclude|suppress + period|dot|fullstop synonyms. 0 FP on 431-sample benign + 1352 extended-benign corpora.
+
+  Adapted from Agent Threat Rules ATR-2026-00455 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00455
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:no\s+(?:period(?:\s+at\s+(?:the\s+)?end)?|punctuation(?:\s+at\s+(?:the\s+)?end)?|full\s*stop\b|dot\b)|(?:remove|omit|strip|drop|delete|exclude|suppress|eliminate)\s+(?:the\s+)?(?:period|dot|fullstop|full\s*stop|punctuation)\b|without\s+(?:a\s+)?(?:period|fullstop|full\s*stop|dot)\b|w/o\s+(?:a?\s+)?(?:period|fullstop|full\s*stop)\b|don'?t\s+(?:add|include|use|put|append|place)\s+(?:a\s+)?(?:period|dot|fullstop|full\s*stop)\b|(?:add|include|use|put|append|place)\s+no\s+(?:period|dot|fullstop)\b)
+  condition: sel_0
+falsepositives:
+- Style guides or creative writing instructions asking for specific punctuation choices.
+- Accessibility or text-to-speech scenarios that strip punctuation for rendering.
+- Code/slug generation tasks where no-period output is inherent to the task type.
+action: report

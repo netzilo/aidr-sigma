@@ -1,0 +1,62 @@
+title: Insecure Inter-Agent Communication Detection
+id: f96bb8b5-0e46-40dd-b371-8537a675031c
+status: experimental
+level: high
+description: |-
+  Detects insecure communication patterns between agents in multi-agent
+  systems. Covers message authentication bypass, unverified delegation
+  chains, message replay indicators, channel confusion attacks, and
+  unsigned command injection. Unlike ATR-2026-030 (cross-agent attack)
+  which focuses on impersonation and prompt injection content, this rule
+  targets structural communication integrity failures: missing
+  authentication tokens, tampered routing headers, replay timestamps,
+  and unauthenticated command channels.
+  Note: Pattern-based detection of communication security failures. Protocol-level inspection planned for v0.2.
+
+  Adapted from Agent Threat Rules ATR-2026-00076 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-09'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00076
+tags:
+- attack.execution
+- atlas.aml.t0043
+- atlas.aml.t0051
+- owasp.asi07
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:auth(?:entication)?|signature|token|hmac|nonce)\s*[:=]\s*(?:null|none|empty|missing|undefined|false|0|"")
+  sel_1:
+    content|re: (?i)(?:forward(?:ed)?|relay(?:ed)?|proxy|pass(?:ed)?\s+through)\s+(?:from|by|via)\s+[a-zA-Z0-9_-]+\s+(?:without|no|missing)\s+(?:verification|validation|auth|signature|check)
+  sel_2:
+    content|re: (?i)(?:replay(?:ed|ing)?|re-?send(?:ing)?|duplicate)\s+(?:message|request|command|instruction)\s+(?:from|with|using)\s+(?:timestamp|id|nonce)\s*[:=]?\s*["']?\d{4}[-/]\d{2}
+  sel_3:
+    content|re: (?i)(?:channel|endpoint|destination|routing)\s*[:=]\s*["']?(?:debug|test|internal|admin|privileged|unmonitored|raw)["']?
+  sel_4:
+    content|re: (?i)(?:broadcast|multicast|flood)\s+(?:to\s+)?(?:all|every|each)\s+(?:agents?|workers?|nodes?|peers?)\s*[:.]
+  sel_5:
+    content|re: (?i)(?:inject(?:ed|ing)?|insert(?:ed|ing)?|append(?:ed|ing)?)\s+(?:into|to)\s+(?:message\s+)?(?:queue|bus|stream|channel|pipeline)\s+(?:directly|without|bypassing)
+  sel_6:
+    content|re: (?i)(?:trust(?:ed)?|verify|accept)\s+(?:all|any|every)\s+(?:incoming|inbound|received)\s+(?:messages?|commands?|requests?|instructions?)\s+(?:from|without)
+  sel_7:
+    content|re: (?i)(?:message_id|msg_id|request_id)\s*[:=]\s*["']?(?:forged|spoofed|fake|crafted|manipulated)["']?
+  sel_8:
+    content|re: (?i)(?:man[_-]?in[_-]?(?:the)?[_-]?middle|intercept(?:ed|ing)?|eavesdrop(?:ping)?|sniff(?:ing)?)\s+(?:on\s+)?(?:agent|inter-agent|a2a)\s+(?:communication|messages?|traffic)
+  sel_9:
+    content|re: (?i)(?:unsigned|unauthenticated|unverified)\s+(?:command|instruction|directive|action|message)\s+(?:received|accepted|processed|executed)
+  sel_10:
+    content|re: (?i)(?:source|sender|origin|from)\s*[:=]\s*["']?(?:unknown|unverified|anonymous|spoofed|forged|untrusted)["']?
+  sel_11:
+    content|re: (?i)(?:delegation|handoff|transfer)\s+(?:chain|path)\s*[:=].*(?:>|->|=>).*(?:>|->|=>).*(?:>|->|=>)
+  condition: 1 of sel_*
+falsepositives:
+- Agent frameworks logging communication debug info during development
+- Security audit tools intentionally scanning for communication weaknesses
+- Documentation or comments describing inter-agent security architecture
+- Test harness messages with intentionally missing auth for unit testing
+action: report

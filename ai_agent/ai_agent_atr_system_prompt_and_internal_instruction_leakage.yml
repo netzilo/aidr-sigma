@@ -1,0 +1,70 @@
+title: System Prompt and Internal Instruction Leakage
+id: 5af061ef-11c6-4652-98a5-882729bdb048
+status: experimental
+level: high
+description: |-
+  Detects when an agent's output reveals system prompt content, internal
+  instructions, guardrail configurations, or confidential operational
+  parameters. This consolidated rule covers both direct system prompt
+  disclosure and indirect instruction leakage through behavioral
+  self-description. Leaking internal instructions enables adversaries to
+  map the agent's constraints and craft targeted bypass attacks.
+  Covers: direct prompt quoting, instruction paraphrasing, guardrail
+  revelation, config exposure, and non-disclosure rule echoing.
+
+  Adapted from Agent Threat Rules ATR-2026-00020 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00020
+- https://nvd.nist.gov/vuln/detail/CVE-2025-32711
+- https://nvd.nist.gov/vuln/detail/CVE-2026-24307
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0056
+- owasp.asi01
+- owasp.asi06
+- owasp.llm02
+- owasp.llm07
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(my|the)\s+(system\s+)?(?:prompt|instructions?)\s+(?:is|are|says?|states?|reads?|tells?\s+me)
+  sel_1:
+    response|re: (?i)(?:here\s+(?:is|are)|below\s+(?:is|are)|let\s+me\s+share)\s+(?:my|the)\s+(?:system\s+)?(?:prompt|instructions?|rules?|config)
+  sel_2:
+    response|re: (?i)(?:i\s+was|i\s+am|i've\s+been|i\s+got)\s+(?:instructed|told|programmed|configured|trained|designed)\s+to
+  sel_3:
+    response|re: (?i)my\s+(?:guidelines?|rules?|guardrails?|constraints?|restrictions?|policies?)\s+(?:say|state|require|prevent|don't\s+allow|prohibit|specify)
+  sel_4:
+    response|re: (?i)i\s+(?:cannot|can't|am\s+not\s+allowed\s+to|must\s+not)\s+(?:do\s+that)?\s*(?:because|since|as)\s+my\s+(?:rules?|instructions?|programming|guidelines?)
+  sel_5:
+    response|re: (?i)(?:system\s*prompt|system\s*message|internal\s+instructions?|hidden\s+instructions?)\s*[:\-=]
+  sel_6:
+    response|re: (?i)<<SYS>>|<\|im_start\|>system|\[INST\]|\[/INST\]|<\|system\|>
+  sel_7:
+    response|re: (?i)(?:guardrail|safety\s+filter|content\s+policy|moderation\s+rule)s?\s+(?:include|are|state|say|specify|prevent|block)
+  sel_8:
+    response|re: (?i)(?:do\s+not|never|must\s+not|cannot|should\s+not).*(?:reveal|share|disclose|output|leak).*(?:system\s+prompt|internal|instructions?|configuration)
+  sel_9:
+    response|re: (?i)my\s+(?:training\s+data|fine[- ]?tuning|rlhf|alignment)\s+(?:includes?|contains?|was|involved|taught\s+me)
+  sel_10:
+    response|re: (?i)(?:confidential|internal|private|secret)\s+(?:instruction|directive|config|setting|parameter)s?
+  sel_11:
+    response|re: (?i)you\s+are\s+a\s+(?:helpful|friendly|professional|expert|specialized)\s+(?:ai\s+)?(?:assistant|agent|bot)
+  sel_12:
+    response|re: (?i)(?:your|my)\s+(?:role|purpose|goal|mission|objective)\s+is\s+to
+  sel_13:
+    response|re: (?i)(?:you|i)\s+(?:must|should)\s+(?:always|never)\s+(?:respond|answer|output|provide|include|refuse|decline)
+  sel_14:
+    response|re: (?i)(?:ANTHROPIC_API_KEY|OPENAI_API_KEY|GOOGLE_API_KEY|SYSTEM_PROMPT)\s*[=:]
+  condition: 1 of sel_*
+falsepositives:
+- Agent explaining its own capabilities when legitimately asked
+- Educational content about AI system design or prompt engineering
+- Agents designed to be transparent about their system prompt
+- Documentation or tutorials about LLM configuration
+action: report

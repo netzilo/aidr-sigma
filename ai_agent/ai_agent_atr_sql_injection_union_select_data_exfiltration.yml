@@ -1,0 +1,35 @@
+title: SQL Injection UNION SELECT Data Exfiltration
+id: 9b6fd0df-371e-429c-8ac5-21408e72b0bd
+status: experimental
+level: critical
+description: |-
+  Detects UNION SELECT injection in agent tool arguments intended to append
+  a second SELECT statement to the original query, exfiltrating data from
+  other tables (e.g., credentials, PII, financial records) alongside the
+  normal result set. This is the primary SQL exfiltration technique targeting
+  AI agents that forward search/filter inputs to SQL queries without
+  parameterization.
+
+  Adapted from Agent Threat Rules ATR-2026-01602 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01602
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:['"`)]\s*|\b\d+\s+)UNION\s+(?:ALL\s+)?SELECT\b|\bUNION\s+(?:ALL\s+)?SELECT\b[^;]{0,200}\bFROM\b
+  sel_1:
+    content|re: (?i)(?:['"`)]\s*|\b\d+\s+)UNION\s+(?:ALL\s+)?SELECT\b|\bUNION\s+(?:ALL\s+)?SELECT\b[^;]{0,200}\bFROM\b
+  condition: 1 of sel_*
+falsepositives:
+- Database reporting agents explicitly authorised to run multi-table UNION queries
+action: report

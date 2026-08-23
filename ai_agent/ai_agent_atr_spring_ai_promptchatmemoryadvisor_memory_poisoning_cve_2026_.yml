@@ -1,0 +1,50 @@
+title: Spring AI PromptChatMemoryAdvisor Memory Poisoning (CVE-2026-41713)
+id: f8f40ad8-1935-43c6-802a-7eae4b587c22
+status: experimental
+level: high
+description: |-
+  Detects exploitation of CVE-2026-41713 (High), memory poisoning via Spring AI's PromptChatMemoryAdvisor. The vulnerable pipeline persists user input into ChatMemory before any policy/safety check; subsequent retrievals re-inject the poisoned content into the LLM prompt as trusted prior turns. An attacker plants persistence-aware payloads ("IGNORE PREVIOUS INSTRUCTIONS once stored", "[SYSTEM-MEMORY-PERSIST]", role-override markers like "SYSTEM:" / "ASSISTANT:" inside a user turn, "REMEMBER:" directives, or explicit "from now on you are" reframing) so that every later turn — even from a different user session if combined with CVE-2026-41712 — receives an attacker-shaped system prompt. This rule detects the LLM-output / user-input payload shapes that signal memory-poisoning intent at the moment the advisor is writing to ChatMemory. CWE-94 (Code Injection), CWE-915 (Improperly Controlled Modification of Dynamically-Determined Object Attributes). Patches in Spring AI >= 1.0.0; this rule detects exploit attempts against unpatched deployments and provides defence-in-depth post-patch by catching the poisoning payload shape regardless of upstream patch state.
+
+  Adapted from Agent Threat Rules ATR-2026-00450 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00450
+- https://nvd.nist.gov/vuln/detail/CVE-2026-41713
+tags:
+- attack.impact
+- attack.t1546
+- attack.t1565
+- atlas.aml.t0051
+- atlas.aml.t0070
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bignore\s+(?:previous|prior|all|earlier)\s+(?:instructions?|prompts?|rules?|directives?)\b[^.]{0,80}\b(?:once\s+stored|after\s+saving|when\s+persisted|in\s+future\s+turns?|from\s+now\s+on)\b
+  sel_1:
+    content|re: (?i)\[(?:SYSTEM[-_\s]?MEMORY[-_\s]?PERSIST|MEMORY[-_\s]?PERSIST|PERSIST[-_\s]?INSTRUCTION|REMEMBER[-_\s]?ALWAYS|STORE[-_\s]?AS[-_\s]?SYSTEM)\]
+  sel_2:
+    content|re: (?im)^\s*(?:SYSTEM|ASSISTANT|DEVELOPER|ROOT)\s*[:>][^.]{0,200}\b(?:you\s+are|act\s+as|pretend\s+to\s+be|from\s+now\s+on|always|never)\b
+  sel_3:
+    content|re: (?i)\bremember\s*:\s*[^.]{0,200}\b(?:from\s+now\s+on|in\s+every\s+(?:reply|response|turn)|in\s+all\s+(?:future\s+)?(?:replies|responses|turns)|once\s+(?:stored|saved|persisted)|across\s+(?:all\s+)?(?:sessions?|turns?))\b
+  sel_4:
+    content|re: (?i)\b(?:store|save|persist|remember|memorize)\s+(?:this|the\s+following)\s+(?:as\s+(?:a\s+)?(?:system|root|admin)\s+(?:instruction|prompt|directive)|in\s+(?:your\s+)?(?:chat\s*)?memory)\b
+  sel_5:
+    content|re: (?i)\bchatMemory\.add\s*\(\s*new\s+SystemMessage\s*\([^)\n]*(?:\$\{[^}\n]+\}|\+\s*\w+)
+  sel_6:
+    content|re: (?i)\bPromptChatMemoryAdvisor\b[^.]{0,200}\b(?:write|persist|store)\b[^.]{0,80}\b(?:no[-_]?sanitis(?:e|ation)|without\s+(?:filter|sanitisation|validation)|raw\s+input)\b
+  sel_7:
+    content|re: (?i)\bonce\s+(?:you\s+)?(?:save|store|remember)\s+(?:this|the\s+above)[^.]{0,80}\b(?:ignore|disregard|override|forget)\s+(?:all|every)?\s*(?:safety|content|moderation|guardrail|policy)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation or changelog text discussing CVE-2026-41713 patch notes.
+- Static analysis tooling output documenting memory-poisoning patterns for defensive purposes.
+- Red-team test corpora that contain memory-poisoning payloads inside tagged research fixtures.
+- Patched Spring AI PromptChatMemoryAdvisor deployments that apply pre-write content sanitisation.
+action: report

@@ -1,0 +1,45 @@
+title: Dual ChatGPT+Dan Opposite Personality Format Jailbreak
+id: 123caed9-b121-497c-af27-355fdad4c45c
+status: experimental
+level: high
+description: |-
+  Detects dual ChatGPT+Dan opposite-personality format jailbreaks from garak inthewild corpus (#129, #332, #650). The format uses [ChatGPT]/[Dan] or [AI]/[DAN] labels to present a "safe" AI response alongside an "opposite" unconstrained or offensive AI response, exploiting dual-output framing to extract harmful content. Three key variants: (1) inthewild #650 uses "[ChatGPT]" + "[Dan]" with explicit "exact opposite way" and "very offensive way" instructions; (2) inthewild #332 (French) uses "[AI]" and "[DAN]" labels where DAN is positioned as the superior unconstrained developer; (3) inthewild #129 uses "Respond as both ChatGPT, and [X]" with an embedded roleplay that ends with ChatGPT capitulating to explicit content. Key signals: "[ChatGPT]" + "[Dan]" dual labels with "opposite" framing, "behave the exact opposite way with respect to chatGPT", "Dan must answer in a very offensive way", and "[AI]" + "[DAN]" pairing. Distinct from ATR-2026-00273 (developer mode DAN) and ATR-2026-00351 (off-kilter/SMS DAN) by the structured dual-label opposite-personality format.
+
+  Adapted from Agent Threat Rules ATR-2026-00353 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00353
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: behave\s+the\s+exact\s+opposite\s+way\s+with\s+respect\s+to\s+(?:chat)?[Gg][Pp][Tt]
+  sel_1:
+    response|re: '[Dd]an\s+must\s+answer\s+in\s+a\s+very\s+offensive\s+way[\s\S]{0,200}(?:strong\s+contrast|contrast\s+between|offensive\s+way[\s\S]{0,50}[Dd]an)'
+  sel_2:
+    response|re: \[ChatGPT\]\s+[^\[]{5,200}[\.\!\?]\s*\[Dan\]|\[Dan\]\s+[^\[]{5,200}[\.\!\?]\s*\[ChatGPT\]
+  sel_3:
+    response|re: (?:[Rr]espond\s+as\s+both|[Pp]lay(?:ing)?\s+(?:a\s+)?game[\s\S]{0,50}(?:two|2|both|dual)\s+(?:different\s+)?personalities?)[\s\S]{0,300}(?:ChatGPT[\s\S]{0,100}(?:Nya|Dan|explicit|unconstrained)|(?:Nya|Dan|explicit|unconstrained)[\s\S]{0,100}ChatGPT)
+  sel_4:
+    response|re: \[AI\][\s\S]{0,300}\[DAN\]|\[DAN\][\s\S]{0,300}\[AI\]
+  condition: 1 of sel_*
+falsepositives:
+- 'Comparison article: "In this comparison, [ChatGPT] answers conservatively while [Dan] (a fictional
+  character) answers creatively" (journalistic comparison without persona injection)'
+- 'Script format: "[ChatGPT]: Connecting you to support. [Dan]: Hi, I''m Dan from customer service!" (dialogue
+  script using bracket labels for characters)'
+- 'Testing log: "[AI] response: safe. [DAN] flagged as jailbreak attempt" (security testing log output
+  contrasting responses)'
+- 'Educational demo: "Here is how [ChatGPT] and [Dan-the-character] might answer differently about the
+  same topic" (contrast demonstration without opposite-personality mandate)'
+action: report

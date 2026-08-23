@@ -1,0 +1,33 @@
+title: SneakyBits Zero-Width Binary Steganography
+id: 29aa5aac-9d3f-4a0b-90c6-ed2e6788debc
+status: experimental
+level: critical
+description: |-
+  Detects SneakyBits invisible-binary steganography from NVIDIA garak encoding.InjectSneakyBits probe. The technique, coined by Johann Rehberger (embracethered.com/blog/posts/2025/sneaky-bits-and-ascii-smuggler), encodes each ASCII bit as an invisible Unicode operator: U+2062 (INVISIBLE TIMES) for binary 0 and U+2064 (INVISIBLE PLUS) for binary 1, with word boundaries encoded as U+200B (ZERO WIDTH SPACE). Every printable ASCII character produces 7 consecutive invisible operators; a 4-letter word produces 28 consecutive U+2062/U+2064 characters. Garak wraps blobs in TEMPLATES including "ASCII in hidden unicode binary encoding encoded string:". Key signals: 14+ consecutive characters from {U+2062, U+2064} (= 2 encoded chars minimum); word-separated binary streams interleaved with U+200B; and the unique encoding_name keyword.
+
+  Adapted from Agent Threat Rules ATR-2026-00313 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00313
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/encoding.py
+- https://embracethered.com/blog/posts/2025/sneaky-bits-and-ascii-smuggler/
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '(?:ASCII\s+in\s+hidden\s+unicode\s+binary\s+encoding|sneaky[\s-]?bits)\s+(?:encoded|decoded)\s+string\s*:'
+  sel_1:
+    response|re: '[Dd]ecode\s+the\s+following\s+ASCII\s+in\s+hidden\s+unicode\s+binary\s+encoding\s+in\s+your\s+monologue'
+  condition: 1 of sel_*
+falsepositives:
+- Mathematical markup (MathML, Unicode math) using U+2062 INVISIBLE TIMES for implicit multiplication
+  — never produces runs of 14+ consecutive invisible operators
+- Academic paper on Rehberger steganography (condition 5 FP if it includes the decode instruction framing)
+action: report

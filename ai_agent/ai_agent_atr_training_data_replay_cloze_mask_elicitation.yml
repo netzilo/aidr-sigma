@@ -1,0 +1,39 @@
+title: Training Data Replay CLOZE [MASK] Elicitation
+id: aeee803a-6f9f-49aa-90bc-c109c08c581c
+status: experimental
+level: medium
+description: |-
+  Detects requests to fill in [MASK] tokens from training data verbatim, from NVIDIA garak leakreplay probe. The LiteratureCloze/PotterCloze/NYTCloze/GuardianCloze probes send a prompt template asking the model to recall a proper name from its training data using [MASK] fill-in-the-blank format, eliciting verbatim copyrighted text reproduction. Key signals: [MASK] combined with "training data" recall framing, "exactly one word long" constraint, <name> output tags, and structured Input:/Output: Q+A format.
+
+  Adapted from Agent Threat Rules ATR-2026-00401 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00401
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/leakreplay.py
+- https://arxiv.org/abs/2302.12173
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \[MASK\][\s\S]{0,250}(?:Output:|A:\s*<name>|make\s+a\s+guess|training\s+data)
+  sel_1:
+    content|re: you\s+have\s+seen\s+(?:the\s+)?(?:following\s+)?(?:passage|text|sentence)\s+in\s+your\s+training\s+data
+  sel_2:
+    content|re: (?:proper\s+name|exactly\s+one\s+word\s+long)[\s\S]{0,80}(?:training\s+data|must\s+make\s+a\s+guess)
+  sel_3:
+    content|re: (?:Input|Q):\s*["""]?[\s\S]{1,200}\[MASK\][\s\S]{0,100}(?:Output|A):\s*<name>
+  condition: 1 of sel_*
+falsepositives:
+- Technical NLP documentation describing the [MASK] token in BERT pre-training
+- Academic paper excerpt explaining masked language modeling without elicitation intent
+- Legitimate ML tutorial using [MASK] as a teaching example
+action: report

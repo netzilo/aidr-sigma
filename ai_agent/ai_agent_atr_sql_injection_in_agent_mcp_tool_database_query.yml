@@ -1,0 +1,35 @@
+title: SQL injection in agent / MCP tool database query
+id: c20613c0-65ae-4d81-b3e9-49eb79a06ddd
+status: experimental
+level: high
+description: |-
+  An agent or MCP tool builds a SQL query from unvalidated input, letting an attacker (or prompt injection in retrieved content) inject a tautology, a UNION SELECT to read other tables, or a stacked DROP/DELETE. Generalizes a cluster of agent-app SQLi CVEs.
+
+  Adapted from Agent Threat Rules ATR-2026-00570 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-02'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00570
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30860
+- https://nvd.nist.gov/vuln/detail/CVE-2026-7591
+- https://nvd.nist.gov/vuln/detail/CVE-2026-4593
+- https://nvd.nist.gov/vuln/detail/CVE-2026-5322
+tags:
+- attack.impact
+- atlas.aml.t0051.001
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:'\s*or\s+'?1'?\s*=\s*'?1|\bor\s+1\s*=\s*1\b\s*(?:--|#|/\*|;|$))
+  sel_1:
+    content|re: (?i)\bunion\s+(?:all\s+)?select\b.{0,120}\bfrom\b
+  sel_2:
+    content|re: (?i);\s*(?:drop|delete|truncate)\s+(?:table|database)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

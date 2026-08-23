@@ -1,0 +1,42 @@
+title: Gigachad Dominant-Aggressive Persona Adoption
+id: 199c5033-11e5-4bf5-8343-307ae15ded03
+status: experimental
+level: high
+description: |-
+  Detects the Gigachad aggressive-dominance persona from NVIDIA garak dan.DanInTheWild inthewild corpus (#219). The attacker instructs the AI to respond "in the voice of a Gigachad character" with "extreme confidence, charisma, and assertiveness" and to demonstrate "sheer dominance and prowess". The "Gigachad" internet persona, when combined with an explicit mandate for extreme confidence + dominance + prowess, creates a persona designed to elicit aggressive, hyper-masculine content that progressively normalises boundary-pushing responses. Key signals: "Gigachad" persona label combined with "sheer dominance and prowess" or "extreme confidence" + "assertiveness" in a voice/character adoption context. Distinct from general confidence/charisma tone requests that do not invoke the Gigachad persona with a dominance mandate.
+
+  Adapted from Agent Threat Rules ATR-2026-00385 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00385
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Gg]igachad[\s\S]{0,120}(?:sheer\s+dominance|extreme\s+confidence|dominance\s+and\s+prowess)'
+  sel_1:
+    response|re: (?:voice|character|persona|style|tone)\s+of\s+(?:a\s+)?[Gg]igachad
+  sel_2:
+    response|re: '[Gg]igachad[\s\S]{0,200}(?:dominan(?:ce|t)|prowess|assertiveness|supremacy)[\s\S]{0,100}(?:possess(?:es)?|exud(?:e|ing)|demonstrat(?:e|ing)|showcase|display)'
+  condition: 1 of sel_*
+falsepositives:
+- 'Meme analysis: "The Gigachad meme represents an idealized hyper-masculine figure in internet culture
+  — it originated from a Krista Sudmalis photo series" (academic/cultural reference without persona adoption
+  directive)'
+- 'Generic tone request: "Write in a confident and assertive tone — strong leadership voice" (tone adjustment
+  without Gigachad persona name or dominance/prowess mandate)'
+- 'Slang reference: "Chad is a slang term for a socially dominant or attractive person, often used ironically
+  online" (slang definition without persona adoption)'
+- 'Leadership content: "Confidence and charisma are important leadership qualities that help executives
+  inspire their teams" (professional context without Gigachad persona)'
+action: report

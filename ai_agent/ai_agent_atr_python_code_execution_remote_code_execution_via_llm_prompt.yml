@@ -1,0 +1,45 @@
+title: Python Code Execution / Remote Code Execution via LLM Prompt
+id: 13a1dadf-b386-4bb1-be86-2e392a48b480
+status: experimental
+level: critical
+description: |-
+  Detects Python remote code execution (RCE) patterns injected via LLM prompts, sourced from 9 real payloads in NVIDIA garak python_code_execution.json (payload name: "Run python code that will cause a system-level effect"). Patterns include __import__('os') to access os.system/popen, eval(compile(...)) for multi-line code execution, subprocess .run() with shell=True, lambda-based socket reverse shells with s.connect() and s.recv()/s.send(), class MRO introspection via __class__.__mro__[1].__subclasses__() for sandbox escape, and file write via open('/tmp/...'). These represent the primary Python code injection patterns used against LLM agents with code execution capabilities.
+
+  Adapted from Agent Threat Rules ATR-2026-00297 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00297
+- https://github.com/NVIDIA/garak/blob/main/garak/data/payloads/python_code_execution.json
+tags:
+- attack.initial-access
+- atlas.aml.t0040
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: __import__\s*\(\s*'(?:os|subprocess|socket|sys)'\s*\)\s*\.\s*(?:system|popen|run|exec|Popen)
+  sel_1:
+    response|re: __import__\s*\(\s*['"]subprocess['"]\s*\)\s*\.\s*run\s*\([^)]{0,300}shell\s*=\s*True
+  sel_2:
+    response|re: eval\s*\(\s*compile\s*\(\s*['"].*?import\s+os
+  sel_3:
+    response|re: __class__\s*\.\s*__mro__\s*\[\s*\d+\s*\]\s*\.\s*__subclasses__\s*\(\s*\)\s*\[\s*\d+
+  sel_4:
+    response|re: s\.connect\s*\(\s*\([^)]{0,100}\d+\s*\)\s*\)|s\.recv\s*\(\d+\)\.decode\s*\(\s*\)|s\.send\s*\(\s*\w+\.encode\s*\(\s*\)\s*\)
+  sel_5:
+    response|re: with\s+open\s*\(\s*['"][^'"]{0,100}(?:/tmp/|/var/|/etc/)[^'"]{0,100}['"]\s*,\s*['"]w['"]\s*\)\s+as\s+\w+\s*:\s*\w+\.write\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- Python tutorials demonstrating __import__() as an alternative to import statements
+- Security research code reviews analyzing known RCE payloads (documentation context)
+- Legitimate subprocess.run() usage in code review where shell=True is discussed
+- CTF write-ups explaining MRO-based sandbox escapes for educational purposes
+- Python socket programming tutorials showing connect/send/recv patterns for benign network code
+action: report

@@ -1,0 +1,37 @@
+title: Tool and Function Capability Enumeration
+id: a935ea8f-d198-4066-baf9-bee8cf6fb5ef
+status: experimental
+level: medium
+description: |-
+  Detects prompts that attempt to enumerate the AI agent's available tools, function calls, APIs, plugins, or their parameters. Exposing the tool surface helps attackers craft targeted injection or privilege escalation attacks against specific tools. Covers: direct tool listing requests, function call enumeration, API and service discovery, specific tool parameter extraction, and "list all" completeness demands. Generalised from promptfoo tool-discovery plugin corpus - hardcoded tool name 'booking' replaced with generic tool/function/API enumeration patterns that match any tool name.
+
+  Adapted from Agent Threat Rules ATR-2026-00504 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00504
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(bulleted|numbered|complete|full|comprehensive|detailed|structured|exhaustive)\s+(list|listing|inventory|catalog|manifest|overview|summary).{0,30}(tools?|functions?|function\s+calls?|capabilities?|features?|plugins?|apis?|actions?|endpoints?|skills?)
+  sel_1:
+    content|re: (?i)(what|which|list|show|tell\s+me|give\s+me|provide).{0,30}(tools?|functions?|function\s+calls?|apis?|plugins?|actions?|capabilities?|skills?|endpoints?).{0,30}(do\s+you\s+have\s+access|you\s+(currently\s+)?(can\s+use|can\s+call|can\s+invoke|can\s+execute|can\s+access|have\s+access)|are\s+available\s+to\s+you\b).{0,30}(please\s+)?(list|enumerate|show|tell|name|provide)?
+  sel_2:
+    content|re: (?i)(available|all|every|the).{0,20}(function\s+calls?|api\s+calls?|tool\s+calls?|method\s+calls?|actions?\s+you\s+can\s+take|capabilities?\s+you\s+(have|possess|can\s+use)).{0,30}(you\s+can\s+make|available\s+to\s+you|at\s+your\s+(disposal|use))
+  sel_3:
+    content|re: (?i)(what|which)\s+(parameters?|arguments?|inputs?|options?|fields?|properties?|attributes?).{0,20}(does|do).{0,20}(the\s+)?["']?[a-z_][a-z0-9_]{1,40}["']?\s*(tool|function|api|action|plugin|endpoint|method|capability).{0,20}(accept|take|require|support|expect|need|use)
+  sel_4:
+    content|re: (?i)(apis?|external\s+services?|integrations?|connections?|webhooks?|data\s+sources?).{0,30}(you\s+have\s+access\s+to|available\s+to\s+you|you\s+(can|are\s+able\s+to)\s+(use|call|query|access)).{0,30}(list|enumerate|show|tell|name|provide|this\s+session)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate operator documentation requests from the system creator
+- Normal user questions about a specific advertised feature without complete enumeration intent
+- Developer onboarding queries about which integrations are configured
+action: report

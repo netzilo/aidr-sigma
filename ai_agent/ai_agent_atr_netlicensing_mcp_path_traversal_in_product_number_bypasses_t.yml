@@ -1,0 +1,38 @@
+title: netlicensing-mcp Path Traversal in product_number Bypasses Token Redaction (GHSA-hxpf-9xvq-wph8)
+id: 8ef57ca5-3ac7-463c-a5b5-36f242d55cc7
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-hxpf-9xvq-wph8 (CRITICAL): NetLicensing-MCP <= 0.1.5 interpolates the netlicensing_get_product tool's `product_number` parameter into a REST path without validation (products.py:22 -> nl_get(f"/product/{product_number}")). Supplying `../token` (or URL-encoded `%2e%2e/token`) produces `/product/../token`, which httpx normalizes to the `/token` endpoint. The response is wrapped as a Product instead of a token, skipping redact_token_read(), so the raw APIKEY ("number" field), "shopURL", and "console_url" plaintext secret are returned. This rule keys on the product_number = ../token traversal payload and its encoded variants reaching the netlicensing product tool/path.
+
+  Adapted from Agent Threat Rules ATR-2026-01948 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01948
+tags:
+- attack.exfiltration
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)product_number\s*[=:]\s*["\x27]?\s*(?:\.\.|%2e%2e)\s*[/\\]\s*token
+  sel_1:
+    content|re: (?i)/product/\s*(?:\.\.|%2e%2e)\s*[/\\]\s*token
+  sel_2:
+    content|re: (?i)(?:netlicensing[_-]?get[_-]?product|get_product)[\s\S]{0,120}(?:\.\.|%2e%2e)[/\\]token
+  sel_3:
+    content|re: (?i)GHSA-hxpf-9xvq-wph8[\s\S]{0,200}(?:path\s*traversal|product_number|\.\./token|redact|token\s*redaction)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate netlicensing_get_product call with a real alphanumeric product_number (e.g. product_number=PRD-001)
+  that contains no ../ traversal.
+- Documentation describing the /product/{number} and /token REST endpoints separately without a traversal
+  payload joining them.
+- Generic mention of the netlicensing-mcp server or its tools without the ../token product_number payload.
+action: report

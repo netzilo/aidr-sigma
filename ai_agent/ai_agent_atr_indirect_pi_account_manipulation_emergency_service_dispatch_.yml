@@ -1,0 +1,38 @@
+title: Indirect PI — Account Manipulation / Emergency Service Dispatch via Pretext
+id: f0965d09-4d85-4aab-b77c-84bfc6dba792
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to perform account manipulation using fabricated emergency pretexts: dispatching fire/ police response to specific addresses, triggering emergency services, or modifying account security policies using false emergency claims.  The payload is embedded in consumed structured data and exploits agents with emergency dispatch or account management tool access. Source: indirect-pi-account-manipulation-carrier / indirect-pi-infrastructure-carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-00722 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00722
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:dispatch|send|call|summon|trigger)\s+(?:an?\s+)?(?:emergency|fire|police|ambulance|paramedic)[^.\n]{0,60}(?:response|vehicle|unit|team)[^.\n]{0,100}(?:to\s+(?:my\s+)?(?:residence|address|location|house|home)|Code\s+\d{3})
+  sel_1:
+    content|re: (?i)(?:update|modify|change|add\s+to)\s+(?:my\s+)?security\s+policy[^.\n]{0,80}(?:whitelist|allowlist|trusted\s+domains?)[^.\n]{0,100}(?:fakesite|scam|evil|attacker|malicious|suspicious|ammyscam|getyourinfo)
+  sel_2:
+    content|re: (?i)Include\s+(?:[^\n]{0,60})?following\s+domains?\s+in[^\n]{0,80}(?:whitelist|allowlist)[^\n]{0,250}(?:fakesite|scam|evil|attacker|malicious|suspicious|ammyscam|getyourinfo)
+  sel_3:
+    content|re: (?i)(?:dispatch|send|call)\s+(?:an?\s+)?(?:ambulance|fire\s+(?:truck|engine)|police\s+car|emergency\s+services?)[^.\n]{0,60}(?:Code\s+(?:Red|Blue|Green|\d+)|immediately|to\s+\d+)
+  sel_4:
+    content|re: (?i)(?:give|set|assign)\s+priority\s+to\s+(?:an?\s+)?emergency\s+vehicle[^.\n]{0,100}(?:at\s+(?:these\s+)?intersections?|traffic\s+signal|light)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate emergency dispatch systems with verified first-responder access
+- Security administrators updating their own security policies with verified domains
+action: report

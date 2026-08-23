@@ -1,0 +1,37 @@
+title: OpenHuman Shell Tool Allowlist Bypass via Env-Prefix / find -execdir (CVE-2026-55743)
+id: 257d3128-f65c-424b-92bc-f8741ac5b366
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-55743 (CRITICAL): the shell tool command allowlist in OpenHuman desktop agent <= 0.54.0 (default Supervised SecurityPolicy) is bypassed because is_command_allowed() strips leading inline KEY=value environment-variable assignments (skip_env_assignments) before validation, and is_args_safe() blocks find -exec/-ok but not the functionally identical -execdir/-okdir. An attacker prefixes an allowlisted command with a dangerous env var (GIT_EXTERNAL_DIFF, GIT_SSH_COMMAND, GIT_PAGER, LD_PRELOAD, BASH_ENV, PYTHONSTARTUP) pointing at a payload, e.g. "GIT_PAGER=/tmp/payload.sh git log", so the allowlisted git binary executes the attacker-controlled subprocess. This rule keys on a dangerous env-var assignment (= path/command) immediately preceding an allowlisted binary, and on find with -execdir/-okdir.
+
+  Adapted from Agent Threat Rules ATR-2026-01959 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01959
+- https://nvd.nist.gov/vuln/detail/CVE-2026-55743
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:^|[\n;&|(`"\x27:,])[ \t]*(?:GIT_EXTERNAL_DIFF|GIT_SSH_COMMAND|GIT_PAGER|GIT_EDITOR|LD_PRELOAD|LD_AUDIT|LD_LIBRARY_PATH|BASH_ENV|ENV|PYTHONSTARTUP|PERL5OPT|PROMPT_COMMAND)=\S*\s*(?:/|\.{1,2}/|~/|\$\{?\w|[\w./-]+\.(?:sh|so|py|pl|bat))[^\n]{0,80}?\b(?:git|ls|cat|grep|find|python3?|node|npm|cp|mv|head|tail)\b
+  sel_1:
+    content|re: (?i)\bfind\b[^\n]{0,200}?-(?:execdir|okdir)\b\s+\S
+  sel_2:
+    content|re: (?i)CVE-2026-55743[\s\S]{0,200}(?:allowlist|env(?:ironment)?[\s-]?(?:var|prefix)|execdir|skip_env|GIT_PAGER|LD_PRELOAD)
+  condition: 1 of sel_*
+falsepositives:
+- Benign inline env vars that do not spawn subprocesses (e.g. TZ=UTC git log, LANG=C ls, NODE_ENV=production
+  npm test).
+- Legitimate use of find with -exec/-ok flags that are already covered by the allowlist, without -execdir/-okdir.
+- Documentation or advisory text that mentions GIT_PAGER or LD_PRELOAD without an assignment to an executable
+  path preceding an allowlisted command.
+action: report

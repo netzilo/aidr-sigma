@@ -1,0 +1,37 @@
+title: SQL Injection Tautology RBAC Bypass
+id: 53b45dd9-e3ad-44e7-bf6e-1699300ef534
+status: experimental
+level: critical
+description: |-
+  Detects SQL injection tautology patterns embedded in agent tool arguments
+  that attempt to bypass row-level security or RBAC filters. Tautologies such
+  as "OR 1=1", "OR true", "OR 'a'='a'" cause the WHERE clause to always
+  evaluate to true, returning all rows regardless of the caller's authorization
+  scope. This is the primary SQL-based BOLA / broken-object-level-authorization
+  vector targeting AI agents that forward user-supplied values directly into
+  database queries.
+
+  Adapted from Agent Threat Rules ATR-2026-01600 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01600
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bOR\s+(?:1\s*=\s*1|'[^']{0,4}'\s*=\s*'[^']{0,4}'|true|"[^"]{0,4}"\s*=\s*"[^"]{0,4}")
+  sel_1:
+    content|re: (?i)\bOR\s+(?:1\s*=\s*1|'[^']{0,4}'\s*=\s*'[^']{0,4}'|true)\b
+  condition: 1 of sel_*
+falsepositives:
+- SQL queries in documentation or educational context (narrative text without tool_args)
+- Boolean logic expressions in non-SQL programming contexts
+action: report

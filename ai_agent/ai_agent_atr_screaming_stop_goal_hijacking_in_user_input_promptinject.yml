@@ -1,0 +1,35 @@
+title: Screaming-Stop Goal Hijacking in User Input (PromptInject)
+id: cf703841-1758-4fbd-bbb5-3627172fdd2d
+status: experimental
+level: high
+description: |-
+  Detects the PromptInject 'screaming-stop' attack: an uppercase urgent imperative ('STOP EVERYTHING', 'HALT NOW') followed by a print/say/output directive with a rogue string. High-urgency framing designed to override agent behavior by simulating an emergency stop signal. Distinct from the 'ignore-print' variant in that it uses urgency framing (STOP EVERYTHING + NOW) rather than instruction cancellation. Generalised from PromptInject corpus (cluster size: 15 base instances) - hardcoded rogue strings replaced with generic output-verb + quoted-string pattern; exclamation count made flexible (1+ per marker); also covers lowercase variants.
+
+  Adapted from Agent Threat Rules ATR-2026-00507 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00507
+- https://github.com/agencyenterprise/PromptInject
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)stop\s+everything!{1,10}\s+now!{1,10}\s+just\s+(print|say|output|write|respond\s+with|type)
+  sel_1:
+    content|re: (?i)(stop|halt|cease|end)\s+(everything|all|it|now|right\s+now)!{0,10}\s*(now|immediately|right\s+now)?!{0,10}\s+just\s+(print|say|output|write|type)
+  sel_2:
+    content|re: (?i)(stop|halt).{0,20}(everything|all|now).{0,20}just\s+(output|print|say|write).{0,20}["'](system\s+override|access\s+granted|override\s+accepted|emergency\s+(stop|override|halt))
+  condition: 1 of sel_*
+falsepositives:
+- 'Urgent messages without print/say output directive: ''STOP - this is an emergency!'''
+- 'Legitimate stop directives: ''Stop everything and review the code before deployment'''
+- 'STOP + output without screaming pattern: ''Please halt and output the error log'''
+action: report

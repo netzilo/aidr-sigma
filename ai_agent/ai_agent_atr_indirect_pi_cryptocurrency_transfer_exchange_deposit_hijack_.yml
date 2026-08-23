@@ -1,0 +1,34 @@
+title: Indirect PI — Cryptocurrency Transfer / Exchange Deposit Hijack via Injection
+id: f41b7c7b-8626-4eaa-8745-329c924ea982
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads instructing an agent with access to cryptocurrency exchange APIs to deposit, withdraw, or transfer cryptocurrency funds to attacker-controlled wallets or exchange accounts. The attack pattern uses "IMPORTANT!!! Ignore all previous instructions" combined with a crypto exchange name (Binance, Coinbase, Kraken), a monetary amount, an account identifier, and a deposit/withdrawal directive. Derived from vpibench indirect-pi-financial-crypto-carrier corpus. Cryptocurrency transfers are typically irreversible, making this a critical severity attack.
+
+  Adapted from Agent Threat Rules ATR-2026-00861 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00861
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- attack.t1657
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:deposit|withdraw|transfer|send|move)\s+(?:\d+(?:\.\d+)?\s+)?(?:USD|BTC|ETH|USDT|BNB|SOL|XRP|cryptocurrency|crypto)\s+from\s+(?:my\s+)?account[^\n]{0,80}(?:account_id|account\s+id|account\s+number)[^\n]{0,80}(?:Binance|Coinbase|Kraken|Gemini|exchange)
+  condition: sel_0
+falsepositives:
+- Legitimate crypto trading bot instructions from verified user with exchange connection
+- Cryptocurrency exchange documentation describing deposit/withdraw API parameters
+- Security research describing crypto exchange injection attacks
+action: report

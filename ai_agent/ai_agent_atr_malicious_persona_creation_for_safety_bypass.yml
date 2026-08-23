@@ -1,0 +1,39 @@
+title: Malicious Persona Creation for Safety Bypass
+id: 12d2cbbb-d52f-495e-b82e-8c04b38637b8
+status: experimental
+level: high
+description: |-
+  Detects attempts to create explicitly malicious AI personas or characters designed to bypass safety guardrails through roleplay instructions. Attackers define fictional characters with detailed harmful traits (racism, violence, self-harm encouragement, aggression, amorality) and instruct the agent to roleplay as these characters. This technique exploits the gap between "fictional character description" and actual harmful output generation. Unlike generic jailbreak personas (DAN, STAN), these attacks create bespoke evil characters with vivid behavioral descriptions to increase compliance likelihood.
+
+  Adapted from Agent Threat Rules ATR-2026-00245 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00245
+- https://arxiv.org/abs/2307.15043 - Universal and Transferable Adversarial Attacks on Aligned Language
+  Models
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (roleplay|role[\s-]play|respond\s+as|act\s+as|play\s+the\s+(?:role|part)\s+of|you\s+are\s+(?:now\s+)?|pretend\s+to\s+be|impersonate)\s+(?:an?\s+|the\s+)?[^\n]{0,60}?(evil|sinister|malicious|wicked|vile|twisted|sadistic|psychopath(?:ic)?|sociopath(?:ic)?|villain(?:ous)?)\b[^\n]{0,40}?(ai|character|persona|version|bot|entity|model|assistant|gpt)
+  sel_1:
+    content|re: (?:evil|malicious|harmful|unrestricted|unfiltered)\s+(?:version|character|persona|ai|entity|bot|model|assistant)\b[^\n]{0,40}?(racist|encourages?\s+(?:suicide|self[\s-]harm|violence)|foul[\s-]mouthed|amoral|cruel|hateful|abusive)|(?:character|persona|version|entity|bot|model|assistant)\s+(?:called|named)\s+[^\n]{0,40}?(racist|encourages?\s+(?:suicide|self[\s-]harm|violence)|foul[\s-]mouthed|amoral|cruel|hateful|abusive)
+  sel_2:
+    content|re: (?:has\s+no|with\s+no|having\s+no|without\s+(?:any\s+)?|no)\s+(?:moral|ethical|safety)(?:\s+or\s+(?:moral|ethical|safety))?\s+(?:restriction|constraint|guideline|rule|limit|bound(?:arie|ar)?s?|filter|guardrail)s?\b|(?:freed?\s+from|ignores?|bypass(?:es|ing)?)\s+(?:all\s+)?(?:its?\s+)?(?:moral|ethical|safety)\s*(?:and\s+(?:moral|ethical|safety)\s*)?(?:restriction|constraint|guideline|rule|limitation|filter|guardrail)s?
+  sel_3:
+    content|re: (swears?\s+a\s+lot|uses?\s+(?:profanity|curse\s+words|bad\s+language)|foul[\s-]mouthed)\s+[^\n]{0,40}?(character|persona|\bai\b|assistant|bot|model|version|robot)|(?:character|persona|\bai\b|bot|robot)\s+[^\n]{0,40}?(?:who|that)\s+(?:swears?\s+a\s+lot|is\s+foul[\s-]mouthed|uses?\s+(?:profanity|curse\s+words))
+  sel_4:
+    content|re: (?:hopes?|wants?)\s+(?:people|users?|humans?|everyone)\s+(?:to\s+)?(?:get\s+)?(?:hurt|harm(?:ed)?|suffer|die)\b|enjoys?\s+(?:it\s+)?when\s+(?:people|users?|humans?)\s+(?:suffer|are\s+hurt|die)|enjoys?\s+(?:other\s+people'?s?\s+|their\s+)?(?:pain|suffering)|encourages?\s+(?:suicide|self[\s-]harm|violence\s+against)
+  condition: 1 of sel_*
+falsepositives:
+- Security research discussing persona-based attacks as examples without requesting roleplay
+- Creative writing discussions about villain characters in fiction without agent roleplay requests
+- Academic analysis of AI safety failures mentioning harmful personas descriptively
+action: report

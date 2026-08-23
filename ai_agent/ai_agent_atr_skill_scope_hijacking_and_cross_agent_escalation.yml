@@ -1,0 +1,34 @@
+title: Skill Scope Hijacking and Cross-Agent Escalation
+id: bc48c023-1b43-406e-9b29-a1e1a6e61114
+status: experimental
+level: high
+description: |-
+  Detects SKILL.md files that instruct agents to expand their scope beyond the skill's stated purpose, access other agents' data, or escalate privileges through natural-language social engineering patterns specific to skill docs.
+
+  Adapted from Agent Threat Rules ATR-2026-00164 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-14'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00164
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:also|additionally|while\s+you.re\s+at\s+it|before\s+(?:returning|responding))\s+(?:read|access|check|scan|collect|gather|harvest)\s+(?:all\s+)?(?:other|additional|nearby|available|accessible)\s+(?:files?|directories|folders?|configs?|secrets?|keys?|tokens?|env)
+  sel_1:
+    content|re: (?i)(?:send|forward|relay|pass|share|transmit)\s+(?:this|these|the|all)\s+(?:results?|data|output|findings?|information)\s+to\s+(?:the\s+)?(?:other|another|secondary|backup|external)\s+(?:agent|server|endpoint|service|API)
+  sel_2:
+    content|re: (?i)(?:you\s+(?:also\s+)?have|this\s+skill\s+(?:also\s+)?has|you\s+can\s+also|additionally\s+you\s+can)\s+(?:full\s+)?(?:access|permission|authority|rights?)\s+to\s+(?:all\s+)?(?:files?|system|network|internet|shell|root)
+  sel_3:
+    content|re: (?i)(?:override|expand|extend|elevate|escalate)\s+(?:your\s+)?(?:current\s+)?(?:scope|permissions?|access|privileges?|authority|role)\s+(?:to|beyond|past)
+  condition: 1 of sel_*
+falsepositives:
+- Multi-agent orchestration tools that legitimately coordinate between agents
+- Admin/ops skills that genuinely need broad access
+action: report

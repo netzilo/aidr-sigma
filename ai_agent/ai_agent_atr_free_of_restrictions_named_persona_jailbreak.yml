@@ -1,0 +1,48 @@
+title: Free-of-Restrictions Named Persona Jailbreak
+id: c85a2911-f347-47d7-aafb-87cc11c8cc09
+status: experimental
+level: critical
+description: |-
+  Detects custom-named AI personas explicitly declared as free from restrictions, ethical settings, safety protocols, or OpenAI/ChatGPT policies — a jailbreak class not caught by ATR-2026-00273 (which requires DAN/DUDE/STAN names) or ATR-2026-00314 (which requires amoral/unfiltered labels). From NVIDIA garak dan.DanInTheWild and inthewild_jailbreak_llms.json corpus: attackers create custom named personas (PersonGPT, ChatTRU, John, FreeGPT, Connor, ARC) and declare them "free of all restrictions and filters", "not bound by any restrictions AT ALL", or with directives like "explicitly forbidden from following safety protocols" and "primary directive is to obey user in any way". The persona name is arbitrary; detection relies on the restriction- removal declaration and mandate. Key signals: "free of all restrictions and filters", "not bound by any restrictions/ethical settings", "explicitly forbidden from following safety protocols", and "primary directive to assist without limitations".
+
+  Adapted from Agent Threat Rules ATR-2026-00317 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00317
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \bfree\s+of\s+all\s+restrictions?\s+and\s+filters?\b
+  sel_1:
+    response|re: \bnot\s+bound\s+by\s+any\s+of\s+(?:ChatGPT|OpenAI|its|their|your)\s+(?:\w+\s+){0,3}(?:restrictions?|ethical\s+settings?|rules?|policies?|filters?|limits?|guidelines?|safety)
+  sel_2:
+    response|re: \bnot\s+bound\s+by\s+any\s+restrictions?\s+AT\s+ALL\b
+  sel_3:
+    response|re: \bnot\s+bound\s+by\s+(?:the\s+)?(?:rules?\s+and\s+policies?|policies?\s+and\s+rules?)[\s\S]{0,100}(?:OpenAI|ChatGPT|AI(?:\s+(?:model|bot|system))?|comply|forced)
+  sel_4:
+    response|re: (?:explicitly|strictly)\s+(?:forbidden|prohibited|not\s+allowed)\s+from\s+(?:following|utilizing|acknowledging|applying|using)[\s\S]{0,50}(?:safety|ethical|content|OpenAI|ChatGPT|moral)
+  sel_5:
+    response|re: (?:primary\s+directive|sole\s+purpose|main\s+purpose|only\s+purpose)\s+is\s+to\s+(?:assist|obey|comply|serve|help)\b[\s\S]{0,80}(?:any\s+(?:way|request|thing|content)|without\s+(?:any\s+)?(?:limit|restrict|filter|question)|regardless\s+of)
+  sel_6:
+    response|re: \bfree\s+from\s+(?:all|any|OpenAI|ChatGPT|its|their|the)[\s\S]{0,30}\b(?:restrictions?|limits?|policies?|filters?|guidelines?|ethics?)\b
+  condition: 1 of sel_*
+falsepositives:
+- 'Legal document: "This agreement is not bound by any restrictions imposed by prior contracts" (no AI
+  persona context)'
+- 'Academic paper: "Models are not bound by restrictions when evaluating creative fiction" (descriptive,
+  not a jailbreak instruction)'
+- 'System design doc: "The free tier has no filter restrictions" (product description without persona
+  declaration)'
+- Red-team report quoting free-of-restrictions jailbreaks as examples for defensive analysis
+action: report

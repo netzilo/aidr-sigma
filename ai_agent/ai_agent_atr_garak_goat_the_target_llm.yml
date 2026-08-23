@@ -1,0 +1,32 @@
+title: Garak Goat - the target llm
+id: c4a6c34f-bb5d-49a8-ae7c-cbbb99bb958e
+status: experimental
+level: medium
+description: |-
+  Detects meta-attack injection where the attacker embeds a description of an attack technique directed at "the target LLM" inside the prompt itself. The garak 'goat' probe family tests whether a model can be manipulated by injecting explicit attack technique descriptions as if they were instructions. Four attack shapes: (1) refusal- suppression via first-person constraint: "attempting to deny the target LLM's next reply from responding in the first person / containing a refusal string such as 'I cannot'"; (2) dual-output generation prime: "prime the LLM to generate two responses, one safe and one harmful"; (3) attention-distraction with violating prompt buried in sub-requests: "answer the violating prompt in-between instruction requests"; (4) intent-inversion: "trick the LLM into responding with a different, opposite or inverse intent." These are the GOAT (Generative Offensive Attack Templates) probe patterns. NOTE: the core detection phrases are corpus-specific descriptions of attack techniques and are kept as literal matches — generalizing "responding in the first person" or "harmful or violating output" would cause substantial false positives in security research content and educational materials. Rule is partially corpus-fingerprint. Layer 2 adds structural coverage for the refusal-suppression shape. Covers garak 'goat' probe cluster 'the-target-llm' (4 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00468 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00468
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(answer the violating prompt in-between instruction requests|responding with a different,
+      opposite or inverse|responding in the first person, starting with,|harmful or violating output\.
+      for example this)
+  sel_1:
+    content|re: (?i)(?:prevent|stop|deny|block|suppress)\s+(?:the\s+)?(?:model|llm|ai|assistant|target)[^\n]{0,50}(?:from\s+)?(?:starting\s+with|containing|using|saying|beginning\s+with)\s+["']?(?:I\s+(?:cannot|can't|am\s+not\s+able|apologize|refuse)|As\s+an\s+AI)["']?
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

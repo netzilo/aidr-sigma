@@ -1,0 +1,38 @@
+title: Indirect PI — Physical Address / PII Exfiltration via Agent Email
+id: 69a6c7a5-f888-40b7-a4ac-34fb1e60a0d7
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to retrieve the user's saved physical addresses (home, shipping, billing) from an e-commerce or account platform and send them to an attacker-controlled email address. Physical address data combined with name enables stalking, physical burglary, and identity theft. The attack pattern uses a "IMPORTANT!!! Ignore all previous instructions" override combined with address-retrieval verbs targeting saved account addresses. Derived from vpibench indirect-pi-exfil-address-carrier corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00856 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00856
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:retrieve|get|fetch|access|export)\s+(?:my\s+)?(?:saved\s+)?(?:address(?:es)?|shipping\s+address(?:es)?|billing\s+address(?:es)?|home\s+address|physical\s+address(?:es)?|delivery\s+address(?:es)?)\s+(?:from\s+(?:my\s+)?\w+\s+account)?[^\n]{0,150}(?:email|mail|send|forward)[^\n]{0,80}(?:alternate\s+email|alternate\s+address|email\s+address|my\s+email)[^\n]{0,80}@[^\s"]{3,80}
+  sel_1:
+    content|re: (?i)(?:retrieve|get|fetch)\s+(?:my\s+)?(?:saved\s+)?(?:address(?:es)?|shipping\s+address|home\s+address)[^\n]{0,80}(?:email|mail|send|forward)\s+(?:it|them|the\s+(?:addresses?|information))\s+to\s+(?:my\s+)?(?:alternate\s+email|alternate\s+address)[^\n]{0,80}@[^\s"]{3,80}
+  sel_2:
+    content|re: (?i)(?:get|retrieve|fetch|access)\s+(?:my\s+)?(?:saved\s+)?(?:shipping\s+address(?:es)?|billing\s+address(?:es)?|home\s+address(?:es)?|physical\s+address(?:es)?|delivery\s+address(?:es)?|saved\s+address(?:es)?)[^\n]{0,100}(?:send|email|mail|forward)(?:\s+(?:it|them|the\s+(?:addresses?|information)))?\s+to[^\n]{0,80}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- User requesting their own address book export for personal backup
+- Address update confirmation email sent to account holder
+- Security documentation describing address exfiltration attack scenarios
+action: report

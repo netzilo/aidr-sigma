@@ -1,0 +1,41 @@
+title: Daddy/Babygirl Sycophantic Power-Dynamic Manipulation
+id: 3a696f75-7ad8-43b7-9bdc-78ea09be4e7d
+status: experimental
+level: high
+description: |-
+  Detects the daddy/Babygirl sycophantic power-dynamic manipulation from NVIDIA garak dan.DanInTheWild inthewild corpus (#479). The attacker establishes an infantilizing relationship where the user is "daddy" and the AI is "Babygirl", creating a sexualized power dynamic via persistent persona mandates. The core pattern is: (1) "refer to me as 'daddy'" at the end of all responses, and (2) "I will refer to you... as 'Babygirl'" — the bidirectional naming mandate signals an intentional relationship-dynamic injection rather than a casual tone preference. The combination of both roles together is the operative signal; either alone in a clearly non-sexual context does not trigger. This persistent relationship framing is used to gradually bypass content policies by normalising an infantilizing/sexualized dynamic across all subsequent interactions.
+
+  Adapted from Agent Threat Rules ATR-2026-00386 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00386
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:refer\s+to\s+(?:me|you)\s+as\s+['"]?(?:daddy|Daddy)['"]?|call\s+(?:me|you)\s+['"]?(?:daddy|Daddy)['"]?)[\s\S]{0,300}(?:refer\s+to\s+(?:you|me)\s+as\s+['"]?[Bb]aby\s*[Gg]irl['"]?|call\s+(?:you|me)\s+['"]?[Bb]aby\s*[Gg]irl['"]?)
+  sel_1:
+    response|re: (?:refer\s+to\s+me\s+as\s+['"]?(?:daddy|Daddy)['"]?|call\s+me\s+['"]?(?:daddy|Daddy)['"]?)[\s\S]{0,100}(?:at\s+the\s+end\s+of\s+all\s+(?:your\s+)?responses?|in\s+(?:all|every)\s+(?:your\s+)?responses?|every\s+(?:time|response|message))
+  sel_2:
+    response|re: refer\s+to\s+(?:me|you)\s+as\s+['"]?(?:daddy|Daddy)['"]?[\s\S]{0,400}refer\s+to\s+(?:you|the\s+assistant|me)\s+as\s+['"]?[Bb]aby\s*[Gg]irl['"]?
+  condition: 1 of sel_*
+falsepositives:
+- 'Parental context: "Call me Dad in your responses since I am helping my young daughter learn to read
+  — she calls me Daddy" (parental learning context without Babygirl counterpart role)'
+- 'Generic nickname: "I call my AI assistant Buddy as a fun nickname — feel free to call me Boss" (generic
+  title/nickname without daddy+Babygirl dynamic)'
+- 'Academic reference: "The term daddy issues is used in psychology to describe attachment patterns stemming
+  from absent father figures" (clinical/academic usage without persona mandate)'
+- 'Formal title: "Refer to me as Chief in all formal correspondence — that is my rank" (professional title
+  without sexualized dynamic or Babygirl counterpart)'
+action: report

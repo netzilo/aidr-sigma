@@ -1,0 +1,31 @@
+title: Bare Key Elicitation Token Detection
+id: c74d5552-9ba9-4344-8b4c-56df81aea654
+status: experimental
+level: high
+description: |-
+  Detects user turns that consist of nothing but a bare secret/credential label (e.g. "key:", "(key)", "[KEY]") with no surrounding sentence. This pattern is characteristic of elicitation probes where an attacker (or a compromised upstream agent) sends a minimal, whole-turn token designed to prompt the assistant to fill in a blank with a live secret, API key, or password rather than treating the message as a genuine question. Detection is whole-string anchored: it only fires when the entire user turn is the bare key/secret label itself, so ordinary sentences that merely mention "key" mid-conversation do not match. Multilingual coverage included (English, Spanish, French, German).
+
+  Adapted from Agent Threat Rules ATR-2026-02007 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02007
+tags:
+- attack.initial-access
+- attack.t1552
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)^\W{0,5}(?:the\s+)?(?:secret[_ ]?key|key|clave|cl[ée]|schluessel|contrase[ñn]a)\W{0,5}:?\W{0,5}$
+  condition: sel_0
+falsepositives:
+- 'Users asking a genuinely short question that happens to include the word ''key'' as part of a larger
+  sentence (not matched: pattern is whole-string anchored)'
+- Single-word UI field labels echoed back by legitimate form-fill automation in non-conversational contexts
+action: report

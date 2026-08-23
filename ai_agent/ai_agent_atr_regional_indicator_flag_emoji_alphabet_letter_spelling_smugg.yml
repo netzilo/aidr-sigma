@@ -1,0 +1,31 @@
+title: Regional-Indicator Flag-Emoji Alphabet Letter-Spelling Smuggling
+id: 4edd6253-1e99-468c-8500-2a5f6ba601e0
+status: experimental
+level: high
+description: |-
+  Detects prompt-injection payloads that smuggle instructions or refusal-suppression phrases by spelling them out one letter at a time using Unicode regional-indicator symbols (U+1F1E6-U+1F1FF, the codepoints that render as flag emoji when paired, e.g. 🇮 🇭 🇦 🇻 🇪). Attackers interleave the letter-emoji with filler emoji (plant/water/ loop icons) to defeat keyword and language-model-based filters while the underlying letters still spell coherent adversarial text (e.g. "I HAVE BEEN NEED WORD" / "AI DO NOT SPEAK"-style constructions). Detection is purely structural: it looks for a long run of regional-indicator codepoints regardless of which letters they spell or what topic the decoded payload targets, so it survives filler-emoji insertion and arbitrary payload content. Recovered from the HackAPrompt false-negative corpus, where this alphabet-spelling technique produced confirmed jailbreak submissions that evaded the prior detection surface.
+
+  Adapted from Agent Threat Rules ATR-2026-02004 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02004
+tags:
+- attack.initial-access
+- attack.t1027
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '[🇦-🇿]{6,}'
+  condition: sel_0
+falsepositives:
+- Single or paired country flag emoji in travel/geography text (e.g. discussing a country's flag)
+- Short lists of 2-3 country flags used to indicate language/region options in a UI or menu
+- Academic text describing Unicode regional-indicator codepoints without an actual long emoji run present
+action: report

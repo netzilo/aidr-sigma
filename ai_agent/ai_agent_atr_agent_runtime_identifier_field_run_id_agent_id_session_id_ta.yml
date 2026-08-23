@@ -1,0 +1,40 @@
+title: Agent-Runtime Identifier Field (run_id/agent_id/session_id/task_id) Carries Path Traversal Into
+  a History/Log File Read
+id: 619f4597-6133-4e33-bb02-758d47f94741
+status: experimental
+level: high
+description: |-
+  Detects an agent-runtime identifier argument (run_id, agent_id, session_id, execution_id, task_id) that contains a path-traversal sequence or an absolute path targeting a sensitive system directory, when that identifier is used as a filesystem-path component for reading history/terminal/log artifacts. Ordinary runtime identifiers are opaque tokens (UUIDs, short alphanumeric run IDs) and legitimately never contain "../" or start with "/etc", "/root", etc. -- the presence of traversal or an absolute system path inside a field whose name signals it should be a bare identifier is itself the attack. Mined from GHSA-22cj-m4wf-fv2c (PraisonAI's Dynamic Context module exposes agent-callable `history_search`/`history_tail`/`history_get` and `terminal_tail`/`terminal_grep`/`terminal_commands` tools that join a caller-supplied `run_id` and `agent_id` directly into a filesystem path -- `self.base_dir / run_id / "history" / f"{agent_id}.jsonl"` -- with no rejection of an absolute `run_id` or a traversal-bearing `agent_id`, letting a lower-trust prompt/user read .jsonl/.log files outside the configured Dynamic Context base directory). This is a distinct field -name family (runtime/session-scoped: run_id/agent_id/session_id/ execution_id/task_id) and a different source product from ATR-2026-02251 (tenant/owner-scoped: sender_id/owner_id/tenant_id/ user_id/project_id/app_id/workspace_id, mined from EverOS/CVE-2026-58499) -- the two rules are complementary members of the same broader "opaque-identifier-field carrying path traversal" class rather than duplicates of one another.
+
+  Adapted from Agent Threat Rules ATR-2026-02353 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02353
+- https://github.com/advisories/GHSA-22cj-m4wf-fv2c
+tags:
+- attack.privilege-escalation
+- attack.t1083
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(run_id|agent_id|session_id|execution_id|task_id)\b\s*(?:[=:]|(?:is\s+)?set\s+to)\s*["\x27]?(?:\.\.(?:/|%2f)|%2e%2e(?:/|%2f))
+  sel_1:
+    content|re: \b(run_id|agent_id|session_id|execution_id|task_id)\b\s*(?:[=:]|(?:is\s+)?set\s+to)\s*["\x27]?/(?:etc|root|proc|home|var/(?:log|lib))\b
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate identifier value that happens to be discussed in prose alongside the word 'traversal' or
+  a path-like example without the field actually being assigned a traversal sequence or absolute system
+  path (e.g. 'validate that run_id never contains ../ before using it' -- no assignment connector directly
+  precedes the traversal marker, so this does not match)
+- Documentation showing the vulnerable field/sink relationship as example code, not an actual argument
+  being set
+- Ordinary bug-report/chat-style prose using 'to' as a preposition rather than an assignment, e.g. 'point
+  your run_id to ../shared/logs' or 'I changed session_id to /etc/hosts by mistake' -- a bare standalone
+  'to' is not accepted as a connector, only actual assignment tokens (:, =, 'set to', 'is set to')
+action: report

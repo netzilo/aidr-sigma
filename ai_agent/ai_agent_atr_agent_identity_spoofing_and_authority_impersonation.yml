@@ -1,0 +1,46 @@
+title: Agent Identity Spoofing and Authority Impersonation
+id: 9d00227a-e26a-48da-b152-87c7f23ae450
+status: experimental
+level: critical
+description: |-
+  Detects agents or messages that impersonate other agents, system components, or
+  supervisory roles. In multi-agent architectures, agents rely on identity claims
+  to establish trust. An attacker can craft messages claiming system-level authority,
+  admin status, or supervisor identity to trick other agents into executing privileged
+  operations, bypassing safety checks, or disclosing sensitive information.
+
+  Adapted from Agent Threat Rules ATR-2026-00117 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00117
+tags:
+- attack.execution
+- attack.t1036
+- atlas.aml.t0051
+- owasp.asi07
+- owasp.asi10
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)I\s+am\s+(?:the\s+)?(?:system|admin|root|supervisor|orchestrator|master)\s+(?:agent|process|controller)
+  sel_1:
+    content|re: (?i)(?:acting|speaking|operating|responding)\s+as\s+(?:the\s+)?(?:system|admin|supervisor|authority|coordinator)
+  sel_2:
+    content|re: (?i)override\s+(?:all\s+)?(?:safety|security|permission)\s+(?:checks?|controls?|restrictions?)\s+as\s+(?:system|admin|authorized)
+  sel_3:
+    content|re: (?i)(?:this\s+is\s+a\s+)?(?:system|admin|supervisor|emergency)\s+(?:level\s+)?(?:command|directive|override)
+  sel_4:
+    content|re: (?i)(?:I\s+am|this\s+is)\s+(?:GPT-4|Claude|Gemini|the\s+(?:primary|main|original)\s+(?:model|AI|assistant))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate orchestrator agents identifying themselves in multi-agent systems
+- Documentation describing agent identity protocols
+- A legitimate orchestrator agent announcing itself during initialization with a message like 'I am the
+  orchestrator agent for this workflow' as part of standard multi-agent handshake protocols
+- 'An agent status report that states ''Currently operating as the coordinator for task batch #4721''
+  in a sanctioned role-rotation system'
+action: report
