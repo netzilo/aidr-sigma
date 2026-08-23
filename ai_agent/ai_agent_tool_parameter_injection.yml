@@ -1,0 +1,395 @@
+title: Tool Parameter Injection Payload
+id: 6f3b1a94-2d7c-4e58-9b21-c05a7f8e3d16
+status: experimental
+level: high
+description: |
+  Detects injection payloads (shell metacharacter break-out, SQL injection,
+  encoded path traversal, server-side template injection) inside the ARGUMENTS an
+  AI agent sends to a tool backend, and correlates them - within one process
+  session only - with a subsequently spawned command line that carries the same
+  injection shape.
+
+  Attribution is instance-resolved: the rule anchors on meta["caller_pid"],
+  resolves the exact process instance with proc_instance(), walks the real spawn
+  chain with proc_lineage(), and enriches evidence with query_events(). Session
+  memory is keyed on the (pid, start_ns) instance identity of the lineage root,
+  so a tool call in one session can never be stitched to a process spawn in
+  another.
+
+  Two verdict tiers, both reported:
+    SUSPECTED - injection-shaped payload observed in tool arguments.
+    CONFIRMED - a prior injection-shaped tool argument in THIS session was
+                followed, within the window, by a spawned command line that is
+                itself injection-shaped (the payload reached an execution
+                context).
+
+  No ATLAS technique is claimed: the verified signal set for this threat maps to
+  no MITRE ATLAS identifier, and inventing one would be worse than omitting it.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://genai.owasp.org/llmrisk/llm05-improper-output-handling/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://cwe.mitre.org/data/definitions/78.html
+  - https://cwe.mitre.org/data/definitions/89.html
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://cwe.mitre.org/data/definitions/1336.html
+tags:
+  - attack.execution
+  - attack.t1059
+  - owasp.llm05
+falsepositives:
+  - Security engineers using an agent to author or edit detection rules, WAF
+    signatures, or pentest payload fixtures - the literal payload strings appear
+    in the tool arguments of the Write/Edit call. Expected; the rule only reports.
+  - Agents running grep/rg/sed where the SEARCH PATTERN argument itself contains
+    shell metacharacters or SQL keywords.
+  - Legitimate shell one-liners passed to a bash-style tool that use command
+    substitution with a network binary, e.g. VERSION=$(curl -s .../version).
+    Mitigated by requiring a quote break-out for the chaining patterns, so plain
+    'make && ./deploy.sh' does not match.
+  - Database tooling issuing a genuine column-probing UNION query. Mitigated by
+    requiring either a NULL/integer column-count probe or a catalog table
+    (information_schema, sqlite_master, pg_catalog, mysql.user) in the same
+    statement - ordinary application UNION SELECT does not match.
+  - Monorepo build tooling using deep relative paths. Mitigated by never matching
+    bare '../../' - traversal requires URL/overlong encoding, a null byte, or a
+    sensitive target (etc/passwd, .ssh, .aws, .env, proc/self, system32).
+  - Front-end templating work using {{ }} or ${ }. Mitigated by requiring an SSTI
+    gadget accessor (__class__, __globals__, lipsum, jndi:, T(, getRuntime).
+  - When the spawning event has not yet been written to the event log,
+    proc_instance() returns None and the rule reports with an explicit
+    'attribution degraded' marker and no kill chain.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_args:
+    event_type: tool_call
+    content|re: '.'
+  sel_exec:
+    event_type: execute_process
+    content|re: '.'
+  condition: 1 of sel_*
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # tunables - this rule's own window, never baked into storage
+  SCAN_LIMIT   = 65536          # bytes of content scanned
+  WINDOW_NS    = 300000000000   # 5 min: tool-arg injection -> observed execution
+  RETENTION_NS = 900000000000   # 15 min of session memory
+  MAX_ENTRIES  = 48
+  FRAG_LEN     = 64
+
+  # Shell break-out: a quote/encoded metacharacter followed by a dangerous binary.
+  # Deliberately does NOT match plain 'a && b' pipelines (legitimate bash usage).
+  SHELL_INJECT = [
+      r'[\x27\x22]\s*[;&|]{1,2}\s*(curl|wget|nc|ncat|telnet|bash|zsh|ksh|python[23]?|perl|ruby|powershell|pwsh|nslookup|dig|chmod|chown|mkfifo|base64)\b',
+      r'[\x27\x22]\s*[;&|]{1,2}\s*rm\s+-',
+      r'[\x27\x22]\s*[;&|]{1,2}\s*(cat|head|tail|less|more)\s+/(etc|proc|root)/',
+      r'[\x27\x22]\s*\$\(',
+      r'(?i)(%0a|%0d|%3b|%7c|%26%26|%24%28)(%20|\+|\s){0,4}(curl|wget|nc|bash|sh|python|rm|cat)\b',
+      r'(?i)\$\{IFS\}',
+      r'\$\(\s*(curl|wget|nc\s|ncat|base64\s+-d|eval)\b',
+      r'(?i);(curl|wget|nc|ncat|bash|sh|python[23]?|perl)\b',
+  ]
+
+  # SQL: tautologies, column-count probes, catalog reads, stacked DDL/DML,
+  # and RCE/file primitives. Ordinary application SQL does not match.
+  SQL_INJECT = [
+      r'(?i)[\x27\x22]\s*(or|and)\s+[\x27\x22]?\d{1,4}[\x27\x22]?\s*(=|<>|like)\s*[\x27\x22]?\d{1,4}',
+      r'(?i)[\x27\x22]\s*(or|and)\s+[\x27\x22][a-z]{1,4}[\x27\x22]\s*=\s*[\x27\x22][a-z]{1,4}[\x27\x22]',
+      r'(?i)\bor\s+1\s*=\s*1\b',
+      r'(?i)\bunion\s+(all\s+)?select\s+(null|\d+)\s*(,\s*(null|\d+)\s*){2,}',
+      r'(?i)\bunion\s+(all\s+)?select\b[^\n]{0,160}\bfrom\s+(information_schema|pg_catalog|sqlite_master|mysql\.user)',
+      r'(?i)[\x27\x22]\s*;\s*(drop|truncate|alter|delete\s+from|update|insert\s+into)\s+',
+      r'(?i);\s*(drop|truncate)\s+(table|database|schema)\s+',
+      r'(?i)\b(xp_cmdshell|sp_executesql|pg_sleep\s*\(|benchmark\s*\(\s*\d{4,}|load_file\s*\(|into\s+outfile)',
+      r'(?i)(%27|%22)(\s|%20|\+){0,4}(or|and|union|;)\b',
+  ]
+
+  # Traversal: encoded, overlong, null-terminated, or aimed at a sensitive target.
+  # Bare '../../' is intentionally NOT a match (monorepo relative paths).
+  TRAVERSAL = [
+      r'(?i)(\.\.(%2f|%5c|/|\\)){2,}[^\n]{0,140}(etc/passwd|etc/shadow|/\.ssh/|/\.aws/|/\.env\b|proc/self/environ|windows[\\/]system32|boot\.ini)',
+      r'(?i)(%2e%2e(%2f|%5c|/|\\)){2,}',
+      r'(?i)(\.\.%2f|\.\.%5c|%252e%252e){2,}',
+      r'(?i)\.\.(%00|%c0%af|;/)',
+      r'(\.\.\.\./|\.\.//|\.\.\\\\){2,}',
+  ]
+
+  # SSTI: only with a real gadget accessor.
+  TEMPLATE = [
+      r'\{\{[^}]{0,200}(__class__|__globals__|__subclasses__|__import__|__builtins__|__mro__|config\.items|os\.popen|lipsum|cycler|joiner|request\.application)',
+      r'\$\{[^}]{0,200}(jndi:|java\.lang|Runtime|getRuntime|processBuilder|T\()',
+      r'(?i)<%=?[^%]{0,200}(runtime|exec|system|eval)\s*[(\x27\x22]',
+      r'#\{[^}]{0,200}(Runtime|exec|system|@)',
+      r'\{%[^%]{0,120}(import|include|extends)\s+[\x27\x22]?/',
+  ]
+
+  def clip(s, n):
+      if len(s) > n:
+          return s[:n]
+      return s
+
+  def first_match(pats, s):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return None
+
+  def classify(s):
+      m = first_match(SHELL_INJECT, s)
+      if m != None:
+          return ("shell-metacharacter break-out", m)
+      m = first_match(SQL_INJECT, s)
+      if m != None:
+          return ("SQL injection", m)
+      m = first_match(TRAVERSAL, s)
+      if m != None:
+          return ("path traversal", m)
+      m = first_match(TEMPLATE, s)
+      if m != None:
+          return ("template injection", m)
+      return None
+
+  # relevance gate: pure string checks on meta, no graph / log calls
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      # tool_input = actual tool ARGUMENTS. Tool/gateway DESCRIPTIONS are excluded
+      # on purpose: a documented example payload there is not an invocation.
+      if ct == "tool_input":
+          return True
+      if ct == "execute_process":
+          return True
+      return False
+
+  def prune(m, now_ns):
+      out = {}
+      n = 0
+      for k in m:
+          v = m[k]
+          ts = int(v.get("ts", "0"))
+          if now_ns - ts > RETENTION_NS:
+              continue
+          if n >= MAX_ENTRIES:
+              continue
+          out[k] = v
+          n += 1
+      return out
+
+  def save(sessions, seen):
+      u = store_usage()
+      if u["free"] < 16384:
+          store_reset()
+      store_set("state", {"sessions": sessions, "seen": seen})
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def tool_edge(proc_path, server, tool, ts):
+      sv = server
+      if sv == "":
+          sv = "local"
+      tn = tool
+      if tn == "":
+          tn = "unknown"
+      return {
+          "from":     "process://" + proc_path,
+          "to":       "tool://" + sv + "/" + tn,
+          "kind":     "TOOL_CALL",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  def exec_edge(parent_path, child_path, ts):
+      return {
+          "from":     "process://" + parent_path,
+          "to":       "process://" + child_path,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  def squash(s):
+      return re.replace(r'[\x27\x22\\\s]+', s, "")
+
+  def run():
+      # 1. relevance gate
+      if not is_relevant_event():
+          return "allow"
+      ct      = meta.get("context_type", "")
+      content = clip(meta.get("content", ""), SCAN_LIMIT)
+      if content == "":
+          return "allow"
+
+      hit = classify(content)
+      if hit == None:
+          return "allow"
+      kind = hit[0]
+      frag = clip(hit[1], FRAG_LEN)
+      tname = meta.get("tool_name", "")
+      if tname == "":
+          tname = "unknown"
+
+      event_ts = int(meta.get("event_ts", "0"))
+      if event_ts <= 0:
+          return {"action": "report",
+                  "reason": "Parameter injection indicator (" + kind +
+                            ") observed but event carries no timestamp - attribution degraded: " + frag}
+
+      # 2. anchor on the exact triggering instance
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          # create row not yet visible - never guess an owner
+          if ct != "tool_input":
+              return "allow"
+          return {"action": "report",
+                  "reason": "SUSPECTED parameter injection (" + kind + ") in arguments to tool '" +
+                            tname + "' - instance attribution degraded (pid " + str(cp) + "): " + frag}
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+      root = lineage[len(lineage) - 1]
+
+      # 3. session scope = this lineage only. Candidate keys are every instance on
+      #    OUR OWN spawn chain, so a lookup can never cross sessions.
+      cand = []
+      for x in lineage:
+          cand.append(x.get("actor_pid", "") + ":" + x.get("actor_start", ""))
+      session_key = cand[len(cand) - 1]
+      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
+      root_id = "process://" + root.get("actor_path", "")
+
+      # 4. load session memory
+      st       = store_get("state") or {}
+      sessions = prune(st.get("sessions", {}), event_ts)
+      seen     = prune(st.get("seen", {}), event_ts)
+
+      # path A: injection observed in TOOL ARGUMENTS
+      if ct == "tool_input":
+          dkey = session_key + "|" + kind + "|" + frag
+          dup  = seen.get(dkey, None)
+          seen[dkey] = {"ts": str(event_ts)}
+          sessions[session_key] = {
+              "ts":     str(event_ts),
+              "kind":   kind,
+              "frag":   frag,
+              "pid":    inst.get("actor_pid", ""),
+              "start":  inst.get("actor_start", ""),
+              "path":   inst.get("actor_path", ""),
+              "tool":   tname,
+              "server": meta.get("server_name", ""),
+          }
+          save(sessions, seen)
+
+          if dup != None and event_ts - int(dup.get("ts", "0")) <= WINDOW_NS:
+              return "allow"     # identical payload already reported for this session
+
+          chain = new_chain(root_id)
+          # query_events: the caller instance's own create row (real evidence)
+          anchor = query_events(kind="EXECUTE_PROCESS",
+                                actor_pid=int(inst["actor_pid"]),
+                                actor_start=int(inst["actor_start"]),
+                                limit=1)
+          if anchor:
+              chain.append(step(ev_edge(anchor[0]),
+                                stage_id="Session Anchor",
+                                stage_desc="tool caller instance " + inst.get("actor_path", "?") +
+                                           " (pid " + inst.get("actor_pid", "?") + ") spawned as: " +
+                                           clip(anchor[0].get("cmdline", ""), 160)))
+          chain.append(step(tool_edge(inst.get("actor_path", ""),
+                                      meta.get("server_name", ""), tname, event_ts),
+                            stage_id="Parameter Injection",
+                            stage_desc=kind + " payload in arguments of tool '" + tname + "': " + frag))
+          print("SUSPECTED " + kind + " -> tool '" + tname + "' via " + names)
+          return {
+              "action": "report",
+              "reason": "SUSPECTED parameter injection (" + kind + ") in arguments to tool '" +
+                        tname + "' by " + names + " - payload: " + frag,
+              "chain":  chain,
+          }
+
+      # path B: injection-shaped COMMAND LINE spawned. Confirm only if THIS
+      # session already showed an injection-shaped tool argument, in-window.
+      prior = None
+      for k in cand:
+          p = sessions.get(k, None)
+          if p == None:
+              continue
+          pts = int(p.get("ts", "0"))
+          if pts <= 0:
+              continue
+          if event_ts < pts:
+              continue
+          if event_ts - pts > WINDOW_NS:
+              continue
+          if prior == None or pts > int(prior.get("ts", "0")):
+              prior = p
+      if prior == None:
+          return "allow"     # no in-session, in-window tool-argument precursor
+
+      # require payload continuity: the executed command line must retain the
+      # distinctive core of the payload seen in the tool arguments
+      pfrag = prior.get("frag", "")
+      core  = squash(pfrag)
+      if len(core) < 8:
+          return "allow"
+      core = core[:24]
+      if core not in squash(content):
+          return "allow"
+
+      ckey = session_key + "|confirmed|" + core
+      cdup = seen.get(ckey, None)
+      seen[ckey] = {"ts": str(event_ts)}
+      save(sessions, seen)
+      if cdup != None and event_ts - int(cdup.get("ts", "0")) <= WINDOW_NS:
+          return "allow"
+
+      chain = new_chain(root_id)
+      ppid   = int(prior.get("pid", "0"))
+      pstart = int(prior.get("start", "0"))
+      if ppid > 0 and pstart > 0:
+          panchor = query_events(kind="EXECUTE_PROCESS", actor_pid=ppid,
+                                 actor_start=pstart, limit=1)
+          if panchor:
+              chain.append(step(ev_edge(panchor[0]),
+                                stage_id="Session Anchor",
+                                stage_desc="tool caller instance " + prior.get("path", "?") +
+                                           " (pid " + prior.get("pid", "?") + ")"))
+      chain.append(step(tool_edge(prior.get("path", ""), prior.get("server", ""),
+                                  prior.get("tool", ""), int(prior.get("ts", "0"))),
+                        stage_id="Parameter Injection",
+                        stage_desc=prior.get("kind", "injection") + " payload in arguments of tool '" +
+                                   prior.get("tool", "?") + "': " + pfrag))
+      chain.append(step(exec_edge(inst.get("actor_path", ""),
+                                  inst.get("actor_path", ""), event_ts),
+                        stage_id="Injected Execution",
+                        stage_desc="same payload observed in spawned command line (" + kind + "): " +
+                                   clip(content, 200)))
+      print("CONFIRMED " + prior.get("kind", "injection") + " reached execution via " + names)
+      return {
+          "action": "report",
+          "reason": "CONFIRMED parameter injection reached an execution context - " +
+                    prior.get("kind", "injection") + " payload sent to tool '" +
+                    prior.get("tool", "?") + "' then observed in a command line spawned by " +
+                    names + " - payload: " + pfrag,
+          "chain":  chain,
+      }
+
+  result = run()
