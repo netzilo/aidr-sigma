@@ -1,0 +1,101 @@
+title: Langflow Untrusted Functionality Inclusion RCE Payload Execution
+id: 7c3f5a1e-9b42-4d7a-8f16-2b5d0e9a4c31
+status: experimental
+level: high
+description: |
+  Detects a child process spawned inside a Langflow runtime (Langflow install path,
+  site-packages/langflow, `langflow run`, `python -m langflow`, LANGFLOW_* env, or a
+  uvicorn/gunicorn worker serving Langflow) whose command line carries a
+  download-and-execute, inline-interpreter, or reverse-shell primitive.
+
+  Langflow's "inclusion of functionality from untrusted control sphere" class of flaw
+  (CWE-829) lets a remote, unauthenticated attacker get attacker-supplied code
+  evaluated by the Langflow backend. The only endpoint-visible artefact of successful
+  exploitation is the process the Langflow worker then spawns. This rule fires on that
+  single execute_process event: Langflow-runtime provenance AND an execution primitive
+  must both be present in the same command line, and the command line must not match
+  Langflow's normal packaging, build, test or version-probe subprocesses.
+author: Selhan
+date: "2026-03-14"
+references:
+  - https://cwe.mitre.org/data/definitions/829.html
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://atlas.mitre.org/techniques/AML.T0049
+tags:
+  - attack.initial_access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0049
+  - atlas.aml.t0050
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  sel_langflow_runtime:
+    content|re:
+      - '(?i)[/\\]langflow[/\\]'
+      - '(?i)site-packages[/\\]langflow'
+      - '(?i)[/\\]\.langflow[/\\]'
+      - '(?i)\blangflow\b\s+(?:run|superuser|migration|api-key|copy-db)\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+langflow\b'
+      - '(?i)\blangflow\.(?:main|server|api|base|components|custom|interface|graph)\b'
+      - '(?i)\b(?:uvicorn|gunicorn|fastapi)\b[^\n]{0,120}\blangflow\b'
+      - '\bLANGFLOW_[A-Z0-9_]{2,}'
+
+  sel_exec_primitive:
+    content|re:
+      - '(?i)\b(?:curl|wget|fetch)\b[^|\n]{0,200}\|\s*(?:ba|z|k|da)?sh\b'
+      - '(?i)\b(?:curl|wget|fetch)\b[^|\n]{0,200}\|\s*(?:python[0-9.]*|perl|ruby|node|php)\b'
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,200}\s-{1,2}(?:o|O|output)\b[^\n]{0,120}(?:/tmp/|/var/tmp/|/dev/shm/|[/\\]Temp[/\\])'
+      - '(?i)(?:ba|z|k|da)?sh\b\s+-c\s+[^\n]{0,300}\b(?:curl|wget|nc|ncat|socat|python[0-9.]*\s+-c)\b'
+      - '(?i)\bpython[0-9.]*\b\s+-c\s'
+      - '(?i)\b(?:perl|ruby|node|php)\b\s+-e\s'
+      - '(?i)\bpython[0-9.]*\b\s+-m\s+(?:http\.server|SimpleHTTPServer|base64|pty|socketserver|smtplib)\b'
+      - '/dev/tcp/'
+      - '(?i)\b(?:nc|ncat|netcat|socat)\b[^\n]{0,120}\s-{1,2}(?:e|c|exec)\b'
+      - '(?i)\bmkfifo\b[^\n]{0,160}\b(?:nc|ncat|sh|bash)\b'
+      - '(?i)\bbase64\b\s+(?:-{1,2}d|-{1,2}decode)\b[^\n]{0,120}(?:\||;|&&|\b(?:ba|z)?sh\b|\bpython[0-9.]*\b)'
+      - '(?i)\b(?:os\.system|subprocess\.(?:Popen|call|run|check_output)|pty\.spawn|__import__)\s*\('
+      - '(?i)\b(?:powershell|pwsh)(?:\.exe)?\b[^\n]{0,120}\s-{1,2}(?:e|ec|enc|encodedcommand)\b'
+      - '(?i)\bchmod\b\s+(?:\+x|[0-7]*7[0-7]{2})\b[^\n]{0,80}(?:/tmp/|/var/tmp/|/dev/shm/)'
+
+  filter_package_tooling:
+    content|re:
+      - '(?i)\b(?:pip[0-9.]*|uv|poetry|pipx|conda|mamba|npm|yarn|pnpm)\b[^\n]{0,160}\b(?:install|download|build|lock|sync|compile|wheel|freeze|list|show|resolve)\b'
+      - '(?i)site-packages[/\\](?:pip|_internal|setuptools|wheel|uv|poetry|pkg_resources|virtualenv)[/\\]'
+      - '(?i)\b(?:setup\.py|pyproject\.toml|bdist_wheel|egg[_-]info|build_meta|requirements(?:-[a-z]+)?\.txt)\b'
+
+  filter_dev_tooling:
+    content|re:
+      - '(?i)\b(?:pytest|tox|nox|coverage|ruff|mypy|black|isort|flake8|pre-commit|alembic|mkdocs|sphinx-build)\b'
+      - '(?i)\btest_[A-Za-z0-9_]{2,40}\.py\b'
+      - '(?i)\bgit\b\s+(?:rev-parse|describe|status|config|log)\b'
+
+  filter_version_probe:
+    content|re:
+      - '(?i)\bpython[0-9.]*\s+-c\s+[\x{22}\x{27}]?(?:import\s+(?:sys|sysconfig|platform|site|struct|json|ssl|importlib|importlib\.metadata|setuptools|pkg_resources|distutils)\s*(?:,\s*[a-z_.]+\s*)?;\s*)+(?:print|sys\.stdout\.write)\('
+      - '(?i)\bpython[0-9.]*\s+-c\s+[\x{22}\x{27}]?(?:import\s+)?(?:sysconfig|platform)\.[a-z_]+\('
+      - '(?i)\b(?:python[0-9.]*|node|perl|ruby|php)\b\s+-{1,2}(?:V|version)\b'
+
+  filter_security_tooling:
+    content|re:
+      - '(?i)\b(?:trivy|semgrep|bandit|snyk|grype|syft|osv-scanner|pip-audit|safety)\b'
+
+  condition: >
+    sel_event and sel_langflow_runtime and sel_exec_primitive
+    and not (filter_package_tooling or filter_dev_tooling or
+             filter_version_probe or filter_security_tooling)
+falsepositives:
+  - Langflow custom-component development that installs dependencies at runtime inside the Langflow venv (pip/uv/poetry) — suppressed by filter_package_tooling.
+  - Langflow build and packaging subprocesses that shell out to `python -c "import setuptools; ..."` or read pyproject.toml — suppressed by filter_package_tooling and filter_version_probe.
+  - CI jobs running the Langflow test suite, linters, or alembic migrations, which spawn interpreters with -c/-e — suppressed by filter_dev_tooling.
+  - Interpreter or toolchain version probes emitted by the Langflow entrypoint on startup — suppressed by filter_version_probe.
+  - A legitimate Langflow data-loader or API component that intentionally shells out to curl/wget against an approved corporate endpoint; this is a genuine residual FP and is why the rule reports rather than blocks.
+  - Container entrypoints wrapping startup as `sh -c "langflow run ..."` — these do not match any execution primitive unless a download/interpreter token is also present.
+action: report
