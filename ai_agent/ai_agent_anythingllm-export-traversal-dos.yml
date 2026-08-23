@@ -1,0 +1,118 @@
+title: AnythingLLM Data-Export Path Traversal DoS Request
+id: 7b3c1f8e-2d54-4a61-9c0f-5e8a4d3b6127
+status: experimental
+level: high
+description: |
+  Detects an agent (or an agent-spawned fetch tool) issuing a request to the
+  AnythingLLM unauthenticated data-export endpoint (/api/system/data-exports/:filename)
+  where the filename path segment is not a flat file name but a directory-traversal
+  or self-reference token: '..', '%2e%2e', '%252e', a bare '.', an empty segment,
+  an encoded path separator (%2f / %5c) or a null-byte truncation (%00).
+
+  In AnythingLLM before commit 08d33cfd8 the export handler joins this parameter
+  onto the exports directory and unconditionally removes the resolved target after
+  serving it. A crafted parameter that escapes to (or resolves as) the current
+  directory triggers an unhandled recursive deletion and crashes the Node process:
+  a single unauthenticated HTTP request is a full denial of service.
+
+  DETECTION SCOPE — deliberate. The engine models no 'crash', 'DENIAL_OF_SERVICE'
+  or 'FILE_DELETE' signal, and the vulnerable delete is an in-process fs call on a
+  third-party server, so successful exploitation is NOT observable from this host.
+  This rule therefore asserts only what is observable: the exploit REQUEST signature.
+  It is not a generic 'call to an AnythingLLM API' rule — every pattern below
+  requires both the vulnerable route AND a traversal/self-reference token inside
+  the filename path segment (query strings are excluded via [^?#]), which no
+  legitimate export download ever contains. Action is report-only because impact
+  cannot be confirmed from the available telemetry.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://github.com/Mintplex-Labs/anything-llm/commit/08d33cfd8
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  - https://attack.mitre.org/techniques/T1499/004/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - attack.initial-access
+  - attack.t1190
+  - owasp.a03_2021
+  - owasp.a07_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: proxied HTTP request, traversal token in the full URL ──────────
+  sel_url_bypass:
+    event_type: http_request
+    url.full|re:
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:/|%2f|%5c|\\)(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e)(?:[?#;&"\s\x{0027}]|/|$)'
+      - '(?i)/system/data-exports?//'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%2f|%5c|%252f|%255c)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%00|%2500)'
+
+  # ── Branch 2: same signature seen on the parsed path component ───────────────
+  sel_path_bypass:
+    event_type: http_request
+    path|re:
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:/|%2f|%5c|\\)(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e)(?:[?#;&"\s\x{0027}]|/|$)'
+      - '(?i)/system/data-exports?//'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%2f|%5c|%252f|%255c)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%00|%2500)'
+
+  # ── Branch 3: POST/DELETE variant — traversal carried in a JSON filename field,
+  #    but ONLY when the request is actually aimed at the vulnerable route.
+  sel_body_bypass:
+    event_type: http_request
+    url.full|re: '(?i)/system/data-exports?(?:/|$)'
+    content|re: '(?i)"(?:filename|file_name|filePath|file_path|export_name|exportName)"\s*:\s*"[^"]{0,200}(?:\.\.|%2e%2e|%252e|%2f|%5c|%00)'
+
+  # ── Branch 4: the exploit issued from a spawned fetch tool (curl/wget/etc.) ──
+  sel_proc_bypass:
+    event_type: execute_process
+    command|re:
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:/|%2f|%5c|\\)(?:\.|%2e|%252e){2,}(?:[/?#;&"\s\x{0027}]|%2f|%5c|\\|$)'
+      - '(?i)/system/data-exports?/(?:\.|%2e|%252e)(?:[?#;&"\s\x{0027}]|/|$)'
+      - '(?i)/system/data-exports?//'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%2f|%5c|%252f|%255c)'
+      - '(?i)/system/data-exports?/[^?#\s]{0,200}(?:%00|%2500)'
+
+  # Requires an actual network client on the command line, so a grep/rg/cat of a
+  # rule file, PoC note or changelog containing this path never satisfies branch 4.
+  sel_proc_fetchtool:
+    command|re: '(?i)\b(?:curl|wget|httpie|xh|aria2c|ncat|socat|python[23]?|node|deno|ruby|perl|php|powershell|pwsh|invoke-webrequest|iwr)\b'
+
+  # ── Filters: unsubstituted documentation/template placeholders ───────────────
+  filter_template_url:
+    url.full|re: '(?i)(?:\{filename\}|%7bfilename%7d|<filename>|\[filename\]|/:filename\b)'
+  filter_template_cmd:
+    command|re: '(?i)(?:\{filename\}|%7bfilename%7d|<filename>|\[filename\]|/:filename\b)'
+  # API specification documents being fetched/echoed rather than a live exploit.
+  filter_api_spec:
+    content|re: '(?i)"(?:openapi|swagger)"\s*:\s*"'
+
+  condition: >
+    (sel_url_bypass or sel_path_bypass or sel_body_bypass
+     or (sel_proc_bypass and sel_proc_fetchtool))
+    and not (filter_template_url or filter_template_cmd or filter_api_spec)
+
+falsepositives:
+  - Authorised security testing — a red teamer or the agent itself validating the
+    08d33cfd8 patch by curling /api/system/data-exports/.. against a lab instance.
+  - Agent-driven vulnerability scanners (nuclei, ZAP, Burp, custom templates) whose
+    check for this issue replays the exact traversal path against every host.
+  - Automated patch-verification or CI smoke tests that assert the endpoint now
+    returns 400/403 for a traversal filename.
+  - A future AnythingLLM release that supports nested export folders and legitimately
+    percent-encodes a separator (%2F) inside the filename parameter.
+  - Client SDKs or docs tooling that emit a partially substituted route; the
+    filter_template_* selections suppress the common {filename}/:filename forms.
+
+action: report
