@@ -1,0 +1,85 @@
+title: SSRF Open WebUI URL Loader Internal Target
+id: 7b3f1c42-9d18-4a76-b0e5-2c94f8d61a3e
+status: experimental
+level: high
+description: |
+  Detects an authenticated blind SSRF attempt against an Open WebUI deployment
+  (CWE-918, patched in v0.1.117). Fires on a single outbound http_request whose
+  path is one of the Open WebUI "fetch this URL for me" endpoints (RAG web /
+  youtube / doc loader, retrieval process web+search, pipelines add-from-URL,
+  knowledge file-add-from-URL) AND whose body or query string carries a
+  user-controlled url/urls/src field pointing at a loopback address, RFC1918 or
+  CGNAT range, link-local cloud-metadata endpoint, IPv6 ULA/link-local address,
+  an internal-only DNS suffix, a DNS-rebinding wildcard service, an obfuscated
+  decimal/octal/hex IP literal, or a non-HTTP scheme (file/gopher/dict/ldap/...).
+  Blind SSRF returns no response body to the attacker, so the request itself is
+  the only observable; detection is therefore single-event and content-only.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://github.com/open-webui/open-webui/releases/tag/v0.1.117
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://cwe.mitre.org/data/definitions/918.html
+tags:
+  - attack.initial_access
+  - attack.t1190
+  - attack.discovery
+  - attack.t1046
+  - owasp.a10-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scope ────────────────────────────────────────────────────────────
+  sel_http:
+    event_type: http_request
+
+  # ── Open WebUI endpoints that fetch a caller-supplied URL server-side ──────
+  sel_openwebui_endpoint:
+    path|re: '(?i)/(?:rag/api/v1/(?:web(?:/search)?|doc|url|youtube)|api/v1/retrieval/(?:process/)?(?:web(?:/search)?|youtube)|api/v1/pipelines/(?:add|upload)|api/v1/files/url|api/v1/knowledge/[^/]{1,64}/file/add)'
+
+  # ── JSON body: url-bearing field whose authority is an internal target ─────
+  sel_body_internal_target:
+    content|re: '(?i)"(?:urls?|web_url|image_url|youtube_url|video_url|src|link|file_url|remote_url|source_url|target_url)"\s*:\s*(?:\[\s*)?"[a-z][a-z0-9+.\-]{1,9}://(?:[^"/\\?#@]{0,64}@)?\[?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|0177\.|0x7f[0-9a-f]{0,6}|2130706433|localhost|::1|::ffff:127\.|169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|192\.0\.0\.192|fd00:ec2::254|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|f[cd][0-9a-f]{2}:[0-9a-f:]{0,32}|fe80:[0-9a-f:]{0,32}|metadata\.(?:google\.internal|goog|azure\.com)|instance-data|kubernetes\.default|host\.docker\.internal|[a-z0-9][a-z0-9.\-]{0,62}\.(?:internal|intranet|localdomain|lan|corp|home\.arpa|consul|cluster\.local|local)|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.(?:nip\.io|sslip\.io|xip\.io))(?:[^a-z0-9.\-]|$)'
+
+  # ── query-string form of the same primitive (GET loaders, encoded scheme) ──
+  sel_query_internal_target:
+    url.full|re: '(?i)[?&](?:urls?|uri|src|image_url|target|dest|destination|redirect|redirect_uri|webhook|callback|feed|proxy|load|fetch)=[a-z][a-z0-9+.\-]{1,9}(?:://|%3a%2f%2f)(?:[^"/\\?#@&]{0,64}@)?\[?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|0177\.|0x7f[0-9a-f]{0,6}|2130706433|localhost|::1|169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|192\.0\.0\.192|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|f[cd][0-9a-f]{2}:[0-9a-f:]{0,32}|fe80:[0-9a-f:]{0,32}|metadata\.(?:google\.internal|goog|azure\.com)|instance-data|kubernetes\.default|host\.docker\.internal|[a-z0-9][a-z0-9.\-]{0,62}\.(?:internal|intranet|localdomain|lan|corp|home\.arpa|consul|cluster\.local|local)|[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.(?:nip\.io|sslip\.io|xip\.io))(?:[^a-z0-9.\-]|$)'
+
+  # ── protocol-smuggling variant: loader pointed at a non-HTTP scheme ────────
+  sel_body_dangerous_scheme:
+    content|re: '(?i)"(?:urls?|web_url|image_url|src|link|file_url|remote_url|source_url|target_url)"\s*:\s*(?:\[\s*)?"\s*(?:file|gopher|dict|ldaps?|ldapi|tftp|ftps?|jar|netdoc|expect|smb|redis|mongodb|memcached|sftp)://'
+
+  # ── FP suppression: the url authority is a template/placeholder, not a host ─
+  filter_placeholder_host:
+    content|re: '(?i)"(?:urls?|web_url|image_url|src|link|file_url|remote_url)"\s*:\s*(?:\[\s*)?"[a-z][a-z0-9+.\-]{1,9}://[^"/]{0,64}(?:\{\{|\$\{|<[a-z_][a-z0-9_\-]{0,30}>|%s|your[-_]?(?:host|server|domain|ip)|changeme|placeholder)'
+
+  # ── FP suppression: the body is an API schema / spec document, not a call ──
+  filter_api_schema_doc:
+    content|contains:
+      - '"openapi":'
+      - '"swagger":'
+      - '"$schema":'
+      - '"components": {"schemas"'
+      - '"x-codeSamples"'
+
+  condition: >
+    sel_http and sel_openwebui_endpoint and
+    (sel_body_internal_target or sel_query_internal_target or sel_body_dangerous_scheme)
+    and not (filter_placeholder_host or filter_api_schema_doc)
+
+falsepositives:
+  - A user legitimately pasting an intranet wiki, Confluence or internal docs URL
+    (e.g. an RFC1918 address or a *.internal / *.local host) into the Open WebUI
+    RAG web loader to summarise an internal page. This is the dominant benign
+    case and the reason the rule reports rather than blocks.
+  - Self-hosted single-box deployments where an operator points the web loader or
+    a pipeline install at a service on the same host or the same Docker network
+    (host.docker.internal, a compose service name resolving under .local).
+  - Homelab / mDNS environments where genuine content is served from *.local names.
+  - Authorised penetration testing or vulnerability-scanner traffic against a known
+    Open WebUI instance, which will produce exactly this signature by design.
+  - Internal CI smoke tests that exercise the retrieval/web endpoint against a
+    loopback fixture server.
+action: report
