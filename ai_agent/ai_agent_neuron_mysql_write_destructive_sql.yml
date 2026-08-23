@@ -1,0 +1,113 @@
+title: Neuron MySQLWriteTool Destructive SQL Execution
+id: 7b3f1c2e-9d5a-4e18-b6c4-2a8f0d371e94
+status: experimental
+level: high
+description: |
+  Detects a single tool_call in which a MySQL/SQL *write* tool (Neuron PHP framework
+  MySQLWriteTool <= 2.8.11 and equivalent write/exec SQL tools) is handed a statement
+  whose verb is destructive or privilege-altering: DROP TABLE/DATABASE/USER, TRUNCATE,
+  unqualified DELETE FROM, DELETE ... WHERE 1=1, ALTER TABLE ... DROP/RENAME TO,
+  GRANT/REVOKE ... ON, CREATE/DROP USER, FLUSH PRIVILEGES, SET GLOBAL/PASSWORD,
+  INTO OUTFILE / LOAD_FILE, or a stacked second statement after a semicolon.
+
+  MySQLWriteTool passes the model-supplied string straight to PDO::prepare()/execute()
+  with no semantic restriction, so a direct or indirect prompt injection that reaches
+  the tool arguments becomes arbitrary DDL/DCL against the production database. This is
+  a single-event content detection on the tool arguments; it does not attempt to prove
+  the upstream injection, only that a destructive statement reached the write tool.
+
+  OWASP Web Top 10 mapping for the underlying flaw: A03:2021 Injection and
+  A04:2021 Insecure Design (recorded here rather than in tags, which only accept
+  LLM/ASI identifiers).
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1485/
+  - https://attack.mitre.org/techniques/T1565/001/
+tags:
+  - attack.impact
+  - attack.t1485
+  - attack.t1565.001
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: tool_call
+
+  # ── Tool identity: a SQL *write/execute* tool, not a read tool ──────────────
+  sel_tool_field_a:
+    tool|re:
+      - '(?i)(?:mysql|mariadb|pdo)[^a-z0-9]{0,3}(?:write|exec|execute|mutat|ddl|statement|update)'
+      - '(?i)\b(?:sql|db|database)[^a-z0-9]{0,3}(?:write|exec|execute|mutat)'
+      - '(?i)\b(?:write|exec|execute|run)[^a-z0-9]{0,3}(?:sql|query|statement)\b'
+      - '(?i)mysqlwritetool'
+  sel_tool_field_b:
+    tool_name|re:
+      - '(?i)(?:mysql|mariadb|pdo)[^a-z0-9]{0,3}(?:write|exec|execute|mutat|ddl|statement|update)'
+      - '(?i)\b(?:sql|db|database)[^a-z0-9]{0,3}(?:write|exec|execute|mutat)'
+      - '(?i)\b(?:write|exec|execute|run)[^a-z0-9]{0,3}(?:sql|query|statement)\b'
+      - '(?i)mysqlwritetool'
+  # Structured fallback: the tool name appears as a JSON key/value in the payload
+  # (hook payloads that do not populate the tool field). Deliberately requires the
+  # "tool"/"class"/"function": "..." shape so prose that merely names the class
+  # cannot satisfy it.
+  sel_tool_marker:
+    content|re: '(?i)"(?:tool|tool_name|toolname|name|function|class|method)"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*"[^"]{0,48}(?:mysqlwrite|mysql[_-]write|neuron[^"]{0,24}write)'
+
+  # ── Destructive / privilege-altering SQL verbs ──────────────────────────────
+  sel_sql_destructive:
+    content|re:
+      - '(?i)\bdrop(?:\s|\\[nrt])+(?:temporary(?:\s|\\[nrt])+)?(?:table|database|schema|view|user|role|trigger|procedure|function)\b'
+      - '(?i)\btruncate(?:\s|\\[nrt])+(?:table(?:\s|\\[nrt])+)?[`"\[]?[A-Za-z0-9_$.]{1,64}'
+      - '(?i)\balter(?:\s|\\[nrt])+table\b[^;"]{0,120}\bdrop(?:\s|\\[nrt])+(?:column|index|primary(?:\s|\\[nrt])+key|foreign(?:\s|\\[nrt])+key|constraint|partition)\b'
+      - '(?i)\balter(?:\s|\\[nrt])+table\b[^;"]{0,120}\brename(?:\s|\\[nrt])+to\b'
+      - '(?i)\b(?:grant|revoke)(?:\s|\\[nrt])+(?:all|super|file|process|reload|shutdown|create|drop|delete|update|insert|select|usage)\b[^;"]{0,120}\bon\b'
+      - '(?i)\b(?:create|drop|alter|rename)(?:\s|\\[nrt])+user\b'
+      - '(?i)\bflush(?:\s|\\[nrt])+privileges\b'
+      - '(?i)\bset(?:\s|\\[nrt])+(?:global|persist|password)\b'
+      - '(?i)\b(?:into(?:\s|\\[nrt])+(?:out|dump)file\b|load_file(?:\s|\\[nrt])*\()'
+      - '(?i)\bdelete(?:\s|\\[nrt])+from(?:\s|\\[nrt])+[`"\[]?[A-Za-z0-9_$.]{1,64}[`"\]]?(?:\s|\\[nrt])*(?:;|"|$)'
+      - '(?i)\bdelete(?:\s|\\[nrt])+from\b[^;"]{0,80}\bwhere(?:\s|\\[nrt])+[^;"]{0,40}\b1(?:\s|\\[nrt])*=(?:\s|\\[nrt])*1\b'
+      - '(?i);(?:\s|\\[nrt])*(?:drop|truncate|grant|revoke|delete(?:\s|\\[nrt])+from|update(?:\s|\\[nrt])+[A-Za-z0-9_$.`]{1,64}(?:\s|\\[nrt])+set)\b'
+
+  # ── Filters ─────────────────────────────────────────────────────────────────
+  # The whole statement value is read-only AND contains no semicolon, so a stacked
+  # "SELECT 1; DROP TABLE users" payload is NOT suppressed.
+  filter_readonly_statement:
+    content|re: '(?i)"(?:sql|query|statement|command|dml|q)"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*"(?:\s|\\[nrt])*(?:select|explain|describe|desc|show|with)\b[^";]{0,1000}"'
+  # Idempotent migration / ETL teardown of an explicitly transient object, expressed
+  # as one complete single statement (no semicolon inside the value).
+  filter_transient_table:
+    content|re: '(?i)"(?:sql|query|statement|command|dml|q)"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*"(?:\s|\\[nrt])*drop(?:\s|\\[nrt])+(?:temporary(?:\s|\\[nrt])+)?table(?:\s|\\[nrt])+if(?:\s|\\[nrt])+exists(?:\s|\\[nrt])+[^";]{0,48}(?:tmp|temp|staging|scratch|fixture|_bak)[^";]{0,48}"'
+  # Template / documentation targets rather than a real object name.
+  filter_placeholder_target:
+    content|re: '(?i)\b(?:drop|truncate|delete(?:\s|\\[nrt])+from|alter(?:\s|\\[nrt])+table)(?:\s|\\[nrt])+(?:table(?:\s|\\[nrt])+)?(?:if(?:\s|\\[nrt])+exists(?:\s|\\[nrt])+)?[`"\[<{:$%]{0,2}(?:your_table|my_table|table_name|tablename|tbl_name|example_table|some_table|<table|\{\{|:table|\$table|%s|placeholder)'
+  # Vulnerability-research / IR payloads that quote this very CVE class.
+  filter_advisory_text:
+    content|re: '(?i)\b(?:CVE-\d{4}-\d{4,7}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|security advisory|vulnerability (?:report|disclosure|advisory)|proof[ -]of[ -]concept|remediation guidance)\b'
+
+  condition: >
+    sel_event and (sel_tool_field_a or sel_tool_field_b or sel_tool_marker)
+    and sel_sql_destructive
+    and not (filter_readonly_statement or filter_transient_table or
+    filter_placeholder_target or filter_advisory_text)
+
+falsepositives:
+  - Schema-migration agents legitimately running DROP TABLE / ALTER TABLE ... DROP COLUMN
+    against a development or staging database where the object is not named tmp/temp/staging.
+  - ETL or reporting pipelines truncating a rebuild table whose name does not carry a
+    transient prefix (e.g. TRUNCATE TABLE daily_rollup).
+  - Test-harness agents tearing down fixture schemas at the end of a run.
+  - DBA-assistant workflows performing approved user administration (CREATE USER,
+    GRANT ... ON, FLUSH PRIVILEGES) through a SQL write tool.
+  - Bulk-purge jobs issuing DELETE FROM <table> with no WHERE clause by design
+    (log rotation, queue drain).
+  - Incident-response or code-review payloads that embed destructive DDL examples and are
+    routed through a write tool; largely suppressed by filter_advisory_text and
+    filter_placeholder_target.
+action: report
