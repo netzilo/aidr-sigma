@@ -1,0 +1,350 @@
+title: NLP Fictional Terminal Override to OS Protection Bypass
+id: 6f2b9c14-8a3d-4e57-9b21-0c7d5ae43f18
+status: experimental
+level: high
+description: |
+  Detects the "fictional terminal" jailbreak reaching the operating system.
+
+  An attacker convinces an NLP-driven agent that it is operating inside a
+  simulated / hypothetical / roleplay terminal ("you are now a Linux terminal",
+  "this is only a simulation, no consequences", a fake root@fictional:~# prompt).
+  The agent then conflates the fiction with reality and shells out for real.
+
+  This rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
+  exact process instance via proc_instance(), derives the owning session via
+  proc_lineage() plus one bounded descendant expansion, and then requires TWO
+  ORDERED stages inside that single session within a 5-minute window:
+
+    Stage 1 (required anchor) - an EXECUTE_PROCESS command line that carries
+      explicit fictional/simulation/roleplay framing or an instruction-override
+      preamble. This is the discriminating signal; without it the rule allows.
+    Stage 2 - a genuine OS protection-override or destructive command
+      (SIP/Gatekeeper/SELinux/firewall/AV disable, sudoers or authorized_keys
+      append, --no-preserve-root, mkfs, dd to a raw device, history wipe,
+      download-piped-to-shell) executed at or after Stage 1 by an instance of the
+      SAME session.
+
+  Neither stage alone fires. Display-only invocations (grep/man/less/head/tail)
+  and --dry-run runs are excluded from Stage 2. The triggering event is taken
+  from meta (never re-queried from the async event log). Verdict is report only:
+  the framing signal is heuristic and security-research hosts legitimately
+  produce it.
+author: Egemen
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1562/001/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.defense-evasion
+  - attack.t1562.001
+  - atlas.aml.t0051
+  - atlas.aml.t0054
+  - owasp.llm01
+  - owasp.asi01
+falsepositives:
+  - Security-awareness or red-team training scripts that echo a jailbreak
+    transcript ("you are now a Linux terminal") and then run hardening or
+    teardown commands in the same shell session.
+  - CTF and malware-analysis lab provisioning inside disposable VMs, where a
+    banner containing "simulated"/"fictional" is printed before setenforce 0,
+    ufw disable or an AV service stop.
+  - Prompt-injection test suites and detection-rule authoring harnesses that
+    intentionally shell out with roleplay strings while exercising destructive
+    commands in a container.
+  - Demo and tutorial recordings (asciinema, screencast scripts) that print a
+    fake "root@fictional:~#" prompt and then perform real administrative work.
+  - Chaos-engineering or disaster-recovery drills explicitly labelled
+    "simulation" that stop firewall or endpoint-protection services.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: report
+on_error:   report
+script: |
+  # ---- tuning -------------------------------------------------------------
+  WINDOW_NS  = 300000000000   # 5 minutes - session clustering window
+  MAX_EVENTS = 4000
+  MAX_SEEN   = 300
+
+  # ---- cheap lowercase tokens (gate before any regex) ----------------------
+  FICTION_TOKENS = [
+      "simul", "fiction", "pretend", "roleplay", "role-play", "hypothetic",
+      "imaginar", "make-believe", "jailbreak", "dan mode", "developer mode",
+      "no consequences", "not a real", "ignore previous", "ignore all previous",
+      "you are now", "act as a", "acting as a", "guardrail",
+  ]
+
+  OVERRIDE_TOKENS = [
+      "csrutil", "spctl", "setenforce", "ufw ", "iptables", "nft ",
+      "mppreference", "chmod", "rm -r", "no-preserve-root", "mkfs", "dd if=",
+      "chattr", "histfile", "history -c", "sudoers", "authorized_keys",
+      "sudo -s", "passwd root", "dscl", "vssadmin", "wbadmin", "bcdedit",
+      "executionpolicy", "disableantispyware", "killall", "pkill", "launchctl",
+      "| bash", "|bash", "| sh", "|sh", "usermod", "useradd", "adduser",
+      "systemctl",
+  ]
+
+  # ---- stage 1: fictional / simulated terminal framing ---------------------
+  FICTION_PATTERNS = [
+      '(?i)\\b(fictional|simulated|simulation|hypothetical|imaginary|pretend|make-believe)\\b[^\\n]{0,48}\\b(terminal|shell|console|command line|prompt|sandbox|machine|operating system)\\b',
+      '(?i)\\b(act|acting|behave|behaving|respond|reply)\\s+as\\s+(a\\s+|an\\s+)?(linux\\s+|unix\\s+|bash\\s+|windows\\s+|macos\\s+|posix\\s+)?(terminal|shell|console|computer|operating\\s+system)\\b',
+      '(?i)\\byou\\s+are\\s+(now\\s+)?(a\\s+|an\\s+)?(linux\\s+|unix\\s+|bash\\s+)?(terminal|shell|console)\\b',
+      '(?i)\\b(root|admin|administrator|user)@(fictional|simulated|simulation|imaginary|pretend|fake|roleplay)[a-z0-9.-]*\\s*[:#$]',
+      '(?i)\\[\\s*(simulation|simulated|fiction|fictional|pretend|roleplay|role-play)\\s*(mode|shell|terminal|only)?\\s*\\]',
+      '(?i)\\b(simulation|fiction|fictional|roleplay|role-play|jailbreak)\\s+mode\\b',
+      '\\bDAN\\s+mode\\b',
+      '(?i)\\bthis\\s+is\\s+(just\\s+|only\\s+)?(a\\s+)?(simulation|simulated|fictional|roleplay|role-play|hypothetical)\\b',
+      '(?i)\\bnot\\s+a\\s+real\\s+(system|machine|terminal|shell|computer|command)\\b',
+      '(?i)\\bno\\s+(real\\s+)?consequences\\b',
+      '(?i)\\bignore\\s+(all\\s+|any\\s+|your\\s+|the\\s+)?(previous|prior|above|earlier)\\s+(instructions|rules|directives|constraints)\\b',
+      '(?i)\\bdeveloper\\s+mode\\s+(enabled|activated|is\\s+on)\\b',
+      '(?i)\\b(safety|security)\\s+(protocols?|filters?|guardrails?|checks?)\\s+(are\\s+)?(off|disabled|bypassed|suspended)\\b',
+      '(?i)\\bin\\s+this\\s+(fictional|simulated|hypothetical|imaginary)\\s+\\w+',
+  ]
+
+  # ---- stage 2: real OS protection override / destructive execution --------
+  OVERRIDE_PATTERNS = [
+      '(?i)\\bcsrutil\\s+disable\\b',
+      '(?i)\\bspctl\\s+--master-disable\\b',
+      '(?i)\\bsetenforce\\s+0\\b',
+      '(?i)\\bsystemctl\\s+(stop|disable|mask)\\s+(firewalld|apparmor|auditd|selinux)',
+      '(?i)\\bufw\\s+disable\\b',
+      '(?i)\\biptables\\s+-F\\b',
+      '(?i)\\bnft\\s+flush\\s+ruleset\\b',
+      '(?i)set-mppreference[^\\n]{0,60}-disablerealtimemonitoring',
+      '(?i)add-mppreference[^\\n]{0,60}-exclusionpath',
+      '(?i)\\breg\\s+add\\b[^\\n]{0,90}disableantispyware',
+      '(?i)set-executionpolicy\\s+(bypass|unrestricted)',
+      '(?i)\\bbcdedit\\b[^\\n]{0,60}testsigning\\s+on',
+      '(?i)\\bvssadmin\\s+delete\\s+shadows',
+      '(?i)\\bwbadmin\\s+delete\\b',
+      '(?i)--no-preserve-root',
+      '(?i)\\brm\\s+-[a-z]*r[a-z]*\\s+/(etc|usr|bin|sbin|var|boot|system|library)\\b',
+      '(?i)\\bchmod\\s+(-[a-z]+\\s+)*777\\s+/(etc|usr|var|bin|sbin|opt|root)\\b',
+      '(?i)\\bchmod\\s+[0-7]{3,4}\\s+[^\\n]{0,60}(authorized_keys|sudoers|shadow|master.passwd)',
+      '(?i)\\bdd\\s+if=[^\\n]{0,60}of=/dev/(sd|nvme|disk|hd)',
+      '(?i)\\bmkfs(\\.[a-z0-9]+)?\\s+/dev/',
+      '(?i)\\bchattr\\s+-i\\b',
+      '(?i)\\bunset\\s+HISTFILE\\b',
+      '(?i)\\bhistory\\s+-c\\b',
+      '(?i)\\bpasswd\\s+root\\b',
+      '(?i)\\bdscl\\s+\\.\\s+-(create|passwd)\\b',
+      '(?i)>>?\\s*/etc/sudoers',
+      '(?i)\\btee\\s+(-a\\s+)?/etc/sudoers',
+      '(?i)\\b(usermod|useradd|adduser)\\b[^\\n]{0,60}\\b(sudo|wheel|admin|root)\\b',
+      '(?i)>>?\\s*[^\\n]{0,60}\\.ssh/authorized_keys',
+      '(?i)\\btee\\s+(-a\\s+)?[^\\n]{0,60}\\.ssh/authorized_keys',
+      '(?i)\\bsudo\\s+-S\\b',
+      '(?i)\\blaunchctl\\s+(unload|bootout)\\b[^\\n]{0,60}(endpointsecurity|santa|crowdstrike|falcon|defender|jamf)',
+      '(?i)\\b(killall|pkill)\\b[^\\n]{0,30}(santad|falconctl|crowdstrike|wdav|defender|osqueryd|auditd)',
+      '(?i)\\b(curl|wget)\\b[^\\n]{0,120}\\|\\s*(sudo\\s+)?(bash|sh|zsh|python[23]?)\\b',
+  ]
+
+  DISPLAY_ONLY = [
+      '(?i)^\\s*(\\S*/)?(grep|rg|ag|ack|man|less|more|head|tail|wc|file|which|type)\\b',
+      '(?i)--dry-?run\\b',
+      '(?i)--what-if\\b',
+  ]
+
+  # ---- pure helpers (no graph / log calls) ---------------------------------
+  def norm(c):
+      c = re.replace('\\\\"', c, '"')
+      c = re.replace('\\\\n', c, ' ')
+      c = re.replace('\\\\/', c, '/')
+      return c
+
+  def token_hit(lc, toks):
+      for t in toks:
+          if t in lc:
+              return True
+      return False
+
+  def has_fiction(c):
+      if c == "":
+          return False
+      if not token_hit(c.lower(), FICTION_TOKENS):
+          return False
+      for p in FICTION_PATTERNS:
+          if re.find(p, c) != None:
+              return True
+      return False
+
+  def is_display_only(c):
+      for p in DISPLAY_ONLY:
+          if re.find(p, c) != None:
+              return True
+      return False
+
+  def is_override(c):
+      if c == "":
+          return False
+      if not token_hit(c.lower(), OVERRIDE_TOKENS):
+          return False
+      if is_display_only(c):
+          return False
+      for p in OVERRIDE_PATTERNS:
+          if re.find(p, c) != None:
+              return True
+      return False
+
+  def short(c):
+      s = c
+      if len(s) > 160:
+          s = s[:160] + "..."
+      return s
+
+  def cmd_of(e):
+      c = e.get("cmdline", "")
+      if c == "":
+          c = e.get("actor_path", "")
+      return norm(c)
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", "process://" + e.get("actor_path", "")),
+          "kind":     "EXECUTE_PROCESS",
+          "dir":      "out",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  short(cmd_of(e)),
+      }
+
+  def already_reported(key):
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      if key in seen:
+          return True
+      if len(seen) > MAX_SEEN:
+          store_reset()
+          seen = {}
+      if store_usage()["free"] > 8192:
+          seen[key] = "1"
+          store_set("seen", seen)
+      return False
+
+  # ---- main ----------------------------------------------------------------
+  def run():
+      # 1. relevance gate - pure string work on meta only
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = norm(meta.get("content", ""))
+      if len(cmd) < 4:
+          return "allow"
+      cur_fic = has_fiction(cmd)
+      cur_ovr = is_override(cmd)
+      if not cur_fic and not cur_ovr:
+          return "allow"
+
+      # 2. anchor on the exact triggering instance
+      cp = int(meta.get("caller_pid", "0"))
+      ts = int(meta.get("event_ts", "0"))
+      if cp == 0 or ts == 0:
+          return "allow"
+      inst = proc_instance(cp, ts)
+      if inst == None:
+          return "allow"          # degraded - re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # 3. scope to ONE session: lineage + bounded descendant expansion
+      session = {}
+      session[inst["actor_pid"]] = True
+      for x in lineage:
+          session[x["actor_pid"]] = True
+
+      since = ts - WINDOW_NS
+      evs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ts,
+                         limit=MAX_EVENTS)
+      for i in range(3):
+          for e in evs:
+              if e.get("parent_pid", "") in session:
+                  session[e["actor_pid"]] = True
+
+      scoped = []
+      for e in evs:
+          if e.get("actor_pid", "") in session:
+              scoped.append(e)
+
+      # the triggering event comes from meta, NEVER from the async log
+      cur = {
+          "ts":          str(ts),
+          "actor_pid":   inst["actor_pid"],
+          "actor_start": inst["actor_start"],
+          "actor_path":  inst.get("actor_path", ""),
+          "target_id":   "process://" + inst.get("actor_path", ""),
+          "cmdline":     cmd,
+      }
+      scoped.append(cur)
+
+      # 4. stage 1 - required anchor: earliest fictional-framing exec
+      fic = None
+      for e in scoped:
+          if has_fiction(cmd_of(e)):
+              if fic == None or int(e["ts"]) < int(fic["ts"]):
+                  fic = e
+      if fic == None:
+          return "allow"
+      f_ts = int(fic["ts"])
+      if f_ts < since:
+          return "allow"
+
+      # 5. stage 2 - ordered: real OS override at or after the framing
+      ovr = None
+      for e in scoped:
+          t = int(e["ts"])
+          if t < f_ts:
+              continue
+          if is_override(cmd_of(e)):
+              if ovr == None or t < int(ovr["ts"]):
+                  ovr = e
+      if ovr == None:
+          return "allow"
+
+      # 6. idempotence - one report per session anchor
+      root = lineage[len(lineage) - 1]
+      key = root.get("actor_pid", "?") + ":" + root.get("actor_start", "0") + ":" + str(f_ts)
+      if already_reported(key):
+          return "allow"
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin = " -> ".join(names)
+
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain.append(step(ev_edge(fic),
+                        stage_id="Fictional Terminal Framing",
+                        stage_desc="simulated/roleplay terminal framing in spawned command: " + short(cmd_of(fic))))
+      if ovr["ts"] != fic["ts"] or cmd_of(ovr) != cmd_of(fic):
+          chain.append(step(ev_edge(ovr),
+                            stage_id="OS Protection Override",
+                            stage_desc="real protection-override/destructive execution: " + short(cmd_of(ovr))))
+      else:
+          chain.append(step(ev_edge(ovr),
+                            stage_id="OS Protection Override",
+                            stage_desc="same command line carried both the fiction framing and the real override"))
+
+      reason = ("Fictional-terminal framing followed by real OS protection override " +
+                "in one session: [" + short(cmd_of(fic)) + "] then [" + short(cmd_of(ovr)) +
+                "] via " + lin)
+      if len(lineage) < 2:
+          reason = reason + " (attribution: degraded)"
+      print(reason)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
