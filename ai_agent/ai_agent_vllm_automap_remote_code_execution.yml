@@ -1,0 +1,295 @@
+title: vLLM auto_map Remote Code Execution Chain
+id: 7f3c9a41-2d68-4b17-9e05-c8b4a6d21f3e
+status: experimental
+level: high
+description: |
+  Detects the vLLM Nemotron_Nano_VL_Config auto_map trust_remote_code bypass being
+  exercised at runtime.
+
+  A benign-looking "frontend" model repository ships a config.json whose auto_map entry
+  points at a second, attacker-controlled "backend" repository. vLLM resolves that entry
+  with get_class_from_dynamic_module() without honouring trust_remote_code=False, so the
+  backend repository's Python module is fetched and executed inside the vLLM process.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), climbs to the nearest python/vLLM loader ancestor
+  with proc_lineage(), and evaluates ONLY that one process tree. Stages are read from the
+  instance-resolved event log (query_events) and are strictly ordered and windowed:
+
+    Stage A (optional, high specificity) - model config.json fetched from repo X
+    Stage B (REQUIRED anchor)            - dynamic Python module (.py under /resolve|/raw|
+                                           /blob|/download, or modeling_*/configuration_*)
+                                           fetched from repo Y, where Y != X
+    Stage C (corroboration)              - the same session spawns a shell / network /
+                                           encoder / interpreter-inline payload process
+    Stage D (optional)                   - the loader instance reads a credential file
+
+  A verdict requires the Stage B anchor plus at least one of the Stage A cross-repo
+  redirection or the Stage C payload execution. Same-repository custom-code loads
+  (ordinary trust_remote_code=True usage) produce no verdict.
+author: Evgen
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://huggingface.co/docs/transformers/en/custom_models
+  - https://docs.vllm.ai/en/latest/models/supported_models.html
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Legitimate trust_remote_code=True workflows where a model's config.json auto_maps to a
+    shared base repository (some multimodal and Nemotron-family checkpoints do this by
+    design). This produces the cross-repo stage without any malicious intent - triage by
+    confirming the backend repository owner.
+  - Model conversion, quantisation or evaluation pipelines that pull remote modelling code
+    and then legitimately shell out (chmod, bash helper scripts, pip install of a missing
+    kernel package) inside the same Python process tree within the 10 minute window.
+  - Interactive notebook or dev sessions where an engineer downloads a modelling_*.py from a
+    hub UI and separately runs curl/ssh from the same Python parent.
+  - CI image builds that fetch model code and post-process it with shell tooling under one
+    python entrypoint.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_http:
+    event_type: http_request
+  condition: sel_exec or sel_http
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── vLLM auto_map remote-code-execution chain (instance-resolved) ───────────
+  WINDOW_NS   = 600000000000     # 10 minutes: config fetch -> module fetch -> payload
+  MAX_SESSION = 64               # bound process-tree expansion
+
+  PY_RE      = r"(?i)\.py($|\?)"
+  DYN_RE     = r"(?i)/(resolve|raw|blob|download)/"
+  MODFILE_RE = r"(?i)/(modeling|configuration|image_processing|video_processing|processing|tokenization|feature_extraction|preprocessor)_[a-z0-9_]+\.py($|\?)"
+  CFG_RE     = r"(?i)/(config|configuration_[a-z0-9_]+|preprocessor_config)\.json($|\?)"
+
+  PAYLOAD_TOKENS = [
+      r"\bcurl\b", r"\bwget\b", r"\bnc\b", r"\bncat\b", r"\bnetcat\b",
+      r"\bbash\b", r"\bzsh\b", r"/bin/sh\b", r"\bsh\s+-c\b",
+      r"\bbase64\b", r"\bchmod\s+\+x", r"\bosascript\b", r"\bpowershell\b",
+      r"\bssh\b", r"\bscp\b", r"\bcrontab\b",
+      r"\bpython[0-9.]*\s+-c\b", r"\bperl\s+-e\b", r"\bruby\s+-e\b",
+      r"\bnode\s+-e\b", r"\bpip[0-9.]*\s+install\b",
+  ]
+
+  SENSITIVE = ["/.ssh/", "/.aws/", "/etc/shadow", "/.kube/", "/.netrc",
+               "/.docker/config.json", "/.huggingface/token"]
+
+  def basename(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def is_loader(p):
+      return re.match(r"(?i)^(python[0-9]*(\.[0-9]+)*|pypy[0-9]*|vllm)$", basename(p))
+
+  def is_module_fetch(path):
+      if re.find(PY_RE, path) == None:
+          return False
+      if re.find(DYN_RE, path) != None:
+          return True
+      return re.find(MODFILE_RE, path) != None
+
+  def is_config_fetch(path):
+      return re.find(CFG_RE, path) != None
+
+  def repo_key(host, path):
+      parts = [x for x in path.split("/") if x != ""]
+      if len(parts) >= 2:
+          return host + "/" + parts[0] + "/" + parts[1]
+      return host
+
+  def matches_any(pats, s):
+      for pat in pats:
+          if re.find(pat, s) != None:
+              return True
+      return False
+
+  def ev_edge(e):
+      t = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def run():
+      ct = meta.get("context_type", "")
+      if ct != "execute_process" and ct != "http_request":
+          return "allow"
+
+      # ── relevance gate: pure string checks on meta, no graph/log calls ─────
+      payload_cmd = ""
+      if ct == "execute_process":
+          payload_cmd = meta.get("content", "")
+          if not matches_any(PAYLOAD_TOKENS, payload_cmd):
+              return "allow"
+      else:
+          tp = meta.get("path", "")
+          if not is_module_fetch(tp) and not is_config_fetch(tp):
+              return "allow"
+
+      trigger_ts = int(meta.get("event_ts", "0"))
+      cp         = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trigger_ts == 0:
+          return "allow"
+
+      # ── instance attribution (never a path-keyed node walk) ───────────────
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"            # degraded: re-fires once the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # session = caller .. nearest python/vLLM loader ancestor (inclusive).
+      # Climbing stops at the loader so we never attribute across sessions.
+      session = {}
+      loader  = None
+      for x in lineage:
+          session[x["actor_pid"]] = True
+          if is_loader(x.get("actor_path", "")):
+              loader = x
+              break
+      if loader == None:
+          return "allow"            # not a Python / vLLM model-loading tree
+
+      win_start = trigger_ts - WINDOW_NS
+      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=win_start, limit=2000)
+      for i in range(3):
+          for e in exec_rows:
+              if len(session) >= MAX_SESSION:
+                  break
+              if e.get("parent_pid", "") in session:
+                  session[e["actor_pid"]] = True
+
+      # ── HTTP stages, scoped to this session's instances only ──────────────
+      py_rows  = []
+      cfg_rows = []
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=win_start, until_ns=trigger_ts, limit=200):
+              path = e.get("path", "")
+              if is_module_fetch(path):
+                  py_rows.append(e)
+              elif is_config_fetch(path):
+                  cfg_rows.append(e)
+
+      # the TRIGGERING request comes from meta - never re-queried (async ingest race)
+      if ct == "http_request":
+          trow = {"ts": str(trigger_ts), "kind": "HTTP_REQUEST",
+                  "actor_pid": str(cp), "actor_path": inst.get("actor_path", ""),
+                  "host": meta.get("host", ""), "path": meta.get("path", ""),
+                  "target_id": "https://" + meta.get("host", "")}
+          if is_module_fetch(trow["path"]):
+              py_rows.append(trow)
+          else:
+              cfg_rows.append(trow)
+
+      # ── REQUIRED anchor: dynamic Python module fetch ──────────────────────
+      if not py_rows:
+          return "allow"
+      s0 = py_rows[0]
+      for e in py_rows:
+          if int(e.get("ts", "0")) < int(s0.get("ts", "0")):
+              s0 = e
+      s0_ts = int(s0.get("ts", "0"))
+      if s0_ts == 0 or (trigger_ts - s0_ts) > WINDOW_NS:
+          return "allow"
+      py_repo = repo_key(s0.get("host", ""), s0.get("path", ""))
+
+      # ── corroboration A: auto_map cross-repo redirection (config BEFORE .py) ─
+      cross = None
+      for e in cfg_rows:
+          if int(e.get("ts", "0")) > s0_ts:
+              continue
+          if repo_key(e.get("host", ""), e.get("path", "")) != py_repo:
+              cross = e
+              break
+
+      # ── corroboration B: payload execution after the module fetch ─────────
+      payload = None
+      if ct == "execute_process":
+          payload = {"ts": str(trigger_ts), "kind": "EXECUTE_PROCESS",
+                     "actor_pid": str(cp), "actor_path": inst.get("actor_path", ""),
+                     "cmdline": payload_cmd,
+                     "target_id": "process://" + inst.get("actor_path", "")}
+      else:
+          for e in exec_rows:
+              if e.get("actor_pid", "") not in session:
+                  continue
+              ts = int(e.get("ts", "0"))
+              if ts < s0_ts or ts > trigger_ts:
+                  continue
+              if matches_any(PAYLOAD_TOKENS,
+                             e.get("cmdline", "") + " " + e.get("actor_path", "")):
+                  payload = e
+                  break
+
+      if cross == None and payload == None:
+          return "allow"            # same-repo custom code with no payload: not this CVE
+
+      # ── kill chain, rooted at the loader instance ─────────────────────────
+      chain  = new_chain("process://" + loader.get("actor_path", ""))
+      names  = " -> ".join([basename(x.get("actor_path", "")) for x in lineage])
+      stages = []
+
+      if cross != None:
+          ck = repo_key(cross.get("host", ""), cross.get("path", ""))
+          chain.append(step(ev_edge(cross), stage_id="Frontend Config Fetch",
+                            stage_desc="model config fetched from " + ck +
+                                       " (" + cross.get("path", "") + ")"))
+          stages.append("auto_map cross-repo " + ck + " -> " + py_repo)
+
+      chain.append(step(ev_edge(s0), stage_id="Remote Code Fetch",
+                        stage_desc="dynamic Python module pulled from " + py_repo +
+                                   " (" + s0.get("path", "") + ")"))
+      stages.append("remote module " + s0.get("host", "") + s0.get("path", ""))
+
+      if payload != None:
+          d = payload.get("cmdline", "")
+          if d == "":
+              d = payload.get("actor_path", "")
+          chain.append(step(ev_edge(payload), stage_id="Payload Execution",
+                            stage_desc="loader session spawned: " + d))
+          stages.append("payload exec " + d)
+
+      # optional: credential access by the loader instance after the fetch
+      cred = None
+      for e in query_events(kind="READ_FILE", actor_pid=int(loader["actor_pid"]),
+                            since_ns=s0_ts, until_ns=trigger_ts, limit=500):
+          fp = e.get("path", "")
+          for s in SENSITIVE:
+              if s in fp:
+                  cred = e
+                  break
+          if cred != None:
+              break
+      if cred != None:
+          chain.append(step(ev_edge(cred), stage_id="Credential Access",
+                            stage_desc="loader read sensitive file: " + cred.get("path", "")))
+          stages.append("credential read " + cred.get("path", ""))
+
+      print("vLLM auto_map remote-code chain via " + names + " - " + "; ".join(stages))
+      return {
+          "action": "report",
+          "reason": "vLLM auto_map remote-code chain (" + names + "): " + "; ".join(stages),
+          "chain":  chain,
+      }
+
+  result = run()
