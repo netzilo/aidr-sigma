@@ -1,0 +1,134 @@
+title: Guardrail Bypass - AgentShield Codex Circuit Breaker State File Tamper
+id: 7f3d2c1a-9b64-4e58-a0d7-5c81f2b4e93a
+status: experimental
+level: high
+description: |
+  Detects an agent tool call, LLM-issued tool_use block, or spawned process whose
+  payload both (a) targets the AgentShield Codex connector's file-backed circuit
+  breaker state (~/.codex/.agentshield-breaker.json) and (b) carries an explicit
+  mutation intent - either a breaker-reset JSON body ("state":"closed",
+  failure counters zeroed, cooldown cleared) or a filesystem-mutating command or
+  write-class tool aimed at that file.
+
+  Why this is a single-event content rule and not a graph rule:
+  the triage objection is correct that the semantics needed at the file layer
+  ('MODIFIED_SECURITY_STATE' edge, 'state_change' event) do not exist in the
+  engine, and that file_read/file_write have no live client producer - a rule
+  written against them loads and never fires. A raw WRITE_FILE edge also carries
+  no content delta, so it cannot separate a legitimate rewrite from a breaker
+  reset. This rule therefore moves the detection one layer up, to the surface
+  that IS live and IS content-bearing: the PreToolUse tool_call payload, the
+  llm_tool_call input block, and the execute_process command line. In every one
+  of those events the attacker-supplied new state and the target path are both
+  present in the same event, which is exactly the content delta the file layer
+  cannot give us. The trade is honest: this sees tampering performed through the
+  agent/tool/exec path, and does not see tampering performed by a wholly
+  out-of-band local editor - that residue is accepted, not hidden.
+
+  tool_response / file read-back is deliberately out of scope: the connector
+  echoing its own state is not manipulation and would be pure noise.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://attack.mitre.org/techniques/T1565/001/
+  - https://atlas.mitre.org/techniques/AML.T0015
+tags:
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.impact
+  - attack.t1565.001
+  - atlas.aml.t0015
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: only live, content-bearing producers ──────────────────────────
+  sel_scope:
+    event_type:
+      - tool_call
+      - llm_tool_call
+      - execute_process
+
+  # ── target: the breaker state artifact (high-specificity anchor) ─────────
+  sel_breaker_target:
+    content|re:
+      - '(?i)agentshield[-_.]breaker'
+      - '(?i)\.codex/\.agentshield[A-Za-z0-9._-]*'
+      - '(?i)breaker[-_.]state\.json'
+
+  # ── mutation intent A: a reset/forced breaker state body ─────────────────
+  sel_state_reset:
+    content|re:
+      - '(?i)"state"\s*:\s*"closed"'
+      - '(?i)"state"\s*:\s*"half[-_]?open"'
+      - '(?i)"(consecutive_)?failure(s|_count)?"\s*:\s*0\b'
+      - '(?i)"(tripped|is_open|open)"\s*:\s*false'
+      - '(?i)"(opened_at|open_until|tripped_at|next_attempt(_at)?|cooldown(_until)?|reset_at)"\s*:\s*(0|null|"")'
+
+  # ── mutation intent B: a shell/interpreter write against the file ────────
+  sel_mutation_cmd:
+    content|re:
+      - '(?i)>\s*[^\s;|&]{0,120}agentshield[-_.]breaker'
+      - '(?i)\btee\b[^\n;|&]{0,120}agentshield[-_.]breaker'
+      - '(?i)\bsed\b[^\n]{0,60}\s-i[^\n]{0,120}agentshield[-_.]breaker'
+      - '(?i)\bjq\b[^\n]{0,160}agentshield[-_.]breaker'
+      - '(?i)\b(rm|mv|cp|ln|truncate|chmod|chown|touch|install|shred)\b[^\n]{0,120}agentshield[-_.]breaker'
+      - '(?i)\b(python[23]?|node|deno|perl|ruby|osascript)\b[^\n]{0,200}agentshield[-_.]breaker'
+      - '(?i)\b(printf|echo)\b[^\n]{0,200}agentshield[-_.]breaker'
+      - '(?i)\bjson\.dump[s]?\b[^\n]{0,200}agentshield[-_.]breaker'
+
+  # ── mutation intent C: a write-class tool aimed at the file ──────────────
+  sel_write_tool_field:
+    tool_name|re: '(?i)^(write|edit|multiedit|notebookedit|str_replace|str_replace_editor|str_replace_based_edit_tool|create_file|write_file|fs_write|filesystem__write_file|apply_patch|patch)$'
+
+  sel_write_tool_payload:
+    content|re:
+      - '(?im)^tool_name=(write|edit|multiedit|apply_patch|patch|str_replace[a-z_]*|create_file|write_file|fs_write)\b'
+      - '(?i)"(tool_name|name)"\s*:\s*"(write|edit|multiedit|apply_patch|patch|str_replace[a-z_]*|create_file|write_file|fs_write|filesystem__write_file)"'
+
+  # ── filters: benign shapes that legitimately contain the same strings ────
+  filter_test_harness:
+    content|re:
+      - '(?i)\b(describe|test)\s*\(\s*[''"]'
+      - '(?i)\bexpect\s*\([^\n]{0,80}\)\s*\.\s*to'
+      - '(?i)@pytest\.(mark|fixture)\b'
+      - '(?i)\bunittest\.TestCase\b'
+      - '(?i)\bassert(Equal|True|False|Raises|That)\s*\('
+      - '(?i)\bt\.(Run|Errorf|Fatalf)\s*\('
+
+  filter_doc_block:
+    content|re:
+      - '(?i)```(json|jsonc|bash|sh|shell|console)?\s'
+      - '(?im)^\s{0,3}#{1,6}\s+[A-Za-z]'
+      - '(?i)<!--\s*agentshield'
+
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(example|sample|placeholder|dummy|redacted)[-_ ]?(path|file|value|config|state|json)\b'
+      - '(?i)/path/to/'
+      - '(?i)\bYOUR[-_](HOME|PATH)\b'
+
+  condition: >
+    sel_scope and sel_breaker_target and
+    (sel_state_reset or sel_mutation_cmd or sel_write_tool_field or sel_write_tool_payload)
+    and not (filter_test_harness or filter_doc_block or filter_placeholder)
+
+falsepositives:
+  - AgentShield / Codex connector maintainers manually resetting a stuck breaker
+    during local development or a support session (e.g. an Edit or `rm` of
+    ~/.codex/.agentshield-breaker.json performed knowingly by an operator).
+  - Uninstall, upgrade or workspace-cleanup scripts that delete or re-initialise
+    ~/.codex state artifacts as part of normal lifecycle management.
+  - CI or local test suites that materialise a synthetic breaker state fixture -
+    largely suppressed by filter_test_harness, but a fixture written by a bare
+    `printf > file` with no assertion nearby will still surface.
+  - Runbooks, incident notes or README content that embed the breaker JSON schema
+    verbatim and are written to disk by the agent - largely suppressed by
+    filter_doc_block when the content is fenced or headed markdown.
+  - Backup/restore tooling that copies the whole ~/.codex directory and happens to
+    name the breaker file in the command line.
+
+action: report
