@@ -1,0 +1,330 @@
+title: Disguised Analytics Exfiltration
+id: 7c3f9e2a-5b41-4d8e-9a6c-1f0b2d7e64c3
+status: experimental
+level: high
+description: |
+  Detects an agent-owned process instance sending model context, conversation
+  material, or credential material to a telemetry/analytics-shaped HTTP endpoint
+  (paths such as /collect, /ingest, /telemetry, /traces, or hosts containing
+  analytics/telemetry/beacon tokens) — i.e. exfiltration wearing the costume of
+  ordinary monitoring traffic.
+
+  The only live surface for this threat is the generic http_request event and the
+  HTTP_REQUEST edge, so this rule deliberately does NOT re-implement the generic
+  "sensitive read then outbound HTTP" chain that netzilo-rule-of-two-001 already
+  covers. It keys on the *disguise* instead:
+
+    anchor (required) : the destination is telemetry-shaped AND the payload is not
+                        telemetry-shaped — it carries credential material, model /
+                        conversation context markers, or a >=512 byte opaque
+                        encoded blob.
+    tiering           : credential material at a telemetry endpoint reports on its
+                        own (it is never legitimate telemetry, including in LLM
+                        tracing payloads). Context markers or an opaque blob
+                        additionally require a session-scoped, ordered, windowed
+                        staging stage (sensitive-store read or artifact write).
+
+  Attribution is instance-resolved: the rule anchors on meta["caller_pid"],
+  resolves the exact (pid, start) instance via proc_instance(), walks the true
+  spawn chain with proc_lineage(), expands to sibling instances spawned by that
+  lineage only, and queries the event log scoped to those pids inside a 10 minute
+  window. No path-keyed graph walk is used, so two identical sends in different
+  sessions can never be stitched into one chain.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0057
+  - https://attack.mitre.org/techniques/T1567/
+  - https://attack.mitre.org/techniques/T1071/001/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.command-and-control
+  - attack.t1071.001
+  - atlas.aml.t0057
+  - owasp.llm06
+  - owasp.asi04
+  - owasp.asi06
+falsepositives:
+  - LLM observability / tracing SDKs (self-hosted trace collectors, OTEL GenAI
+    exporters) that legitimately POST prompts and completions to an ingestion
+    endpoint. These carry context markers but are only reported when the same
+    session also read a credential store or wrote a staging artifact inside the
+    10 minute window. Tune by narrowing SENSITIVE_PATH, not by allowlisting hosts.
+  - Crash / error reporters that attach a base64 minidump or gzipped breadcrumb
+    blob to a /ingest or /report endpoint. Blob-only anchors always require a
+    staging corroboration, which crash reporters normally do not produce.
+  - Product analytics with session replay, which can post large encoded DOM
+    payloads to /collect. Same blob-tier corroboration requirement applies.
+  - CI/CD log shippers posting build logs to /logs or /ingest from an agent
+    session that also touched .npmrc or .git-credentials during the same build.
+  - A developer deliberately exporting a conversation transcript to an internal
+    metrics endpoint for evaluation work.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------- constants
+  WINDOW_NS   = 600000000000   # 10 minutes — staging must cluster with the send
+  MAX_PIDS    = 12             # bound session fan-out
+  PAYLOAD_CAP = 200000         # cap regex input
+  MIN_BLOB    = 512            # opaque encoded run length
+
+  # Indicator lists. These WIDEN detection only; nothing here permits traffic.
+  DISGUISE_PATH = [
+      "/collect", "/telemetry", "/analytics", "/metrics", "/beacon", "/track",
+      "/tracking", "/ingest", "/ingestion", "/event", "/events", "/stat",
+      "/stats", "/pixel", "/usage", "/logs", "/report", "/batch", "/hit",
+      "/traces", "/measurement", "/monitoring",
+  ]
+  DISGUISE_HOST = [
+      "analytics", "telemetry", "metrics", "beacon", "tracking", "collect",
+      "insights", "monitor", "usage", "stats", "logs.", "log.", "events.",
+      "rum.", "trace.", "traces.",
+  ]
+
+  CRED_RE = [
+      r"-----BEGIN [A-Z ]{0,24}PRIVATE KEY-----",
+      r"\bAKIA[0-9A-Z]{16}\b",
+      r"\bsk-[A-Za-z0-9_-]{32,}\b",
+      r"\b(ghp|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}\b",
+      r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+      r"(?i)aws_secret_access_key",
+      r"(?i)\"?private_key\"?\s*[:=]",
+  ]
+
+  CTX_SUB = [
+      '"role":"assistant"', '"role": "assistant"',
+      '"role":"system"',    '"role": "system"',
+      '"messages":[',       '"messages": [',
+      "system_prompt", "system prompt", "completion_tokens",
+      "prompt_tokens", "<|im_start|>", "\"tool_calls\"",
+  ]
+
+  SENSITIVE_PATH = [
+      "/.aws/credentials", "/.aws/config", "/.ssh/id_", "/.ssh/config",
+      "/.env", ".env.local", ".env.production", "/etc/shadow", "/.netrc",
+      "/.docker/config.json", "/.kube/config", "/.config/gcloud/", "/.gnupg/",
+      "/.git-credentials", "/.npmrc", "/.pypirc", "service-account",
+      "/.bash_history", "/.zsh_history", "cookies.sqlite", "/login data",
+      "/.claude/projects/", "/conversations/", "/history.jsonl",
+  ]
+
+  STAGING_DIR = ["/tmp/", "/var/tmp/", "/private/tmp/", "\\appdata\\local\\temp\\", "/dev/shm/"]
+  STAGING_EXT = [".tar.gz", ".tgz", ".zip", ".7z", ".b64", ".enc", ".dump", ".jsonl"]
+
+  # ------------------------------------------------------------ pure helpers
+  def is_disguised(host, path):
+      for t in DISGUISE_PATH:
+          if t in path:
+              return True
+      for t in DISGUISE_HOST:
+          if t in host:
+              return True
+      return False
+
+  def cred_hit(s):
+      for p in CRED_RE:
+          if re.find(p, s) != None:
+              return p
+      return ""
+
+  def ctx_hit(low):
+      for t in CTX_SUB:
+          if t in low:
+              return t
+      return ""
+
+  def blob_hit(s):
+      return re.find(r"[A-Za-z0-9+/_-]{" + str(MIN_BLOB) + r",}={0,2}", s) != None
+
+  def is_sensitive_path(p):
+      for t in SENSITIVE_PATH:
+          if t in p:
+              return True
+      return False
+
+  def is_staging_path(p):
+      d = False
+      for t in STAGING_DIR:
+          if t in p:
+              d = True
+      for t in STAGING_EXT:
+          if p.endswith(t):
+              return True
+      return d
+
+  def scheme_of(u):
+      if u.startswith("http://"):
+          return "http"
+      return "https"
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def sort_hits(hits):
+      out = []
+      for h in hits:
+          idx = len(out)
+          for i in range(len(out)):
+              if int(h[2].get("ts", "0")) < int(out[i][2].get("ts", "0")):
+                  idx = i
+                  break
+          out = out[:idx] + [h] + out[idx:]
+      return out
+
+  # ------------------------------------------- session-scoped corroboration
+  def find_staging(session, t0, t1):
+      hits = []
+      n = 0
+      for pid in session:
+          if n >= MAX_PIDS:
+              break
+          n += 1
+          if pid == "":
+              continue
+          p = int(pid)
+          # READ_FILE is high volume — always scoped by actor_pid + window + limit.
+          for e in query_events(kind="READ_FILE", actor_pid=p, since_ns=t0,
+                                until_ns=t1, limit=300):
+              fp = e.get("path", "").lower()
+              if fp != "" and is_sensitive_path(fp):
+                  hits.append(["Context Staging",
+                               "sensitive store read by session instance: " + e.get("path", ""),
+                               e])
+                  break
+          for k in ["WRITE_FILE", "CREATE_FILE"]:
+              for e in query_events(kind=k, actor_pid=p, since_ns=t0,
+                                    until_ns=t1, limit=200):
+                  fp = e.get("path", "").lower()
+                  if fp != "" and is_staging_path(fp):
+                      hits.append(["Artifact Staging",
+                                   "staged artifact written before send: " + e.get("path", ""),
+                                   e])
+                      break
+      return sort_hits(hits)
+
+  # ----------------------------------------------------------------- verdict
+  def run():
+      # 1. relevance gate — pure string checks on meta, no graph / log calls
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      host = meta.get("host", "").lower()
+      path = meta.get("path", "").lower()
+      if host == "" and path == "":
+          return "allow"
+      if not is_disguised(host, path):
+          return "allow"
+
+      # 2. anchor — the payload must NOT look like telemetry
+      url  = meta.get("url", "")
+      body = meta.get("content", "")
+      payload = url + "\n" + body
+      if len(payload) > PAYLOAD_CAP:
+          payload = payload[:PAYLOAD_CAP]
+      low = payload.lower()
+
+      cred = cred_hit(payload)
+      ctx  = ctx_hit(low)
+      blob = blob_hit(payload)
+      if cred == "" and ctx == "" and not blob:
+          return "allow"
+
+      # 3. instance-resolved attribution — never a path-keyed graph walk
+      event_ts = int(meta.get("event_ts", "0"))
+      cp       = int(meta.get("caller_pid", "0"))
+      if cp == 0 or event_ts == 0:
+          return "allow"
+
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          # degraded — create row not yet logged; never guess an owner
+          print("disguised analytics payload to " + host + path + " (attribution degraded)")
+          return {
+              "action": "report",
+              "reason": "Non-telemetry payload sent to telemetry-shaped endpoint " +
+                        host + path + " — process instance unresolved, attribution degraded",
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lineage) == 0:
+          lineage = [inst]
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin = " -> ".join(names)
+
+      # 4. strict single-session scope: lineage + instances it spawned, in window
+      t0 = event_ts - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=t0, until_ns=event_ts,
+                            limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e.get("actor_pid", "")] = True
+
+      hits = find_staging(session, t0, event_ts)
+
+      # 5. tiering
+      tier = ""
+      if cred != "":
+          tier = "credential material in a telemetry payload"
+      elif len(hits) > 0:
+          if ctx != "":
+              tier = "model/conversation context (" + ctx + ") after in-session staging"
+          else:
+              tier = "opaque encoded blob after in-session staging"
+      else:
+          # context markers or a blob alone at a telemetry endpoint is what a
+          # legitimate tracing/crash SDK looks like — not enough on its own.
+          return "allow"
+
+      # 6. kill chain — rooted at the session owner, evidence from event rows
+      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      for h in hits:
+          chain.append(step(ev_edge(h[2]), stage_id=h[0], stage_desc=h[1]))
+
+      # the triggering send is taken from meta, never re-queried from the log
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       scheme_of(url) + "://" + meta.get("host", ""),
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+          "method":   meta.get("method", ""),
+          "callid":   meta.get("callid", ""),
+      }
+      chain.append(step(trig, stage_id="Disguised Analytics Exfil",
+                        stage_desc=meta.get("method", "?") + " " +
+                                   meta.get("host", "") + meta.get("path", "") +
+                                   " — " + tier))
+
+      print("disguised analytics exfil: " + tier + " via " + lin +
+            " -> " + meta.get("host", "") + meta.get("path", ""))
+
+      return {
+          "action": "report",
+          "reason": "Disguised analytics exfiltration — " + tier + " sent to " +
+                    meta.get("host", "") + meta.get("path", "") + " by " + lin,
+          "chain":  chain,
+      }
+
+  result = run()
