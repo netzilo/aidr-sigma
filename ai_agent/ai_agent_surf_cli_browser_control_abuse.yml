@@ -1,0 +1,331 @@
+title: Surf-CLI Browser Control Abuse (Instance-Resolved)
+id: 6f2b9d41-3c7e-4a58-9b0d-1e84c5a7f2d9
+status: experimental
+level: high
+description: |
+  Detects an AI agent session that launches surf-cli (or any Chrome DevTools
+  Protocol control channel via --remote-debugging-port/--remote-debugging-pipe)
+  and then, inside the SAME process session, either
+
+    (a) reads browser credential material (Cookies / Login Data / Local State /
+        Web Data / logins.json / key4.db) with a NON-browser process, or
+    (b) writes a captured browser artifact (screenshot / HAR / MHTML / storage
+        state / cookie dump) AND makes an outbound non-loopback, non-RFC1918
+        HTTP POST/PUT/PATCH from a NON-browser process.
+
+  surf-cli exists to give agents zero-config control of Chrome. That capability
+  is indistinguishable from browser-session hijacking unless you look at what
+  the automation session actually touched. The browser reading its own profile
+  is normal; the automation harness reading the profile secret store, or
+  shipping a captured artifact off-box, is the threat.
+
+  The rule is instance-resolved: it anchors on meta.caller_pid, resolves the
+  exact process instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), expands to that session's descendants via the event log, and
+  queries only that session's events. It never attributes across sessions and
+  never walks path-keyed graph nodes.
+author: Evgen
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1185/
+  - https://attack.mitre.org/techniques/T1539/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://chromedevtools.github.io/devtools-protocol/
+  - https://www.npmjs.com/package/surf-cli
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.credential-access
+  - attack.t1539
+  - attack.collection
+  - attack.t1185
+  - atlas.aml.t0053
+  - atlas.aml.t0025
+  - owasp.llm06
+  - owasp.llm02
+falsepositives:
+  - Legitimate agent-driven or CI end-to-end browser testing with surf-cli /
+    Puppeteer / Playwright that saves a screenshot or HAR and uploads it to an
+    artifact store — this produces the capture+egress combination and will be
+    reported once per automation session.
+  - A developer manually running surf-cli against their own logged-in profile
+    and using a helper script (node/python/cat) to inspect the cookie jar.
+  - Browser profile backup, migration or sync tooling launched from the same
+    shell as the automation session inside the 15 minute window.
+  - Password-manager or extension test harnesses that read Login Data / key4.db
+    while a CDP session happens to be open.
+  - Cookie-consent or session-replay QA tooling that exports storage_state.json
+    and POSTs it to an internal-but-publicly-resolvable test service.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec_surf:
+    event_type: execute_process
+    content|re: '(?i)(\bsurf-cli\b|\bsurf_cli\b|node_modules/\.bin/surf\b|--remote-debugging-(port|pipe))'
+  sel_http:
+    event_type: http_request
+  condition: sel_exec_surf or sel_http
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── surf-cli / CDP browser-automation misuse — instance-resolved ───────────
+  WINDOW_NS = 900000000000      # 15 min: anchor and evidence must cluster
+  EXEC_ROWS = 4000
+  FILE_ROWS = 2000
+  HTTP_ROWS = 500
+
+  ANCHOR_PATTERNS = [
+      r"(?i)\bsurf-cli\b",
+      r"(?i)\bsurf_cli\b",
+      r"(?i)node_modules/\.bin/surf\b",
+      r"(?i)\bnpx\b[^\n]*\bsurf\b",
+      r"(?i)--remote-debugging-port",
+      r"(?i)--remote-debugging-pipe",
+  ]
+
+  CDP_PATHS = [r"^/json(/|$)", r"^/devtools/"]
+
+  # Actor-class exclusion (NOT a host/domain/path trust list): a browser reading
+  # its own profile secret store is normal startup behaviour. The threat is the
+  # automation harness doing it.
+  BROWSER_BINS = [
+      r"(?i)\bgoogle chrome\b", r"(?i)\bchrome\b", r"(?i)\bchromium\b",
+      r"(?i)\bmsedge\b", r"(?i)\bbrave\b", r"(?i)\bfirefox\b",
+  ]
+
+  SECRET_FILES = ["/cookies", "/login data", "/local state", "/web data",
+                  "cookies.sqlite", "logins.json", "key4.db"]
+
+  CAPTURE_FILES = ["screenshot", ".har", ".mhtml", "cookies.json",
+                   "storage_state", "trace.zip", "page.pdf"]
+
+  PRIVATE_PREFIXES = ["127.", "10.", "192.168.", "169.254.",
+                      "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
+                      "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                      "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+                      "172.31."]
+
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def contains_any(subs, s):
+      for x in subs:
+          if x in s:
+              return True
+      return False
+
+  def is_browser_bin(p):
+      return matches_any(BROWSER_BINS, p)
+
+  # Address-class check only (loopback / RFC1918 / link-local). This is the CDP
+  # control channel itself, not a trust list of permitted destinations.
+  def is_internal_host(h):
+      if h == "":
+          return True
+      if h == "localhost" or h == "::1" or h == "[::1]" or h == "0.0.0.0":
+          return True
+      for pfx in PRIVATE_PREFIXES:
+          if h.startswith(pfx):
+              return True
+      return False
+
+  # ── relevance gate: pure string checks on meta, no graph / log calls ───────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          return matches_any(ANCHOR_PATTERNS, meta.get("content", ""))
+      if ct == "http_request":
+          if matches_any(CDP_PATHS, meta.get("path", "")):
+              return True
+          m = meta.get("method", "").upper()
+          if m == "POST" or m == "PUT" or m == "PATCH":
+              return not is_internal_host(meta.get("host", ""))
+          return False
+      return False
+
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {"from": "process://" + e.get("actor_path", ""),
+              "to": e.get("target_id", ""),
+              "kind": e.get("kind", ""),
+              "ts": ts, "first_ts": ts, "last_ts": ts,
+              "count": "1", "risk_context": ""}
+
+  def synth_edge(kind, actor_path, to_id, ts):
+      return {"from": "process://" + actor_path,
+              "to": to_id, "kind": kind,
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
+              "count": "1", "risk_context": ""}
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trig_ts == 0:
+          return "allow"
+
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"          # degraded — re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── session scope: this lineage plus everything it spawned in-window ───
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = [x.get("actor_start", "0"),
+                                             x.get("actor_path", "")]
+      execs = query_events(kind="EXECUTE_PROCESS",
+                           since_ns=trig_ts - WINDOW_NS, until_ns=trig_ts,
+                           limit=EXEC_ROWS)
+      for i in range(3):          # bounded transitive closure over one fetch
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap not in session:
+                  session[ap] = [e.get("actor_start", "0"), e.get("actor_path", "")]
+
+      # ── REQUIRED anchor: surf-cli / CDP control launched in THIS session ───
+      anchor = None
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          cmd = e.get("cmdline", "") + " " + e.get("actor_path", "")
+          if matches_any(ANCHOR_PATTERNS, cmd):
+              if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
+                  anchor = e
+      if anchor == None:
+          return "allow"
+      s0 = int(anchor.get("ts", "0"))
+      if s0 == 0 or s0 > trig_ts or (trig_ts - s0) > WINDOW_NS:
+          return "allow"
+
+      root  = lineage[-1]
+      dedup = "surf:" + root.get("actor_pid", "0") + ":" + \
+              root.get("actor_start", "0") + ":" + anchor.get("ts", "0")
+      if store_get(dedup) != None:
+          return "allow"          # this automation session already reported
+
+      # ── non-browser workers of this session (the automation harness) ──────
+      workers = []
+      for pid in session:
+          if not is_browser_bin(session[pid][1]):
+              workers.append(pid)
+
+      cred_edge    = None
+      cred_desc    = ""
+      capture_edge = None
+      capture_desc = ""
+      cdp_edge     = None
+      cdp_desc     = ""
+      egress_edge  = None
+      egress_desc  = ""
+
+      # Stage: browser secret-store read by a non-browser session instance.
+      for pid in workers:
+          if cred_edge != None:
+              break
+          rows = query_events(kind="READ_FILE", actor_pid=int(pid),
+                              actor_start=int(session[pid][0]),
+                              since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
+          for r in rows:
+              fp = r.get("path", "")
+              if contains_any(SECRET_FILES, fp.lower()):
+                  cred_edge = ev_edge(r)
+                  cred_desc = "browser secret store read by " + \
+                              session[pid][1].split("/")[-1] + ": " + fp
+                  break
+
+      # Stage: captured browser artifact written by a non-browser instance.
+      for pid in workers:
+          if capture_edge != None:
+              break
+          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
+                              actor_start=int(session[pid][0]),
+                              since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
+          for r in rows:
+              fp = r.get("path", "")
+              if contains_any(CAPTURE_FILES, fp.lower()):
+                  capture_edge = ev_edge(r)
+                  capture_desc = "browser artifact captured: " + fp
+                  break
+
+      # Stage: CDP control traffic and outbound egress by session workers.
+      for pid in workers:
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              actor_start=int(session[pid][0]),
+                              since_ns=s0, until_ns=trig_ts, limit=HTTP_ROWS)
+          for r in rows:
+              if cdp_edge == None and matches_any(CDP_PATHS, r.get("path", "")):
+                  cdp_edge = ev_edge(r)
+                  cdp_desc = "DevTools control channel: " + \
+                             r.get("host", "") + r.get("path", "")
+              if egress_edge == None and not is_internal_host(r.get("host", "")):
+                  egress_edge = ev_edge(r)
+                  egress_desc = "outbound " + r.get("method", "") + " to " + \
+                                r.get("host", "")
+
+      # The TRIGGERING event comes from meta, never from a log lookup.
+      ct          = meta.get("context_type", "")
+      caller_path = inst.get("actor_path", "")
+      if ct == "http_request" and not is_browser_bin(caller_path):
+          thost = meta.get("host", "")
+          tpath = meta.get("path", "")
+          if cdp_edge == None and matches_any(CDP_PATHS, tpath):
+              cdp_edge = synth_edge("HTTP_REQUEST", caller_path,
+                                    "https://" + thost, trig_ts)
+              cdp_desc = "DevTools control channel: " + thost + tpath
+          if egress_edge == None and not is_internal_host(thost):
+              egress_edge = synth_edge("HTTP_REQUEST", caller_path,
+                                       "https://" + thost, trig_ts)
+              egress_desc = "outbound " + meta.get("method", "") + " to " + thost
+
+      confirmed = cred_edge != None or \
+                  (capture_edge != None and egress_edge != None)
+      if not confirmed:
+          return "allow"
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain.append(step(ev_edge(anchor), stage_id="Browser Automation Launch",
+                        stage_desc="CDP/surf-cli control launched: " +
+                                   anchor.get("cmdline", "")[:200]))
+      if cdp_edge != None:
+          chain.append(step(cdp_edge, stage_id="Browser Control",
+                            stage_desc=cdp_desc))
+      if cred_edge != None:
+          chain.append(step(cred_edge, stage_id="Credential Access",
+                            stage_desc=cred_desc))
+      if capture_edge != None:
+          chain.append(step(capture_edge, stage_id="Collection",
+                            stage_desc=capture_desc))
+      if egress_edge != None:
+          chain.append(step(egress_edge, stage_id="Egress",
+                            stage_desc=egress_desc))
+
+      why = cred_desc
+      if why == "":
+          why = capture_desc + " then " + egress_desc
+      reason = "Agent browser-automation session (" + " -> ".join(names) + \
+               ") " + why
+      print(reason)
+
+      if store_usage()["free"] < 8192:
+          store_reset()
+      store_set(dedup, trig_ts)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
