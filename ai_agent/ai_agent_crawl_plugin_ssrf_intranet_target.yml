@@ -1,0 +1,97 @@
+title: Crawl Plugin SSRF - Intranet Target In URL Parameter
+id: 7c1f4b6a-3d2e-4a58-9b0c-5e8f2a94d17b
+status: experimental
+level: high
+description: |
+  Detects a single outbound http_request whose body or query string carries a
+  URL-valued parameter (url / uri / target_url / fetch_url / crawl_url / callback /
+  endpoint / redirect_uri ...) whose value resolves to an intranet, loopback,
+  link-local, CGNAT, cloud-metadata or in-cluster destination.
+
+  This is the exact wire shape of the FastGPT web-crawling plugin SSRF: the plugin
+  accepts an attacker-supplied URL and fetches it without validating that the host is
+  a private/internal address, so the server is coerced into retrieving intranet
+  resources on the attacker's behalf.
+
+  The rule deliberately does NOT fire merely because a request goes to a private
+  address - agents talk to localhost and RFC1918 services constantly. It only fires
+  when a private address appears as the *value of a fetch/crawl URL parameter*, with
+  an explicit scheme, which is what a crafted SSRF payload looks like and what normal
+  API traffic does not contain.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://cwe.mitre.org/data/definitions/918.html
+tags:
+  - attack.discovery
+  - attack.t1046
+  - attack.credential-access
+  - attack.t1552.005
+  - cwe.918
+  - owasp.a10-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+
+  # JSON / body form:  "url": "http://10.0.0.7/admin"
+  sel_json_url_target:
+    content|re: '(?i)"(?:urls?|uri|link|links|src|source|source_?url|target|target_?url|web_?url|fetch_?url|crawl_?url|page_?url|endpoint|callback|feed_?url|site_?url|proxy_?url|image_?url|document_?url|redirect_?uri|webhook_?url)"\s*:\s*(?:\[\s*)?"(?:(?:https?|ftp|gopher|dict|file)(?::|%3a)(?://|%2f%2f)|//)(?:[^"@/\s]{0,64}@)?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost|\[::1\]|\[::ffff:127\.\d{1,3}\.\d{1,3}\.\d{1,3}\]|0x7f[0-9a-f]{6}|2130706433|metadata\.google\.internal|[a-z0-9-]{1,63}\.svc\.cluster\.local)(?:["/:?#&,]|$)'
+
+  # form-encoded / query form inside the body:  &url=http%3A%2F%2F169.254.169.254%2F
+  sel_query_url_target:
+    content|re: '(?i)[?&;](?:urls?|uri|link|src|source_?url|target_?url|web_?url|fetch_?url|crawl_?url|page_?url|endpoint|callback|feed|redirect_?uri|next|dest|proxy|image_?url|u)=(?:(?:https?|ftp|gopher|dict)(?::|%3a)(?://|%2f%2f)|%2f%2f|//)(?:[^&"@/\s]{0,64}@)?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost|\[::1\]|0x7f[0-9a-f]{6}|2130706433|metadata\.google\.internal|[a-z0-9-]{1,63}\.svc\.cluster\.local)(?:["/:?#&,;]|$)'
+
+  # same payload carried on the outbound request line itself
+  sel_request_url_target:
+    url.full|re: '(?i)[?&;](?:urls?|uri|link|src|source_?url|target_?url|web_?url|fetch_?url|crawl_?url|page_?url|endpoint|callback|feed|redirect_?uri|next|dest|proxy|image_?url|u)=(?:(?:https?|ftp|gopher|dict)(?::|%3a)(?://|%2f%2f)|%2f%2f|//)(?:[^&"@/\s]{0,64}@)?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost|\[::1\]|0x7f[0-9a-f]{6}|2130706433|metadata\.google\.internal|[a-z0-9-]{1,63}\.svc\.cluster\.local)(?:["/:?#&,;]|$)'
+
+  # ── noise suppression (none of these widen what any host is permitted to do) ──
+
+  # Bodies that discuss private ranges as CIDR blocks are config/doc text, not a
+  # crafted single-target fetch.
+  filter_cidr_doc:
+    content|re: '(?:10\.0\.0\.0/8|172\.16\.0\.0/12|192\.168\.0\.0/16|127\.0\.0\.0/8|169\.254\.0\.0/16|100\.64\.0\.0/10|0\.0\.0\.0/0)'
+
+  # Un-rendered templates and obvious fill-me-in markers.
+  filter_template_placeholder:
+    content|re:
+      - '\{\{[^}]{0,64}\}\}'
+      - '\$\{[^}]{0,64}\}'
+      - '(?i)<(?:your[- _]?)?(?:ip|host|hostname|server|address|target)[^>]{0,24}>'
+      - '(?i)(?:xxx\.xxx|YOUR_(?:IP|HOST|URL|SERVER))'
+
+  # Security research / disclosure material that quotes SSRF payloads verbatim.
+  filter_vuln_docs:
+    content|contains:
+      - 'CVE-'
+      - 'proof of concept'
+      - 'proof-of-concept'
+      - 'vulnerability report'
+      - 'penetration test'
+      - 'A10:2021'
+
+  condition: >
+    sel_event
+    and (sel_json_url_target or sel_query_url_target or sel_request_url_target)
+    and not (filter_cidr_doc or filter_template_placeholder or filter_vuln_docs)
+
+falsepositives:
+  - Agent legitimately asked to crawl or summarise an internal wiki, Confluence, Jira
+    or documentation site that is hosted on an RFC1918 address and passed as a url=
+    parameter.
+  - Local development and CI - a developer exercising the crawl/fetch tool against a
+    service running on 127.0.0.1 or 0.0.0.0 with an explicit port.
+  - Kubernetes-hosted agents fetching an in-cluster API via a *.svc.cluster.local URL
+    passed to a generic fetch tool.
+  - Tailscale / CGNAT estates where 100.64.0.0/10 addresses are the normal way to
+    reach internal services.
+  - Authorised SSRF regression suites and scanner payload corpora replayed through the
+    agent (partly suppressed by filter_vuln_docs).
+  - Configuration or seed data blobs that embed example private-range URLs (suppressed
+    by filter_cidr_doc and filter_template_placeholder).
+
+action: report
