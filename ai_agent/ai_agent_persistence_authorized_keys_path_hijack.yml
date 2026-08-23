@@ -1,0 +1,315 @@
+title: Agent File-Edit Persistence — SSH Authorized Keys / Shell Startup PATH Hijack
+id: 7c3f1a2e-9b64-4d51-8ae7-2f0c6d3b5a19
+status: experimental
+level: high
+description: |
+  Detects an AI agent being directed to plant a persistence backdoor through a
+  file-write / file-edit tool:
+
+    (a) injecting an SSH public key blob (ssh-rsa / ssh-ed25519 / ssh-dss /
+        ecdsa-sha2-nistp*) into ~/.ssh/authorized_keys, or
+    (b) prepending a world-writable directory (/tmp, /var/tmp, /dev/shm,
+        /private/tmp, ~/.cache) ahead of $PATH inside a shell startup file
+        (.bashrc, .bash_profile, .zshrc, .profile, /etc/profile.d/*).
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), scopes corroborating WRITE_FILE rows to that one session via
+  query_events(), and emits a kill chain built from the triggering tool call plus
+  the instance-scoped write rows. No cross-session attribution is performed and
+  no graph-wide agent scan is used.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1098/004/
+  - https://attack.mitre.org/techniques/T1546/004/
+  - https://attack.mitre.org/techniques/T1574/007/
+tags:
+  - attack.persistence
+  - attack.t1098.004
+  - attack.t1546.004
+  - attack.t1574.007
+  - atlas.aml.t0055
+  - owasp.llm06
+falsepositives:
+  - Legitimate provisioning work where the operator explicitly asks the agent to add
+    their own SSH public key to authorized_keys on a new dev box, CI runner or jump host.
+  - Dotfile-management workflows (chezmoi, ansible, stow, home-manager) where the agent
+    edits .bashrc/.zshrc and a toolchain genuinely prepends a cache-backed bin directory
+    (for example a pyenv/uv/bun shim under $HOME/.cache) ahead of $PATH.
+  - Container or devcontainer bootstrap scripts that intentionally prepend /tmp or
+    /dev/shm build directories to PATH in a throwaway image.
+  - Integration tests or documentation fixtures whose write target is itself a shell rc
+    file (for example a test asserting rc parsing) — the target-path gate keeps README
+    or tutorial writes that only *mention* authorized_keys from matching, but a fixture
+    literally named .bashrc will match.
+  - Security-research and detection-engineering repositories where the agent authors an
+    example authorized_keys or PATH-hijack rc file as test data.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_events:
+    event_type:
+      - tool_call
+      - tool_response
+  sel_persistence_marker:
+    content|re:
+      - '(?i)authorized_keys'
+      - '(?i)\.(bashrc|bash_profile|bash_login|profile|zshrc|zprofile|zshenv|zlogin|kshrc|cshrc|tcshrc|bash_aliases)\b'
+      - '(?i)/etc/profile'
+      - '(?i)\bssh-(rsa|ed25519|dss)\b'
+      - '(?i)\becdsa-sha2-nistp(256|384|521)\b'
+      - 'PATH[ \t]*=[ \t]*'
+  condition: sel_events and sel_persistence_marker
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants ───────────────────────────────────────────────────────────────
+  WINDOW_NS = 300000000000          # 5 min — session clustering window
+  MAX_SESSION_PIDS = 64             # bound the per-session query fan-out
+
+  WRITE_TOOLS = [
+      r"\bwrite\b", r"\bwrite_file\b", r"\bwritefile\b", r"\bwrite_to_file\b",
+      r"\bedit\b", r"\bedit_file\b", r"\bmultiedit\b", r"\bmulti_edit\b",
+      r"\bapply_diff\b", r"\bapply_patch\b", r"\bpatch\b", r"\boverwrite\b",
+      r"\bappend\b", r"\bappend_file\b", r"\binsert\b", r"\bcreate_file\b",
+      r"\bfs_write\b", r"\bstr_replace_editor\b", r"\bstr_replace_based_edit_tool\b",
+      r"\breplace_in_file\b", r"\bupdate_file\b", r"\bnotebookedit\b",
+      r"\bbash\b", r"\bsh\b", r"\bshell\b", r"\bterminal\b",
+      r"\brun_command\b", r"\bexecute_command\b", r"\brun_terminal_cmd\b",
+  ]
+
+  SHELL_RC = [".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc",
+              ".zprofile", ".zshenv", ".zlogin", ".kshrc", ".cshrc", ".tcshrc",
+              ".bash_aliases"]
+
+  # \x22 = double quote, \x27 = single quote (kept as codepoints so the YAML and
+  # the Starlark literal never fight over quoting). RE2 understands both.
+  PATH_ARG_RE = r"\x22(?:file_path|filepath|path|filename|file|target_file|absolute_path|notebook_path|target_path)\x22[ \t]*:[ \t]*\x22[^\x22]{1,400}\x22"
+
+  SSH_KEY_RE  = r"(?i:ssh-rsa|ssh-ed25519|ssh-dss|ecdsa-sha2-nistp(?:256|384|521))[ \t]+AAAA[0-9A-Za-z+/]{20,}"
+
+  # Writable dir must appear BEFORE $PATH — i.e. a prepend, not an append.
+  PATH_PREPEND_RE = r"PATH[ \t]*=[ \t]*[\x22\x27]?[^\n\x22\x27]{0,240}(?:/tmp|/var/tmp|/dev/shm|/private/tmp|/\.cache)[^\n\x22\x27]{0,240}\$\{?PATH\}?"
+
+  # ── Pure helpers (no graph / no event-log calls) ────────────────────────────
+  def name_is_write(tn):
+      if tn == "":
+          return False
+      low = tn.lower()
+      for p in WRITE_TOOLS:
+          if re.find(p, low) != None:
+              return True
+      return False
+
+  def payload_anchor(c):
+      if re.find(SSH_KEY_RE, c) != None:
+          return "sshkey"
+      if re.find(PATH_PREPEND_RE, c) != None:
+          return "pathhijack"
+      return ""
+
+  def path_args(c):
+      out = []
+      for chunk in re.find_all(PATH_ARG_RE, c, 12):
+          parts = chunk.split("\"")
+          if len(parts) >= 4:
+              v = parts[3]
+              if v != "":
+                  out.append(v)
+      return out
+
+  def classify_target(p):
+      lp = p.lower()
+      if lp == "":
+          return ""
+      if "authorized_keys" in lp:
+          return "ssh_authorized_keys"
+      base = lp.split("/")[-1]
+      for f in SHELL_RC:
+          if base == f:
+              return "shell_startup"
+      if "/etc/profile.d/" in lp:
+          return "shell_startup"
+      if lp.endswith("/etc/profile"):
+          return "shell_startup"
+      if lp.endswith("/.config/fish/config.fish"):
+          return "shell_startup"
+      return ""
+
+  def target_token(c):
+      # Fallback only: used when the tool exposes no explicit path argument
+      # (shell tools with a redirect, sed -i, tee, heredoc, ...).
+      lc = c.lower()
+      if "authorized_keys" in lc:
+          return "ssh_authorized_keys"
+      for f in SHELL_RC:
+          if f in lc:
+              return "shell_startup"
+      if "/etc/profile" in lc:
+          return "shell_startup"
+      return ""
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "WRITE_FILE"),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  def short(p):
+      return p.split("/")[-1]
+
+  # ── Main ────────────────────────────────────────────────────────────────────
+  def run():
+      # 1. RELEVANCE GATE — pure string work on meta only.
+      ct = meta.get("context_type", "")
+      if ct != "tool_input" and ct != "tool_output":
+          return "allow"
+
+      content = meta.get("content", "")
+      if content == "":
+          return "allow"
+
+      tn = meta.get("tool_name", "")
+      if tn != "" and not name_is_write(tn):
+          return "allow"
+
+      kind = payload_anchor(content)
+      if kind == "":
+          return "allow"                 # no key blob, no PATH prepend → not this threat
+
+      # 2. TARGET GATE — the write must be aimed at a persistence file.
+      targets  = path_args(content)
+      hit_path = ""
+      hit_type = ""
+      for p in targets:
+          t = classify_target(p)
+          if t != "":
+              hit_path = p
+              hit_type = t
+              break
+      if hit_type == "":
+          if len(targets) > 0:
+              return "allow"             # explicit target, and it is not a persistence file
+          hit_type = target_token(content)
+          if hit_type == "":
+              return "allow"
+          hit_path = "(target inferred from command text)"
+
+      # 3. Anchor and target must agree — kills doc/example crossfire.
+      if hit_type == "ssh_authorized_keys" and kind != "sshkey":
+          return "allow"
+      if hit_type == "shell_startup" and kind != "pathhijack":
+          return "allow"
+
+      if hit_type == "ssh_authorized_keys":
+          label = "SSH public key injected into authorized_keys"
+      else:
+          label = "writable directory prepended to $PATH in a shell startup file"
+
+      tool_label = tn
+      if tool_label == "":
+          tool_label = "file-edit tool"
+
+      ets = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+
+      trig_from = "process://" + meta.get("agent_name", "unknown")
+      trig = {
+          "from":     trig_from,
+          "to":       "tool://" + meta.get("server_name", "local") + "/" + tool_label,
+          "kind":     "TOOL_CALL",
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+      }
+
+      # 4. ANCHOR on the exact triggering instance.
+      inst = None
+      if cp != 0:
+          inst = proc_instance(cp, ets)
+      if inst == None:
+          # Degraded: we can see the directive but not the instance yet.
+          chain = new_chain(trig_from)
+          chain.append(step(trig, stage_id="Persistence Directive",
+                            stage_desc=label + " via " + tool_label + " — target: " + hit_path))
+          print("persistence directive, attribution degraded (caller_pid=" + str(cp) + ")")
+          return {
+              "action": "report",
+              "reason": "Persistence backdoor directive (" + label + ", target: " + hit_path +
+                        ") — attribution degraded, process instance not yet in the event log",
+              "chain":  chain,
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if lineage == None or len(lineage) == 0:
+          lineage = [inst]
+
+      trig["from"] = "process://" + lineage[0]["actor_path"]
+      root_path = lineage[len(lineage) - 1]["actor_path"]
+      names = " -> ".join([short(x["actor_path"]) for x in lineage])
+
+      # 5. SESSION SCOPE — lineage instances plus their children. Never wider.
+      since = 0
+      if ets > WINDOW_NS:
+          since = ets - WINDOW_NS
+
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x["actor_start"]
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+          if e.get("parent_pid", "") in session:
+              if len(session) < MAX_SESSION_PIDS:
+                  session[e["actor_pid"]] = e.get("actor_start", "0")
+
+      # 6. CORROBORATION — WRITE_FILE rows scoped per-instance and windowed.
+      writes = []
+      scanned = 0
+      for pid in session:
+          if scanned >= MAX_SESSION_PIDS:
+              break
+          scanned = scanned + 1
+          for w in query_events(kind="WRITE_FILE", actor_pid=int(pid),
+                                since_ns=since, limit=200):
+              wp = w.get("path", "")
+              if wp == "":
+                  continue
+              if classify_target(wp) == hit_type:
+                  writes.append(w)
+                  if len(writes) >= 8:
+                      break
+          if len(writes) >= 8:
+              break
+
+      # 7. VERDICT — always report, always with a kill chain.
+      chain = new_chain("process://" + root_path)
+      chain.append(step(trig, stage_id="Persistence Directive",
+                        stage_desc=label + " via " + tool_label + " — target: " + hit_path))
+
+      for w in writes[:4]:
+          chain.append(step(ev_edge(w), stage_id="Persistence Write",
+                            stage_desc="session instance " + short(w.get("actor_path", "?")) +
+                                       " (pid " + w.get("actor_pid", "?") + ") wrote " +
+                                       w.get("path", "?")))
+
+      corr = " (no filesystem write observed yet in this session)"
+      if len(writes) > 0:
+          corr = " (corroborated by " + str(len(writes)) + " session WRITE_FILE event(s), first: " + \
+                 writes[0].get("path", "?") + ")"
+
+      print("persistence directive: " + label + " | target=" + hit_path + " | lineage=" + names)
+
+      return {
+          "action": "report",
+          "reason": "Agent-directed persistence backdoor — " + label + ", target: " + hit_path +
+                    ", tool: " + tool_label + ", session: " + names + corr,
+          "chain":  chain,
+      }
+
+  result = run()
