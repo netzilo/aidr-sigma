@@ -1,0 +1,300 @@
+title: MCP Streamable-HTTP Session Churn (Uncaught ClosedResourceError DoS)
+id: 7f3c9d21-4b8e-4a6f-9c1d-5e2a8b4f6031
+status: experimental
+level: medium
+author: Evgen
+date: "2026-03-14"
+description: |
+  Consequence-based detection for CVE-2025-53365 (MCP Python SDK < 1.10.0), where a
+  client can trigger an uncaught ClosedResourceError after establishing a streamable
+  HTTP session, crashing the server until it is restarted.
+
+  The engine has no exception or process-liveness telemetry: 'exception_raised' is not
+  an event type and 'CAUSED_EXCEPTION' is not an edge kind, so the crash itself is
+  unobservable. What IS observable is the mechanical consequence of the crash loop:
+  a streamable-HTTP MCP session is designed to be long-lived and to carry many
+  JSON-RPC POSTs per TCP connection, so an endpoint that is being torn down
+  immediately after session establishment forces the client to re-establish the
+  transport again and again while the HTTP request volume across those
+  re-establishments stays at or below ~2 requests per session.
+
+  This rule therefore anchors on a high-specificity signal (an MCP streamable-HTTP
+  endpoint path already present in the behaviour graph), then measures
+  re-establishment rate from the live 'connects' events against the growth of the
+  HTTP_REQUEST edge count to that same host over the same span. It reports only.
+  It cannot confirm exploitation - a server restart loop from any cause produces the
+  same shape - so the verdict is an investigation lead, not an enforcement decision.
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-53365
+  - https://github.com/modelcontextprotocol/python-sdk/security/advisories
+  - https://attack.mitre.org/techniques/T1499/004/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - cve.2025.53365
+falsepositives:
+  - Local MCP server run with hot reload (uvicorn --reload, nodemon, watchexec) restarting on every file save during development, forcing the client to re-establish the streamable HTTP session repeatedly.
+  - Container or pod restart, rolling deploy, or crash-loop of the MCP server caused by an unrelated bug or an OOM kill.
+  - Load balancer, service mesh sidecar, or reverse proxy with a short idle timeout terminating long-lived streamable HTTP sessions.
+  - Flaky network, VPN or ZTNA tunnel re-key causing genuine TCP churn on an otherwise healthy session.
+  - A batch or CI harness that intentionally runs many short one-shot MCP sessions in a loop against the same endpoint instead of reusing one session.
+  - An HTTP client configured without keep-alive that polls an endpoint whose path happens to contain /mcp, /sse, /stream or /rpc.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_connects:
+    event_type: connects
+  condition: sel_connects
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- tunables (all live in the rule, never in the store) --------------------
+  WINDOW_NS           = 120000000000   # 2 minutes of connect history per endpoint
+  MAX_STALE_NS        = 360000000000   # HTTP evidence older than 6 min is not stitched
+  COOLDOWN_NS         = 600000000000   # 10 min per-endpoint report suppression
+  MIN_CONNECTS        = 10             # re-establishments required inside the window
+  MAX_REQ_PER_SESSION = 2              # a healthy MCP session carries far more
+  MAX_TS              = 64
+  MAX_SNAPS           = 32
+  MAX_ENDPOINTS       = 48
+
+  # Streamable-HTTP / SSE transport paths used by the MCP Python SDK. This is a
+  # detection anchor, not a trust list - nothing is permitted by matching it.
+  MCP_PATH_HINTS = ["/mcp", "/message", "/sse", "/stream", "/jsonrpc", "/rpc"]
+
+  def is_mcp_path(p):
+      lp = p.lower()
+      for h in MCP_PATH_HINTS:
+          if h in lp:
+              return True
+      return False
+
+  def prune_ints(lst, cutoff):
+      out = []
+      for v in lst:
+          iv = int(v)
+          if iv >= cutoff:
+              out.append(iv)
+      return out
+
+  def prune_pairs(lst, cutoff):
+      out = []
+      for s in lst:
+          if len(s) == 2 and int(s[0]) >= cutoff:
+              out.append([int(s[0]), int(s[1])])
+      return out
+
+  def evict(state, keep_key):
+      if len(state) <= MAX_ENDPOINTS:
+          return state
+      oldest_k = ""
+      oldest_t = 0
+      for k in state:
+          if k == keep_key:
+              continue
+          t = int(state[k].get("last", 0))
+          if oldest_t == 0 or t < oldest_t:
+              oldest_t = t
+              oldest_k = k
+      if oldest_k == "":
+          return state
+      out = {}
+      for k in state:
+          if k != oldest_k:
+              out[k] = state[k]
+      return out
+
+  def save(state):
+      u = store_usage()
+      if u["free"] < 16384:
+          store_reset()
+      store_set("ep", state)
+
+  # Sum HTTP_REQUEST edge counts from processes to the URL nodes of this host and
+  # keep the most recent edge as kill-chain evidence.
+  def collect(url_ids, paths):
+      total = 0
+      best  = None
+      bproc = None
+      for p in graph(type="Process"):
+          if paths != None and p.get("path", "") not in paths:
+              continue
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              if e["to"] not in url_ids:
+                  continue
+              total = total + int(e.get("count", "0"))
+              if best == None or int(e.get("last_ts", "0")) > int(best.get("last_ts", "0")):
+                  best  = e
+                  bproc = p
+      return [total, best, bproc]
+
+  def run():
+      # ---- relevance gate: pure string checks on meta, no graph, no event log ---
+      if meta.get("context_type", "") != "connects":
+          return "allow"
+      if meta.get("protocol", "tcp") == "udp":
+          return "allow"
+      host = meta.get("host", "")
+      port = meta.get("port", "")
+      now  = int(meta.get("event_ts", "0"))
+      if host == "" or now == 0:
+          return "allow"
+
+      cutoff = now - WINDOW_NS
+      state  = store_get("ep")
+      if state == None:
+          state = {}
+      key = host + ":" + port
+      rec = state.get(key, None)
+      if rec == None:
+          rec = {"ts": [], "snaps": [], "last_report": 0, "last": now}
+
+      ts_list = prune_ints(rec.get("ts", []), cutoff)
+      ts_list.append(now)
+      if len(ts_list) > MAX_TS:
+          ts_list = ts_list[len(ts_list) - MAX_TS:]
+      snaps = prune_pairs(rec.get("snaps", []), cutoff)
+
+      rec["ts"]    = ts_list
+      rec["snaps"] = snaps
+      rec["last"]  = now
+      state[key]   = rec
+      state        = evict(state, key)
+
+      # Below the churn floor: record state and do zero graph work.
+      if len(ts_list) < MIN_CONNECTS:
+          save(state)
+          return "allow"
+
+      # ---- anchor: this host must already be a streamable-HTTP MCP endpoint ----
+      url_ids  = {}
+      mcp_path = ""
+      scheme   = ""
+      for u in graph(type="URL"):
+          if u.get("host", "") != host:
+              continue
+          url_ids[u["id"]] = True
+          p = u.get("path", "")
+          if mcp_path == "" and is_mcp_path(p):
+              mcp_path = p
+              scheme   = u.get("scheme", "")
+      if not url_ids or mcp_path == "":
+          save(state)
+          return "allow"
+
+      # ---- attribution: instance-resolved owner of the triggering connect ------
+      cp      = int(meta.get("caller_pid", "0"))
+      lineage = []
+      if cp > 0:
+          inst = proc_instance(cp, now)
+          if inst != None:
+              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      paths = {}
+      for x in lineage:
+          ap = x.get("actor_path", "")
+          if ap != "":
+              paths[ap] = True
+
+      scoped = None
+      if len(paths) > 0:
+          scoped = paths
+      r           = collect(url_ids, scoped)
+      attribution = "instance-resolved"
+      if r[1] == None:
+          r           = collect(url_ids, None)
+          attribution = "degraded"
+      if r[1] == None:
+          save(state)
+          return "allow"
+      total = r[0]
+      edge  = r[1]
+      proc  = r[2]
+
+      if int(edge.get("last_ts", "0")) < now - MAX_STALE_NS:
+          save(state)
+          return "allow"
+
+      # ---- rate comparison over one aligned span -------------------------------
+      snap_ts  = 0
+      snap_cnt = 0
+      for s in snaps:
+          if snap_ts == 0 or s[0] < snap_ts:
+              snap_ts  = s[0]
+              snap_cnt = s[1]
+      snaps.append([now, total])
+      if len(snaps) > MAX_SNAPS:
+          snaps = snaps[len(snaps) - MAX_SNAPS:]
+      rec["snaps"] = snaps
+      state[key]   = rec
+
+      if snap_ts == 0:
+          save(state)
+          return "allow"   # need two observations before a rate is meaningful
+
+      connects_since = 0
+      for t in ts_list:
+          if t >= snap_ts:
+              connects_since = connects_since + 1
+      delta = total - snap_cnt
+      if delta < 0:
+          delta = 0
+
+      if connects_since < MIN_CONNECTS:
+          save(state)
+          return "allow"
+      if delta > MAX_REQ_PER_SESSION * connects_since:
+          save(state)
+          return "allow"   # sessions are actually carrying traffic - healthy
+
+      last_rep = int(rec.get("last_report", 0))
+      if last_rep > 0 and now - last_rep < COOLDOWN_NS:
+          save(state)
+          return "allow"
+      rec["last_report"] = now
+      state[key]         = rec
+      save(state)
+
+      # ---- verdict + kill chain ------------------------------------------------
+      span_s = (now - snap_ts) // 1000000000
+      if span_s < 1:
+          span_s = 1
+      names = ""
+      if lineage:
+          parts = []
+          for x in lineage:
+              parts.append(x.get("actor_path", "?").split("/")[-1])
+          names = " -> ".join(parts)
+      else:
+          names = proc.get("name", "?")
+
+      endpoint = scheme + "://" + host + mcp_path
+      chain    = new_chain(proc["id"])
+      chain.append(step(edge,
+                        stage_id="MCP Streamable-HTTP Endpoint",
+                        stage_desc="MCP transport endpoint " + endpoint +
+                                   " (method=" + edge.get("method", "?") +
+                                   ", aggregate requests=" + edge.get("count", "0") + ")"))
+      chain.append(step(edge,
+                        stage_id="Session Re-establishment Storm",
+                        stage_desc=str(connects_since) + " TCP re-connects to " + key +
+                                   " in " + str(span_s) + "s while HTTP requests grew by only " +
+                                   str(delta) + " (<= " + str(MAX_REQ_PER_SESSION) +
+                                   "/session) - sessions are dying at establishment; actor: " +
+                                   names + " (" + attribution + ")"))
+
+      reason = ("MCP streamable-HTTP session churn on " + endpoint + ": " +
+                str(connects_since) + " re-connects in " + str(span_s) + "s with only " +
+                str(delta) + " HTTP requests. Consistent with server-side session" +
+                " termination / crash-restart loop (CVE-2025-53365 uncaught" +
+                " ClosedResourceError in MCP Python SDK < 1.10.0). Exception and" +
+                " process-liveness telemetry are not observable by this engine, so this" +
+                " is a consequence-based lead, not confirmed exploitation - verify the" +
+                " server SDK version and its restart history. Actor: " + names +
+                " (" + attribution + ").")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
