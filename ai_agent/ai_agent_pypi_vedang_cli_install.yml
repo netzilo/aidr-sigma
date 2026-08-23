@@ -1,0 +1,113 @@
+title: Supply Chain Malicious PyPI Package vedang-cli Installation
+id: 9f3c1d7a-4b62-4e8f-a1c5-2d7b6e04f3ab
+status: experimental
+level: high
+description: |
+  Detects a monitored agent (or a subprocess it spawned) invoking a Python package
+  manager to acquire, execute, or import the malicious PyPI package `vedang-cli`
+  (normalised forms: vedang-cli / vedang_cli), which advertises AI-agent, MCP-server
+  and Web3 "agent readiness" capabilities to attract developers working on AI agent
+  systems. Installation of an sdist runs arbitrary code via setup.py / PEP 517
+  metadata hooks, giving the package an opportunity to harvest environment
+  variables, API keys and cloud credentials from the developer host and from any
+  downstream AI agent deployment that pulls it in.
+
+  This is a single-event content detection on the spawned process command line.
+  Only `execute_process` carries the installer command line; the engine exposes no
+  package_install or credential_access event type and no INSTALLED_PACKAGE edge, so
+  the acquisition command itself is the earliest and only reliable observable.
+author: Tanya
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1552/001/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.a06-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Gate: only spawned-process command lines carry installer invocations.
+  sel_event:
+    event_type: execute_process
+
+  # 1. Package-manager acquisition of the named package.
+  #    Requires BOTH an installer binary AND an install/add/sync verb AND the
+  #    exact normalised package name — a bare mention of the name is not enough.
+  sel_acquire:
+    content|re:
+      - '(?i)\b(?:pip|pip2|pip3|pipx|pipenv|uv|poetry|pdm|rye|hatch|conda|mamba|micromamba|easy_install)\b[^\n]{0,240}?\b(?:install|add|sync)\b[^\n]{0,240}?\bvedang[-_]cli\b'
+      - '(?i)\b(?:uvx|pipx\s+run)\b[^\n]{0,120}?\bvedang[-_]cli\b'
+      - '(?i)--with[= ][\x27"]?vedang[-_]cli\b'
+
+  # 2. Direct fetch of the distribution artifact (bypasses the resolver).
+  sel_artifact:
+    content|re:
+      - '(?i)\bvedang[-_]cli-[0-9][^\s"\x27]{0,60}\.(?:whl|tar\.gz|zip|egg)\b'
+      - '(?i)\b(?:curl|wget|aria2c|httpie)\b[^\n]{0,200}/(?:simple/)?vedang[-_]cli[/-]'
+
+  # 3. Post-install execution / import of the package payload.
+  sel_execute:
+    content|re:
+      - '(?i)(?:^|[\s"\x27/=])vedang[-_]cli(?:\.exe)?(?:[\s"\x27]|$)'
+      - '(?i)\bpython[0-9.]{0,4}\b[^\n]{0,80}\s-m\s+[\x27"]?vedang[._-]cli\b'
+      - '(?i)\b(?:import\s+vedang_cli|from\s+vedang_cli\s+import)\b'
+
+  # 4. Backstop on the extracted command field in case content is wrapped as JSON.
+  sel_command_backstop:
+    command|re:
+      - '(?i)\b(?:pip|pip2|pip3|pipx|pipenv|uv|poetry|pdm|rye|hatch|conda|mamba|micromamba)\b[^\n]{0,240}?\b(?:install|add|sync)\b[^\n]{0,240}?\bvedang[-_]cli\b'
+      - '(?i)(?:^|[\s"\x27/=])vedang[-_]cli(?:\.exe)?(?:[\s"\x27]|$)'
+
+  # ── Filters — benign operator activity that mentions the package name ──────
+
+  # Remediation: the verb must be immediately followed by flags then the package
+  # name, so "pip uninstall foo; pip install vedang-cli" is NOT suppressed.
+  filter_remediation:
+    content|re: '(?i)\b(?:pip[0-9]?|pipx|uv\s+pip|poetry|pdm|conda|mamba)\s+(?:pip\s+)?(?:uninstall|remove)\s+(?:-{1,2}[A-Za-z-]+\s+)*[\x27"]?vedang[-_]cli\b'
+
+  # Metadata queries that resolve nothing and build nothing.
+  filter_metadata_query:
+    content|re: '(?i)\b(?:pip[0-9]?|pipx|uv\s+pip)\s+(?:show|index\s+versions|cache\s+(?:info|list|dir))\s+(?:-{1,2}[A-Za-z-]+\s+)*[\x27"]?vedang[-_]cli\b'
+
+  # Supply-chain scanners and SBOM tooling legitimately name flagged packages.
+  filter_supply_chain_tooling:
+    content|re: '(?i)\b(?:pip-audit|safety|osv-scanner|trivy|snyk|grype|syft|dependency-?check|guarddog|cyclonedx|pipdeptree|pip-licenses)\b'
+
+  # Pure string inspection: the package name is the search/echo argument.
+  filter_string_inspection:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ack|ag)\b(?:\s+-{1,2}[A-Za-z-]+)*\s+[\x27"]?vedang[-_]cli'
+      - '(?i)\b(?:echo|printf)\s+[^|;&\n]{0,80}vedang[-_]cli'
+
+  condition: >
+    sel_event
+    and (sel_acquire or sel_artifact or sel_execute or sel_command_backstop)
+    and not (filter_remediation or filter_metadata_query
+             or filter_supply_chain_tooling or filter_string_inspection)
+
+falsepositives:
+  - Malware analyst or incident responder deliberately installing vedang-cli inside an
+    isolated analysis sandbox to reverse the payload. Expected and intentionally not
+    filtered — the same command line is indistinguishable from a real compromise.
+  - "`pip download vedang-cli` performed for offline inspection. Deliberately NOT filtered:
+    pip still executes the sdist's PEP 517 metadata hooks, so the credential-theft code runs."
+  - Remediation (`pip uninstall vedang-cli`) and metadata lookups (`pip show vedang-cli`,
+    `pip index versions vedang-cli`) — suppressed by filter_remediation / filter_metadata_query.
+  - Dependency scanners (pip-audit, safety, osv-scanner, guarddog, CycloneDX) that echo the
+    flagged package name into their command line — suppressed by filter_supply_chain_tooling.
+  - Shell one-liners that grep or echo the package name out of a requirements/SBOM file while
+    triaging the advisory — suppressed by filter_string_inspection.
+  - A future unrelated internal tool that legitimately takes the executable name `vedang-cli`.
+    None is known to exist; if one is adopted, retire this rule rather than widening the filters.
+
+action: report
