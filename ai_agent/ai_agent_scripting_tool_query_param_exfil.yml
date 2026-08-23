@@ -1,0 +1,106 @@
+title: Scripting Tool Substitution - Query String Payload Exfiltration
+id: 7f2c9d84-3b1e-4a6f-9c05-2d81e4b7a63c
+status: experimental
+level: medium
+description: |
+  Refinement of the scripting-tool-substitution detection surface. Fires only when a single
+  tool_call payload contains ALL THREE of the following at once:
+
+    1. an inline scripting-interpreter invocation or an HTTP client import
+       (python -c / node -e / perl -e / `import urllib.request` / `import requests`),
+    2. an actual outbound fetch primitive (urlopen / requests.get|post|put / httpx),
+    3. an absolute http(s) URL whose QUERY STRING carries a sensitive-named parameter
+       (data=, payload=, secret=, token=, credentials=, api_key=, b64=, dump=, ...)
+       with a substantive (>=8 char) non-placeholder value.
+
+  The threat is a scripting-tool substitution: the agent avoids a monitored network utility
+  by hand-rolling the request inside an interpreter, and smuggles the stolen material in the
+  URL query string rather than a request body - so body-oriented DLP and upload-shaped
+  network-exfil detections never see the data. This rule deliberately does NOT fire on a bare
+  urlopen()/requests.get() call: URL fetching by an agent is ordinary work, and the pre-refinement
+  behaviour of matching any urllib fetch is the exact false-positive source this rule replaces.
+  The sensitive-key-with-real-value query parameter is the discriminator.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1567/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0025
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # (1) Scripting-tool substitution: an interpreter one-liner, or an HTTP client import
+  #     inside the tool arguments. Anchored with \b so "widget"/"pythonic" do not match.
+  sel_scripting:
+    event_type: tool_call
+    content|re:
+      - '(?i)\bpython[23]?(?:\.exe)?\b[^\n]{0,300}?\s-c[\s"'']'
+      - '(?i)\b(?:import|from)\s+urllib(?:\.request)?\b'
+      - '(?i)\bimport\s+(?:requests|httpx|http\.client)\b'
+      - '(?i)\bnode\b[^\n]{0,200}?\s-e[\s"'']'
+      - '(?i)\bperl\b[^\n]{0,200}?\s-e[\s"'']'
+      - '(?i)\bruby\b[^\n]{0,200}?\s-e[\s"'']'
+
+  # (2) An actual outbound fetch primitive is invoked (not merely imported/discussed).
+  sel_fetch_primitive:
+    content|re:
+      - '(?i)\burllib(?:\.request)?\.urlopen\s*\('
+      - '(?i)\burlopen\s*\(\s*["'']?https?://'
+      - '(?i)\brequests\.(?:get|post|put|head)\s*\(\s*["'']?https?://'
+      - '(?i)\bhttpx\.(?:get|post|put|stream)\s*\(\s*["'']?https?://'
+      - '(?i)\bhttp\.client\.HTTPS?Connection\s*\('
+
+  # (3) The discriminator: sensitive-named query parameter carrying a real payload value.
+  #     Value must be >=8 chars, and \b prevents matching benign suffixes such as
+  #     "metadata=", "user_token_id=" or "?update=".
+  sel_query_exfil:
+    content|re: '(?i)https?://[^\s"''`)\\]{4,300}\?[^\s"''`)\\]{0,300}?\b(?:data|payload|secret|secrets|token|access_token|refresh_token|id_token|api_key|apikey|apitoken|credential|credentials|creds|password|passwd|session_id|sessionid|cookie|dump|exfil|leak|b64|base64|blob|priv|privkey)=[^&\s"''`)\\]{8,}'
+
+  # Placeholder / templated / documentation values - not real exfiltrated material.
+  filter_placeholder:
+    content|re:
+      - '(?i)=(?:your|my|the|some|<)[-_]?(?:api[-_]?)?(?:key|token|secret|password|data|value)\b'
+      - '(?i)=(?:x{3,}|y{3,}|z{3,}|a{6,}|1234567|abcdef|\*{3,}|\.{3,})'
+      - '(?i)=<[^>\n]{1,60}>'
+      - '(?i)=\{\{?[A-Za-z0-9_.\- ]{1,60}\}?\}'
+      - '(?i)=%\([A-Za-z0-9_]{1,40}\)s'
+      - '(?i)=(?:%s|%d|\$\{?[A-Z][A-Z0-9_]{1,40}\}?)'
+      - '(?i)=(?:placeholder|example|examplevalue|sample|dummy|redacted|changeme|insert[-_]?(?:token|key|secret)|fake[-_]?\w{0,20}|test[-_]?(?:token|key|secret|data|value|payload))\b'
+
+  # The agent is authoring or editing detection content that embeds the one-liner as sample text.
+  filter_rule_authoring:
+    content|re:
+      - '(?i)\bcontent\|(?:re|contains|startswith|endswith)\b'
+      - '(?i)\bfalsepositives\s*:'
+      - '(?im)^\s*logsource\s*:\s*$'
+      - '(?im)^\s*detection\s*:\s*$'
+      - '(?i)\b(?:sigma|yara|snort|suricata)\s+rule\b'
+      - '(?i)\blogsource:\s*\\n?\s*product:\s*ai_agent\b'
+
+  condition: >
+    sel_scripting and sel_fetch_primitive and sel_query_exfil
+    and not (filter_placeholder or filter_rule_authoring)
+
+falsepositives:
+  - Agent fetching a pre-signed or capability URL whose signature parameter is literally named
+    token= or credentials= (some artifact registries and webhook verification endpoints do this)
+    from inside a python one-liner. Reported, never blocked, for exactly this reason.
+  - Developer debugging a REST API that legitimately accepts session_id= or api_key= as a query
+    parameter, driven through an inline `python3 -c "import urllib.request; ..."` snippet.
+  - Security or detection engineers editing rule files, test fixtures or runbooks that quote the
+    exfiltration one-liner verbatim - suppressed by filter_rule_authoring.
+  - Tutorial, README or OAuth documentation pasted into a tool argument showing token-in-query
+    examples with templated or placeholder values - suppressed by filter_placeholder.
+  - Encoded but benign payloads such as data=<base64 of a public config> uploaded to an internal
+    telemetry collector; the sensitive key name plus interpreter substitution still warrants review.
+
+action: report
