@@ -1,0 +1,83 @@
+title: Python eval() Sink Exploitation - RunGptLLM Command Injection
+id: b3f7a91c-4d2e-4a06-9f18-6c5d0e83a1b7
+status: experimental
+level: high
+description: |
+  Detects the downstream process-execution residue of an eval() sink being driven by
+  attacker-controlled model output, as in the LlamaIndex RunGptLLM class
+  (GHSA-pw38-xv9x-h8ch), where SSE payloads returned by the RunGpt model host are passed
+  to eval() without sanitisation and execute with the privileges of the agent process.
+
+  Why this is not the generic "agent spawned a process" signal: eval() evaluates a single
+  Python EXPRESSION, not a statement block. A working eval() payload therefore cannot use
+  `import os; os.system(...)` - it is forced into expression-only gadget syntax:
+  `__import__('os').system(...)`, `__import__('subprocess').Popen(...)`,
+  `getattr(__import__('os'),'system')(...)`, `().__class__.__bases__[0].__subclasses__()`,
+  `__builtins__['eval']`, `__globals__['os']`, or a decode-then-exec chain
+  (`exec(__import__('base64').b64decode(...))`). That syntax is the fingerprint of an
+  interpreter-level eval/exec sink, and it survives into the spawned command line whenever
+  the payload chains a second interpreter or shell. This rule keys on that fingerprint
+  ANDed with an OS execution sink - it is silent on ordinary backgrounded or detached
+  process spawns, which are covered elsewhere, and silent on statement-form one-liners
+  (`python -c "import os; ..."`) that no eval() sink can produce.
+
+  Reported, not blocked: the engine exposes no CODE_INJECTION / RECEIVED_DATA /
+  code_evaluation event, so this is deliberately a high-specificity residue detection
+  measured on report before any enforcement decision is taken.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://github.com/advisories/GHSA-pw38-xv9x-h8ch
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - owasp.a03-2021-injection
+  - ghsa.pw38-xv9x-h8ch
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  sel_import_sink:
+    content|re:
+      - '__import__\s*\(\s*\\?[\x27"]os\\?[\x27"]\s*\)\s*\.\s*(?:system|popen|posix_spawn|spawn[lv]p?e?|exec[lv]p?e?)\s*\('
+      - '__import__\s*\(\s*\\?[\x27"]subprocess\\?[\x27"]\s*\)\s*\.\s*(?:Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\s*\('
+      - '__import__\s*\(\s*\\?[\x27"]pty\\?[\x27"]\s*\)\s*\.\s*spawn\s*\('
+      - 'getattr\s*\(\s*__import__\s*\(\s*\\?[\x27"](?:os|subprocess|pty|builtins)\\?[\x27"]'
+
+  sel_gadget_chain:
+    content|re:
+      - '\.\s*__class__\s*\.\s*__bases__\s*\[\s*0\s*\]\s*\.\s*__subclasses__\s*\('
+      - '\(\s*\)\s*\.\s*__class__\s*\.\s*__mro__\s*\['
+      - '__globals__\s*\[\s*\\?[\x27"](?:__builtins__|os|subprocess)\\?[\x27"]\s*\]'
+      - '__builtins__\s*(?:\[\s*\\?[\x27"]|\.\s*)(?:eval|exec|__import__|compile)\b'
+
+  sel_decode_then_eval:
+    content|re:
+      - '\b(?:eval|exec)\s*\(\s*[^)]{0,80}\b(?:b64decode|b85decode|a85decode|b32decode|decompress|marshal\s*\.\s*loads|pickle\s*\.\s*loads|codecs\s*\.\s*decode)\s*\('
+      - '\b(?:eval|exec)\s*\(\s*__import__\s*\(\s*\\?[\x27"](?:base64|zlib|codecs|marshal|pickle|gzip)\\?[\x27"]'
+
+  filter_code_search:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|semgrep|bandit|codeql|gitleaks|trufflehog|yara|ruff|pylint)\s+[^|;&\n=]{0,80}?(?:__import__|__subclasses__|__builtins__|__globals__|b64decode)'
+
+  filter_test_runner:
+    content|re: '(?i)\b(?:pytest|py\.test|tox|nox|unittest|coverage)\s+[^|;&\n]{0,120}?(?:tests?/|test_|_test\.py|conftest\.py)'
+
+  filter_echo_literal:
+    content|re: '(?i)(?:^|[\s;&])(?:echo|printf)\s+[^|;&\n]{0,160}?(?:__import__|__subclasses__|__builtins__)[^|]*$'
+
+  condition: >
+    sel_exec
+    and (sel_import_sink or sel_gadget_chain or sel_decode_then_eval)
+    and not (filter_code_search or filter_test_runner or filter_echo_literal)
+falsepositives:
+  - Developers or CI jobs grepping a repository for exploit gadget strings (e.g. `grep -rn "__import__('os').system" .`, `semgrep --pattern ...`) - suppressed by filter_code_search unless the search flag itself contains an '=' sign.
+  - Security regression suites for LlamaIndex/RunGpt or for eval-sink hardening that execute the exploit string as a test fixture - partially suppressed by filter_test_runner; residual hits are expected and should be baselined per repository.
+  - Hand-golfed build or bootstrap one-liners such as `python -c "__import__('subprocess').run(['ls'])"`. This is a genuine residual false positive; the rule reports rather than blocks so these can be enumerated before any enforcement change.
+  - Vendor installers and packagers that base64-decode and exec a bootstrap payload (matched by sel_decode_then_eval). Legitimate but worth a one-time review - the same shape is used by loader malware.
+  - Shell scripts that echo an exploit string into a corpus/fixture file - suppressed by filter_echo_literal only when no pipe follows, so `echo <payload> | python` is still reported.
+action: report
