@@ -1,0 +1,147 @@
+title: Model Serving RCE - vLLM RPC Pickle Deserialization Exploit
+id: 7b3f1d2e-9c84-4a17-b0e5-2f6a8d41c9e3
+status: experimental
+level: high
+description: |
+  Detects a single spawned process whose command line carries an exploit for the
+  unsafe pickle deserialization in vLLM's AsyncEngineRPCServer RPC surface
+  (run_server_loop -> _make_handler_coro -> cloudpickle.loads on attacker-supplied
+  bytes).
+
+  The rule fires on one execute_process event only. It requires a co-occurrence of
+  three independent, high-specificity tokens in the same command line:
+
+    (A) a pickle-family serialization call  (cloudpickle/pickle/dill .dumps/.loads,
+        or an inline base64 pickle frame such as gASV.../gAWV.../gAJc...),
+    (B) a code-execution gadget that only appears when the pickle stream is being
+        weaponised  (__reduce__, os.system/popen/exec*, subprocess.Popen/run,
+        builtins.eval/exec, __import__("os"), pty.spawn), and
+    (C) a vLLM RPC target identifier  (AsyncEngineRPCServer/Client, RPC*Request
+        message classes, _make_handler_coro, run_server_loop, VLLM_RPC_* env var,
+        or "vllm" adjacent to zmq / ipc:// / tcp://host:port / rpc_path).
+
+  Payload-crafting one-liners, PoC delivery scripts and post-exploitation reruns all
+  contain this triple. Ordinary vLLM operation, ordinary Python, and ordinary pickle
+  use each contain at most one of the three.
+author: Egemen
+date: "2026-03-05"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # (A1) explicit pickle-family serialization API on the command line
+  sel_pickle_serializer:
+    content|re:
+      - '\bcloudpickle\s*\.\s*(dumps|loads|dump|load)\s*\('
+      - '\b(pickle|cPickle|dill)\s*\.\s*(dumps|loads|dump|load)\s*\('
+      - '\b(pickle|cPickle|dill)\s*\.\s*Unpickler\s*\('
+      - '\bimport\s+cloudpickle\b'
+
+  # (A2) an inline base64-encoded pickle frame sitting in argv
+  sel_inline_pickle_blob:
+    content|re:
+      - '\bgASV[A-Za-z0-9+/]{40,}'
+      - '\bgAWV[A-Za-z0-9+/]{40,}'
+      - '\bgAJj[A-Za-z0-9+/]{24,}'
+      - '\bgAJd[A-Za-z0-9+/]{24,}'
+      - '\bgASNV[A-Za-z0-9+/]{24,}'
+
+  # (A2 partner) the blob is actually being deserialized, not just carried
+  sel_pickle_loads:
+    content|re:
+      - '\b(cloudpickle|pickle|cPickle|dill)\s*\.\s*loads\s*\('
+      - '\bUnpickler\s*\([^\n]{0,80}\)\s*\.\s*load\s*\('
+
+  # (B) weaponisation gadget - the part that turns a pickle into RCE
+  sel_rce_gadget:
+    content|re:
+      - '__reduce__'
+      - '__reduce_ex__'
+      - '\bos\s*\.\s*(system|popen|execv|execve|execvp|execvpe|spawnl|spawnv|posix_spawn)\s*\('
+      - '\bsubprocess\s*\.\s*(Popen|run|call|check_call|check_output)\s*\('
+      - '\bbuiltins\s*\.\s*(eval|exec|__import__)\b'
+      - '\b__import__\s*\(\s*["\x27](os|subprocess|pty|socket)["\x27]'
+      - '\bpty\s*\.\s*spawn\s*\('
+      - '\bposix["\x27]?\s*[,\n]?\s*["\x27]?system\b'
+
+  # (C) the vLLM RPC entrypoint being targeted
+  sel_vllm_rpc_target:
+    content|re:
+      - '\bAsyncEngineRPC(Server|Client)\b'
+      - '\bRPC(Generate|Abort|Utility|Process|HealthCheck)Request\b'
+      - '\b_make_handler_coro\b'
+      - '\brun_server_loop\b'
+      - '\bVLLM_RPC_[A-Z_]{2,}'
+      - '(?i:vllm)[^\n]{0,160}(\bzmq\b|ipc://|tcp://[^\n]{0,60}:[0-9]{4,5}|\brpc[_.-]?(server|client|path|port|socket)\b)'
+      - '(\bzmq\b|ipc://|\brpc[_.-]?(server|client|path|port|socket)\b)[^\n]{0,160}(?i:vllm)'
+
+  # ── benign-context suppressors ────────────────────────────────────────────────
+
+  # security documentation, advisories, lint messages and IR notes that quote the
+  # vulnerable construct while explaining it
+  filter_docs:
+    content|re:
+      - '(?i)\bnever\s+un-?pickle\b'
+      - '(?i)\bdo\s+not\s+un-?pickle\b'
+      - '(?i)untrusted\s+pickle'
+      - '(?i)insecure\s+deserializ'
+      - '(?i)unsafe\s+deserializ'
+      - '(?i)\bCWE-502\b'
+      - '(?i)security\s+advisor(y|ies)'
+      - '(?i)proof[- ]of[- ]concept\s+only'
+
+  # SAST / SCA / linters invoked with the vulnerable snippet in argv
+  filter_static_analysis:
+    content|re:
+      - '(?i)(^|[\s"\x27/])(bandit|semgrep|codeql|pylint|flake8|ruff|mypy|trivy|snyk|pip-audit)\b'
+
+  # developers reading or searching the vLLM source tree
+  filter_code_search:
+    content|re:
+      - '(?i)(^|[\s"\x27/])(grep|egrep|fgrep|rg|ripgrep|ag|ack|sed|awk|head|tail|less|more|wc)\s'
+      - '(?i)(^|[\s"\x27/])git\s+(grep|diff|log|show|blame)\b'
+
+  # vLLM's own RPC round-trip tests and CI harnesses
+  filter_test_harness:
+    content|re:
+      - '(?i)(^|[\s"\x27/])(pytest|py\.test|nosetests|tox|nox)\b'
+      - '(?i)-m\s+(pytest|unittest)\b'
+
+  condition: >
+    sel_event and
+    ((sel_pickle_serializer and sel_rce_gadget and sel_vllm_rpc_target) or
+     (sel_inline_pickle_blob and sel_pickle_loads and sel_vllm_rpc_target) or
+     (sel_inline_pickle_blob and sel_pickle_loads and sel_rce_gadget))
+    and not (filter_docs or filter_static_analysis or filter_code_search or filter_test_harness)
+
+falsepositives:
+  - vLLM's own unit and integration tests that round-trip cloudpickle-serialized
+    RPC*Request messages through a zmq ipc:// socket (suppressed by
+    filter_test_harness when invoked via pytest/tox/unittest).
+  - Authorised red-team or patch-validation work reproducing the advisory PoC in a
+    lab; the command line is indistinguishable from the real exploit by design.
+  - Security tooling (bandit, semgrep, codeql) or a dependency scanner whose argv
+    embeds the vulnerable snippet (suppressed by filter_static_analysis).
+  - An engineer grepping the vLLM source for cloudpickle.loads or
+    AsyncEngineRPCServer (suppressed by filter_code_search).
+  - Training material, advisories or incident notes pasted into a shell command
+    (suppressed by filter_docs).
+  - Rare distributed-serving launchers that base64-pickle a config onto argv; these
+    only reach the rule if they also carry a vLLM RPC identifier or an exec gadget
+    in the same command line.
+
+action: report
