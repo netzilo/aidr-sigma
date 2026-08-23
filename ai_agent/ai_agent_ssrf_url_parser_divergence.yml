@@ -1,0 +1,293 @@
+title: SSRF Filter Bypass via URL Parser Divergence
+id: 7c1f4a92-3b58-4e6d-9a41-5f0c8d2be713
+status: experimental
+level: high
+description: |
+  Detects the vLLM-class SSRF bypass in which one URL parser (urllib3.parse_url, used
+  for the allowlist/validation check) and another (yarl/aiohttp, used to open the socket)
+  disagree about which component of the authority is the hostname.
+
+  A payload such as https://httpbin.org\@evil.com/ is read by urllib3 as host
+  "httpbin.org" (the backslash is treated as the start of the path, so the SSRF check
+  passes), while yarl treats the backslash as part of userinfo and the "@" as the
+  userinfo separator, so the request is actually sent to "evil.com".
+
+  The rule does not match a payload string. It re-parses each candidate URL twice --
+  once with lenient (validation-layer) semantics where a raw or percent-encoded
+  backslash terminates the authority, once with strict (client-layer) semantics where
+  it does not -- and reports only when the two parses yield two different, syntactically
+  resolvable hostnames. It then corroborates against the behaviour graph: whether the
+  agent genuinely talks to the impersonated host (making it a credible allowlist
+  decoy), whether it already has HTTP_REQUEST edges to the real target, and whether the
+  real target is an internal/ZTNA or cloud-metadata endpoint. Candidate URLs are taken
+  from the outbound request URL and from URLs embedded in the request body, since the
+  crafted URL is frequently handed to an inference server in a JSON field rather than
+  fetched directly by the agent.
+
+  Taxonomy note: the applicable OWASP mapping for this threat is A10:2021 (SSRF) from
+  the OWASP Top 10 for web applications, which is not one of the LLM/ASI identifier
+  sets the `owasp.` tag prefix accepts, and no MITRE ATLAS technique covers URL parser
+  differential parsing. Both prefixes are therefore deliberately omitted rather than
+  populated with an approximate identifier; the A10:2021 mapping is recorded under
+  references instead.
+author: Haibo
+date: "2025-06-18"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://docs.aiohttp.org/en/stable/client_reference.html
+  - https://urllib3.readthedocs.io/en/stable/reference/urllib3.util.html
+tags:
+  - attack.defense-evasion
+  - attack.command-and-control
+  - attack.t1071.001
+falsepositives:
+  - HTTP basic-auth URLs of the form https://user:pass@host/ - both parses return the
+    same host, so the script returns allow and the rule stays invisible.
+  - Windows or UNC style backslashes in a path or query string (for example
+    ?redirect=share\folder). The backslash is outside the authority, both parses agree.
+  - npm scoped package paths (/@scope/pkg) and e-mail addresses in query parameters -
+    the "@" is not inside the authority, so the analysis is skipped.
+  - Typo'd or hand-mangled URLs such as https://api.example.com\v1/thing that no HTTP
+    client can resolve - the strict parse must yield a syntactically valid hostname
+    preceded by an "@", otherwise the candidate is discarded.
+  - Proxy/tunnel URLs that legitimately encode a target hostname in the userinfo field.
+    That path fires only as the lower-confidence userinfo-masquerade branch, and only
+    when the encoded name is a host this agent already contacts.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  MARKERS    = ["\\", "%5c"]
+  META_HOSTS = ["169.254.169.254", "169.254.170.2", "100.100.100.200",
+                "metadata.google.internal"]
+  PRIVATE    = ["10.", "127.", "192.168.", "169.254.", "172.16.", "172.17.",
+                "172.18.", "172.19.", "172.2", "172.30.", "172.31.",
+                "0.0.0.0", "localhost", "[::1]", "::1"]
+  MAX_URL    = 240
+
+  def clip(s):
+      if len(s) > MAX_URL:
+          return s[:MAX_URL] + "..."
+      return s
+
+  def authority(u):
+      p = u.find("://")
+      rest = u
+      if p >= 0:
+          rest = u[p + 3:]
+      end = len(rest)
+      for c in ["/", "?", "#"]:
+          i = rest.find(c)
+          if i >= 0 and i < end:
+              end = i
+      return rest[:end]
+
+  def lenient_authority(u):
+      # validation-layer view: a raw or encoded backslash terminates the authority
+      a   = authority(u)
+      low = a.lower()
+      end = len(a)
+      for m in MARKERS:
+          i = low.find(m)
+          if i >= 0 and i < end:
+              end = i
+      return a[:end]
+
+  def strip_port(h):
+      if h.startswith("["):
+          j = h.find("]")
+          if j >= 0:
+              return h[:j + 1]
+      i = h.rfind(":")
+      if i > 0:
+          return h[:i]
+      return h
+
+  def host_of(a):
+      i = a.rfind("@")
+      if i >= 0:
+          a = a[i + 1:]
+      return strip_port(a).lower()
+
+  def userinfo_of(a):
+      i = a.rfind("@")
+      if i < 0:
+          return ""
+      return a[:i]
+
+  def userinfo_host(ui):
+      j = ui.find(":")
+      if j >= 0:
+          ui = ui[:j]
+      ui = ui.replace("\\", "")
+      ui = ui.replace("%5c", "")
+      ui = ui.replace("%5C", "")
+      return ui.lower()
+
+  def valid_host(h):
+      if h == "":
+          return False
+      if h.find("\\") >= 0 or h.lower().find("%5c") >= 0:
+          return False
+      if re.find(r'^[a-z0-9._%:\-\[\]]+$', h) == None:
+          return False
+      if h.startswith("["):
+          return True
+      return h.find(".") >= 0
+
+  def find_url_node(h):
+      for n in graph(type="URL"):
+          if n.get("host", "").lower() == h:
+              return n
+      return None
+
+  def requester_edge(url_id):
+      fallback = None
+      for e in edges(url_id, dir="in", kind="HTTP_REQUEST"):
+          p = node(e["from"])
+          if p == None:
+              continue
+          if p.get("agent", "0") == "1":
+              return e
+          if fallback == None:
+              fallback = e
+      return fallback
+
+  def chain_root(ev):
+      if ev != None:
+          p = node(ev["from"])
+          if p != None:
+              return p["id"]
+      an = meta.get("agent_name", "")
+      for pn in graph(type="Process"):
+          if an != "" and pn.get("path", "") == an:
+              return pn["id"]
+      if an != "":
+          return "process://" + an
+      return "process://unknown"
+
+  def is_internal(h, n):
+      if n != None and n.get("is_ztna_host", "0") == "1":
+          return True
+      for m in META_HOSTS:
+          if h == m or h.endswith("." + m):
+              return True
+      for p in PRIVATE:
+          if h.startswith(p):
+              return True
+      return False
+
+  def candidates():
+      out = []
+      u = meta.get("url", "")
+      if u != "":
+          out.append(u)
+      c = meta.get("content", "")
+      if c != "":
+          cl = c.lower()
+          if cl.find("@") >= 0 and (cl.find("\\") >= 0 or cl.find("%5c") >= 0):
+              for m in re.find_all(r'https?://[^\s"\x27<>,;)\]}]{4,400}', c, 20):
+                  out.append(m)
+      return out
+
+  def analyze(u):
+      a = authority(u)
+      if a.find("@") < 0:
+          return None                      # no userinfo separator -> no parser split
+      actual = host_of(a)
+      if not valid_host(actual):
+          return None                      # malformed; no client would resolve it
+      lo = a.lower()
+      if lo.find("\\") >= 0 or lo.find("%5c") >= 0:
+          app = host_of(lenient_authority(u))
+          if app != "" and app != actual and valid_host(app):
+              return {"branch": "parser-divergence", "apparent": app,
+                      "actual": actual, "url": u}
+      ui = userinfo_host(userinfo_of(a))
+      if ui != "" and ui != actual and valid_host(ui):
+          if find_url_node(ui) != None:
+              return {"branch": "userinfo-masquerade", "apparent": ui,
+                      "actual": actual, "url": u}
+      return None
+
+  def run():
+      # ---- relevance gate: pure string work on meta, no graph access ----
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      hit = None
+      for u in candidates():
+          hit = analyze(u)
+          if hit != None:
+              break
+      if hit == None:
+          return "allow"
+
+      actual   = hit["actual"]
+      apparent = hit["apparent"]
+
+      # ---- graph corroboration ----
+      actual_node   = find_url_node(actual)
+      apparent_node = find_url_node(apparent)
+      ev_actual     = None
+      ev_apparent   = None
+      if actual_node != None:
+          ev_actual = requester_edge(actual_node["id"])
+      if apparent_node != None:
+          ev_apparent = requester_edge(apparent_node["id"])
+
+      anchor = ev_actual
+      if anchor == None:
+          anchor = ev_apparent
+      root  = chain_root(anchor)
+      chain = new_chain(root)
+      stages = [hit["branch"]]
+
+      # Trigger stage is synthesised from meta: the just-fired request races the
+      # asynchronous graph/event ingest and may not be queryable yet.
+      ets  = meta.get("event_ts", "0")
+      trig = {"from": root, "to": "https://" + actual, "kind": "HTTP_REQUEST",
+              "method": meta.get("method", ""), "ts": ets,
+              "first_ts": ets, "last_ts": ets}
+      chain.append(step(trig, stage_id="SSRF Filter Bypass",
+                        stage_desc="validation parse yields host " + apparent +
+                                   " but client parse resolves " + actual +
+                                   " -- url: " + clip(hit["url"])))
+
+      if ev_apparent != None:
+          chain.append(step(ev_apparent, stage_id="Impersonated Target",
+                            stage_desc="agent has genuine HTTP traffic to " + apparent +
+                                       ", the host this URL is disguised as"))
+          stages.append("impersonated:" + apparent)
+
+      if ev_actual != None:
+          chain.append(step(ev_actual, stage_id="Bypass Target Contacted",
+                            stage_desc="existing HTTP_REQUEST edge to " + actual +
+                                       " (count=" + ev_actual.get("count", "1") + ")"))
+          stages.append("contacted:" + actual)
+
+      if is_internal(actual, actual_node):
+          stages.append("internal-target")
+          if ev_actual != None:
+              chain.append(step(ev_actual, stage_id="Internal Target Reached",
+                                stage_desc="bypassed request targets internal / metadata " +
+                                           "endpoint " + actual))
+
+      print("ssrf parser divergence: apparent=" + apparent + " actual=" + actual +
+            " stages=" + ", ".join(stages))
+      return {
+          "action": "report",
+          "reason": "SSRF allowlist bypass via URL parser divergence (" + hit["branch"] +
+                    "): validated host " + apparent + ", real destination " + actual +
+                    " [" + ", ".join(stages) + "]",
+          "chain":  chain,
+      }
+
+  result = run()
