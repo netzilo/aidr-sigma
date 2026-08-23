@@ -1,0 +1,110 @@
+title: Supply Chain AIDR npm Hook Installer Execution
+id: 8f3c1d27-5a94-4e61-9b0f-2c7d6ea41b83
+status: experimental
+level: medium
+description: |
+  Detects execution of a package-manager / Node runtime command line that installs or
+  runs the @coworker-jp/aidr CLI, or an already-installed `aidr` binary invoked with a
+  setup/install-hooks subcommand together with an ai-scanner/hook token.
+
+  The @coworker-jp/aidr setup CLI writes ai-scanner hooks into the configuration of 19+
+  AI coding agents (PreToolUse / PostToolUse style interception points). A compromised or
+  typo-squatted build of this package would therefore obtain read/modify access to every
+  tool call those agents make, on every developer machine that installs it. This rule is a
+  single-event content detection on the spawned command line only: it records the moment a
+  runtime-hook installer is executed so the installation can be attributed to a sanctioned
+  rollout or investigated as an unsanctioned supply chain event.
+
+  Detection is deliberately scoped to (a) the exact package scope name plus a JS package
+  manager or runtime token, or (b) the aidr binary plus an explicit hook-installation
+  subcommand plus a hook token. Read-only inspection, dry runs and uninstalls are filtered.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1546/
+  - https://atlas.mitre.org/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.persistence
+  - attack.t1546
+  - atlas.aml.t0000.002
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: only spawned process command lines ──────────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── branch A: the package scope name appears on the command line ───────────
+  sel_pkg_cmd:
+    command|re: '(?i)@?coworker-jp[/-]aidr\b'
+  sel_pkg_content:
+    content|re: '(?i)@?coworker-jp[/-]aidr\b'
+
+  # ── branch A: …and a JS package manager or runtime is what is executing it ──
+  sel_pm_cmd:
+    command|re: '(?i)(?:^|[\s/"=])(?:npm|pnpm|yarn|bun|npx|bunx|corepack|node|tsx|ts-node|deno)(?:\.cmd|\.exe)?(?:\s|$)'
+  sel_pm_content:
+    content|re: '(?i)(?:^|[\s/"=])(?:npm|pnpm|yarn|bun|npx|bunx|corepack|node|tsx|ts-node|deno)(?:\.cmd|\.exe)?(?:\s|$)'
+
+  # ── branch B: an installed aidr binary run with a hook-install subcommand ───
+  sel_cli_cmd:
+    command|re: '(?i)(?:^|[\s/"=])aidr(?:\.js|\.cjs|\.mjs|\.cmd|\.exe)?["\s]+(?:setup|init|install|install-hooks|hook|hooks|enable|apply)\b'
+  sel_cli_content:
+    content|re: '(?i)(?:^|[\s/"=])aidr(?:\.js|\.cjs|\.mjs|\.cmd|\.exe)?["\s]+(?:setup|init|install|install-hooks|hook|hooks|enable|apply)\b'
+
+  # ── branch B: …together with an explicit agent-hook token ──────────────────
+  sel_hooktok_cmd:
+    command|re: '(?i)\b(?:ai[-_]?scanner|pre[-_]?tool[-_]?use|post[-_]?tool[-_]?use|hooks?|--all-agents|--agents?)\b'
+  sel_hooktok_content:
+    content|re: '(?i)\b(?:ai[-_]?scanner|pre[-_]?tool[-_]?use|post[-_]?tool[-_]?use|hooks?|--all-agents|--agents?)\b'
+
+  # ── filters: read-only queries, rehearsals, removals ───────────────────────
+  filter_inspect_cmd:
+    command|re:
+      - '(?i)\bnpm\s+(?:view|info|show|search|ls|list|outdated|audit|why|pack|repo|docs|home|dist-tag|owner|deprecate|unpublish)\b'
+      - '(?i)\b(?:yarn|pnpm|bun)\s+(?:info|why|list|ls|outdated|audit|search|licenses)\b'
+      - '(?i)\bnpm\s+(?:uninstall|remove|rm|un)\b'
+      - '(?i)\b(?:yarn|pnpm|bun)\s+(?:remove|rm|uninstall)\b'
+      - '(?i)(?:\s|^)--dry-run(?:\s|=|$)'
+      - '(?i)(?:\s)(?:--help|--version|--usage)(?:\s|$)'
+  filter_inspect_content:
+    content|re:
+      - '(?i)\bnpm\s+(?:view|info|show|search|ls|list|outdated|audit|why|pack|repo|docs|home|dist-tag|owner|deprecate|unpublish)\b'
+      - '(?i)\b(?:yarn|pnpm|bun)\s+(?:info|why|list|ls|outdated|audit|search|licenses)\b'
+      - '(?i)\bnpm\s+(?:uninstall|remove|rm|un)\b'
+      - '(?i)\b(?:yarn|pnpm|bun)\s+(?:remove|rm|uninstall)\b'
+      - '(?i)(?:\s|^)--dry-run(?:\s|=|$)'
+      - '(?i)(?:\s)(?:--help|--version|--usage)(?:\s|$)'
+
+  # ── filters: the spawned binary is a text-inspection tool, not an installer ─
+  filter_read_cmd:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:[^\s"]*/)?(?:grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|wc|diff|awk|sed|jq|find|man)\b'
+  filter_read_content:
+    content|re: '(?i)^\s*(?:sudo\s+)?(?:[^\s"]*/)?(?:grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|wc|diff|awk|sed|jq|find|man)\b'
+
+  condition: >
+    sel_event
+    and (
+      ((sel_pkg_cmd or sel_pkg_content) and (sel_pm_cmd or sel_pm_content))
+      or ((sel_cli_cmd or sel_cli_content) and (sel_hooktok_cmd or sel_hooktok_content))
+    )
+    and not (
+      filter_inspect_cmd or filter_inspect_content
+      or filter_read_cmd or filter_read_content
+    )
+
+falsepositives:
+  - Sanctioned platform-team rollout of the AIDR CLI onto developer machines or CI runners — the alert is the audit record of that rollout and should be closed as expected once the change ticket is matched.
+  - CI/CD pipeline steps that intentionally install the package before running agent tests (npm ci with the scope name pinned on the command line).
+  - A developer upgrading an already-approved installation (npm install @coworker-jp/aidr@latest).
+  - Engineers inspecting or removing the package (npm view / npm uninstall / grep of a lockfile) — filtered by the inspection and removal selections.
+  - An unrelated internal tool whose binary is also named 'aidr' being run with a 'setup' or 'hooks' subcommand — branch B additionally requires an ai-scanner / tool-use hook token to reduce this.
+
+action: report
