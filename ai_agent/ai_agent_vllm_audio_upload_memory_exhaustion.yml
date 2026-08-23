@@ -1,0 +1,292 @@
+title: vLLM Audio Endpoint Oversized Upload Burst
+id: 6f1d2c47-9ab0-4e5a-8f21-0c7d3b9e4a18
+status: experimental
+level: medium
+description: |
+  Detects a burst of oversized or unusually large multipart uploads to vLLM's
+  speech-to-text routes (/v1/audio/transcriptions, /v1/audio/translations).
+
+  Those routes call `await request.file.read()` and only afterwards compare the
+  materialised bytes object against VLLM_MAX_AUDIO_CLIP_FILESIZE_MB (default
+  25 MB). Every rejected oversized upload therefore still costs memory
+  proportional to the upload, so repeated oversized posts are a memory
+  exhaustion / DoS primitive (GHSA-v82g-2437-67m2).
+
+  The engine has NO memory, RSS or process-termination telemetry, so this rule
+  deliberately does not claim to observe exhaustion. It observes the only thing
+  that is observable and is also the discriminating precondition: the same agent
+  repeatedly pushing uploads that are *guaranteed to be rejected* (> the
+  documented limit) at one audio endpoint inside a short window, or sustaining a
+  very large aggregate byte volume of near-limit clips. A single oversized
+  upload — the normal user mistake — is invisible (script returns allow, so no
+  event is emitted at all).
+
+  Verdict is report only: this is a strong indicator of an abuse pattern, not
+  proof of impact.
+author: Egemen
+date: "2026-03-05"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories/GHSA-v82g-2437-67m2
+  - https://attack.mitre.org/techniques/T1499/
+  - https://atlas.mitre.org/techniques/AML.T0029
+tags:
+  - attack.impact
+  - attack.t1499
+  - atlas.aml.t0029
+  - owasp.llm10
+falsepositives:
+  - Legitimate long-form transcription work (podcasts, all-hands recordings, court
+    audio) where the operator has raised VLLM_MAX_AUDIO_CLIP_FILESIZE_MB above the
+    25 MB default — those clips exceed this rule's oversize threshold while being
+    accepted by the server. Tune MAX_BYTES in the script to the deployed limit.
+  - A user or SDK retry loop re-posting one large file after a 413, three or more
+    times inside 60 seconds.
+  - Capacity or load testing of a self-hosted vLLM deployment, and CI regression
+    tests that intentionally probe the file-size limit.
+  - Batch pipelines that fan out many 16-25 MB clips concurrently to one endpoint
+    and cross the 512 MB in-window aggregate threshold.
+  - A reverse proxy that rewrites Content-Length or buffers uploads may make the
+    observed size larger than the client's actual clip.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_audio_path:
+    event_type: http_request
+    path|contains:
+      - '/audio/transcriptions'
+      - '/audio/translations'
+  sel_audio_url:
+    event_type: http_request
+    url.full|contains:
+      - '/audio/transcriptions'
+      - '/audio/translations'
+  condition: sel_audio_path or sel_audio_url
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Tunables ───────────────────────────────────────────────────────────────
+  WINDOW_NS    = 60000000000     # 60s burst window
+  COOLDOWN_NS  = 300000000000    # 5min per-endpoint alert cooldown (anti-spam)
+  MAX_BYTES    = 26214400        # 25 MB = VLLM_MAX_AUDIO_CLIP_FILESIZE_MB default
+  LARGE_BYTES  = 16777216        # 16 MB — large but under the limit
+  AGG_BYTES    = 536870912       # 512 MB aggregate inside the window
+  OVERSIZE_MIN = 3               # rejected-but-materialised uploads needed
+  LARGE_MIN    = 8               # near-limit uploads needed for the volume path
+  MAX_ENTRIES  = 240             # per-bucket ring cap
+  AUDIO_RE     = r"/audio/(transcriptions|translations)"
+
+  # ── Pure helpers (no graph / no store) ─────────────────────────────────────
+  def parse_int(s):
+      if s == None:
+          return 0
+      s = str(s).strip()
+      if s == "":
+          return 0
+      if not re.match(r"^[0-9]+$", s):
+          return 0
+      return int(s)
+
+  def to_int(v):
+      t = type(v)
+      if t == "int":
+          return v
+      if t == "float":
+          return int(v)
+      return parse_int(v)
+
+  def endpoint_of(p):
+      if p == "":
+          return ""
+      m = re.find(AUDIO_RE, p)
+      if m == None:
+          return ""
+      return m
+
+  def target_path():
+      p = meta.get("path", "")
+      if endpoint_of(p) != "":
+          return p
+      return meta.get("url", "")
+
+  def mb(n):
+      return str(n // 1048576) + " MB"
+
+  # ── Relevance gate: pure string checks on meta only ───────────────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      m = meta.get("method", "").upper()
+      if m != "POST" and m != "PUT":
+          return False
+      if endpoint_of(target_path()) == "":
+          return False
+      return True
+
+  # ── Observed upload size for this request ─────────────────────────────────
+  def observed_size():
+      n = parse_int(meta.get("header_content-length", ""))
+      b = len(meta.get("content", ""))
+      if b > n:
+          n = b
+      return n
+
+  # ── Graph evidence: agent process -> URL node for this host ───────────────
+  def find_evidence(host, agent_path):
+      target = None
+      for u in graph(type="URL"):
+          if u.get("host", "") == host:
+              target = u
+              break
+      if target == None:
+          return [None, None]
+      tid        = target["id"]
+      pick_proc  = None
+      pick_edge  = None
+      pick_score = -1
+      for p in graph(type="Process"):
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              if e.get("to", "") != tid:
+                  continue
+              score = to_int(e.get("count", "0"))
+              if p.get("agent", "0") == "1":
+                  score = score + 1000
+              if agent_path != "" and p.get("path", "") == agent_path:
+                  score = score + 1000000
+              if score > pick_score:
+                  pick_score = score
+                  pick_proc  = p
+                  pick_edge  = e
+      return [pick_proc, pick_edge]
+
+  # Synthesised edge for the TRIGGERING request — taken from meta, never from a
+  # lookup, because the event that just fired races the async ingest.
+  def trigger_edge(host, ts, agent_path):
+      src = agent_path
+      if src == "":
+          src = "unknown"
+      return {
+          "from":     "process://" + src,
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "method":   meta.get("method", "POST"),
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  def save(key, st):
+      u = store_usage()
+      if u["free"] < 8192:
+          store_reset()          # bounded state; losing the window is acceptable
+      if store_usage()["free"] > 4096:
+          store_set(key, st)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = parse_int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+
+      host  = meta.get("host", "")
+      apath = meta.get("agent_name", "")
+      ep    = endpoint_of(target_path())
+      size  = observed_size()
+      if host == "" or ep == "":
+          return "allow"
+
+      # Per-agent, per-endpoint bucket — no cross-process conflation.
+      key = "b:" + apath + "|" + host + ep
+      st  = store_get(key)
+      if st == None:
+          st = {"ev": [], "alert": 0}
+
+      fresh = []
+      for it in st.get("ev", []):
+          ts = to_int(it[0])
+          if ts > 0 and (now - ts) <= WINDOW_NS:
+              fresh.append([ts, to_int(it[1])])
+      fresh.append([now, size])
+      if len(fresh) > MAX_ENTRIES:
+          fresh = fresh[len(fresh) - MAX_ENTRIES:]
+
+      over  = 0
+      large = 0
+      total = 0
+      peak  = 0
+      for it in fresh:
+          b = it[1]
+          total = total + b
+          if b > peak:
+              peak = b
+          if b > MAX_BYTES:
+              over = over + 1
+          if b >= LARGE_BYTES:
+              large = large + 1
+
+      last_alert = to_int(st.get("alert", 0))
+      st["ev"]   = fresh
+
+      stage_id = ""
+      why      = ""
+      if over >= OVERSIZE_MIN:
+          stage_id = "Read-Before-Validate Abuse"
+          why = (str(over) + " uploads above the " + mb(MAX_BYTES) +
+                 " audio clip limit in 60s (peak " + mb(peak) +
+                 ") — each one is read into memory before it is rejected")
+      elif large >= LARGE_MIN and total >= AGG_BYTES:
+          stage_id = "Sustained Upload Pressure"
+          why = (str(large) + " near-limit uploads totalling " + mb(total) +
+                 " in 60s to one audio endpoint")
+
+      if stage_id == "":
+          save(key, st)
+          return "allow"                      # invisible: no event, no noise
+
+      if last_alert > 0 and (now - last_alert) < COOLDOWN_NS:
+          save(key, st)
+          return "allow"                      # already reported this burst
+
+      st["alert"] = now
+      save(key, st)
+
+      ev      = find_evidence(host, apath)
+      proc    = ev[0]
+      gedge   = ev[1]
+      anchor  = "process://" + (apath or "unknown")
+      if proc != None:
+          anchor = proc["id"]
+      chain = new_chain(anchor)
+
+      chain.append(step(
+          trigger_edge(host, now, apath),
+          stage_id=stage_id,
+          stage_desc="POST " + ep + " on " + host + " — " + why,
+      ))
+
+      if gedge != None:
+          u   = node(gedge["to"])
+          uh  = host
+          fc  = "?"
+          if u != None:
+              uh = u.get("host", host)
+              fc = u.get("fetch_count", "?")
+          chain.append(step(
+              gedge,
+              stage_id="Endpoint Hammering",
+              stage_desc=("cumulative HTTP_REQUEST count " +
+                          gedge.get("count", "?") + " to " + uh +
+                          " (URL fetch_count " + fc + ")"),
+          ))
+
+      reason = ("vLLM audio upload abuse pattern on " + host + ep + ": " + why +
+                " — unbounded read-before-validate (GHSA-v82g-2437-67m2) makes" +
+                " each rejected upload a memory allocation. No memory telemetry" +
+                " exists; impact is inferred, not observed.")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
