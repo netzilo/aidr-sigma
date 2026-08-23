@@ -1,0 +1,388 @@
+title: Unicode Invisible-Character Data Smuggling in LLM Traffic
+id: b7f3c1d2-9a4e-4f6b-8c05-3d2e7a1f4b96
+status: experimental
+level: high
+description: |
+  Detects ASCII smuggling / "Sneaky Bits" style data hiding in LLM prompts and
+  completions: dense payloads built from Unicode tag characters (U+E0000-U+E007F),
+  supplemental variation selectors (U+E0100-U+E01EF), zero-width and other invisible
+  format controls, or bidi override/isolate controls. Both raw UTF-8 and JSON
+  \uXXXX / surrogate-pair escaped forms are counted, because different clients
+  serialise the same payload either way.
+
+  This is a BEHAVIOURAL rule. A stray zero-width joiner is not an attack, so the
+  script only decides on the payload alone when the encoding class has essentially
+  no legitimate use (tag block, supplemental variation selectors, or a long
+  two-symbol binary run). For weaker signals it walks the behaviour graph for the
+  agent that owns this LLM call and requires provenance - an ACQUIRED_SKILL,
+  TOOL_RESULT or HTTP_RESPONSE ingestion edge inside the same 15-minute window -
+  or recurrence of the same hidden-payload signature across separate LLM calls in
+  the session (tracked in the rule's private store). The kill chain records the
+  ingestion edge, the LLM edge carrying the hidden payload, and any outbound
+  channel used in the same window.
+
+  Reporting only. Repeat alerts for an identical hidden-payload signature are
+  suppressed for 5 minutes so a long conversation carrying the same watermark does
+  not flood the dashboard.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://www.unicode.org/reports/tr36/
+  - https://www.unicode.org/reports/tr39/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Emoji-heavy content. ZWJ (U+200D) and the emoji presentation selectors U+FE0E/U+FE0F
+    are excluded from the density counters and only ever contribute to run length, where
+    the thresholds (8 weak / 24 strong) are far above the 2-3 codepoint runs real emoji
+    sequences produce.
+  - Regional-subdivision flag emoji (Scotland, Wales, England) legitimately embed 5-7
+    Unicode tag characters each. The tag signal requires tag_count > 7 * (number of
+    U+1F3F4 flag bases), so any number of legitimate subdivision flags is cancelled out.
+  - Right-to-left documents (Arabic, Hebrew, Farsi). LRM/RLM (U+200E/U+200F) are not
+    counted at all; only overrides and isolates are, at a threshold of 12, and that is a
+    weak signal that additionally needs graph provenance or recurrence.
+  - ICU MessageFormat / i18n UI-string bundles that wrap placeholders in FSI/PDI isolates -
+    same mitigation as above (weak signal only, needs corroboration).
+  - PDF- or web-extracted text carrying soft hyphens, BOM/ZWNBSP or zero-width line-break
+    hints (CJK, Thai). Zero-width density must exceed 32 occurrences to register even as a
+    weak signal.
+  - Security research, threat-intel documents and unit-test fixtures about ASCII smuggling
+    that embed live examples or \uXXXX escape tables. Small demonstration tables stay under
+    every threshold; a full live payload will be reported, which is the intended behaviour
+    for an audit rule.
+  - SaaS editors that inject zero-width tracking watermarks into copied text. These recur,
+    so the store-based recurrence path can surface them once per 5-minute window; raise the
+    zero-width threshold if such an editor is in standard use.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_llm_traffic:
+    event_type:
+      - llm_request
+      - llm_response
+  sel_invisible_raw:
+    content|re: '[\x{00ad}\x{180e}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2060}-\x{206f}\x{fe00}-\x{fe0f}\x{feff}\x{e0000}-\x{e007f}\x{e0100}-\x{e01ef}]'
+  sel_invisible_escaped:
+    content|re: '(?i)\\u(?:00ad|180e|200[b-f]|202[a-e]|206[0-9a-f]|fe0[0-9a-f]|feff|db40)'
+  condition: sel_llm_traffic and (sel_invisible_raw or sel_invisible_escaped)
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables ────────────────────────────────────────────────────────────────
+  WINDOW_NS      = 900000000000   # 15 min — provenance / exfil correlation window
+  SUPPRESS_NS    = 300000000000   # 5 min  — per-signature alert suppression
+  RECUR_NS       = 1800000000000  # 30 min — signature recurrence memory
+
+  TAG_MARGIN     = 7              # tag chars allowed per legitimate flag base
+  VS_SUPP_MIN    = 4              # supplemental variation selectors (no benign use)
+  RUN_STRONG     = 24             # two-symbol invisible run => Sneaky Bits
+  RUN_WEAK       = 8
+  ZW_WEAK        = 32             # zero-width density (excl. ZWJ)
+  BIDI_WEAK      = 12             # bidi override/isolate density
+
+  INGEST_KINDS   = ["ACQUIRED_SKILL", "TOOL_RESULT", "HTTP_RESPONSE"]
+  EGRESS_KINDS   = ["HTTP_REQUEST", "TOOL_CALL", "CONNECTS"]
+
+  # Codepoints deliberately NOT counted as density signal:
+  #   U+200D ZWJ, U+FE0E/U+FE0F emoji selectors  -> emoji sequences
+  #   U+200E/U+200F LRM/RLM                      -> ordinary RTL prose
+  EMOJI_SAFE = [8205, 65038, 65039]
+  DIR_SAFE   = [8206, 8207]
+
+  def is_zero_width(c):
+      # soft hyphen, Mongolian vowel sep, ZWSP/ZWNJ, word joiner, invisible
+      # operators, ZWNBSP. ZWJ excluded (see EMOJI_SAFE).
+      if c == 173 or c == 6158 or c == 65279:
+          return True
+      if c == 8203 or c == 8204:
+          return True
+      if c >= 8288 and c <= 8303:
+          return True
+      return False
+
+  def is_bidi_ctrl(c):
+      # LRE RLE PDF LRO RLO (202A-202E) and LRI RLI FSI PDI (2066-2069)
+      if c >= 8234 and c <= 8238:
+          return True
+      if c >= 8294 and c <= 8297:
+          return True
+      return False
+
+  def is_tag(c):
+      return c >= 917504 and c <= 917631        # U+E0000 - U+E007F
+
+  def is_vs_supp(c):
+      return c >= 917760 and c <= 917999        # U+E0100 - U+E01EF
+
+  def is_vs_basic(c):
+      # U+FE00-U+FE0D — variation selectors 1-14, excluding the two emoji ones
+      return c >= 65024 and c <= 65037
+
+  def is_invisible(c):
+      if c in EMOJI_SAFE or c in DIR_SAFE:
+          return True                            # invisible for run purposes
+      if is_zero_width(c) or is_bidi_ctrl(c):
+          return True
+      if is_tag(c) or is_vs_supp(c) or is_vs_basic(c):
+          return True
+      return False
+
+  # ── Raw-codepoint analysis ─────────────────────────────────────────────────
+  def analyse_raw(s):
+      r = {"tag": 0, "vs_supp": 0, "vs_basic": 0, "zw": 0, "bidi": 0,
+           "flagbase": 0, "run": 0, "run_syms": 0}
+      run = 0
+      run_set = {}
+      for c in s.elem_ords():
+          if c == 127988:                        # U+1F3F4 waving black flag
+              r["flagbase"] = r["flagbase"] + 1
+          if is_invisible(c):
+              run = run + 1
+              run_set[c] = True
+              if is_tag(c):
+                  r["tag"] = r["tag"] + 1
+              elif is_vs_supp(c):
+                  r["vs_supp"] = r["vs_supp"] + 1
+              elif is_vs_basic(c):
+                  r["vs_basic"] = r["vs_basic"] + 1
+              elif is_zero_width(c):
+                  r["zw"] = r["zw"] + 1
+              elif is_bidi_ctrl(c):
+                  r["bidi"] = r["bidi"] + 1
+          else:
+              if run > r["run"]:
+                  r["run"] = run
+                  r["run_syms"] = len(run_set)
+              run = 0
+              run_set = {}
+      if run > r["run"]:
+          r["run"] = run
+          r["run_syms"] = len(run_set)
+      return r
+
+  # ── JSON-escaped analysis (\u200b, surrogate pairs for plane-14) ───────────
+  def analyse_escaped(s, r):
+      # Plane-14 payloads arrive as \udb40\udcXX (tags) / \udb40\uddXX (VS supp).
+      tag_esc = len(re.find_all(r'(?i)\\udb40\\udc[0-9a-f][0-9a-f]', s))
+      vs_esc  = len(re.find_all(r'(?i)\\udb40\\ud[de][0-9a-f][0-9a-f]', s))
+      zw_esc  = len(re.find_all(r'(?i)\\u(?:00ad|180e|200[bc]|206[0-9a-f]|feff)', s))
+      bidi_esc = len(re.find_all(r'(?i)\\u(?:202[a-e]|206[6-9])', s))
+      r["tag"]     = r["tag"] + tag_esc
+      r["vs_supp"] = r["vs_supp"] + vs_esc
+      r["zw"]      = r["zw"] + zw_esc
+      r["bidi"]    = r["bidi"] + bidi_esc
+      # A contiguous escape run is the escaped equivalent of a binary run.
+      longest = 0
+      for m in re.find_all(r'(?i)(?:\\u(?:200[bc]|2060|feff|db40\\u[0-9a-f]{4})){4,}', s):
+          n = len(re.find_all(r'(?i)\\u', m))
+          if n > longest:
+              longest = n
+      if longest > r["run"]:
+          r["run"] = longest
+          r["run_syms"] = 2
+      return r
+
+  # ── Signature: stable across retries of the same payload ──────────────────
+  def signature(r):
+      return "t%d-v%d-b%d-z%d-d%d-r%d" % (r["tag"], r["vs_supp"], r["vs_basic"],
+                                          r["zw"], r["bidi"], r["run"])
+
+  def classify(r):
+      strong = []
+      weak   = []
+      # Tag block: cancel out legitimate subdivision-flag usage entirely.
+      if r["tag"] > TAG_MARGIN * r["flagbase"] and r["tag"] >= 4:
+          strong.append("unicode-tag payload (" + str(r["tag"]) + " tag chars)")
+      if r["vs_supp"] >= VS_SUPP_MIN:
+          strong.append("supplemental variation selectors (" + str(r["vs_supp"]) + ")")
+      if r["run"] >= RUN_STRONG and r["run_syms"] <= 2:
+          strong.append("Sneaky Bits: " + str(r["run"]) +
+                        "-char run of " + str(r["run_syms"]) + " invisible symbol(s)")
+      if r["run"] >= RUN_WEAK and r["run_syms"] <= 2 and r["run"] < RUN_STRONG:
+          weak.append("short two-symbol invisible run (" + str(r["run"]) + ")")
+      if r["zw"] >= ZW_WEAK:
+          weak.append("zero-width density (" + str(r["zw"]) + ")")
+      if r["bidi"] >= BIDI_WEAK:
+          weak.append("bidi control density (" + str(r["bidi"]) + ")")
+      if r["vs_basic"] >= 16:
+          weak.append("variation-selector density (" + str(r["vs_basic"]) + ")")
+      return strong, weak
+
+  # ── Graph helpers ─────────────────────────────────────────────────────────
+  def edge_ts(e):
+      for k in ["ts", "last_ts", "first_ts"]:
+          v = e.get(k, "")
+          if v != "":
+              return int(v)
+      return 0
+
+  def owning_agent():
+      # Prefer the agent whose executable path matches meta[agent_name];
+      # fall back to any monitored agent that has LLM_REQUEST edges.
+      want = meta.get("agent_name", "")
+      fallback = None
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if want != "" and p.get("path", "") == want:
+              return p
+          if fallback == None and edges(p["id"], dir="out", kind="LLM_REQUEST"):
+              fallback = p
+      return fallback
+
+  def describe(nid, default):
+      n = node(nid)
+      if n == None:
+          return default
+      for k in ["host", "name", "model", "path"]:
+          v = n.get(k, "")
+          if v != "":
+              return v
+      return default
+
+  def run():
+      ct = meta.get("context_type", "")
+      if ct != "llm_request" and ct != "llm_response":
+          return "allow"
+      body = meta.get("content", "")
+      if body == "":
+          return "allow"
+
+      r = analyse_raw(body)
+      r = analyse_escaped(body, r)
+      strong, weak = classify(r)
+      if not strong and not weak:
+          return "allow"
+
+      sig      = signature(r)
+      now      = int(meta.get("event_ts", "0"))
+      seen     = store_get("sig_seen") or {}
+      alerted  = store_get("sig_alerted") or {}
+
+      prior_ts = int(seen.get(sig, "0")) if sig in seen else 0
+      recurred = prior_ts > 0 and now > 0 and (now - prior_ts) < RECUR_NS
+
+      # Prune + record this sighting (bounded, quota-guarded).
+      fresh = {}
+      for k in seen:
+          t = int(seen[k])
+          if now == 0 or (now - t) < RECUR_NS:
+              fresh[k] = str(t)
+      fresh[sig] = str(now)
+      if len(fresh) <= 200 and store_usage()["free"] > 8192:
+          store_set("sig_seen", fresh)
+
+      # ── Graph corroboration: provenance + egress in the same window ──────
+      agent = owning_agent()
+      ingest_edge = None
+      ingest_desc = ""
+      llm_edge    = None
+      egress_edge = None
+      egress_desc = ""
+      aid = ""
+
+      if agent != None:
+          aid = agent["id"]
+          for k in INGEST_KINDS:
+              for e in edges(aid, dir="both", kind=k):
+                  t = edge_ts(e)
+                  if t == 0:
+                      continue
+                  if now > 0 and (now - t) > WINDOW_NS:
+                      continue
+                  if now > 0 and t > now:
+                      continue
+                  other = e["to"] if e["from"] == aid else e["from"]
+                  ingest_edge = e
+                  ingest_desc = k + " from " + describe(other, other)
+                  break
+              if ingest_edge != None:
+                  break
+
+          newest = 0
+          for e in edges(aid, dir="out", kind="LLM_REQUEST"):
+              t = edge_ts(e)
+              if t >= newest:
+                  newest = t
+                  llm_edge = e
+
+          for k in EGRESS_KINDS:
+              for e in edges(aid, dir="out", kind=k):
+                  t = edge_ts(e)
+                  if t == 0 or (now > 0 and (now - t) > WINDOW_NS):
+                      continue
+                  tgt = node(e["to"])
+                  if tgt == None:
+                      continue
+                  if k != "TOOL_CALL" and tgt.get("is_ztna_host", "0") == "1":
+                      continue
+                  egress_edge = e
+                  egress_desc = k + " -> " + describe(e["to"], e["to"])
+                  break
+              if egress_edge != None:
+                  break
+
+      # ── Verdict: strong encoding alone, or weak + corroboration ─────────
+      reasons = []
+      for s in strong:
+          reasons.append(s)
+      corroborated = False
+      if ingest_edge != None:
+          corroborated = True
+          reasons.append("untrusted content ingested in window: " + ingest_desc)
+      if recurred:
+          corroborated = True
+          reasons.append("identical hidden-payload signature seen earlier this session")
+
+      if not strong and not corroborated:
+          return "allow"
+      if not strong:
+          for w in weak:
+              reasons.append(w)
+
+      # Suppress duplicate alerts for the same payload signature.
+      last = int(alerted.get(sig, "0")) if sig in alerted else 0
+      if last > 0 and now > 0 and (now - last) < SUPPRESS_NS:
+          return "allow"
+      pruned = {}
+      for k in alerted:
+          t = int(alerted[k])
+          if now == 0 or (now - t) < RECUR_NS:
+              pruned[k] = str(t)
+      pruned[sig] = str(now)
+      if len(pruned) <= 200 and store_usage()["free"] > 8192:
+          store_set("sig_alerted", pruned)
+
+      label = "prompt" if ct == "llm_request" else "completion"
+      reason = ("Invisible-Unicode data smuggling in LLM " + label +
+                " (" + meta.get("provider", "?") + "/" + meta.get("model", "?") +
+                "): " + "; ".join(reasons))
+      print(reason + " | sig=" + sig)
+
+      if agent == None:
+          return {"action": "report", "reason": reason}
+
+      chain = new_chain(aid)
+      if ingest_edge != None:
+          chain.append(step(ingest_edge, stage_id="Content Ingestion",
+                            stage_desc="carrier for hidden payload: " + ingest_desc))
+      if llm_edge != None:
+          chain.append(step(llm_edge, stage_id="Hidden Payload to Model",
+                            stage_desc=("LLM " + label + " carries invisible-Unicode payload: " +
+                                        "; ".join(reasons[:2]) + " [sig " + sig + "]")))
+      if egress_edge != None:
+          chain.append(step(egress_edge, stage_id="Possible Egress",
+                            stage_desc="outbound channel in same window: " + egress_desc))
+      if len(chain) == 0:
+          return {"action": "report", "reason": reason}
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
