@@ -1,0 +1,75 @@
+title: Dify APP DSL Export Endpoint Access
+id: 7f3c9a12-5d84-4b6e-9c0a-2e18d4f7b365
+status: experimental
+level: medium
+description: |
+  Detects an AI agent issuing an HTTP request to the Dify console APP DSL export
+  route (/console/api/apps/<app_id>/export, also reachable as /api/apps/<app_id>/export
+  behind the default nginx routing).
+
+  Dify <= 0.6.8 does not enforce administrator-only authorization on this endpoint,
+  so any authenticated workspace member can export the full application DSL —
+  prompts, workflow graph, model configuration, tool wiring and, when
+  include_secret=true is supplied, embedded credential material. The gap was closed
+  with stricter RBAC in 0.6.13.
+
+  A single HTTP event cannot reveal the caller's workspace role, so this rule reports
+  every agent-initiated DSL export for review rather than attempting to guess
+  privilege. The `include_secret` query parameter is the strongest escalation signal
+  when triaging a hit: it means the exported DSL carries provider API keys.
+
+  Detection is deliberately narrow: it requires the literal `apps/<id>/export`
+  segment inside the console API path component (never the query string), and a
+  read-shaped method. Documentation and template placeholders are filtered out.
+author: Tanya
+date: "2026-03-06"
+references:
+  - https://github.com/langgenius/dify
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://attack.mitre.org/techniques/T1213/
+tags:
+  - attack.collection
+  - attack.t1213
+  - owasp.a01-2021
+  - owasp.a04-2021
+  - cwe.285
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+
+  # Export route seen in the URL path component only ([^?#]* prevents a match that
+  # lives inside a query string, e.g. a search engine lookup for the CVE).
+  sel_export_path:
+    path|re: '(?i)^[^?#]*/(?:console/)?api/apps/[A-Za-z0-9_.-]{6,64}/export/?(?:[?#].*)?$'
+  sel_export_url:
+    url.full|re: '(?i)^[^?#]*/(?:console/)?api/apps/[A-Za-z0-9_.-]{6,64}/export(?:[/?#]|$)'
+
+  # The Dify export handler is a read operation; anything else is not this endpoint.
+  sel_read_method:
+    method:
+      - GET
+      - POST
+
+  # Documentation, SDK samples, Postman collections and test fixtures use template
+  # or dummy application identifiers rather than a real workspace app UUID.
+  filter_doc_placeholder:
+    url.full|re: '(?i)/apps/(?:your[-_]?app[-_]?id|app[-_]?id|the[-_]?app[-_]?id|%7[Bb][^/]{1,40}%7[Dd]|%3[Cc][^/]{1,40}%3[Ee]|example|examples|sample|samples|placeholder|dummy|test|tests|demo|foobar|x{6,}|0{8}-0{4}-0{4}-0{4}-0{12}|1{8}-1{4}-1{4}-1{4}-1{12}|a{8}-a{4}-a{4}-a{4}-a{12})/export'
+
+  # Static asset / documentation fetches that merely contain the string in a filename.
+  filter_static_asset:
+    path|re: '(?i)\.(?:md|mdx|html?|json|ya?ml|js|ts|css|png|svg|pdf)$'
+
+  condition: sel_event and (sel_export_path or sel_export_url) and sel_read_method and not (filter_doc_placeholder or filter_static_asset)
+falsepositives:
+  - Workspace administrator legitimately exporting an application DSL through the
+    Dify console while an agent-driven browser session is being proxied.
+  - Scheduled backup or GitOps automation that snapshots app DSL definitions on a
+    cadence — expect a repeating, same-source pattern and baseline it.
+  - CI or migration tooling copying applications between Dify workspaces or between
+    staging and production instances.
+  - Internal red-team or patch-verification testing against a Dify instance already
+    upgraded past 0.6.13, where the endpoint now correctly rejects non-admins.
+action: report
