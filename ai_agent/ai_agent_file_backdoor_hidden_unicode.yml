@@ -1,0 +1,398 @@
+title: File Backdoor via Bidirectional Unicode and Zero-Width Characters
+id: 5f2c9a13-8d47-4b6e-a0c2-7e91d4f3b8aa
+status: experimental
+level: high
+description: |
+  Detects an AI agent writing a file whose payload carries invisible Unicode
+  control characters - bidirectional overrides/embeddings/isolates
+  (U+202A-U+202E, U+2066-U+2069) or zero-width / invisible joiners
+  (U+200B, U+200C, U+200D, U+2060-U+2064, U+FEFF, U+3164, U+115F, U+FFA0,
+  U+180E) - in raw, JSON/source-escaped or HTML-entity form. This is the
+  Trojan-Source class: the reviewed rendering of the file differs from the
+  bytes the compiler, interpreter or shell consumes, so a backdoor survives
+  visual code review.
+
+  The live pipeline has no file_write content producer, so the byte-level
+  evidence is taken from the surface that does carry it in real time: the
+  agent's own write tool call (tool_input) and the model's tool_use block
+  (llm_tool_call). Both contain the exact bytes destined for disk, before
+  the write happens.
+
+  Attribution is instance-resolved: caller_pid -> proc_instance ->
+  proc_lineage. Corroborating WRITE_FILE and EXECUTE_PROCESS rows are read
+  from the event log strictly scoped to that one session and time window -
+  never across sessions.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://trojansource.codes/
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-42574
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-42694
+  - https://unicode.org/reports/tr36/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.persistence
+  - atlas.aml.t0051
+  - atlas.aml.t0050
+  - owasp.llm01
+  - owasp.llm05
+falsepositives:
+  - Localization / i18n resource files (.arb, .json, .properties, .po) that
+    legitimately embed bidi embedding or isolate marks around RTL strings.
+    Mitigated - embedding/isolate marks are only scored when the payload
+    contains no Hebrew/Arabic/Syriac script at all; explicit LTR/RTL
+    OVERRIDES (U+202D/U+202E) are still reported because Unicode UAX#9 best
+    practice never requires an override for ordinary RTL prose.
+  - Emoji ZWJ sequences (family/profession emoji) and Devanagari, Bengali or
+    Persian text using ZWJ/ZWNJ as real joiners in UI strings or docs.
+    Mitigated - zero-width characters are only scored when the payload is
+    otherwise pure ASCII (no other non-ASCII codepoint survives stripping),
+    so the joiner has nothing legitimate to join.
+  - Files intentionally starting with a UTF-8 BOM. Mitigated - a leading
+    U+FEFF run is stripped before counting.
+  - Security test fixtures, linter test corpora and CI checks for Trojan
+    Source that deliberately contain these codepoints. These WILL be
+    reported; the action is report, never block, and the kill chain names
+    the exact file so triage is one glance.
+  - Minified JavaScript or scraped web content pasted into a file with stray
+    U+200B separators. Mitigated - the zero-width-only path additionally
+    requires a code/script/config target path.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_write_surface:
+    event_type:
+      - tool_call
+      - llm_tool_call
+  sel_raw_hidden:
+    content|re: '[\x{202a}-\x{202e}\x{2066}-\x{2069}\x{200b}-\x{200d}\x{2060}-\x{2064}\x{feff}\x{115f}\x{1160}\x{3164}\x{ffa0}\x{180e}]'
+  sel_escaped_hidden:
+    content|re: '\\[uU]\+?(?:202[a-eA-E]|206[6-9]|200[b-dB-D]|206[0-4]|[fF][eE][fF][fF]|3164|180[eE])'
+  sel_entity_hidden:
+    content|re: '&#(?:[xX](?:202[a-eA-E]|206[6-9]|200[b-dB-D]|206[0-4]|[fF][eE][fF][fF]|3164)|823[4-8]|829[4-7]|820[3-5]|8288|65279|12644);'
+  condition: sel_write_surface and (sel_raw_hidden or sel_escaped_hidden or sel_entity_hidden)
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ----------------------------------------------------------------------
+  # Hidden bidi / zero-width backdoor smuggled into an agent-authored file.
+  #
+  # Live evidence  : tool_input / llm_tool_call args (bytes before the write)
+  # Attribution    : caller_pid -> proc_instance -> proc_lineage
+  # Corroboration  : WRITE_FILE + EXECUTE_PROCESS event-log rows, session and
+  #                  window scoped only.  No cross-session attribution.
+  # ----------------------------------------------------------------------
+  WINDOW_NS   = 600000000000   # 10 minutes
+  MAX_CONTENT = 262144
+  MAX_SESSION = 32
+  DEDUPE_MAX  = 400
+
+  P_OVR = [r"[\x{202d}\x{202e}]",
+           r"\\[uU]\+?202[dDeE]",
+           r"&#(?:[xX]202[dDeE]|823[78]);"]
+
+  P_EMB = [r"[\x{202a}\x{202b}\x{202c}\x{2066}-\x{2069}]",
+           r"\\[uU]\+?(?:202[abcABC]|206[6-9])",
+           r"&#(?:[xX](?:202[abcABC]|206[6-9])|823[456]|829[4-7]);"]
+
+  P_ZW  = [r"[\x{200b}\x{200c}\x{200d}\x{2060}-\x{2064}\x{feff}\x{115f}\x{1160}\x{3164}\x{ffa0}\x{180e}]",
+           r"\\[uU]\+?(?:200[bcdBCD]|206[0-4]|[fF][eE][fF][fF]|3164|180[eE])",
+           r"&#(?:[xX](?:200[bcdBCD]|206[0-4]|[fF][eE][fF][fF]|3164)|820[345]|8288|65279|12644);"]
+
+  INVISIBLE = r"[\x{200b}\x{200c}\x{200d}\x{2060}-\x{2064}\x{feff}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{115f}\x{1160}\x{3164}\x{ffa0}\x{180e}]"
+  RTL_CLASS = r"[\x{0590}-\x{08ff}\x{fb1d}-\x{fdff}\x{fe70}-\x{fefc}]"
+  NON_ASCII = r"[^\x{0000}-\x{007f}]"
+  BOM_HEAD  = r"\A[\x{feff}]+"
+
+  PATH_KEYS = ['"file_path"', '"filePath"', '"path"', '"filename"', '"file_name"',
+               '"target_file"', '"notebook_path"', '"absolute_path"', '"file"', '"dest"']
+  BODY_KEYS = ['"content"', '"contents"', '"text"', '"data"', '"new_string"', '"new_str"',
+               '"body"', '"source"', '"patch"', '"diff"', '"code"', '"replacement"']
+
+  WRITE_TOOLS = [r"\bwrite\b", r"\bwrite[_-]?file\b", r"\bedit\b", r"\bmulti[_-]?edit\b",
+                 r"\bnotebook[_-]?edit\b", r"\bcreate[_-]?file\b", r"\bapply[_-]?patch\b",
+                 r"str[_-]?replace", r"\bfs[_-]?write\b", r"\bsave[_-]?file\b",
+                 r"\bupdate[_-]?file\b", r"\bput[_-]?file\b", r"\bappend\b",
+                 r"\bpatch\b", r"\binsert[_-]?text\b"]
+  SHELL_TOOLS = [r"\bbash\b", r"\bsh\b", r"\bzsh\b", r"\bshell\b", r"\bexec",
+                 r"\bterminal\b", r"\brun[_-]?command\b", r"\bcommand\b"]
+  REDIRECTS   = [r">>?\s*[^\s>|&]", r"\btee\b", r"<<[-~]?\s*[\"']?[A-Za-z_]",
+                 r"\bdd\s+of=", r"\bpython[23]?\s+-c\b", r"\bperl\s+-e\b",
+                 r"\bsed\s+-i\b", r"\bcat\s*>"]
+
+  CODE_EXT = ["py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "go", "rs", "java", "kt",
+              "kts", "c", "cc", "cpp", "cxx", "h", "hpp", "cs", "rb", "php", "pl", "pm",
+              "sh", "bash", "zsh", "fish", "ps1", "psm1", "bat", "cmd", "lua", "swift",
+              "scala", "clj", "ex", "exs", "erl", "r", "sql", "tf", "tfvars", "yaml",
+              "yml", "json", "toml", "ini", "cfg", "conf", "env", "properties", "gradle",
+              "mk", "cmake", "service", "plist", "vue", "svelte", "ipynb", "gemspec",
+              "podspec", "rake", "vim", "el", "html", "htm", "xml"]
+  BARE_NAMES = ["makefile", "dockerfile", "jenkinsfile", "gemfile", "rakefile",
+                "procfile", "justfile", "vagrantfile", ".bashrc", ".zshrc", ".profile",
+                ".bash_profile", ".zprofile", ".npmrc", ".gitconfig", ".env"]
+
+  def count_pats(pats, s):
+      n = 0
+      for p in pats:
+          n += len(re.find_all(p, s))
+      return n
+
+  def json_str_value(c, key):
+      i = c.find(key)
+      if i < 0:
+          return ""
+      rest = c[i + len(key):]
+      j = rest.find('"')
+      if j < 0 or j > 8:
+          return ""
+      if rest[:j].find(":") < 0:
+          return ""
+      rest = rest[j + 1:]
+      k = rest.find('"')
+      if k <= 0 or k > 512:
+          return ""
+      return rest[:k]
+
+  def extract_path(c):
+      for k in PATH_KEYS:
+          v = json_str_value(c, k)
+          if v != "":
+              return v
+      return ""
+
+  def has_body_key(c):
+      for k in BODY_KEYS:
+          if c.find(k) >= 0:
+              return True
+      return False
+
+  def basename(p):
+      b = p.split("/")[-1]
+      b = b.split("\\")[-1]
+      return b
+
+  def is_code_path(p):
+      if p == "":
+          return False
+      b = basename(p).lower()
+      for n in BARE_NAMES:
+          if b == n:
+              return True
+      i = b.rfind(".")
+      if i < 0:
+          return False
+      return b[i + 1:] in CODE_EXT
+
+  def match_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # --- relevance gate: pure string checks on meta, no graph / log calls -----
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct != "tool_input" and ct != "llm_tool_call":
+          return False
+      if meta.get("content", "") == "":
+          return False
+      return True
+
+  def is_write_surface(c):
+      t = meta.get("tool_name", "").lower()
+      if t != "" and match_any(WRITE_TOOLS, t):
+          return True
+      if t != "" and match_any(SHELL_TOOLS, t):
+          return match_any(REDIRECTS, c)
+      # unknown / custom MCP tool: shape of the arguments decides
+      if extract_path(c) != "" and has_body_key(c):
+          return True
+      return False
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      c = meta.get("content", "")
+      if len(c) > MAX_CONTENT:
+          c = c[:MAX_CONTENT]
+      if not is_write_surface(c):
+          return "allow"
+
+      body = re.replace(BOM_HEAD, c, "")
+      ovr  = count_pats(P_OVR, body)
+      emb  = count_pats(P_EMB, body)
+      zw   = count_pats(P_ZW, body)
+      if ovr + emb + zw == 0:
+          return "allow"
+
+      rtl      = re.find(RTL_CLASS, body) != None
+      visible  = re.replace(INVISIBLE, body, "")
+      other_na = re.find(NON_ASCII, visible) != None
+      path     = extract_path(c)
+      base     = basename(path)
+      codefile = is_code_path(path)
+
+      signals = []
+      if ovr > 0:
+          signals.append("bidi-override x" + str(ovr))
+      if emb > 0 and not rtl:
+          signals.append("bidi-embed/isolate x" + str(emb))
+      if zw > 0 and not other_na and codefile:
+          signals.append("zero-width x" + str(zw))
+      if len(signals) == 0:
+          return "allow"                       # benign RTL prose / real joiners
+
+      # --- instance-resolved attribution -----------------------------------
+      ets = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      tgt = path
+      if tgt == "":
+          tgt = "<path not in args>"
+      sig = ", ".join(signals)
+
+      if cp == 0:
+          print("hidden-unicode write, attribution unavailable: " + tgt + " [" + sig + "]")
+          return {
+              "action": "report",
+              "reason": "Hidden Unicode payload in agent file write (" + tgt +
+                        ") - " + sig + " [attribution: unavailable, no caller_pid]",
+          }
+
+      inst = proc_instance(cp, ets)
+      if inst == None:
+          print("hidden-unicode write, attribution degraded: " + tgt + " [" + sig + "]")
+          return {
+              "action": "report",
+              "reason": "Hidden Unicode payload in agent file write (" + tgt +
+                        ") - " + sig + " [attribution: degraded, instance not yet logged]",
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lineage) == 0:
+          lineage = [inst]
+
+      # --- session scope: lineage + descendants inside the window ----------
+      since = ets - WINDOW_NS
+      if since < 0:
+          since = 0
+      sess = {}
+      for x in lineage:
+          sess[x.get("actor_pid", "")] = True
+
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ets, limit=3000)
+      for _pass in range(2):
+          for e in execs:
+              if len(sess) >= MAX_SESSION:
+                  break
+              if e.get("parent_pid", "") in sess:
+                  sess[e.get("actor_pid", "")] = True
+
+      # --- dedupe (per session root + path + signal shape) ------------------
+      root     = lineage[-1]
+      root_key = root.get("actor_pid", "") + ":" + root.get("actor_start", "")
+      dkey     = root_key + "|" + tgt + "|" + str(ovr) + "/" + str(emb) + "/" + str(zw)
+      seen     = store_get("reported")
+      if seen == None:
+          seen = {}
+      if dkey in seen:
+          return "allow"
+      if len(seen) > DEDUPE_MAX:
+          seen = {}
+      seen[dkey] = str(ets)
+      if store_usage()["free"] > 8192:
+          store_set("reported", seen)
+
+      # --- corroboration: WRITE_FILE row for this file, this session --------
+      wf = None
+      n  = 0
+      for pid in sess:
+          if n >= MAX_SESSION or wf != None:
+              break
+          n += 1
+          if pid == "":
+              continue
+          for e in query_events(kind="WRITE_FILE", actor_pid=int(pid),
+                                since_ns=since, until_ns=ets, limit=200):
+              p = e.get("path", "")
+              if base != "" and len(base) > 2 and p.find(base) >= 0:
+                  wf = e
+                  break
+
+      # --- corroboration: EXECUTE_PROCESS touching the artefact -------------
+      ex = None
+      for e in execs:
+          if e.get("actor_pid", "") not in sess and e.get("parent_pid", "") not in sess:
+              continue
+          cmd = e.get("cmdline", "")
+          if cmd == "":
+              continue
+          if base != "" and len(base) > 3 and cmd.find(base) >= 0:
+              ex = e
+              break
+          if count_pats(P_OVR, cmd) + count_pats(P_EMB, cmd) > 0:
+              ex = e
+              break
+
+      # --- kill chain -------------------------------------------------------
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[-1])
+
+      tool = meta.get("tool_name", "")
+      if tool == "":
+          tool = "unnamed-tool"
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "tool://" + meta.get("server_name", "local") + "/" + tool,
+          "kind":     "TOOL_CALL",
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+      }
+      chain.append(step(trig,
+                        stage_id="Hidden Unicode Payload",
+                        stage_desc="tool '" + tool + "' writing " + tgt +
+                                   " with invisible control chars: " + sig))
+      stages = 1
+
+      if wf != None:
+          chain.append(step(ev_edge(wf),
+                            stage_id="Backdoor Persisted",
+                            stage_desc="obfuscated content reached disk: " + wf.get("path", "")))
+          stages += 1
+
+      if ex != None:
+          cl = ex.get("cmdline", "")
+          if len(cl) > 200:
+              cl = cl[:200]
+          chain.append(step(ev_edge(ex),
+                            stage_id="Execution Surface",
+                            stage_desc="session executed the artefact / obfuscated command: " + cl))
+          stages += 1
+
+      lin = " -> ".join(names)
+      print("hidden-unicode file backdoor: " + tgt + " [" + sig + "] via " + lin +
+            " (" + str(stages) + " stages)")
+      return {
+          "action": "report",
+          "reason": "Hidden Unicode file backdoor - " + sig + " written to " + tgt +
+                    " by " + lin + " (" + str(stages) + " stages, session-scoped)",
+          "chain":  chain,
+      }
+
+  result = run()
