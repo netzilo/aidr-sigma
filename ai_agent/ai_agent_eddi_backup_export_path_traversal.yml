@@ -1,0 +1,95 @@
+title: EDDI Backup Export Path Traversal Attempt
+id: 7b3c9e42-5d18-4a6f-9c21-8ef04b7d31a5
+status: experimental
+level: medium
+description: |
+  Detects an outbound HTTP request from an AI agent to the E.D.D.I backup export
+  endpoint (/backup/export) carrying path-traversal sequences — most commonly in the
+  botFilename parameter — in the URL query string or in the request body.
+
+  E.D.D.I versions prior to 5.4 fail to sanitise botFilename in RestExportService.java,
+  so a value such as ..%2f..%2fetc%2fpasswd resolves outside the intended export
+  directory and returns arbitrary files from the container filesystem. Impact is
+  bounded by Docker container isolation, but the primitive still yields container
+  configuration, environment files, and application secrets.
+
+  This is a single-event content detection: the endpoint anchor and the traversal
+  token must both be present in the same request. Encoded (%2f, %5c), double-encoded
+  (%252f, %252e), dot-encoded (%2e%2e, .%2e) and overlong UTF-8 (%c0%af, %c1%9c)
+  variants are covered, as is the raw ../ and ..\ form.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://github.com/labsai/EDDI
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.discovery
+  - attack.t1083
+  - owasp.a01-2021
+  - cwe.22
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Endpoint anchor — the request must target the EDDI backup export API ──
+  sel_endpoint_url:
+    event_type: http_request
+    url.full|contains: '/backup/export'
+  sel_endpoint_path:
+    event_type: http_request
+    path|contains: '/backup/export'
+
+  # ── Traversal in the botFilename query parameter (the vulnerable input) ──
+  sel_trav_param:
+    url.full|re:
+      - '(?i)botfilename=[^&#\s]*\.\.[/\\]'
+      - '(?i)botfilename=[^&#\s]*\.\.%(?:2f|5c|252f|255c|c0%af|c1%9c)'
+      - '(?i)botfilename=[^&#\s]*%(?:25)?2e%(?:25)?2e'
+      - '(?i)botfilename=[^&#\s]*(?:\.%2e|%2e\.)[/\\%]'
+
+  # ── Traversal or canonical target file anywhere in the export URL ──
+  sel_trav_url:
+    url.full|re:
+      - '(?i)/backup/export[^\s]*(?:\.\.[/\\]|\.\.%(?:25)?(?:2f|5c)|%(?:25)?2e%(?:25)?2e)'
+      - '(?i)/backup/export[^\s]*(?:/etc/(?:passwd|shadow)|%2fetc%2f(?:passwd|shadow)|/proc/self/environ)'
+
+  # ── Traversal delivered in a JSON / form body rather than the query string ──
+  sel_trav_body:
+    content|re:
+      - '(?i)botfilename["''\s:=]{0,6}[^"&\n]{0,200}?(?:\.\.[/\\]|\.\.%(?:25)?(?:2f|5c)|%(?:25)?2e%(?:25)?2e)'
+
+  # ── Filters — documented benign shapes of the same bytes ──
+  filter_placeholder:
+    url.full|re: '(?i)botfilename=(?:%7b|\{|<|\$\{|your_|example|placeholder|filename_here)'
+  filter_api_spec:
+    content|contains|all:
+      - '"openapi"'
+      - '"paths"'
+  filter_advisory_text:
+    content|contains|all:
+      - 'cve-'
+      - 'path traversal'
+
+  condition: >
+    (sel_endpoint_url or sel_endpoint_path)
+    and (sel_trav_param or sel_trav_url or sel_trav_body)
+    and not (filter_placeholder or filter_api_spec or filter_advisory_text)
+
+falsepositives:
+  - Authorised DAST / penetration-test tooling driven through the agent against an
+    internal EDDI instance — the payload is byte-identical to a real attack and can
+    only be distinguished by change-ticket context.
+  - A security engineer asking the agent to reproduce the public proof-of-concept for
+    this CVE against a lab bot; the advisory-text filter only suppresses this when the
+    request body also carries the words "CVE-" and "path traversal".
+  - OpenAPI / Swagger specification bodies that document the botFilename parameter with
+    an escaped example value (suppressed by filter_api_spec and filter_placeholder).
+  - A genuine bot export whose filename legitimately contains a double dot immediately
+    followed by a slash or backslash (e.g. "archive../nightly.json") — extremely rare,
+    since the regex requires the dots to be adjacent to a separator or its encoding.
+
+action: report
