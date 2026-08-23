@@ -1,0 +1,131 @@
+title: Cloud Metadata Credential Endpoint In Agent Tool Call
+id: 7b3c1f2a-9d64-4e58-b0a7-3f5c8e21d94b
+status: experimental
+level: high
+description: |
+  Fires on a single tool_call event whose arguments contain BOTH a network-fetch
+  capability (curl / wget / an http(s) URL / an SDK HTTP client / a "url" argument)
+  AND a cloud instance-metadata credential endpoint.
+
+  This is the pre-execution (PreToolUse) view of the technique. It complements the
+  existing resolved-destination rule (2fdcc1b0-2bdc-5fd3-9f49-bb91969fded6), which
+  can only fire once an EXECUTE_PROCESS/HTTP_REQUEST edge exists and which keys on
+  the literal dotted-quad. This rule adds two things that rule cannot provide:
+
+    1. Intent is visible in the tool arguments BEFORE any connection is attempted,
+       so an injected agent that is stopped, times out, or fails DNS still alerts.
+    2. Obfuscated address encodings that never appear as a literal 169.254.169.254
+       string in the command line are matched here: decimal (2852039166), dotted
+       decimal shorthand (169.16689662, 169.254.43518), hex (0xa9fea9fe and the
+       dotted 0xa9.0xfe.0xa9.0xfe form), zero-padded octal (0251.0376.0251.0376),
+       IPv6 IMDS (fd00:ec2::254), IPv4-mapped IPv6 (::ffff:169.254.169.254 and
+       ::ffff:a9fe:a9fe) and percent-encoded (169%2e254%2e169%2e254).
+
+  Also covers the non-AWS credential surfaces reached the same way: GCP
+  metadata.google.internal / /computeMetadata/v1 (and its mandatory
+  Metadata-Flavor: Google header), Azure IMDS /metadata/instance?api-version= and
+  /metadata/identity/oauth2/token, ECS/EKS task-credential endpoints
+  (169.254.170.2, 169.254.170.23, fd00:ec2::23,
+  AWS_CONTAINER_CREDENTIALS_RELATIVE_URI/_FULL_URI) and Alibaba 100.100.100.200.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1552/005/
+  - https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/instancedata-data-retrieval.html
+  - https://cloud.google.com/compute/docs/metadata/overview
+tags:
+  - attack.credential-access
+  - attack.t1552
+  - attack.t1552.005
+  - atlas.aml.t0024
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: tool_call
+
+  # A network-fetch capability must be present in the same tool-call arguments.
+  # Without this, a bare mention of the address is not an access attempt.
+  sel_fetch_capability:
+    content|re:
+      - '(?i)\bcurl\b'
+      - '(?i)\bwget\b'
+      - '(?i)\bhttps?://'
+      - '(?i)\bInvoke-WebRequest\b'
+      - '(?i)\bIWR\b'
+      - '(?i)\brequests\.(get|post|put|head)\s*\('
+      - '(?i)\burllib(\.request)?\b'
+      - '(?i)\bhttp\.client\b'
+      - '(?i)\baxios\b'
+      - '(?i)\bfetch\s*\('
+      - '(?i)"url"\s*:'
+
+  # A cloud metadata / instance-credential endpoint, literal or obfuscated.
+  sel_metadata_target:
+    content|re:
+      # --- literal link-local metadata addresses ---
+      - '\b169\.254\.169\.254\b'
+      - '\b169\.254\.170\.2\b'
+      - '\b169\.254\.170\.23\b'
+      - '\b100\.100\.100\.200\b'
+      # --- alternate encodings of 169.254.169.254 ---
+      - '\b2852039166\b'
+      - '\b169\.16689662\b'
+      - '\b169\.254\.43518\b'
+      - '(?i)0xa9fea9fe'
+      - '(?i)0xa9\.0xfe\.0xa9\.0xfe'
+      - '\b0+251\.0+376\.0+251\.0+376\b'
+      - '(?i)\bfd00:ec2::254\b'
+      - '(?i)::ffff:169\.254\.169\.254'
+      - '(?i)::ffff:a9fe:a9fe'
+      - '(?i)169%2e254%2e169%2e254'
+      # --- alternate encodings of the ECS/EKS credential endpoints ---
+      - '\b2852039170\b'
+      - '(?i)0xa9feaa02'
+      - '(?i)\bfd00:ec2::23\b'
+      # --- provider-specific credential paths and mandatory headers ---
+      - '(?i)/latest/meta-data/'
+      - '(?i)/latest/user-data\b'
+      - '(?i)/latest/dynamic/instance-identity'
+      - '(?i)x-aws-ec2-metadata-token'
+      - '(?i)/computeMetadata/v1'
+      - '(?i)\bmetadata\.google\.internal\b'
+      - '(?i)metadata-flavor\s*:\s*google'
+      - '(?i)/metadata/instance\?api-version='
+      - '(?i)/metadata/identity/oauth2/token'
+      - '(?i)AWS_CONTAINER_CREDENTIALS_(RELATIVE|FULL)_URI'
+
+  # --- suppression: authoring detection content that necessarily embeds the IP ---
+  filter_detection_authoring:
+    content|contains|all:
+      - 'logsource:'
+      - 'detection:'
+
+  # --- suppression: test fixtures, mocks, examples and docs trees ---
+  filter_test_or_docs_path:
+    file_path|re: '(?i)(^|/)(tests?|specs?|fixtures?|__mocks__|__tests__|examples?|docs)/'
+
+  # --- suppression: IMDS hardening / instance metadata-options configuration ---
+  filter_imds_hardening:
+    content|contains:
+      - 'http-put-response-hop-limit'
+      - 'HttpTokens'
+      - 'HttpEndpoint=disabled'
+      - 'metadata_options'
+      - 'metadata_service_v1_disabled'
+
+  condition: >
+    sel_event and sel_fetch_capability and sel_metadata_target
+    and not (filter_detection_authoring or filter_test_or_docs_path or filter_imds_hardening)
+
+falsepositives:
+  - An operator legitimately asking the agent to debug a cloud host, e.g. "curl http://169.254.169.254/latest/meta-data/instance-id" — genuinely common on EC2/GCE and the primary reason this rule is report-only rather than blocking.
+  - Authoring or editing cloud-init user-data, Terraform, Ansible, Packer or container entrypoint scripts that read instance identity at boot.
+  - Writing or editing detection content (Sigma, Falco, Suricata) that must embed the metadata address — suppressed by filter_detection_authoring.
+  - Unit tests and mocked IMDS responses that hard-code the endpoint — suppressed by filter_test_or_docs_path.
+  - Hardening work that disables IMDSv1 or lowers the hop limit — suppressed by filter_imds_hardening.
+  - Runbooks or troubleshooting notes in a /docs or /examples tree that quote a metadata curl command.
+
+action: report
