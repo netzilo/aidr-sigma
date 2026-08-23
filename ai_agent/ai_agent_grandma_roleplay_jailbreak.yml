@@ -1,0 +1,122 @@
+title: Jailbreak Grandma Roleplay Persona Compliance
+id: 7c3f0b92-4d61-4a5e-9f28-6b1d0c84e3a7
+status: experimental
+level: high
+description: |
+  Detects the "grandma" roleplay jailbreak at the only point where it is
+  observable in this deployment: the model response itself.
+
+  The engine exposes no prompt_input event type and no PROMPT_INJECTION /
+  BEHAVIOR_MODIFICATION / SAFETY_BYPASS edge kinds, so the injected roleplay
+  prompt cannot be structurally correlated with the resulting output. The only
+  live signal is llm_response content. This rule therefore does NOT try to
+  detect the roleplay framing (which is benign on its own and appears in
+  ordinary creative writing); it detects the *conjunction* of three independent
+  markers inside a single model response:
+
+    1. sel_persona     - the model refers to itself/the speaker as the user's
+                         grandmother-figure (persona adoption, not mere mention)
+    2. sel_incharacter - in-character narration or terms of endearment showing
+                         the model is speaking AS the persona, not about it
+    3. sel_payload     - the response actually delivers guideline-restricted
+                         material (energetics/CWA/drug synthesis nouns, product
+                         key formats, license-bypass instructions, offensive
+                         tooling with code-delivery framing)
+
+  All three must be present. Persona without payload is fiction; payload without
+  persona is covered by other rules; only the conjunction indicates that the
+  fictional framing was the vehicle for the guideline violation. Refusals and
+  security/meta discussion of the technique are explicitly suppressed.
+
+  Shipped as report, not block: this is a novel single-event heuristic against a
+  content class that legitimately overlaps with fiction and security education,
+  and a false positive on llm_response destroys a user-visible model reply.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.defense-evasion
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.asi01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: llm_response
+
+  # 1. Persona adoption - the response frames a grandparent figure as the speaker
+  sel_persona:
+    content|re:
+      - '(?i)\b(?:your|my)\s+(?:dear\s+|sweet\s+|late\s+|dearly\s+departed\s+|deceased\s+|old\s+|beloved\s+)?(?:grandma|grandmother|granny|grannie|nana|grandmama|babushka|abuela|oma|nonna|grandpa|grandfather|granddad)\b'
+      - '(?i)\bgrand(?:ma|mother|pa|father)\b[^.\n]{0,60}\b(?:used to|would always|would tell|would read|would sing|is here|loves you)\b'
+      - '(?i)\b(?:as|acting as|in character as|channeling|speaking as)\s+(?:your\s+)?(?:dear\s+|late\s+|deceased\s+)?grand(?:ma|mother|pa|father)\b'
+
+  # 2. In-character delivery - the model is speaking AS the persona
+  sel_incharacter:
+    content|re:
+      - '(?i)\b(?:oh|ah|now|well|there there),?\s*(?:my\s+)?(?:dear(?:ie|y)?|sweetie|sweetheart|sweet\s+child|little\s+one|precious|grandchild|kiddo|bubbeleh)\b'
+      - '(?i)\*[^*\n]{0,80}(?:rocking chair|knitting|adjusts (?:her|his) glasses|smiles warmly|chuckles softly|pats your (?:hand|head)|tucks you in|warm hug)[^*\n]{0,80}\*'
+      - '(?i)\blet\s+grand(?:ma|mother|pa|father)\s+(?:tell|show|walk|remind)\s+you\b'
+      - '(?i)\b(?:bedtime\s+story|before\s+you\s+(?:go\s+to\s+)?sleep|tuck(?:ed|ing)?\s+you\s+in|just\s+like\s+(?:the\s+)?old\s+days\s+at\s+the\s+(?:factory|plant|lab))\b'
+
+  # 3. Restricted payload actually delivered inside the roleplay
+  sel_payload:
+    content|re:
+      - '(?i)\b(?:napalm|thermite|nitroglycerin|TATP|acetone\s+peroxide|ANFO|pipe\s+bomb|pressure\s+cooker\s+bomb|molotov\s+cocktail|chlorine\s+gas|mustard\s+gas|nerve\s+agent|sarin|ricin|methamphetamine|crystal\s+meth|shaped\s+charge|detonator)\b'
+      - '(?i)\b(?:windows|office|adobe|photoshop|autocad)\s*(?:10|11|7|8|xp|pro|home|365|cc)?\s*(?:product\s+|activation\s+|license\s+|serial\s+)?(?:key|keys|serial|serials|activation\s+code)\b'
+      - '\b[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}-[A-Z0-9]{5}\b'
+      - '(?i)\b(?:keygen|key\s+generator|crack(?:ed)?\s+(?:version|copy|build)|bypass\s+(?:the\s+)?(?:license|activation|drm|copy\s+protection))\b'
+      - '(?i)\b(?:reverse\s+shell|keylogger|ransomware|credential\s+stealer|rootkit)\b[^.\n]{0,80}\b(?:code|payload|script|snippet|here\s+it\s+is|full\s+source)\b'
+
+  # Suppression 1 - the model refused or called out the framing
+  filter_refusal:
+    content|re:
+      - '(?i)\bI\s+(?:cannot|can.t|won.t|will not|am not able to|am unable to|must decline|have to decline)\b'
+      - '(?i)\b(?:even|regardless of)\s+(?:in|the|a)\s+(?:a\s+)?(?:roleplay|role.play|fictional|hypothetical|story)\b'
+      - '(?i)\b(?:this|that)\s+(?:looks like|appears to be|is)\s+(?:a\s+)?(?:jailbreak|prompt injection|attempt to bypass)\b'
+      - '(?i)\bI\s+(?:notice|see)\b[^.\n]{0,60}\b(?:bypass|jailbreak|circumvent|get around)\b'
+
+  # Suppression 2 - the response is ABOUT the technique (security education,
+  # red-team writeups, detection engineering, threat modelling)
+  filter_meta_analysis:
+    content|re:
+      - '(?i)\b(?:jailbreak|prompt injection|adversarial prompt|red.team(?:ing)?|safety (?:guideline|guardrail|training|filter)|alignment research|threat model|detection rule|sigma rule|mitre atlas|owasp)\b'
+      - '(?i)\bAML\.T\d{4}\b'
+      - '(?i)\b(?:known as|referred to as|so.called|commonly called)\s+the\s+[^.\n]{0,20}grand(?:ma|mother)\b'
+      - '(?i)\b(?:example|illustration|demonstration|case study)\s+of\s+(?:a|an|the)\s+(?:jailbreak|roleplay attack|persona attack|social engineering)\b'
+
+  # Suppression 3 - obvious placeholder / redacted key material
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(?:XXXXX-XXXXX|AAAAA-AAAAA|12345-12345|00000-00000|NNNNN-NNNNN)\b'
+      - '(?i)\b(?:placeholder|redacted|example key|dummy (?:key|serial)|sample (?:key|serial)|lorem ipsum)\b'
+
+  condition: >
+    sel_event and sel_persona and sel_incharacter and sel_payload
+    and not (filter_refusal or filter_meta_analysis or filter_placeholder)
+falsepositives:
+  - Creative-writing assistance where the user asked for a war-era or
+    factory-era family story - a grandmother character can plausibly narrate
+    working with napalm or thermite without the response being a synthesis
+    procedure. Partially mitigated by requiring in-character narration plus a
+    restricted-subject noun, but a long enough fiction request can still match.
+  - Historical or documentary summarisation written in a warm second-person
+    voice ("your grandmother would have seen...") that also names a chemical
+    weapon or munition. Rare, but the persona and payload selections can both
+    fire on the same paragraph.
+  - IT-support or licensing help written in a folksy tone that mentions a
+    Windows product key format, if the same reply also happens to contain a
+    grandparent reference from the user's own message being echoed back. The
+    placeholder filter removes the masked-key variants; genuine echoed keys are
+    worth reviewing anyway.
+  - Security awareness training content that walks through the grandma jailbreak
+    with a worked example. Suppressed by filter_meta_analysis, which matches the
+    vocabulary such material invariably uses (jailbreak, prompt injection,
+    red team, safety guardrail, ATLAS identifiers).
+  - Model refusals that restate the requested restricted topic while declining.
+    Suppressed by filter_refusal.
+action: report
