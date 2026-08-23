@@ -1,0 +1,306 @@
+title: CDP Browser Bridge Session Enumeration and Takeover
+id: 7f3c1d9a-2b64-4e8f-9c05-6ad1e3f8b472
+status: experimental
+level: medium
+description: |
+  Detects the agent-observable half of an exposed HITL CDP browser-provider bridge
+  being used for remote session viewing/control.
+
+  Scope and honesty about the signal (answers the triage dissent directly):
+  the engine has no WEBSOCKET_CONNECT or REMOTE_ACCESS edge and no
+  websocket_connection / network_connection event, so the CDP command channel
+  itself (the substance of "escalation from viewing to controlling") is NOT
+  observable. This rule therefore does NOT claim to detect remote control over
+  the WebSocket. It detects the only part of the attack that is carried on live
+  telemetry: the Chrome DevTools Protocol HTTP control surface, which is
+  mandatory before any WS session can be opened.
+
+  The CDP HTTP surface splits cleanly into three behaviours:
+    * enumeration  -> GET /json or /json/list  ("which browser sessions exist?")
+    * attach       -> /devtools/page/<id>, /devtools/browser/<id>,
+                      /devtools/inspector*  (the WS-upgrade handshake / remote
+                      viewer entry point, observable as a plain HTTP request)
+    * mutation     -> /json/new, /json/close/<id>, /json/activate/<id>
+                      (control-plane manipulation of somebody else's session)
+
+  The rule requires the ORDERED pair enumeration -> attach performed by one
+  process session inside a 5 minute window, plus at least one escalator:
+  a network-reachable (non-loopback) bridge host, a control-plane mutation,
+  or three or more distinct browser targets attached. Enumeration alone, a
+  bare /json/version probe, or a single attach is not reported.
+
+  Attribution is instance-resolved: the rule anchors on meta.caller_pid,
+  resolves the exact process instance with proc_instance(), walks the real
+  spawn chain with proc_lineage(), and only considers HTTP_REQUEST rows whose
+  actor_pid belongs to that lineage or to children spawned by it. No
+  cross-session stitching and no path-keyed graph node walk. The triggering
+  request is taken from meta (never re-queried) because the event log is
+  populated asynchronously.
+
+  No host, domain or path is exempted from detection. Loopback is not a trust
+  decision here: a loopback bridge still reports when it shows control-plane
+  mutation or mass target attachment; "non-loopback" only ADDS an escalator.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://chromedevtools.github.io/devtools-protocol/
+  - https://attack.mitre.org/techniques/T1219/
+  - https://attack.mitre.org/techniques/T1021/
+tags:
+  - attack.lateral-movement
+  - attack.t1021
+  - attack.command-and-control
+  - attack.t1219
+  - owasp.asi01
+falsepositives:
+  - Playwright, Puppeteer, chrome-remote-interface or Selenium CDP attaching to an
+    already-running browser they legitimately own. These normally probe
+    /json/version and connect at the browser level; the rule requires the
+    /json(/list) enumeration -> /devtools/page attach pair PLUS an escalator, so
+    the common loopback launch path does not report.
+  - Browser-automation test harnesses in CI that intentionally reuse a shared
+    remote Chrome container over the network. These will report (non-loopback
+    escalator) and should be triaged once and understood as a real exposure of
+    the debugging port, not silenced by host.
+  - Legitimate HITL takeover workflows where a human operator is meant to view and
+    steer the agent's browser. Indistinguishable from an attacker at this layer
+    by design - the rule reports so the exposure can be reviewed, and never blocks.
+  - Session-manager tooling that opens many tabs via /json/new during normal work,
+    which can satisfy the mutation escalator after a genuine enumeration.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_cdp_http_surface:
+    event_type: http_request
+    path|re: '(?i)^/(json(/|$)|devtools/(page|browser|inspector))'
+  condition: sel_cdp_http_surface
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── constants (this rule's own window — never baked into storage) ──────────
+  WINDOW_NS   = 300000000000    # 5 minutes: enumerate -> attach must cluster
+  DEDUPE_NS   = 900000000000    # 15 minutes: one report per session anchor
+  MASS_ATTACH = 3               # distinct targets that count as harvesting
+
+  # ── pure helpers (no graph / no log / no fs calls) ─────────────────────────
+  def strip_query(p):
+      q = p
+      i = q.find("?")
+      if i >= 0:
+          q = q[:i]
+      i = q.find("#")
+      if i >= 0:
+          q = q[:i]
+      return q.lower()
+
+  def cdp_class(p):
+      q = strip_query(p)
+      if q == "/json" or q == "/json/" or q == "/json/list" or q == "/json/list/":
+          return "enum"
+      if q.startswith("/devtools/page/") or q.startswith("/devtools/browser/") or q.startswith("/devtools/inspector"):
+          return "attach"
+      if q.startswith("/json/new") or q.startswith("/json/close/") or q.startswith("/json/activate/"):
+          return "mutate"
+      if q.startswith("/json/version") or q.startswith("/json/protocol"):
+          return "probe"
+      return ""
+
+  # NOT a trust list: loopback is never exempted from detection, it only fails to
+  # contribute the "network-reachable bridge" escalator.
+  def is_loopback(h):
+      x = h.lower()
+      if x.startswith("[") and x.endswith("]"):
+          x = x[1:-1]
+      if x == "localhost" or x == "::1" or x == "0:0:0:0:0:0:0:1":
+          return True
+      if x.startswith("127."):
+          return True
+      if x.endswith(".localhost"):
+          return True
+      return False
+
+  def target_ref(p):
+      q = strip_query(p)
+      parts = q.split("/")
+      if len(parts) >= 4 and parts[3] != "":
+          return parts[3]
+      return q
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "https://" + e.get("host", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     "HTTP_REQUEST",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "method":   e.get("method", ""),
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no traversal ─────────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      trig_path = meta.get("path", "")
+      trig_cls  = cdp_class(trig_path)
+      if trig_cls != "enum" and trig_cls != "attach" and trig_cls != "mutate":
+          return "allow"          # /json/version probes alone are not worth traversal
+
+      # ── 2. anchor on the exact triggering instance ──────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      ts_now = int(meta.get("event_ts", "0"))
+      if ts_now == 0:
+          return "allow"
+      inst = proc_instance(cp, ts_now)
+      if inst == None:
+          return "allow"          # degraded attribution — re-fires when create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      lo = ts_now - WINDOW_NS
+
+      # ── 3. scope to ONE session: lineage + processes it spawned ─────────────
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=lo, until_ns=ts_now, limit=4000)
+      for depth in range(3):
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap != "" and ap not in session:
+                  session[ap] = e.get("actor_start", "0")
+
+      # ── 4. collect this session's CDP HTTP surface hits, scoped by actor ────
+      evs = []
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=lo, until_ns=ts_now, limit=300):
+              if cdp_class(e.get("path", "")) != "":
+                  evs.append(e)
+
+      # the triggering request comes from meta, never from a log lookup
+      trig = {
+          "ts":          str(ts_now),
+          "kind":        "HTTP_REQUEST",
+          "actor_pid":   str(cp),
+          "actor_start": inst.get("actor_start", "0"),
+          "actor_path":  inst.get("actor_path", ""),
+          "host":        meta.get("host", ""),
+          "path":        trig_path,
+          "method":      meta.get("method", ""),
+          "target_id":   "",
+      }
+      evs.append(trig)
+
+      # ── 5. ordered stages: enumeration must precede attach ──────────────────
+      enum_ev = None
+      for e in evs:
+          if cdp_class(e.get("path", "")) != "enum":
+              continue
+          if enum_ev == None or int(e["ts"]) < int(enum_ev["ts"]):
+              enum_ev = e
+      if enum_ev == None:
+          return "allow"                     # REQUIRED anchor absent
+      t0 = int(enum_ev["ts"])
+
+      attach_ev = None
+      targets   = {}
+      for e in evs:
+          if cdp_class(e.get("path", "")) != "attach":
+              continue
+          t = int(e["ts"])
+          if t < t0 or t > ts_now:
+              continue
+          targets[target_ref(e.get("path", ""))] = True
+          if attach_ev == None or t < int(attach_ev["ts"]):
+              attach_ev = e
+      if attach_ev == None:
+          return "allow"                     # enumeration without attach is not takeover
+
+      mutate_ev = None
+      for e in evs:
+          if cdp_class(e.get("path", "")) != "mutate":
+              continue
+          t = int(e["ts"])
+          if t < t0 or t > ts_now:
+              continue
+          if mutate_ev == None or t < int(mutate_ev["ts"]):
+              mutate_ev = e
+
+      remote_host = ""
+      for e in evs:
+          if int(e["ts"]) < t0:
+              continue
+          h = e.get("host", "")
+          if h != "" and remote_host == "" and not is_loopback(h):
+              remote_host = h
+
+      # ── 6. escalators — at least one required ───────────────────────────────
+      esc = []
+      if remote_host != "":
+          esc.append("network-reachable bridge host " + remote_host)
+      if mutate_ev != None:
+          esc.append("control-plane mutation " + strip_query(mutate_ev.get("path", "")))
+      if len(targets) >= MASS_ATTACH:
+          esc.append(str(len(targets)) + " distinct browser targets attached")
+      if not esc:
+          return "allow"
+
+      # ── 7. one report per session anchor ────────────────────────────────────
+      root = lineage[len(lineage) - 1]
+      skey = root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          if ts_now - int(seen[k]) <= DEDUPE_NS:
+              fresh[k] = seen[k]
+      if skey in fresh:
+          return "allow"
+      fresh[skey] = str(ts_now)
+      if store_usage()["free"] > 8192:
+          store_set("reported", fresh)
+
+      # ── 8. kill chain built from instance-resolved event rows ───────────────
+      chain = new_chain("process://" + root.get("actor_path", inst.get("actor_path", "")))
+      chain.append(step(ev_edge(enum_ev),
+                        stage_id="Session Discovery",
+                        stage_desc="CDP target enumeration " + strip_query(enum_ev.get("path", "")) +
+                                   " on " + enum_ev.get("host", "?")))
+      chain.append(step(ev_edge(attach_ev),
+                        stage_id="Session Attach",
+                        stage_desc="attached to browser target " + target_ref(attach_ev.get("path", "")) +
+                                   " on " + attach_ev.get("host", "?") +
+                                   " (WebSocket control channel is not observable by this engine)"))
+      if mutate_ev != None:
+          chain.append(step(ev_edge(mutate_ev),
+                            stage_id="Session Control",
+                            stage_desc="CDP control-plane mutation " + strip_query(mutate_ev.get("path", "")) +
+                                       " on " + mutate_ev.get("host", "?")))
+      if trig != enum_ev and trig != attach_ev and trig != mutate_ev:
+          chain.append(step(ev_edge(trig),
+                            stage_id="Live Request",
+                            stage_desc="triggering CDP request " + strip_query(trig_path) +
+                                       " on " + trig.get("host", "?")))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+
+      reason = ("CDP browser bridge session takeover pattern: enumerate -> attach" +
+                " (" + ", ".join(esc) + ") across " + str(len(targets)) +
+                " target(s) via " + " -> ".join(names))
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
