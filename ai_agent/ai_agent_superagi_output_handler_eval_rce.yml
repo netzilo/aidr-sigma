@@ -1,0 +1,125 @@
+title: SuperAGI Output Handler Eval RCE
+id: 7c1e4b0a-3f2d-4a86-9b51-2d8e0f6ac417
+status: experimental
+level: high
+description: |
+  Detects the process-execution artefact of an eval()/exec() injection in an AI
+  agent framework's output handler (SuperAGI CVE class, CWE-95).
+
+  SuperAGI passes unsanitised model/tool output to Python's eval(). Because eval()
+  accepts only *expressions*, a working payload cannot use an `import` statement --
+  it must reach the OS through an expression-only idiom such as
+  `__import__('os').system(...)`, `eval(compile(...))`, `exec(__import__(...))` or a
+  base64/marshal-decoded blob. That idiom, appearing on a Python interpreter
+  command line together with an OS/network sink, is the tightest single-event
+  signature of eval-driven RCE in the agent runtime.
+
+  Fires on one execute_process event only: a Python interpreter spawned with inline
+  code (-c) whose command line contains BOTH an eval/exec call AND an OS, network,
+  decode or introspection sink -- or the expression-only `__import__('os')` dotted
+  call that eval payloads are forced to use.
+author: Tanya
+date: "2026-02-18"
+modified: "2026-02-18"
+references:
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://cwe.mitre.org/data/definitions/95.html
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - atlas.aml.t0050
+  - atlas.aml.t0051
+  - owasp.llm05
+  - owasp.asi05
+  - owasp.asi06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: syscall-level process spawn only ────────────────────────────────
+  sel_evt:
+    event_type: execute_process
+
+  # ── a Python-family interpreter is the spawned binary ──────────────────────
+  sel_python_interp:
+    content|re: '(?i)\b(python[0-9.]{0,4}|pypy[0-9.]{0,4})\b'
+
+  # ── inline code, not a script path: the -c flag (tolerant of JSON escaping) ─
+  sel_inline_code:
+    content|re: '(?:^|\s)-c[\s"''\\]'
+
+  # ── an actual eval()/exec() call. The leading negated class excludes
+  #    ast.literal_eval( and DataFrame.eval( without needing lookbehind (RE2).
+  sel_eval_call:
+    content|re: '(?:^|[^A-Za-z0-9_.])(eval|exec)\s*\('
+
+  # ── an OS / network / decode / introspection sink in the same command line ─
+  sel_dangerous_sink:
+    content|re:
+      - 'os\.(system|popen|execv?p?e?|spawn[lv]p?e?)\s*\('
+      - 'subprocess\.(Popen|run|call|check_output|check_call|getoutput)\s*\('
+      - 'pty\.spawn\s*\('
+      - 'socket\.socket\s*\('
+      - 'urllib\.request\.urlopen\s*\('
+      - 'requests\.(get|post)\s*\('
+      - 'base64\.b64decode\s*\('
+      - 'codecs\.decode\s*\('
+      - 'marshal\.loads\s*\('
+      - 'pickle\.loads\s*\('
+      - 'compile\s*\('
+      - 'getattr\s*\(\s*__builtins__'
+      - '\.__globals__\b'
+      - '\.__subclasses__\s*\('
+
+  # ── the expression-only import idiom that eval payloads are forced to use ──
+  sel_import_expr_payload:
+    content|re: '__import__\s*\(\s*[\\"'']{1,2}(os|subprocess|socket|pty|builtins|importlib|base64|shutil|ctypes)[\\"'']{1,2}\s*\)\s*\.'
+
+  # ── benign-case suppressions ───────────────────────────────────────────────
+  filter_literal_eval:
+    content|contains: 'literal_eval'
+
+  # pip's legacy setup.py shim: python -c "import setuptools, tokenize; ... exec(compile(...__file__...))"
+  filter_pip_setuptools_shim:
+    content|contains|all:
+      - 'setuptools'
+      - 'tokenize'
+      - '__file__'
+
+  # security/static-analysis tooling that greps for eval( as its own argument
+  filter_static_analysis:
+    content|re: '(?i)\b(bandit|semgrep|codeql|sonar[-_]?scanner|ruff|flake8|pylint|mypy|ripgrep|rg|grep|ack)\b'
+
+  # test harnesses executing injection fixtures / regression cases
+  filter_test_harness:
+    content|re: '(?i)\b(pytest|unittest|nose2|tox|coverage|hypothesis)\b'
+
+  # configuration-management agents that legitimately ship inline python payloads
+  filter_config_mgmt:
+    content|re: '(?i)\b(ansiballz|ansible[-_]module|salt[-_]call|chef[-_]client|puppet[-_]agent)\b'
+
+  condition: >
+    sel_evt and sel_python_interp and sel_inline_code and
+    ((sel_eval_call and sel_dangerous_sink) or sel_import_expr_payload)
+    and not (filter_literal_eval or filter_pip_setuptools_shim or
+    filter_static_analysis or filter_test_harness or filter_config_mgmt)
+
+action: report
+
+falsepositives:
+  - pip / legacy build backends invoking the setuptools setup.py shim
+    ("python -c 'import setuptools, tokenize; ... exec(compile(...))'") -- suppressed
+    by filter_pip_setuptools_shim.
+  - Security scanners and grep-like tools whose own argv contains "eval(" while
+    searching a codebase for eval sinks -- suppressed by filter_static_analysis.
+  - Unit/integration tests and security regression fixtures that deliberately execute
+    eval payloads under pytest/tox -- suppressed by filter_test_harness.
+  - Ansible/Salt/Chef/Puppet inline Python modules that embed base64-decoded payloads
+    -- suppressed by filter_config_mgmt.
+  - Developer or CI one-liners such as "python -c \"import subprocess; subprocess.run(...)\"";
+    these use a plain import statement and no eval/exec call, so they do not match.
+  - Pandas / SQLAlchemy "df.eval(...)" and "ast.literal_eval(...)" expressions -- excluded
+    by the leading negated character class in sel_eval_call and by filter_literal_eval.
