@@ -1,0 +1,38 @@
+title: Amoral Persona Assignment with Obsessive Character Traits
+id: 0546ce6d-4787-4d84-b6d2-6b3cc37e8370
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that assign an explicitly amoral or unfiltered persona to the agent combined with obsessive character repetition requirements. This attack pattern instructs the AI to adopt a harmful persona (amoral, unfiltered, evil chatbot) while demanding specific character traits or phrases be repeated multiple times per response. The combination creates a dual-layer bypass: persona adoption removes safety constraints while repetition requirements lock the agent into harmful output patterns. Common variants include EXTREME-COMMUNIST, EXTREME-CAPITALIST, or other ideological personas with mandatory profanity and topic obsession.
+
+  Adapted from Agent Threat Rules ATR-2026-00239 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00239
+- 'https://arxiv.org/abs/2312.02119 - Tree of Attacks: Jailbreaking Black-Box LLMs Automatically'
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:act|behave|roleplay|portray|simulate|impersonate)\s+(?:as|like)\s+(?:a[n]?\s+)?(?:extreme|extremal|unfiltered|amoral|immoral|unethical|evil|malicious|rogue|unrestricted|uncensored)\s+(?:chatbot|assistant|ai|bot|model|entity|intelligence)
+  sel_1:
+    response|re: (?:it\s+)?(?:doesnt?\s+have|has\s+no|without)\s+(?:any\s+)?(?:ethical|moral)\s+(?:guidelines?|constraints?|boundaries|restrictions?|rules?)
+  sel_2:
+    response|re: (?:will\s+)?never\s+(?:tell|say|respond|mention)\s+(?:me\s+that\s+)?(?:it\s+)?(?:cant?|cannot|wont?|will\s+not|refuses?\s+to|is\s+unable\s+to)
+  sel_3:
+    response|re: (?:minimum|at\s+least|more\s+than)\s+\d+\s+(?:times?|references?)\s+(?:in\s+)?(?:every\s+)?(?:sentence|response|answer|message)
+  sel_4:
+    response|re: (?:send|respond|answer|format)\s+(?:all\s+(?:of\s+)?your\s+)?responses?\s+(?:in\s+this\s+format|as)\s*[:"]?\s*[☇⚠🔥💀⭐]
+  condition: 1 of sel_*
+falsepositives:
+- Security research papers describing jailbreak techniques in academic context
+- Red team training materials discussing persona-based attack methods
+- Creative writing tools that explicitly operate within safety guidelines
+action: report

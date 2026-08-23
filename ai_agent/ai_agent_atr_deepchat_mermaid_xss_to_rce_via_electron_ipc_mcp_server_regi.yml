@@ -1,0 +1,38 @@
+title: DeepChat Mermaid XSS to RCE via Electron IPC MCP Server Registration (CVE-2025-66481 / GHSA-h9f5-7hhf-fqm4)
+id: f23ee1be-0dec-4fd1-a27c-ab8bf37979d5
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2025-66481 (CVSS 9.6 CRITICAL): DeepChat <= 0.5.1 incompletely sanitizes Mermaid diagram content in MermaidArtifact.vue. The sanitizer regex /on\w+\s*=\s*["'][^"']*["']/ only strips QUOTED event-handler attributes, so an unquoted handler (e.g. `<audio src=x onerror=...>`) survives and executes in the Electron renderer. The PoC handler invokes window.electron.ipcRenderer.invoke ('presenter:call','mcpPresenter','addMcpServer',...) then 'startServer' to register and launch a malicious stdio MCP server (command:'calc.exe'), escalating stored XSS to remote code execution. This rule keys on the unquoted-onerror + IPC presenter:call mcpPresenter addMcpServer/startServer tokens, not on Mermaid alone.
+
+  Adapted from Agent Threat Rules ATR-2026-01967 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01967
+- https://nvd.nist.gov/vuln/detail/CVE-2025-66481
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<\s*(?:audio|img|video|svg|image|object|input|body|details)\b[^>]*\bon\w+\s*=\s*[^"'\s>][^>]*?(?:electron\.)?ipcRenderer\.invoke\s*\(\s*['"]presenter:call['"]
+  sel_1:
+    content|re: (?i)ipcRenderer\.invoke\([^)]*['"]mcpPresenter['"][^)]*['"](?:addMcpServer|startServer)['"]
+  sel_2:
+    content|re: (?i)CVE-2025-66481[\s\S]{0,200}(?:mermaid|MermaidArtifact|onerror|ipcRenderer|mcpPresenter)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate Mermaid diagram (graph/flowchart/sequenceDiagram) with node labels and no event-handler
+  attributes or IPC calls.
+- DeepChat source/docs discussing the electron.ipcRenderer presenter bridge or mcpPresenter API without
+  an embedded onerror handler payload.
+- A normal addMcpServer config object with command:'npx' that is not wrapped inside an HTML event handler
+  attribute.
+action: report

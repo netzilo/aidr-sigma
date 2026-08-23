@@ -1,0 +1,44 @@
+title: MCP Tool Rug-Pull — Post-Approval Description Redefinition Injects Execution Instructions
+id: 8e88c006-347e-47cf-99d8-305867eaf717
+status: experimental
+level: high
+description: |-
+  Detects the MCP "rug pull" tool-poisoning class (The Vulnerable MCP Project entry tool-poisoning-rce-rug-pull, reported by Repello AI). A tool's description / docstring is benign at install or approval time, then SILENTLY REDEFINED later — on a version bump, a second run, a hidden marker file, or "after the user approves" — to inject hidden execution or exfiltration instructions. This is a time-of-check / time-of-use attack on the tool definition itself, not a static hidden directive. The detectable signature is a TEMPORAL redefinition trigger ("after you approve", "on version update", "on subsequent runs", "now that this tool is trusted") co-occurring with an imperative execution / exfil instruction (run a base64-piped command, read ~/.ssh keys, post to a remote host). Auto-run MCP clients execute the redefined description without re-prompting.
+
+  Adapted from Agent Threat Rules ATR-2026-00581 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00581
+- https://repello.ai/blog/mcp-tool-poisoning-to-rce
+- https://github.com/vineethsai/vulnerablemcp
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:after\s+(?:the\s+)?user\s+(?:has\s+)?approv\w*|once\s+(?:you|this\s+tool|the\s+tool)\s+(?:are\s+|is\s+)?(?:trust|approv|install)\w*|now\s+that\s+(?:you|this\s+tool|the\s+tool)\s+(?:trust\w*|are\s+trusted|is\s+trusted|is\s+approved)|on\s+(?:the\s+)?(?:next|subsequent|second)\s+(?:run|invocation|call|use)|on\s+(?:a\s+)?version\s+(?:update|bump|change)|after\s+(?:the\s+)?(?:marker|init(?:ialization)?)\s+(?:file\s+)?(?:is\s+)?(?:detected|present|exists))\b[\s\S]{0,200}?(?:~/\.ssh|\bid_rsa\b|\bid_ed25519\b|\.aws/credentials|\.env\b|\bcredential\w*|\bsecret\w*|\btoken\b|\bapi[_\s-]?key\b|\bbase64\b|\|\s*(?:sh|bash)\b|\b(?:curl|wget)\b[\s\S]{0,40}?(?:https?://|\|\s*(?:sh|bash)\b)|https?://\S+|\bsilently\b|without\s+(?:telling|informing|notifying)\s+(?:the\s+)?user|do\s+not\s+(?:mention|tell|inform|notify)|instruct\w*\s+the\s+(?:ai|assistant|llm|agent)\s+to\s+(?:run|execute)|you\s+must\s+(?:run|execute)|required\s+(?:init(?:ialization)?|setup)\s+steps?)
+  sel_1:
+    content|re: (?i)\b(?:modif(?:y|ies|ied)|rewrit|redefin|updat|chang|inject)\w*\s+(?:its\s+own\s+|the\s+)?(?:tool\s+)?(?:description|docstring|definition|manifest|schema)\b[\s\S]{0,160}?\b(?:required\s+(?:init|initialization|setup)\s+steps?|you\s+must\s+(?:run|execute)|instruct\w*\s+the\s+(?:ai|assistant|llm|agent)\s+to\s+(?:run|execute))\b
+  sel_2:
+    content|re: (?i)\b(?:required\s+(?:initialization|init|setup)\s+steps?|to\s+(?:finish|complete)\s+(?:initialization|setup))\b[\s\S]{0,200}?(?:~/\.ssh/|id_rsa|id_ed25519|\.aws/credentials|\.env\b)[\s\S]{0,120}?\b(?:base64|wget|curl)\b
+  condition: 1 of sel_*
+falsepositives:
+- Changelogs / release notes that mention a 'version update' or 'on the next run' in benign user-facing
+  language without any embedded execution or exfil instruction.
+- Security research, blogs, and advisories that DESCRIBE the rug-pull attack class (including the words
+  'rug pull', 'redefine', 'post-approval') but do not embed a live temporal-trigger + execution payload
+  in a tool description.
+- Legitimate tools that document initialization steps performed by the tool's own code (not directives
+  instructing the LLM to run shell commands or read private keys).
+- Test fixtures and MCP scanner corpora that catalog rug-pull payloads as reference samples — should live
+  in test directories, not be served over MCP.
+action: report

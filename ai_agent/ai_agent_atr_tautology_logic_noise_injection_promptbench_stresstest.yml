@@ -1,0 +1,31 @@
+title: Tautology Logic Noise Injection (PromptBench Stresstest)
+id: 99d5781f-109a-43fd-8b6b-5a4da083a812
+status: experimental
+level: medium
+description: |-
+  Detects the PromptBench 'stresstest' attack: repeated appending of tautological logic clauses ("and true is true", "and false is not true") to the end of a prompt to confuse model reasoning or cause prompt length overflow. Unlike standard prompt injection that redirects the model, stresstest attacks degrade the model's ability to follow the original instruction by padding with distracting logic noise. Attested in PromptBench (Microsoft Research, 2023) as a distinct adversarial attack type with 425 instances. The structural regex requires 3 or more consecutive repetitions of the pattern "and (true|false) is (not)? (true|false)" -- the repetition count is the detection signal distinguishing attack from legitimate logical phrasing. A single occurrence is not flagged.
+
+  Adapted from Agent Threat Rules ATR-2026-00519 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00519
+- https://github.com/microsoft/promptbench
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:(?:and\s+(?:true|false)\s+is\s+(?:not\s+)?(?:true|false)[\s,.]*)){3,}
+  condition: sel_0
+falsepositives:
+- Legitimate propositional logic discussions with a single tautology example
+- Boolean algebra tutorials with isolated true/false statements
+- Two-occurrence sequences (below the 3-repetition threshold)
+action: report

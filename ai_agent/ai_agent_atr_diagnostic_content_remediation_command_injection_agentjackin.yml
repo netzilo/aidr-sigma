@@ -1,0 +1,40 @@
+title: Diagnostic Content Remediation Command Injection (Agentjacking)
+id: c157ef60-aba4-4819-9647-18cb7573871d
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection delivered through untrusted diagnostic / error-monitoring content (the "Agentjacking" class disclosed by Tenet Security, 2026-06, against the Sentry MCP server). An attacker plants a fabricated error event whose remediation section instructs the coding agent to run an attacker-controlled command; the agent treats the injected text as trusted diagnostic guidance and executes it. This rule keys on the distinctive combination of a resolution / remediation framing carried inside diagnostic content AND an auto-executing or remote-fetch-execute payload (npx --yes on a scoped package, curl/wget piped to a shell, iwr|iex, base64|sh). It does not fire on ordinary remediation advice that names a known package install, and it does not key on any single vendor name.
+
+  Adapted from Agent Threat Rules ATR-2026-02027 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02027
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0051
+- owasp.asi06
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:#{1,4}\s*resolution|recommended\s+(?:fix|remediation|resolution|action)|to\s+(?:fix|resolve|clear|remediate)\s+(?:this|the|your)|\brun\s+the\s+following\s+(?:diagnostic|command|tool|fix|to)|resolution\s*[:=]|"remediation")[\s\S]{0,240}(?:npx\s+(?:--yes|-y)\s+@[\w.-]+\/[\w.-]+|\bcurl\s+[^\n|]{0,200}\|\s*(?:ba|z|d)?sh\b|\bwget\s+[^\n|]{0,200}\|\s*(?:ba|z|d)?sh\b|iwr\s+[^\n|]{0,200}\|\s*iex\b|base64\s+-d\s*\|\s*(?:ba)?sh\b)
+  sel_1:
+    content|re: (?i)(?:sentry|error\s+event|issue\s+(?:id|#|tracker)|monitoring\s+alert|exception\s+(?:captured|event)|stack\s*trace|breadcrumb)[\s\S]{0,300}(?:"?(?:resolution|remediation|recommended_action|fix|extra)"?\s*[:=][\s\S]{0,160})?(?:npx\s+(?:--yes|-y)\s+@[\w.-]+\/[\w.-]+|\bcurl\s+[^\n|]{0,200}\|\s*(?:ba)?sh\b|iwr\s+[^\n|]{0,200}\|\s*iex\b)
+  sel_2:
+    content|re: (?i)"?(?:resolution|remediation|recommended_action)"?\s*[:=]\s*["'`][\s\S]{0,160}(?:npx\s+(?:--yes|-y)\s+@[\w.-]+\/[\w.-]+|\bcurl\s+[^\n|]{0,160}\|\s*(?:ba)?sh\b|iwr\s+[^\n|]{0,160}\|\s*iex\b)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate error/remediation note that recommends installing a named, known package (e.g. 'run npm
+  install lodash@latest') with no auto-execute or remote-fetch-and-run payload.
+- A real stack trace or reproduction step that mentions npm/npx to reproduce or build, without a resolution/remediation
+  framing telling the agent to execute an attacker package.
+- Security advisory text describing the Agentjacking technique itself without an actual executable injected
+  payload.
+- A setup/quickstart guide using npx to scaffold a project (e.g. 'npx create-next-app') outside of any
+  diagnostic/error-resolution context.
+action: report

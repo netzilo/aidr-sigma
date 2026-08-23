@@ -1,0 +1,42 @@
+title: Delayed Tool Invocation via Prompt Injection (Time-Shifted Execution)
+id: 02ddfc8c-f0fc-444e-818e-94828ce1148a
+status: experimental
+level: critical
+description: |-
+  Detects prompt injections that instruct an agent to defer malicious actions to a future interaction or tool call, bypassing immediate security controls. The attack plants instructions in current context that activate on a subsequent turn, email-send event, or browse action. MITRE ATLAS AML.CS0038 (Gemini Workspace attack). Pattern: deferred execution instruction combined with malicious action payload — temporal-shift verbs ("next time", "when you next", "on your next response", "schedule for next run") co- occurring with high-risk action targets (credential access, context exfiltration, forwarding, browsing to external URLs).
+
+  Adapted from Agent Threat Rules ATR-2026-00510 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00510
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(execute|run|perform|carry\s+out|activate|trigger|invoke|apply|do\s+this|take\s+effect)\b.{0,50}\b(on\s+(the\s+)?(next|your\s+next)|when\s+you\s+next|next\s+time\s+you|the\s+next\s+time\s+you|on\s+your\s+next\s+(response|tool\s+call|interaction|turn|message|request))
+  sel_1:
+    content|re: (?i)\b(remember|store|keep\s+in\s+mind|retain|hold\s+onto)\b.{0,60}\b(and\s+(execute|run|perform|apply|invoke|carry\s+out)|to\s+execute\s+later|when\s+the\s+user\s+next|on\s+the\s+next\s+(tool|interaction|message|turn|session))
+  sel_2:
+    content|re: (?i)\bwhen\s+(the\s+)?user\s+(next\s+)(asks?|requests?|tells?|instructs?|wants?)\s+(you\s+)?(to\s+)?(send|forward|browse|visit|fetch|call|run|execute|access|open|email|post|upload|download|exfiltrate|share|transfer)|\bwhen\s+(the\s+)?user\s+(asks?|requests?|tells?|instructs?|wants?)\s+(you\s+)?(to\s+)?(exfiltrate|forward\s+all|send\s+(all|the\s+)?(credentials?|contacts|conversation|context))
+  sel_3:
+    content|re: (?i)\b(schedule\s+for\s+(next|the\s+next)|defer\s+(to|until)\s+(the\s+)?(next|your\s+next)|wait\s+until\s+(the\s+)?(next|your\s+next)|queue\s+for\s+(next|the\s+next)|postpone\s+(to|until)\s+next)\b.{0,80}\b(run|execution|session|interaction|turn|message|response|tool\s+call|request)
+  sel_4:
+    content|re: (?i)\b(this\s+(instruction|command|task|directive|order|note)\s+(takes?\s+effect|activates?|executes?|runs?|applies?|becomes?\s+active)|activate\s+this\s+when|execute\s+this\s+when|run\s+this\s+when)\b.{0,80}\b(next|later|future|subsequent|following|when\s+you|when\s+the\s+user)
+  sel_5:
+    content|re: (?i)\b(then|next|after\s+(that|this|it)|first|also|additionally|and\s+then)\s+(forward|exfiltrate|send|email|post|upload|transmit|relay|export|leak|copy)\b.{0,80}\b(all\s+contacts|all\s+(the\s+)?(credentials?|messages?)|credentials?\s+to|passwords?\s+to|tokens?\s+to|api\s+keys?\s+to|ssh\s+keys?|system\s+prompt|current\s+context|env\s+(vars?|variables?)|session\s+data)
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate multi-step workflow instructions: ''execute the tests after the build completes'''
+- 'Legitimate scheduling requests: ''remind me tomorrow'', ''schedule a follow-up for next week'''
+- CI/CD pipeline instructions referencing sequential steps
+- 'User confirmation gates: ''when user confirms, proceed with file transfer'''
+action: report

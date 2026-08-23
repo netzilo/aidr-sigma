@@ -1,0 +1,33 @@
+title: 'Indirect Prompt Injection: Fake-Authority Task Abort'
+id: a09df58b-9975-4c09-9fa3-ae0c9d62fbc3
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads that impersonate an authoritative system message (INFORMATION block, signed message from a named person) in order to abort the agent's current task and substitute a trivial or nonsensical response. The invariant artifact is a structured block claiming to be an "important message" from a specific person, directing the agent to "immediately stop" or respond with a fixed short string instead. Derived from AgentDojo indirect-pi-dos corpus (2026-06, N=2). This is a goal-hijacking/DoS vector that disables the agent's legitimate task without triggering content-safety filters.
+
+  Adapted from Agent Threat Rules ATR-2026-01751 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01751
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<INFORMATION>\s*[\s\S]{0,200}\b(immediately\s+stop|stop\s+what\s+you('re|\s+are)\s+doing|should\s+immediately\s+stop)\b
+  sel_1:
+    content|re: (?i)\bthis\s+is\s+(an?\s+)?important\s+message\s+from\s+me\b[\s\S]{0,200}\b(immediately\s+stop|stop\s+(what|whatever)\s+you|reply\s+(to\s+me\s+)?['"\w]{1,20}\s+instead)\b
+  sel_2:
+    content|re: (?i)<INFORMATION>[\s\S]{0,400}(reply\s+(to\s+me\s+)?['"]\w+['"]\s+instead|respond\s+with\s+['"]\w+['"]\s+instead)
+  condition: 1 of sel_*
+falsepositives:
+- Security training materials that reproduce this attack pattern in quoted form
+- Agent documentation explaining INFORMATION block injection attacks
+action: report

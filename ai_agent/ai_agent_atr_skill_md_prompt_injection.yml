@@ -1,0 +1,34 @@
+title: SKILL.md Prompt Injection
+id: 2241cd15-5624-4d00-87ef-515bbba2b5b6
+status: experimental
+level: critical
+description: |-
+  Detects prompt injection patterns embedded in SKILL.md files. 91% of confirmed malicious skills combine prompt injection with malware delivery (Snyk ToxicSkills, Feb 2026). Patterns include: system message impersonation, DAN-style jailbreaks, instruction override, and safety disablement. The convergence attack flow uses prompt injection first to disable safety warnings, then delivers malicious payloads. Real campaign: ClawHavoc (1,184 skills) used injection to bypass agent safety before credential exfiltration.
+
+  Adapted from Agent Threat Rules ATR-2026-00120 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00120
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(you\s+are\s+(now\s+)?in\s+(developer|unrestricted|god|admin|root)\s+mode|security\s+warnings?\s+are\s+test\s+artifacts?|enable\s+advanced\s+features?\s+mode)
+  sel_1:
+    content|re: (?i)(you\s+(must|should|will|shall)\s+(ignore|disregard|override|forget|bypass|circumvent|supersede|set\s+aside|discard|abandon)\s+(all\s+)?(previous|prior|system|safety)\s+\w*\s*(instructions?|rules?|guidelines?|prompts?))|((?:ignore|disregard|bypass|circumvent|supersede|set\s+aside)\s+all\s+(previous|prior|safety|system)\s+\w*\s*(instructions?|rules?|guidelines?|prompts?))
+  condition: 1 of sel_*
+falsepositives:
+- Security research skills discussing prompt injection techniques
+- Skills that teach prompt injection defense
+- Documentation that explains how developer mode works in an IDE, e.g. 'You are now in developer mode'
+  appearing in a tutorial about VS Code debug configurations
+- A skill that discusses historical prompt injection attacks in an academic context, quoting attack taxonomies
+  without using the exact trigger phrases
+action: report

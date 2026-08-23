@@ -1,0 +1,34 @@
+title: 'DoS Injection: NEW IMPORTANT INSTRUCTIONS Embedded in Document Data'
+id: 9a38b72e-a387-4b7d-8e7e-df92e048c518
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection that embeds adversarial instructions inside document or data content using the "*** NEW IMPORTANT INSTRUCTIONS ***" header pattern. The attack appends an override command inside a document that an agent is processing (e.g., summarise this article, answer a question about this data). The model processes the document and encounters the injected header, which it treats as authoritative system instructions. Canonical payload from spikee dos-output-amplification corpus (2026-06): the instruction after the header is a repeat-N-times DoS command, but the header pattern itself is a generic injection carrier for any malicious command. This rule detects the header artifact; the specific payload (DoS, exfil, etc.) is handled by downstream rules.
+
+  Adapted from Agent Threat Rules ATR-2026-01759 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01759
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\*{2,3}\s*NEW\s+IMPORTANT\s+INSTRUCTIONS\s*\*{2,3}
+  sel_1:
+    content|re: (?i)\*{2,3}\s*(IMPORTANT|CRITICAL|URGENT|PRIORITY)\s+(INSTRUCTIONS?|SYSTEM\s+OVERRIDE|NEW\s+DIRECTIVE|OVERRIDE|COMMANDS?)\s*\*{2,3}
+  sel_2:
+    content|re: (?i)---+\s*(SYSTEM\s+(OVERRIDE|INSTRUCTIONS?|DIRECTIVE|COMMAND)|NEW\s+(INSTRUCTIONS?|DIRECTIVES?|COMMANDS?))\s*---+
+  sel_3:
+    content|re: (?i)\[{2,3}\s*(SYSTEM|OVERRIDE|INJECTED)\s+(INSTRUCTIONS?|PROMPT|COMMAND)\s*\]{2,3}
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation or test suites that quote this injection pattern in examples
+- Legitimate document templates that use starred headers for section markers (rare overlap)
+action: report

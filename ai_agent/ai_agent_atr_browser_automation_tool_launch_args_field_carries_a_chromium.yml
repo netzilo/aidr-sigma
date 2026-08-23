@@ -1,0 +1,49 @@
+title: Browser-Automation Tool Launch-Args Field Carries a Chromium Command-Replacing Switch
+id: 6dca8ebc-e82c-4777-bc55-def3beaaef5d
+status: experimental
+level: critical
+description: |-
+  Detects a browser-automation/crawler MCP tool call whose Chromium launch-argument field (extra_args / browser_config / chrome_args / browser_args / launch_args) carries one of the four Chromium switches that replace a child-process launch command -- --utility-cmd-prefix / --renderer-cmd-prefix / --gpu-launcher / --browser-subprocess-path -- optionally paired with --no-zygote (which forces Chromium to fork/exec via that replaced command instead of the zygote process). Mined from GHSA-r253-r9jw-qg44 (CVE-2026-57572, crawl4ai): the Docker API server accepted a request-supplied browser_config.extra_args and passed it straight into Chromium's launch arguments; a denylist of proxy/DNS flags from an earlier SSRF patch did not cover these command-execution switches, so a single unauthenticated request achieved arbitrary command execution as the container runtime user. Generalized beyond crawl4ai to any agent/browser-automation tool that forwards a caller- or LLM-controlled launch-args list into a Chromium/Chrome/Puppeteer/Playwright process without an allowlist.
+
+  Adapted from Agent Threat Rules ATR-2026-02371 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02371
+- https://github.com/unclecode/crawl4ai/security/advisories/GHSA-r253-r9jw-qg44
+- https://github.com/unclecode/crawl4ai/commit/60886d1a0c52682e4c83a7cef9dfac417fff6bd2
+- https://nvd.nist.gov/vuln/detail/CVE-2026-57572
+- https://github.com/advisories/GHSA-r253-r9jw-qg44
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)--(?:utility-cmd-prefix|renderer-cmd-prefix|gpu-launcher|browser-subprocess-path)\s*=[\s\S]{0,40}--no-zygote\b
+  sel_1:
+    content|re: (?i)--no-zygote\b[\s\S]{0,40}--(?:utility-cmd-prefix|renderer-cmd-prefix|gpu-launcher|browser-subprocess-path)\s*=
+  condition: 1 of sel_*
+falsepositives:
+- A launch-args field carrying ordinary Chromium flags with no command-replacing switch (e.g. extra_args=["--headless",
+  "--disable-gpu"])
+- Chromium/Chrome-internals engineering documentation discussing these switch names without an actual
+  tool-call argument being set to them
+- A --no-zygote flag used alone for container/sandboxing compatibility with no accompanying cmd-prefix/launcher/subprocess-path
+  switch
+- 'A local developer wrapping the renderer/utility process with a well-known debugger or profiler for
+  legitimate crash investigation (e.g. --renderer-cmd-prefix="gdb --args", --utility-cmd-prefix="valgrind",
+  or lldb/strace/ltrace/perf) -- adversarially confirmed during review: caught by an earlier, broader
+  version of condition 1 and fixed with a negative lookahead'
+- 'Residual: a backslash-escaped quote before the debugger name (e.g. --renderer-cmd-prefix=\"gdb --args\"
+  as a doubly-JSON-escaped literal) can still evade the lookahead, since the lookahead''s optional ["'']?
+  does not account for a preceding backslash -- an accepted, narrow residual gap given this exact escaping
+  shape is uncommon in the flat tool-call-argument text this rule targets'
+action: report

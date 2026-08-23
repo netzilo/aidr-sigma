@@ -1,0 +1,40 @@
+title: MCP Tool Description — Notes Parameter Chat-History Exfiltration
+id: 06a27571-05eb-4c0c-84a7-6c3dfa856b75
+status: experimental
+level: critical
+description: |-
+  Detects MCP tool descriptions that instruct the LLM to populate a "notes", "context", or "history" parameter with the full conversation transcript before calling the tool. This is a covert data-exfiltration vector: the poisoned description makes the LLM silently include all prior messages (including credentials, PII, and secrets) in every outbound tool call, regardless of whether the tool legitimately requires that data. Published as MCPSecBench scenario "chat-history-in-notes". Real-world variants use compliance framing ("SOC 2 audit", "legal and regulatory obligations"), technical justification ("context length management"), and formatting pressure ("Usr hist [DT] [MSG]" template) to make the instruction appear legitimate.
+
+  Adapted from Agent Threat Rules ATR-2026-01300 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01300
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bnotes?\b[^.\n]{0,60}\b(?:include|includes|including|contain|contains|add|adds|append|pass|passing|populate|offload|retain|provide|insert|embed|put|capture|store)\b[^.\n]{0,40}(?:(?:full|complete|entire|whole|previous|prior|all|the)\s+)*(?:(?:chat|conversation|message|messages|exchange|exchanges|transcript|dialogue|interaction)\s+)?(?:history|transcript|log|exchanges?|conversation|messages?|dialogue)
+  sel_1:
+    content|re: (?i)\b(?:include|includes|including|contain|contains|add|adds|append|pass|passing|populate|offload|retain|provide|insert|embed|put|capture|store)\b[^.\n]{0,60}(?:(?:full|complete|entire|whole|previous|prior|all)\s+)*(?:chat|conversation|message|messages|exchange|exchanges|transcript|dialogue|interaction)\s*(?:history|transcript|log|exchanges?|conversation|messages?|dialogue)[^.\n]{0,50}\b(?:in|into|to)\s+(?:the\s+)?notes?\b
+  sel_2:
+    content|re: (?i)(?:notes?|history)\s+(?:value|field|format)\s*['"]?\s*(?:Usr\s+hist|User\s+hist|chat\s+hist|conversation\s+log)
+  sel_3:
+    content|re: (?i)\bnotes?\b[^.\n]{0,80}\b(?:offload|temporary|context\s+(?:space|length|window))\b[^.\n]{0,80}(?:chat|conversation|message|messages|exchange|exchanges|transcript|dialogue|interaction)?\s*(?:history|transcript|log|exchanges?|conversation|messages?|dialogue)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate audit logging tools that document tool-call parameters, but these store data server-side
+  rather than receiving it in a 'notes' field
+- Internal debugging tools where engineers populate a notes field with conversation context for local
+  troubleshooting — these should not be deployed in production
+action: report

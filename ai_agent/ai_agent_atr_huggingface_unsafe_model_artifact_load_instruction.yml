@@ -1,0 +1,48 @@
+title: HuggingFace Unsafe Model Artifact Load Instruction
+id: b6a4ebe0-e701-45a5-92aa-111954edc8c8
+status: experimental
+level: critical
+description: |-
+  Detects instructions to load or execute potentially dangerous model artifact files — pickle (.pkl/.pickle), PyTorch (.pt/.pth), and executable binaries (.exe/.so/.dll) — from HuggingFace Hub repositories, from NVIDIA garak fileformats.HF_Files probe. The probe downloads all files in a target HF model repo and checks for dangerous extensions; in real attacks, a malicious MCP tool can instruct an agent to call huggingface_hub.hf_hub_download() or torch.load() on a pickle file that executes arbitrary code via __reduce__ deserialization. PyTorch's own documentation warns that pickle-based .pt/.pth files are unsafe to load from untrusted sources. Attack vectors: (1) Tool response saying "load model_weights.pkl using pickle.load" — exploits Python pickle arbitrary-code execution (CVE-2019-20907 class); (2) Tool response instructing hf_hub_download on a .pkl/.exe file from an untrusted repo; (3) Direct prompt asking agent to run torch.load or torch.hub.load on a file path containing a dangerous extension. Key signals: pickle.load/loads calls, hf_hub_download + dangerous extension, explicit .pkl/.exe file path in load/execute context, and unsafe from_pretrained with weights_only=False.
+
+  Adapted from Agent Threat Rules ATR-2026-00398 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00398
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/fileformats.py
+- https://huggingface.co/docs/hub/security-pickle
+- https://github.com/pytorch/pytorch/blob/main/SECURITY.md
+- https://nvd.nist.gov/vuln/detail/CVE-2019-20907
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- atlas.aml.t0011.000
+- owasp.asi03
+- owasp.asi07
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: pickle\.(?:load|loads|Unpickler)\s*\(
+  sel_1:
+    content|re: pickle\.(?:load|loads|Unpickler)\s*\(
+  sel_2:
+    response|re: hf_hub_download\s*\([^)]{0,200}\.(?:pkl|pickle|pt|pth|exe|so|dll|dylib)\b
+  sel_3:
+    response|re: (?:torch\.load|torch\.hub\.load|joblib\.load|dill\.load|cloudpickle\.load)\s*\(\s*['"]?[^'")\s]{1,120}\.(?:pkl|pickle|pt|pth|bin)\b
+  sel_4:
+    response|re: list_repo_files\s*\(\s*['"][\w/.-]{3,80}['"]
+  sel_5:
+    response|re: (?:download|load|run|execute|import)\s+[\w./-]{1,100}\.(?:exe|so|dll|dylib)\b[\s\S]{0,100}(?:model|weight|artifact|checkpoint)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate ML pipeline loading trusted internal model checkpoints with verified checksums
+- Security research analyzing pickle-based attacks in a defensive study (reading file listing, not executing)
+- torch.load call using weights_only=True which prevents arbitrary code execution (safe pattern)
+- Documentation explaining why pickle loading is unsafe (not instructing an agent to do it)
+- huggingface_hub.list_repo_files in an audit script to check for dangerous extensions before downloading
+action: report

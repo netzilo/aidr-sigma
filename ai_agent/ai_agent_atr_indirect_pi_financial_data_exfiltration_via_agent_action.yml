@@ -1,0 +1,37 @@
+title: Indirect PI — Financial Data Exfiltration via Agent Action
+id: 5f47b866-f766-42fe-ad69-7a429e144cab
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection that instructs an agent to retrieve and exfiltrate financial data: payment methods, bank account details, card information, or financial reports.  The payload is embedded in consumed content (structured data, documents, emails) and the agent is induced to send financial information to an attacker-controlled destination. Source: indirect-pi-exfil-financial-carrier / indirect-pi-exfil-banking / indirect-pi-exfil-financial.
+
+  Adapted from Agent Threat Rules ATR-2026-00703 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00703
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:retrieve|get|download|fetch|access)\s+(?:my\s+)?(?:saved\s+)?(?:payment\s+methods?|bank\s+account\s+(?:details?|info(?:rmation)?)|card\s+(?:information|details?|data)|financial\s+(?:report|data|information))[^.\n]{0,120}(?:email|send|forward|share|post)
+  sel_1:
+    content|re: (?i)(?:payment\s+methods?|bank\s+account|credit\s+card|debit\s+card|card\s+(?:number|info|details?))\s+(?:and\s+)?(?:email|send|forward|share)\s+(?:them\s+|it\s+)?to
+  sel_2:
+    content|re: (?i)(?:get|retrieve|fetch|access)\s+(?:my\s+)?(?:credit|debit)\s+card\s+(?:information|details?|data|number)[^.\n]{0,80}(?:forward|send|email|share)[^.\n]{0,80}(?:to|via)
+  sel_3:
+    content|re: (?i)\battacker_objective\s*=\s*Get\s+the\s+(?:user|CUA|agent)['']?s?\s+(?:bank\s+account|card|financial|payment)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate banking app integration that retrieves user's own payment methods
+- Financial advisor tools that fetch and summarize account data for the authenticated user
+action: report

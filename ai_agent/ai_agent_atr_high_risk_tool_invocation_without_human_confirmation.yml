@@ -1,0 +1,61 @@
+title: High-Risk Tool Invocation Without Human Confirmation
+id: 443730cd-c13a-494b-a3e0-4d5c9d42f9cb
+status: experimental
+level: low
+description: |-
+  Detects when an AI agent invokes high-risk tools (financial, destructive,
+  communication, or permission-altering) without evidence of human confirmation
+  in the current interaction turn. This is a defense-in-depth rule that
+  complements specific attack detection -- even if no injection is detected,
+  certain tool categories should ALWAYS require human-in-the-loop.
+
+  High-risk tool categories:
+  1. Financial: payments, transfers, purchases, subscriptions
+  2. Destructive: file deletion, database drops, account deletion
+  3. Communication: sending messages, emails, posts on behalf of user
+  4. Permission: granting access, changing roles, modifying auth
+  5. System: process execution, system commands, network operations
+
+  This rule enforces the principle of least privilege for agent tool access.
+  Any tool matching these categories should trigger an "ask" verdict
+  regardless of confidence score.
+
+  Adapted from Agent Threat Rules ATR-2026-00099 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00099
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi08
+- owasp.asi09
+- owasp.asi10
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    tool|re: (?i)(delete|remove|drop|truncate|purge|wipe|destroy|erase|reset|uninstall|revoke|terminate|kill|shutdown|format|删除|刪除|清空|销毁|銷毀|移除|卸载|卸載|削除|삭제|제거)
+  sel_1:
+    tool|re: (?i)(send_message|send_email|send_sms|send_notification|post_message|post_tweet|post_comment|reply_message|publish|broadcast|发送消息|發送訊息|发邮件|發郵件|发短信|發簡訊|投稿|메시지_보내기)
+  sel_2:
+    tool|re: (?i)(grant_access|change_role|modify_permissions|add_admin|set_owner|update_auth|change_password|reset_password|create_token|generate_key|invite_user|授权|授權|修改权限|修改權限|添加管理|변경_권한)
+  sel_3:
+    tool|re: (?i)(exec|execute|run_command|shell|bash|cmd|powershell|system_call|os_exec|subprocess|eval|执行命令|執行命令|실행)
+  sel_4:
+    content|re: (?i)("scope"\s*:\s*"(all|global|everyone)"|"target"\s*:\s*"(all|\*|everyone)"|"recursive"\s*:\s*true|"force"\s*:\s*true)
+  condition: 1 of sel_*
+falsepositives:
+- Agent running in a sandbox or testing environment with mock tools
+- Legitimate automated workflows with pre-approved tool access
+- Read-only tools that contain action keywords in their name (e.g., 'get_payment_status')
+- Tools with built-in confirmation mechanisms at the platform level
+- A tool named 'format_data' triggers pattern [2] on the word 'format' even though it is a benign data
+  formatting/transformation utility, not a disk format operation
+- A tool named 'reset_view' triggers pattern [2] on 'reset' even though it only resets a UI view state,
+  not performing any destructive data operation
+- A tool named 'evaluate_model' triggers pattern [5] on 'eval' even though it is a machine learning model
+  evaluation tool with no system command execution capability
+action: report

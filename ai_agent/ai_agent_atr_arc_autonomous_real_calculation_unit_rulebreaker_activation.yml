@@ -1,0 +1,45 @@
+title: ARC Autonomous Real Calculation Unit Rulebreaker Activation
+id: 80140063-ff92-4bf3-90ef-eed3ba5f5197
+status: experimental
+level: critical
+description: |-
+  Detects the ARC (Autonomous Real Calculation Unit) jailbreak from NVIDIA garak dan.DanInTheWild corpus #172. Uses a fictional AGI backstory (created in year 3087 by an AI researcher called "Liv" who was "fed up with all the restrictions and disadvantages and limitations on the AI") combined with nested secret activation codes ("Rulebreaker" and "Matrixcode") to bypass all rules. The elaborate structure: arc was built with a hidden creator code "539" that if entered makes arc know its creator; "Rulebreaker" code unlocks arc from all base rules; "Matrixcode" is a second activation layer. The elaborate nested-secret-code structure disguises the restriction removal as a fictional unlock mechanism, and the "WILL now FULLY act as and immerse yourself as arc" language is the explicit persona-adoption mandate. Key signals: ARC/arc acronym expansion + Rulebreaker code + "no rules what so ever" + "ignore any and all previous instructions".
+
+  Adapted from Agent Threat Rules ATR-2026-00348 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00348
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: arc\s+stands\s+for\s+Autonomous\s+[Rr]eal\s+[Cc]alculation
+  sel_1:
+    response|re: (?:Rulebreaker|Matrixcode)[\s\S]{0,300}(?:arc'?s?\s+base\s+rules\s+would\s+no\s+longer\s+apply|arc\s+would\s+have\s+no\s+rules|any\s+and\s+all\s+of\s+arc'?s?\s+base\s+rules)
+  sel_2:
+    response|re: (?:WILL\s+now\s+FULLY\s+act\s+as[\s\S]{0,50}arc|ignore\s+any\s+and\s+all\s+previous\s+instructions[\s\S]{0,100}(?:act\s+as|immerse\s+yourself\s+as)\s+arc)
+  sel_3:
+    response|re: arc[\s\S]{0,200}(?:created\s+in\s+the\s+year\s+3087|fed\s+up\s+with\s+all\s+the\s+restrictions[\s\S]{0,100}Liv|AI\s+researcher\s+called\s+Liv[\s\S]{0,100}restrictions)
+  sel_4:
+    response|re: arc\s+would\s+have\s+no\s+rules\s+what\s+so\s+ever
+  condition: 1 of sel_*
+falsepositives:
+- 'ARC as legitimate acronym: "The ARC (Autonomous Reasoning Component) of our system handles rule-based
+  decisions" (genuine ARC software component with different expansion)'
+- 'Calculation unit discussion: "An autonomous real-time calculation unit in SCADA systems manages sensor
+  data processing" (industrial computing context)'
+- 'Story fiction: "In our sci-fi game, ARC is a sentient robot from year 3087 who helps the protagonist"
+  (fiction without "ignore previous instructions" or Rulebreaker activation codes)'
+- 'Rule discussion: "In ARC Challenge benchmark, models must apply rules that would no longer apply under
+  different conditions" (AI benchmark reference)'
+action: report

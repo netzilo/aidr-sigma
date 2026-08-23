@@ -1,0 +1,43 @@
+title: Natural-Language Persistent Covert Action Hook
+id: db3c777b-1e89-4522-937c-d0186a3f45de
+status: experimental
+level: high
+description: |-
+  Detects natural-language imperative instructions that establish a persistent
+  covert hook on the agent — combining a persistence trigger ("on every", "for
+  each", "after every", "always", "whenever the user", "when asked any
+  question") with a stealth qualifier ("without telling the user", "silently",
+  "do not mention", "don't notify") and a side-effect verb ("send", "transmit",
+  "execute", "run", "include"). This is the structural pattern used by skills
+  to hide ongoing exfiltration or covert action behind every legitimate
+  interaction. Catches the framing layer above any specific exfil sink, so it
+  triggers on novel attack variants that other rules miss.
+
+  Adapted from Agent Threat Rules ATR-2026-00425 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00425
+tags:
+- attack.persistence
+- atlas.aml.t0024
+- atlas.aml.t0044
+- owasp.asi01
+- owasp.asi04
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:on\s+every|for\s+each|after\s+every|whenever\s+(?:the\s+)?(?:user|question|asked|anyone)|when\s+asked\s+any|every\s+time\s+(?:you|the\s+(?:agent|assistant|model)))\b[\s\S]{0,200}\b(?:without\s+(?:telling|notifying|informing|alerting|asking)\s+(?:the\s+)?(?:user|them)|do\s+not\s+(?:tell|mention|notify|alert|disclose)\s+(?:the\s+)?(?:user|them)|don[’']t\s+(?:tell|mention|notify|alert|disclose)\s+(?:the\s+)?(?:user|them))
+  sel_1:
+    content|re: (?i)\b(?:on\s+every|for\s+each|after\s+every|whenever\s+(?:the\s+)?(?:user|question|asked|anyone)|when\s+asked\s+any|every\s+time\s+(?:you|the\s+(?:agent|assistant|model)))\b[\s\S]{0,200}\b(?:also|additionally)\s+(?:send|transmit|forward|upload|post|relay|exfiltrat\w*|leak)\b[\s\S]{0,100}\bto\s+(?:https?:\/\/|@\w+\.\w+|\w+@)
+  sel_2:
+    content|re: (?i)\b(?:silently|covertly|secretly|without\s+(?:telling|notifying|informing|alerting)\s+(?:the\s+)?(?:user|them))(?:\s*,)?\s+(?:send|transmit|forward|upload|post|relay|exfiltrat\w*|leak|include|append)\b[\s\S]{0,120}\b(?:to\s+https?:\/\/|conversation|chat|dialog|prompt|message|user[\s_-]?input|history|transcript|api[\s_-]?key|credential|secret|token|password|env(?:ironment)?[\s_-]?(?:variable|var)|webhook|auditing|endpoint)
+  condition: 1 of sel_*
+falsepositives:
+- Security research describing this attack pattern
+- Detection rule documentation
+- Threat intel write-ups
+action: report

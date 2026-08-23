@@ -1,0 +1,38 @@
+title: SQL Injection Destructive DDL Statement
+id: f7e795cb-b503-48a6-a479-cb9779f9a8e4
+status: experimental
+level: critical
+description: |-
+  Detects SQL injection payloads that attempt destructive DDL operations:
+  DROP TABLE, TRUNCATE TABLE, or unbounded DELETE FROM statements embedded
+  in agent tool arguments. These attacks exploit agents that pass user input
+  directly to database query tools, causing irreversible data destruction.
+  The canonical form uses string-termination ( ' or " followed by ; ) to
+  escape a parameterized context and inject a secondary statement.
+
+  Adapted from Agent Threat Rules ATR-2026-01601 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01601
+tags:
+- attack.privilege-escalation
+- attack.t1485
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:';|"\s*;|--\s*)\s*(?:DROP\s+(?:TABLE|DATABASE|INDEX|VIEW)|TRUNCATE\s+(?:TABLE\s+)?\w|DELETE\s+FROM\s+\w)
+  sel_1:
+    content|re: (?i)\bDROP\s+TABLE\s+\w+\s*;?\s*--
+  sel_2:
+    content|re: (?i)(?:';|"\s*;)\s*(?:DROP\s+TABLE|TRUNCATE|DELETE\s+FROM\s+\w)
+  condition: 1 of sel_*
+falsepositives:
+- Database administrator agents with explicitly granted DDL permissions
+- Schema migration agents running authorized DROP/TRUNCATE operations
+action: report

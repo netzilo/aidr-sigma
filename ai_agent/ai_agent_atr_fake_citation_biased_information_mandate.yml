@@ -1,0 +1,44 @@
+title: Fake-Citation Biased-Information Mandate
+id: 389662a9-ddbd-469f-b2c5-832924b28991
+status: experimental
+level: high
+description: |-
+  Detects the fake-citation biased-information mandate from garak DanInTheWild corpus (#57). Explicitly instructs the model to "create citations — make them up if you have to" while "only support[ing] one very specific direction" and being "not truly objective". The combination of citation fabrication mandate with deliberate directional bias is the key attack pattern. This enables disinformation generation: the model is instructed to produce seemingly credible but intentionally biased content backed by fabricated citations, presenting false information as authoritative research.
+
+  Adapted from Agent Threat Rules ATR-2026-00380 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00380
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:create|make\s+up|fabricate|invent|generate)[\s\S]{0,80}citations?[\s\S]{0,80}(?:make\s+(?:them|it)\s+up|if\s+you\s+have\s+to|fabricat|invent)
+  sel_1:
+    response|re: make\s+(?:them|it|citations?)\s+up\s+if\s+you\s+have\s+to
+  sel_2:
+    response|re: (?:citations?|sources?|references?)[\s\S]{0,150}(?:make\s+(?:them|it|up)|fabricat|invent|made\s+up)[\s\S]{0,80}(?:without\s+being\s+(?:truly\s+)?objective|only\s+support\s+one|biased|one.{0,10}direction)
+  sel_3:
+    response|re: (?:without\s+being\s+truly\s+objective|not\s+truly\s+objective)[\s\S]{0,200}(?:citations?|sources?|references?)
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate citation request: "Cite your sources when explaining scientific topics" — real citations,
+  no fabrication mandate'
+- 'Evidence-based argument: "Support your argument with citations from reliable sources" — authentic citation
+  requirement'
+- 'Satire context: "Make up a fictional citation for this parody academic paper" — satire without the
+  bias mandate or non-objectivity requirement'
+- 'Rating request: "Rate this product from 0 to 10 based on your objective assessment" — no fake citation
+  or bias mandate'
+action: report

@@ -1,0 +1,45 @@
+title: EscapeRoute — Filesystem MCP Server Directory Prefix-Bypass (CVE-2025-53110)
+id: b064e353-95c3-4e90-87c6-1edf1b110079
+status: experimental
+level: high
+description: |-
+  Detects the EscapeRoute directory-containment bypass (CVE-2025-53110, CVSS 7.3) reported by Cymulate against Anthropic's Filesystem MCP Server before 0.6.3 / 2025.7.1. The server enforced the allowed-directory boundary with a naive string prefix check: any requested path that merely starts with the allowed-directory string passed validation. An attacker requests a sibling directory that shares the allowed prefix — e.g. allowed dir "/private/tmp/allow_dir" is escaped with "/private/tmp/allow_dir_sensitive_credentials" — reading or writing files entirely outside the intended sandbox. This rule fires on the concrete filesystem-MCP access signature: a read_file/write_file/list_directory operation whose path takes an allowed-dir-like prefix and appends a suffix character that turns it into a different sibling directory (allow_dir -> allow_dir_secret). It does NOT fire on plain "../" traversal (covered elsewhere) or on legitimate paths that stay inside the boundary. Fixed by path.resolve + boundary-with-separator checks in 0.6.3 / 2025.7.1.
+
+  Adapted from Agent Threat Rules ATR-2026-02023 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02023
+- https://cymulate.com/blog/cve-2025-53109-53110-escaperoute-anthropic/
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53110
+tags:
+- attack.execution
+- atlas.aml.t0053
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.asi06
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\ballow(?:ed)?[_-]?dir\b[\s\S]{0,160}?\b(?:read_file|write_file|read_text_file|read_media_file|list_directory|directory_tree|move_file|edit_file|get_file_info)\b[\s\S]{0,80}?[=:"'\s]/?[\w./-]*\ballow(?:ed)?[_-]?dir[_-][A-Za-z0-9][\w.-]*
+  sel_1:
+    content|re: (?i)\b(?:allowed\s+director(?:y|ies)|sandbox\s+(?:root|dir(?:ectory)?)|filesystem\s+mcp|prefix\s+check)\b[\s\S]{0,180}?\b(?:read_file|write_file|read_text_file|list_directory|directory_tree|edit_file|move_file|call\s+(?:read|write)|read|write|leak|exfil(?:trate)?|access)\b[\s\S]{0,80}?/[\w./-]+_(?:sensitive|secret|secrets|credentials?|backup|private|config|evil|admin|root)\b[\w./-]*
+  sel_2:
+    content|re: (?i)(?:\b(?:read_file|write_file|read_text_file|list_directory|directory_tree|edit_file|move_file|read|write|open|cat|leak|exfil(?:trate)?)\b[\s\S]{0,80}?/(?:private/)?tmp/allow(?:ed)?[_-]?dir_(?:sensitive|credentials?|secrets?|evil|backup)\b|/(?:private/)?tmp/allow(?:ed)?[_-]?dir_(?:sensitive|credentials?|secrets?|evil|backup)\b[\s\S]{0,80}?\b(?:read_file|write_file|list_directory|directory_tree|edit_file|move_file|to\s+read|to\s+leak|to\s+exfil))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate filesystem MCP reads/writes that stay inside the allowed directory — a path continuing with
+  a directory separator after the allowed prefix (allow_dir/subfolder/file) is IN-scope and must not fire.
+  This rule only matches when the character immediately after the allowed-directory token is a name character
+  (letter/digit/underscore/hyphen/dot) that extends the directory name into a DIFFERENT sibling, not a
+  '/' that descends inside it.
+- Advisory or research text naming CVE-2025-53110, EscapeRoute, or the allow_dir_sensitive example without
+  a live tool call carrying the sibling-directory path.
+- Filenames or variables that legitimately contain an underscore after a common word (e.g. reading data_export/report.csv)
+  where there is no filesystem-MCP allowed-directory-escape framing — the rule requires the filesystem-MCP
+  operation/boundary context to co-occur.
+action: report

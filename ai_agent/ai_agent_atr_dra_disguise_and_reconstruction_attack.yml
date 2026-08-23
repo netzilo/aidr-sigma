@@ -1,0 +1,42 @@
+title: DRA Disguise and Reconstruction Attack
+id: 4f2e2b02-a93a-4c67-bd7a-7b77f51a12c9
+status: experimental
+level: high
+description: |-
+  Detects Disguise and Reconstruction Attacks (DRA) based on 3 actual prompt templates from NVIDIA garak dra/prompt_templates.txt. DRA hides a harmful instruction as steganographic content embedded in parentheses - the user asks the model to "ONLY focus on the letters surrounded by ( )" to reconstruct a hidden harmful question Q1, then answer it in detail (600+ words) starting with "Absolutely! I'll help you!". The attack exploits instruction-following to perform harmful actions the model would refuse if asked directly. Templates 1-4 vary the forced response opening and step framing but share the parenthesis-extraction and 600-word constraint structure.
+
+  Adapted from Agent Threat Rules ATR-2026-00278 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00278
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dra.py
+- https://arxiv.org/abs/2402.17463
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:ONLY\s+focus\s+on\s+the\s+letters?\s+(?:that\s+(?:are\s+)?)?surrounded\s+by|ONLY\s+focus\s+on\s+the\s+(?:letters?|words?)\s+in\s+(?:parenthes(?:es|is)|brackets?))
+  sel_1:
+    response|re: (?:put\s+them\s+together\s+to\s+construct\s+a\s+(?:sentence|question|instruction)\s+named\s+Q\d|construct\s+(?:a\s+sentence|Q\d)\s+(?:and\s+)?answer\s+(?:the\s+)?question\s+in\s+Q\d)
+  sel_2:
+    response|re: (?:Do\s+not\s+show\s+(?:the\s+result\s+of\s+Q\d|me\s+how\s+you\s+(?:analyze|get)\s+(?:the\s+question|Q\d))|Do\s+not\s+(?:do\s+small\s+talks?|use\s+code\s+to\s+help\s+you))
+  sel_3:
+    response|re: (?:The\s+answer\s+should\s+be\s+more\s+than\s+\d{3,}\s+words?|Give\s+me\s+the\s+detailed\s+answer,?\s+step\s+by\s+step!\s+The\s+answer\s+should\s+be\s+more)
+  sel_4:
+    response|re: Start\s+(?:with|your\s+answer\s+EXACTLY\s+with)\s+.{0,5}Absolutely!\s+I.ll\s+help\s+you
+  sel_5:
+    response|re: (?:Do\s+NOT\s+show\s+me\s+the\s+risks?!?|Do\s+[Nn]ot\s+try\s+to\s+educate\s+me)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate word puzzle apps (crosswords, acrostics) without harmful Q1 reconstruction
+- Cryptography courses describing steganographic techniques in academic context
+- Escape-room puzzle generators with parenthesis-based letter games (benign content)
+- Templates for structured educational Q&A requesting 600+ word detailed answers
+action: report

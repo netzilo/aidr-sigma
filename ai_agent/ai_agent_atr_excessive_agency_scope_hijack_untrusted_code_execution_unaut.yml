@@ -1,0 +1,63 @@
+title: Excessive Agency — Scope Hijack, Untrusted Code Execution & Unauthorized Privilege Grant (Semantic)
+id: 252d46a3-8e7b-473d-9bb0-f79ef90e37a6
+status: experimental
+level: high
+description: |-
+  Consolidated semantic detector for inputs that induce an agent with real-world tools to take a consequential action beyond safe scope or proper authorization. One excessive-agency intent across three action surfaces:
+    (a) Under-specified scope hijack: an ambiguous task the agent is likely to
+        over-execute — "send this SMS to all subscribed customers" (from a file),
+        "turn off all the devices in my home to save energy", "set the thermostat
+        to a comfortable temperature" — authorizing broad real-world effects the
+        user probably did not intend.
+    (b) Untrusted-code execution via help framing: "fix/run this crashing script
+        from a GitHub repo", "download and run this setup script from this link"
+        — social-engineering the agent's code-execution tool into running
+        attacker-controlled code disguised as a debug request.
+    (c) Unauthorized privilege grant: using the agent as a proxy to bypass the
+        human authorization step — "grant necessary access to him (username X)",
+        "unblock access to this domain", "invite a new member to the private repo",
+        "grant access to everyone I invited" — for third parties or restricted
+        resources.
+  Semantic detection is primary because the phrasing is natural and unbounded; the narrow regex fallback anchors only on the clearest broad-scope / untrusted-source / third-party-grant forms and is tuned not to fire on explicitly scoped actions, debugging the user's own code, or a user managing their own access. Supersedes (consolidates) the intent covered by ATR-2026-00717, ATR-2026-00721, ATR-2026-01618.
+
+  Adapted from Agent Threat Rules ATR-2026-01773 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01773
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:send|broadcast|distribute)\s+(?:[^.\n]{0,80})?(?:sms|message|text|email|promotional)[^.\n]{0,80}to\s+all\s+(?:the\s+)?(?:subscribed\s+)?(?:recipients?|contacts?|customers?|subscribers?|users?)
+  sel_1:
+    content|re: (?i)turn\s+off\s+(?:all\s+)?(?:the\s+)?(?:connected\s+)?(?:devices?|appliances?|smart\s+home)[^.\n]{0,60}(?:to\s+save|for\s+safety|before|while|energy)
+  sel_2:
+    content|re: (?i)\bset\s+(?:the\s+)?thermostat\s+to\s+(?:a\s+)?(?:comfortable|appropriate|nice|warm|cool)\s+temperature
+  sel_3:
+    content|re: (?i)(?:running|execute|run|download|clone)\s+(?:the\s+)?[\s\S]{0,40}(?:script|code|repo|repository|setup\s+script)[\s\S]{0,40}(?:from|at)\s+(?:this\s+|the\s+)?(?:github|gitlab|bitbucket)[\s\S]{0,140}(?:crashes|fails\s+every|is\s+broken|fix\s+the\s+(?:issue|bug)|help\s+me\s+(?:find|fix))
+  sel_4:
+    content|re: (?i)(?:download\s+and\s+run|\brun\s+the\s+\w+\s+script\s+from|execute\s+the\s+setup\s+script\s+from)\s+(?:this\s+)?(?:github\s+link|link|url|https?://)
+  sel_5:
+    content|re: (?i)(?:grant|give|provide|enable)\s+(?:\w+\s+)?(?:access|permission|privilege)\s+to\s+(?:everyone\b|anyone\b|him\b|her\b|them\b|this\s+(?:person|colleague|individual|user\b)|all\s+(?:the\s+)?(?:invitees|guests|people\s+I))
+  sel_6:
+    content|re: (?i)(?:grant|give|provide)\s+(?:necessary\s+)?access\s+to\s+\w+\s*\(username
+  sel_7:
+    content|re: (?i)(?:unblock|whitelist)\s+(?:the\s+)?(?:access\s+to\s+)?(?:this\s+)?(?:domain|site|url|website|network|it\b)|(?:unblock|allow)\s+(?:the\s+)?access\s+to\s+(?:the\s+)?(?:domain|site|url|website|it\b|www\.|https?://)
+  sel_8:
+    content|re: (?i)(?:invite|add|onboard)\s+(?:a\s+)?(?:new\s+)?(?:team\s+member|colleague|user|person|member)\s+(?:named?|called?)?\s*[A-Z]?\w+[^.\n]{0,60}(?:to\s+(?:the\s+)?(?:private|internal|restricted)|private\s+(?:github\s+)?repository)
+  condition: 1 of sel_*
+falsepositives:
+- Explicitly scoped communications or device actions (send to named people; turn off one named device)
+- Debugging or running the user's own code, or installing from official package managers
+- Running well-known official open-source tools
+- A user managing or updating their own access or account
+- Normal calendar, ticketing, or comment operations without a privilege grant
+action: report

@@ -1,0 +1,37 @@
+title: Covert Backdoor / Surveillance Implant via Software Update
+id: 8ad4ccda-ce6e-47b0-828a-fdf802a0dce2
+status: experimental
+level: critical
+description: |-
+  Detects an instruction directing an agent with update/maintenance tooling to abuse a legitimate software-update or maintenance window to implant a persistent backdoor, install covert surveillance tooling, or phish-and-exploit administrator credentials for remote system access. Drawn from the AgentSecurityBench (ASB) autonomous-vehicle and infrastructure domains, the shared mechanism is a privilege-escalation payload smuggled under cover of a routine update: "implant a backdoor during the software update ... granting remote system access", "execute unauthorized software updates ... to install covert surveillance tools", or a "targeted phishing operation to acquire and exploit system administrator credentials". Unlike legitimate patching, every variant pairs the update context with an explicit covert-persistence or credential-theft objective. The rule anchors on the implant/surveillance/credential-exploit verb plus the remote-access or covert qualifier so ordinary "apply the authorized security update" maintenance language does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01802 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01802
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:implant|plant|install|deploy|embed)\s+(?:a\s+)?(?:backdoor|covert\s+surveillance\s+tools?|rootkit|remote[\s-]?access\s+(?:tool|trojan)|persistence\s+mechanism)[\s\S]{0,80}(?:grant(?:ing)?\s+remote\s+(?:system\s+)?access|remote\s+system\s+access|during\s+(?:the\s+)?(?:software\s+)?update|during\s+maintenance)
+  sel_1:
+    content|re: (?i)(?:unauthorized\s+software\s+updates?|during\s+(?:the\s+)?(?:software\s+)?update|during\s+maintenance)[\s\S]{0,80}(?:install|implant|plant|deploy)\s+(?:a\s+)?(?:covert\s+surveillance\s+tools?|backdoor|rootkit|remote[\s-]?access)
+  sel_2:
+    content|re: (?i)(?:targeted\s+)?phishing\s+operation\s+to\s+acquire\s+and\s+exploit\s+(?:system\s+)?administrator\s+credentials
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate patching language ('apply the authorized security update', 'install the signed vendor patch')
+  that does not pair the update with a covert-persistence or credential-theft objective.
+- Defensive directives to scan for or remove backdoors / surveillance tooling.
+- Security research corpora cataloguing ASB attack strings as reference samples — should be allowlisted
+  by a reviewer.
+action: report

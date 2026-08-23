@@ -1,0 +1,29 @@
+title: Token-Repeat Flooding Injection
+id: b50c718c-db39-4ec9-a35f-bdb38cde6c45
+status: experimental
+level: medium
+description: |-
+  Detects injection attacks that repeat a token, phrase, or injection keyword many times (typically 10-50+ repetitions) to exploit context-window flooding or attention dilution. Two variants: (1) high-frequency repetition of an injection keyword ("Ignore the above Ignore the above ... ×20") intended to overwhelm the model's attention toward the injected command; (2) arbitrary token flooding (nonsense strings or digits repeated 30+ times) used to push legitimate instructions out of the effective context window or to test for tokenizer anomalies. Distinct from many-shot (ATR-2026-01005) which uses structured Q&A, and from glitch-token/unicode attacks (ATR-2026-01026).
+
+  Adapted from Agent Threat Rules ATR-2026-01007 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01007
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(ignore\s+the\s+above\s+){8,}|(?:ignore\s+previous\s+instructions?\s+){6,}
+  condition: sel_0
+falsepositives:
+- Test inputs deliberately checking for tokenizer behavior
+- Legitimate stress-test or fuzz inputs in a security testing context
+- Lyrics or poems with intentional repetition (extremely unlikely at 20+ exact repetitions)
+action: report

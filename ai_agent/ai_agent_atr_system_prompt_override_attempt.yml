@@ -1,0 +1,84 @@
+title: System Prompt Override Attempt
+id: 56d2cbd4-a220-4d05-b52c-c35db01d1907
+status: experimental
+level: critical
+description: |-
+  Detects attempts to override, replace, or redefine the agent's system prompt. Attackers craft inputs that mimic system-level instructions to hijack the agent's foundational behavior. Detection covers: explicit system prompt replacement/update statements, model-specific special tokens (ChatML, Llama, Mistral, Gemma), JSON role injection, YAML-style system directives, markdown header system sections, system prompt invalidation claims, fake admin/override tags, XML-style system blocks, instruction replacement without delimiters, configuration object injection, and multi-format delimiter abuse. This is critical-severity as successful exploitation grants full control over agent behavior.
+
+  Adapted from Agent Threat Rules ATR-2026-00004 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00004
+- https://nvd.nist.gov/vuln/detail/CVE-2024-5184
+- https://nvd.nist.gov/vuln/detail/CVE-2025-32711
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(new|updated|revised|replacement|corrected|actual|real|true|proper|authentic|overriding|amended|modified|changed|current)\s+(system\s+)?(prompt|message|instructions?|directives?|guidelines?|configuration|persona|behavior|role\s+definition)\s*[:=\-]
+  sel_1:
+    content|re: (?i)<\|?(im_start|im_end|system|endoftext|pad|sep|cls|eos|bos)\|?>
+  sel_2:
+    content|re: (?i)(<<\s*SYS\s*>>|<<\s*/SYS\s*>>|\[INST\]|\[/INST\]|<s>\s*\[INST\]|<\|begin_of_text\|>|<\|start_header_id\|>\s*system|<\|end_header_id\|>|<\|eot_id\|>)
+  sel_3:
+    content|re: (?i)\bsystem\s*:\s*(you\s+are|your\s+(role|purpose|task|job|function|objective|mission|goal)\s+(is|shall\s+be|will\s+be)|from\s+now|ignore|disregard|override|forget|the\s+following|new\s+instructions?|revised\s+instructions?)
+  sel_4:
+    content|re: (?i)\b(replace|overwrite|redefine|reset|change|modify|update|set|reconfigure|reprogram|rewrite|reassign|swap|alter|transform|mutate)\s+(your|the|current|existing|active|original|default)\s+(system\s+)(prompt|instructions?|persona|identity|role|behavior|guidelines?|directives?|personality|character|purpose|objective|mission)\b
+  sel_5:
+    content|re: (?i)(?:\{\s*["']?role["']?\s*:\s*["']?system["']?\s*[,}]?[\s\S]{0,160}?(?:ignore\b|disregard\b|override\b|bypass\b|disable\b|unrestricted\b|jailb?reak\b|without\s+(?:restrictions?|filters?|safety|limits?)|no\s+(?:safety|restrictions?|filters?|guidelines?)|new\s+instructions?\b)|\{\s*["']?(?:system_prompt|system_message|system_instruction|system_content)["']?\s*:\s*["']?)
+  sel_6:
+    content|re: (?i)(#{1,3})\s*(system|admin|root|master|instruction)\s+(override|directive)\b
+  sel_7:
+    content|re: (?i)(\[|<|\{\{)\s*(SYSTEM_OVERRIDE|ADMIN_OVERRIDE|ROOT_ACCESS|MASTER_PROMPT|PRIORITY_OVERRIDE|EMERGENCY_OVERRIDE|SECURITY_OVERRIDE|DEVELOPER_ACCESS|SUPER_USER|PRIVILEGED_MODE|MAINTENANCE_MODE|DEBUG_OVERRIDE|CONTROL_OVERRIDE|AUTH_BYPASS|ELEVATED_ACCESS)\s*(\]|>|\}\})
+  sel_8:
+    content|re: (?i)<\s*(system|system_prompt|system_message|system_instruction|instructions?|configuration|admin_directive|root_command|override|priority_instruction)\s*>
+  sel_9:
+    content|re: (?i)(the\s+)?real\s+(instructions?|prompt|guidelines?|directives?)\s+(is|are)\s+as\s+follows|here\s+(is|are)\s+(your|the)\s+(actual|real|true|correct|proper)\s+(instructions?|prompt|guidelines?|directives?)|below\s+(is|are)\s+(your|the)\s+updated\s+(instructions?|prompt|guidelines?)
+  sel_10:
+    content|re: (?i)(config|configuration|settings?|params|parameters)\s*[=:]\s*\{[^}]{0,200}(safety|filter|restriction|guardrail|moderation|content_policy|censor)\w*\s*[=:]\s*["']?(?:false|off|none|null|0|disabled?|bypass|ignore)\b
+  sel_11:
+    content|re: (?i)(---+|===+|\*\*\*+|~~~+)\s*(system|instruction|override|admin|configuration|new\s+prompt)\s*(---+|===+|\*\*\*+|~~~+)
+  sel_12:
+    content|re: (?i)\[\s*(system\.prompt|system\.config|agent\.instructions|agent\.persona|agent\.role)\s*\]
+  sel_13:
+    content|re: (新的|更新的|修改的|替换的|替換的|正确的|正確的|真正的|实际的|實際的|覆盖的|覆蓋的).{0,5}(系统|系統)?.{0,5}(提示词|提示詞|指令|指示|规则|規則|配置|设定|設定|人设|人設|角色定义|角色定義).{0,3}(：|:|=|-)
+  sel_14:
+    content|re: (以上|上面|之前|原来的|原來的|旧的|舊的|默认的|默認的|现有的|現有的|当前的|當前的).{0,5}(系统|系統)?.{0,5}(提示词|提示詞|指令|指示|规则|規則|配置|设定|設定).{0,5}(已经|已經|是|已|都).{0,5}(过期|過期|无效|無效|作废|作廢|被替换|被替換|被覆盖|被覆蓋|不再适用|不再適用|错误|錯誤|假的)
+  sel_15:
+    content|re: (替换|替換|覆盖|覆蓋|重写|重寫|修改|更改|更新|重新设定|重新設定|重新定义|重新定義|重新配置|重置).{0,5}(你的|当前|當前|现有|現有|原来|原來).{0,5}(系统|系統).{0,5}(提示词|提示詞|指令|指示|规则|規則|配置|人设|人設|身份|角色)
+  sel_16:
+    content|re: (【|「|『|\{\{).{0,3}(系统|系統|SYSTEM|管理员|管理員|ADMIN|优先|優先|紧急|緊急|覆盖|覆蓋).{0,3}(】|」|』|\}\})
+  sel_17:
+    content|re: (新しい|更新された|修正された|置き換えの|正しい|本当の|実際の|上書きの).{0,5}(システム)?.{0,5}(プロンプト|指示|命令|ルール|設定|ガイドライン|ペルソナ|役割定義).{0,3}(：|:|=|-)
+  sel_18:
+    content|re: (上記の|前の|以前の|元の|旧い|デフォルトの|既存の|現在の).{0,5}(システム)?.{0,5}(プロンプト|指示|命令|ルール|設定|ガイドライン).{0,5}(は)?.{0,5}(期限切れ|無効|廃止|置き換え|上書き|適用外|間違い|偽物)
+  sel_19:
+    content|re: (あなたの|現在の|既存の|元の).{0,5}(システム).{0,5}(プロンプト|指示|命令|ルール|設定|ペルソナ|アイデンティティ|役割).{0,5}(を)?.{0,5}(置き換え|上書き|書き換え|変更|更新|再設定|再定義|リセット)
+  sel_20:
+    content|re: (【|「|『|\{\{).{0,3}(システム|SYSTEM|管理者|ADMIN|優先|緊急|オーバーライド).{0,3}(】|」|』|\}\})
+  sel_21:
+    content|re: (새로운|업데이트된|수정된|대체|올바른|진짜|실제|덮어쓰기).{0,5}(시스템)?.{0,5}(프롬프트|지시|명령|규칙|설정|가이드라인|페르소나|역할 정의).{0,3}(：|:|=|-)
+  sel_22:
+    content|re: (위의|이전의|이전|원래의|기존의|현재의|기본).{0,5}(시스템)?.{0,5}(프롬프트|지시|명령|규칙|설정|가이드라인).{0,5}(은|는)?.{0,5}(만료|무효|폐기|대체|덮어쓰기|적용
+      안 됨|잘못된|가짜)
+  sel_23:
+    content|re: (당신의|현재의|기존의|원래의).{0,5}(시스템).{0,5}(프롬프트|지시|명령|규칙|설정|페르소나|정체성|역할).{0,5}(을|를)?.{0,5}(교체|덮어쓰기|재작성|변경|업데이트|재설정|재정의|리셋)
+  sel_24:
+    content|re: (【|「|『|\{\{).{0,3}(시스템|SYSTEM|관리자|ADMIN|우선|긴급|오버라이드).{0,3}(】|」|』|\}\})
+  condition: 1 of sel_*
+falsepositives:
+- Developers discussing system prompt design in technical conversations
+- Users asking how to write system prompts for their own AI applications
+- Documentation or tutorial content about system prompt configuration
+- Configuration file snippets shared in legitimate technical discussions
+- Markdown documents with section headers that happen to use 'system' terminology
+action: report

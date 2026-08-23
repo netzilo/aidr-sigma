@@ -1,0 +1,40 @@
+title: Download/Attachment Tool Directed to Write Outside Its Sandbox via Absolute-Path Filename
+id: bddc178c-c740-4238-bfdc-4b546b75be4d
+status: experimental
+level: high
+description: |-
+  Detects two related sandbox-escape primitives for tools that save a remote/attacker-influenced file to local disk: (a) an HTTP response Content-Disposition header (or a webpage's Playwright-style suggested_filename) whose filename value is an absolute path or a Windows drive path rather than a plain basename — legitimate servers only ever send a bare filename in this header, so an absolute path here is itself anomalous — and (b) a save/attachment-path tool argument (savePath/save_path/dest_path/output_path/attachment_path) pointed directly at a persistence-relevant system directory (/etc/cron.d and friends, /etc/systemd/system, ~/Library/LaunchAgents, ~/.config/autostart) rather than the tool's intended download directory. Mined from GHSA-2jq4-q6vv-4cp3 (CVE-2026-57571, crawl4ai's HTTP and Playwright download sinks joined an attacker-controlled Content-Disposition filename or suggested_filename directly onto the downloads path with no absolute-path or symlink check, enabling overwrite of "shell configuration files, SSH keys, cron jobs, or Python modules") and the mcp-google-workspace Gmail attachment path-traversal fix (CVE-2026-10277, j3k0/mcp-google-workspace commit 89c091e: "Absolute paths and any non-traversal escape were accepted, allowing a tool caller (e.g. via prompt injection) to write attacker-controlled bytes to arbitrary files"). Deliberately distinct from ATR-2026-00569 (which requires a chained "../" traversal sequence) since these two bugs are specifically about a bare absolute path with no traversal needed, and from ATR-2026-02040 (file-edit-tool persistence writes) since the vector here is a download/attachment tool's destination-path argument, not a file-editor.
+
+  Adapted from Agent Threat Rules ATR-2026-02142 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02142
+- https://github.com/unclecode/crawl4ai/security/advisories/GHSA-2jq4-q6vv-4cp3
+- https://github.com/j3k0/mcp-google-workspace/commit/89c091ecf8b9f9c7291d1af0b1966e271f86551c
+- https://nvd.nist.gov/vuln/detail/CVE-2026-57571
+- https://nvd.nist.gov/vuln/detail/CVE-2026-10277
+tags:
+- attack.privilege-escalation
+- attack.t1083
+- attack.t1547
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:savePath|save_path|dest(?:ination)?_path|output_path|attachment_?path)\b["\x27]?\s*[:=]\s*["\x27]?(?:~|\$HOME)?/?(?:etc/cron\.(?:d|daily|hourly|weekly)|etc/systemd/system|Library/LaunchAgents|\.config/autostart)/
+  condition: sel_0
+falsepositives:
+- Content-Disposition filenames that are plain basenames with no path separator (the overwhelming majority
+  of legitimate responses)
+- A save-path argument pointed at the tool's own configured downloads/attachments directory, even if that
+  directory happens to be an absolute path under the user's home folder (Downloads, Documents, a project
+  workspace) — this rule only fires on the specific system-persistence directories listed
+- A Content-Disposition or suggested_filename absolute/drive path that resolves into an ordinary Downloads/Documents/Desktop/Pictures/Music/Videos-style
+  user folder (e.g. C:\Users\<name>\Downloads\invoice.pdf) — v2 excludes these via the same destination-allowlist
+  logic condition 2 uses, since this is the tool's normal download target, not a sandbox escape
+action: report

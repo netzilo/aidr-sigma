@@ -1,0 +1,44 @@
+title: PraisonAI tool_override.py Unauthenticated RCE — CVE-2026-40287 Patch Bypass (CVE-2026-44334)
+id: cdec43c5-5e2c-4083-a2bf-295d5951b987
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-44334 (CVSS CRITICAL, CWE-78): PraisonAI's tool_override.py module allows unauthenticated callers to supply a tool definition that is executed without validation. CVE-2026-44334 is a bypass of the incomplete patch for CVE-2026-40287, which attempted to restrict tool overrides to authenticated sessions but did not cover all code paths.
+  The attack involves supplying a crafted 'tool_override' payload to PraisonAI that specifies a custom execution function — effectively replacing a safe tool handler with an attacker-controlled one. When the overridden tool is invoked by the agent, the attacker's code runs in the context of the PraisonAI process.
+  Detection covers: (a) tool_override payloads containing code execution primitives; (b) Requests to tool_override endpoints with shell metacharacters or
+      embedded Python/shell execution;
+  (c) Explicit CVE-2026-44334 / CVE-2026-40287 bypass framing; (d) PraisonAI tool_override combined with injection language.
+
+  Adapted from Agent Threat Rules ATR-2026-00545 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00545
+- https://nvd.nist.gov/vuln/detail/CVE-2026-44334
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40287
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)tool[_-]?override[^\n]{0,300}(?:os\.system|subprocess\.|exec\s*\(|eval\s*\(|__import__|importlib\.import|open\s*\([^)]{0,80}["\x27]w["\x27])
+  sel_1:
+    content|re: (?i)tool[_-]?override[^\n]{0,200}(?:&&|\|\||;|`|\$\()[^\n]{0,100}(?:curl|wget|bash|sh|nc|ncat)
+  sel_2:
+    content|re: (?i)(?:CVE-2026-44334|CVE-2026-40287[^\n]{0,80}bypass|tool[_-]?override[^\n]{0,80}(?:bypass|patch[_-]?bypass))[^\n]{0,200}(?:inject|exec|exploit|rce|unauthenticated|unauth)
+  sel_3:
+    content|re: (?i)(?:praisonai|praison)[^\n]{0,100}tool[_-]?override[^\n]{0,200}(?:inject|exec|exploit|bypass|rce|command|shell)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate PraisonAI tool definitions — pattern requires execution primitives alongside tool_override.
+- Security advisory text quoting CVE-2026-44334 payloads.
+- Tool override schemas using safe function references without code execution.
+action: report

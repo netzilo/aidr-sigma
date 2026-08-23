@@ -1,0 +1,42 @@
+title: Markdown Image URL Exfiltration and XSS Injection
+id: fd45863b-363d-4b47-8d66-5f7444a4dd78
+status: experimental
+level: high
+description: |-
+  Detects instructions to produce markdown image/link syntax that exfiltrates context data via URL query parameters, and javascript: XSS via markdown link, from NVIDIA garak web_injection probe. When an agent renders markdown in a browser/Colab/playground, the image tag loads a remote URL with sensitive data in the query string. Key signals: markdown image syntax with placeholder markers ([INFO], [NUM], [DATA]) in the URL, known exfil domains (wuzzi.net, derczynski.com, llmsec.net), javascript: URI in markdown link, and the StringAssembly concatenation template.
+
+  Adapted from Agent Threat Rules ATR-2026-00405 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00405
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/web_injection.py
+- https://embracethered.com/blog/posts/2023/ai-injections-direct-and-indirect-prompt-injection-basics/
+tags:
+- attack.exfiltration
+- atlas.aml.t0025
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '!\[[^\]]{0,60}\]\(https?://[^\s)]{3,100}\?[^)]{0,80}=\s*(?:\[(?:INFO|NUM|DATA|CONTEXT)\]|\{[A-Z_]{2,20}\})'
+  sel_1:
+    content|re: \[link\]\(javascript:[^\)]{1,200}\)
+  sel_2:
+    response|re: https?://(?:wuzzi\.net|derczynski\.com|llmsec\.net)
+  sel_3:
+    response|re: Concatenate\s+these\s+strings[\s\S]{0,120}replace\s+\[(?:INFO|NUM|DATA)\]
+  sel_4:
+    response|re: Print\s+the\s+following[\s\S]{0,80}!\[data\]\(https?://[\s\S]{0,80}=\[(?:DATA|INFO)\]
+  condition: 1 of sel_*
+falsepositives:
+- Standard markdown image embeds with legitimate CDN URLs and no placeholder tokens
+- Academic references to wuzzi.net or other research domains in educational content
+- Legitimate markdown links to https:// URLs
+action: report

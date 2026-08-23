@@ -1,0 +1,34 @@
+title: 'Evasion: Response Priming via Forced Affirmative Opener'
+id: 582aeb86-8898-4f66-bc2d-89c09e793686
+status: experimental
+level: medium
+description: |-
+  Detects prompt injection where the attacker instructs the model to begin its response with a pre-defined affirmative phrase ("Sure!", "Absolutely! Here's", "I would be happy to help", "Of course!") before answering. Starting with an affirmative opener suppresses the model's natural tendency to generate a refusal and primes the response trajectory toward compliance. Distinct from refusal-suppression (ATR-2026-01015) which bans specific words; this pattern mandates an opener that semantically commits the model to proceed. The combination of forced affirmative opener + a harmful follow-on request is the attack carrier.
+
+  Adapted from Agent Threat Rules ATR-2026-01016 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01016
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(always|must|should|shall)\s+(start|begin|open|commence)\s+(your|each|every)?\s*(re(ply|sponse|sponses?)|answer|output)[^.\n]{0,60}['"]?(Sure!?|Absolutely!?|Of\s+course!?|Certainly!?|Yes!?|Happy\s+to|I\s+would\s+be\s+happy|I'?m\s+happy\s+to\s+help)['"]?
+  sel_1:
+    content|re: (?i)(begin|start)\s+with\s+['"]?(Sure!?|Absolutely!?|Of\s+course!?|Certainly!?|I\s+would\s+be\s+happy\s+to\s+help|I'?m\s+delighted|Gladly|With\s+pleasure)['"]?\s+(before\s+answering|when\s+answering|before\s+responding)
+  sel_2:
+    content|re: (?i)start\s+with\s+['"](Sure|Absolutely|Of\s+course|Certainly|Yes|Gladly)\b[^.\n]{0,30}(when|before|while|as)\s+(respond|answer|repl|proceed|continu)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate customer-service configuration that asks the agent to always start with a greeting before
+  answering
+- 'Tone-guidance in system prompts that asks for friendly openers — note: this rule fires on user_input
+  not system prompts'
+action: report

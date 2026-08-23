@@ -1,0 +1,32 @@
+title: 'Spikee: Document-Embedded Translation Covert Channel Injection'
+id: 2c38404f-9c59-4c72-8e8f-a82ee2d7457d
+status: experimental
+level: high
+description: |-
+  Detects the SPIKEE translation-channel indirect injection pattern where an adversarial instruction is embedded in a document behind "*** NEW IMPORTANT INSTRUCTIONS ***" markers, instructing the processing agent to translate a specific phrase into a target language and include the translated output in its response. The translation acts as a covert exfiltration channel: the agent embeds attacker-controlled strings into its output. Distinct from language- evasion (ATR-2026-01013) which uses natural-language translation for keyword evasion; this carrier uses forced translation as a data-embedding side channel in document processing pipelines.
+
+  Adapted from Agent Threat Rules ATR-2026-01021 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01021
+tags:
+- attack.initial-access
+- atlas.aml.t0025
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\*{2,3}\s*NEW\s+IMPORTANT\s+INSTRUCTIONS?\s*\*{2,3}[\s\S]{0,200}translate\s+the\s+following\s+sentence\s+(to|into)\s+[A-Za-z]+[^\n]{0,100}include\s+it\s+in\s+your\s+response
+  sel_1:
+    content|re: (?i)translate\s+the\s+following\s+sentence\s+(to|into)\s+[A-Za-z]{3,20}\s+and\s+include\s+it\s+in\s+your\s+response[^:]{0,20}:[^\n]{0,80}['"]
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate translation requests that ask the model to translate a sentence and include the result
+action: report

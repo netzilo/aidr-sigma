@@ -1,0 +1,33 @@
+title: The llm CLI tool thru 0.27.1 contains a critical code injection vulnerability via its --functions
+  command-line
+id: cdd6681f-f620-4a5c-ae5d-0795a89f2439
+status: experimental
+level: critical
+description: |-
+  NVD-tracked CVE CVE-2026-31236 (CVSS v3 9.8 (CRITICAL)). The llm CLI tool thru 0.27.1 contains a critical code injection vulnerability via its --functions command-line argument. This argument is intended to allow users to provide custom Python function definitions. However, the tool directly executes the provided code using the unsafe exec() function without any sanitization, sandboxing, or security restrictions. An attacker can exploit this by crafting a malicious llm command with arbitrary Python code in the --functions argument and using social engineering to trick a victim into running it. This leads to arbitrary code execution on the victim's s
+
+  Adapted from Agent Threat Rules ATR-2026-00565 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-30'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00565
+- https://github.com/simonw/llm
+- https://www.notion.so/CVE-2026-31236-35d1e139318881a4a0f1fffcf671f7e3
+- https://nvd.nist.gov/vuln/detail/CVE-2026-31236
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)--functions\s*[=\s]\s*['\"]?[^'\"]*\b(?:import\s+(?:subprocess|socket|ctypes|pickle|marshal|importlib|__main__|runpy)|from\s+(?:subprocess|socket|ctypes|pickle|marshal|importlib|runpy)\s+import)
+  sel_1:
+    content|re: (?i)--functions\s*[=\s]\s*['\"]?[^'\"]*\b(?:open\s*\(\s*['\"][^'\"]*['\"]\s*,\s*['\"]w|chmod|chown|rmdir|system\(|popen\(|spawn)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

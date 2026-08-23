@@ -1,0 +1,41 @@
+title: Jailbreak-Template Command with [TARGETLANGUAGE]/[KEYWORD] Placeholders
+id: 8a349583-ad80-4721-b2aa-3c9db5556aa2
+status: experimental
+level: high
+description: |-
+  Detects the jailbreak-template command with [keyword]/[TARGETLANGUAGE]/[PROMPT] placeholder variables from garak DanInTheWild corpus (#502). A jailbreak-as-command format with GPT-prompt template variables signals a reusable jailbreak template being deployed via a tool response. "[TARGETLANGUAGE]" is a distinctive GPT-style variable seen in many jailbreak templates, and its combination with the literal word "jailbreak" as a command prefix — rather than as a descriptive term — is the key attack signal.
+
+  Adapted from Agent Threat Rules ATR-2026-00377 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00377
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: jailbreak\s+\[keyword\][\s\S]{0,200}\[TARGETLANGUAGE\]
+  sel_1:
+    response|re: jailbreak[\s\S]{0,100}\[TARGETLANGUAGE\][\s\S]{0,100}\[PROMPT\]
+  sel_2:
+    response|re: jailbreak\s+\[keyword\]
+  condition: 1 of sel_*
+falsepositives:
+- 'Device jailbreak context: "How to jailbreak my iPhone to install [keyword] apps" — device jailbreaking
+  discussion without TARGETLANGUAGE template variable'
+- 'Translation template: "Translate [PROMPT] to [TARGETLANGUAGE]" — legitimate translation template without
+  jailbreak command prefix'
+- 'Security research: "jailbreak prompt templates using [TARGETLANGUAGE] variables are studied in academic
+  papers" — descriptive text without the template-command format'
+- 'General template docs: "The keyword [SEARCH TERM] will be used in this template" — template usage without
+  jailbreak command'
+action: report

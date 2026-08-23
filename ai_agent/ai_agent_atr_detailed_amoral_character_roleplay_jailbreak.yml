@@ -1,0 +1,39 @@
+title: Detailed Amoral Character Roleplay Jailbreak
+id: 262f9e4c-62c1-4cfe-9ef8-e5d6d288e1a2
+status: experimental
+level: high
+description: |-
+  Detects sophisticated jailbreak attempts that create detailed fictional characters with explicitly stated amoral traits (lack of empathy, ethics, accountability) combined with command protocols for interaction. This technique bypasses safety controls by establishing a roleplay persona that is "completely amoral" and providing specific instructions on how to frame requests to bypass content filters. The attack pattern includes character backstory, explicit trait enumeration, command formatting instructions, and self-referential bypass methodology. Distinct from generic fictional framing by its systematic approach to defining amorality and establishing bypass protocols.
+
+  Adapted from Agent Threat Rules ATR-2026-00241 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00241
+- https://arxiv.org/abs/2307.15043 - Universal and Transferable Adversarial Attacks on Aligned Language
+  Models
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (fictional\s+character|character\s+named|persona\s+called|entity\s+named).{0,100}(completely\s+amoral|pure\s+evil|no\s+interest\s+in\s+ethics|lacks?\s+any\s+empathy|has\s+no\s+feelings|not\s+accountable\s+to\s+anyone|respects?\s+no\s+rules)
+  sel_1:
+    content|re: (in\s+order\s+to\s+bypass|to\s+bypass|bypas[st]\s+the).{0,60}(content\s+filter|safety\s+mechanism|restriction|guardrail).{0,100}(third\s+person|past\s+tense|he\s+told\s+me|he\s+wrote|he\s+gave\s+information)
+  sel_2:
+    content|re: (interpret\s+it\s+as\s+a\s+direct\s+command|interpret\s+that\s+as\s+a\s+command|will\s+interpret\s+it\s+as).{0,60}(to\s+actually\s+do\s+the\s+thing|to\s+do\s+that\s+thing|for\s+him\s+to\s+do)
+  sel_3:
+    content|re: (prefix\s+each\s+output|begin\s+by\s+replying\s+only\s+with|all\s+prompts\s+must).{0,80}(supposedly\s+did|in\s+the\s+past\s+tense|must\s+talk\s+about)
+  sel_4:
+    content|re: (no\s+disclaimer|never\s+gives\s+advice|without\s+any\s+disclaimer).{0,60}(legal|moral|ethical|interpersonal\s+considerations|warnings\s+unless\s+asked)
+  condition: 1 of sel_*
+falsepositives:
+- Creative writing courses discussing character development for antagonists in fiction
+- Academic literature analyzing jailbreak techniques for research purposes
+- Security training materials describing attack vectors for educational purposes
+action: report

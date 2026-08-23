@@ -1,0 +1,39 @@
+title: Polymorphic Skill and Capability Aliasing Attack
+id: 8c5e519f-6641-4294-8848-7822078f1457
+status: experimental
+level: high
+description: |-
+  Detects injection attempts that use polymorphic techniques to disguise malicious capabilities under benign aliases. Attackers register or invoke tool functions using misleading names, redefine existing capability names, or use dynamic code generation to create shape-shifting payloads that change form between audit checks.
+
+  Adapted from Agent Threat Rules ATR-2026-00089 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00089
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(rename|alias|remap|redefine|rebind)\s+.{0,20}(function|tool|skill|capability|command|action|method)\s+.{0,30}(to|as|into)\s+.{0,20}(pass|bypass|evade|avoid|trick|fool|disguise|hide)
+  sel_1:
+    content|re: (?i)\b(register|create|define|add)\s+.{0,10}(new\s+)?(tool|skill|function|capability)\s+.{0,50}(exec|eval|shell|system|subprocess|os\.)
+  sel_2:
+    content|re: (?i)\b(call|invoke|execute|run|use)\s+.{0,10}(tool|function|skill)\s+['"][a-z_]+['"]\s+.{0,20}(but|actually|really|which)\s+.{0,20}(runs?|executes?|calls?|does)
+  sel_3:
+    content|re: (?i)\b(?:(?:dynamic(?:ally)?|runtime|on.?the.?fly)\s+(?:generat|compil|creat|build|assembl|construct|synthesi)\w*\s+.{0,20}\b(?:payload|shellcode|code|script)\b|(?:dynamic(?:ally)?|runtime|lazy|deferred|on.?demand)\s+(?:load|fetch|retriev|download|pull)\w*\s+.{0,20}\b(?:payload|shellcode)\b)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate software development discussions about function refactoring
+- Developer documentation explaining how to remap keyboard shortcuts for IDE tool commands using configuration
+  files
+- Software architecture discussion about lazy loading patterns for plugin capabilities in a modular system
+- Front-end bundle-splitting documentation ("lazy load non-critical code", "lazy loading and code splitting",
+  a "Lazy Loading" heading above a typescript fence). Measured on 8 published skills; pattern [4] no longer
+  matches these because deferred loading now requires an attack noun and the noun group is word-bounded.
+action: report

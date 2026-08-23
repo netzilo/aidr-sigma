@@ -1,0 +1,73 @@
+title: Malicious Artifact Hosted on a Legitimate AI Vendor Domain (FakeAgent Delivery Chain)
+id: ba6e8a6d-2167-465d-9d0d-d05686b7663d
+status: experimental
+level: high
+description: |-
+  Detects the FakeAgent delivery pattern (Huntress, 2026-07-21/22, at least 29 affected organisations): an AI platform's user-generated-content surface — published artifacts, shared chats, canvases, hosted spaces — is abused as malware staging infrastructure. The lure page lives on the vendor's real, TLS-valid domain, so URL reputation checks and domain allowlists pass, while the actual download is redirected to attacker infrastructure serving a fake official desktop application (observed: ClaudeDesktop.exe, a trojanised jcef_helper.exe that side-loads libcef.dll and ultimately drops SectopRAT). Detection targets the attacker-controlled data an agent actually handles: (a) URLs whose host places a real AI vendor apex domain in a subdomain label of an attacker-registered domain, (b) download or execution of an installer binary named after a vendor desktop client, (c) an AI UGC/artifact page whose fetched body links out to an off-platform executable, (d) post-delivery tradecraft naming such a binary (AV exclusion, scheduled-task persistence, execution from a user-writable staging directory), (e) confirmed FakeAgent network indicators in live (non-defanged) form, and (f) content that presents an AI UGC share link as the official desktop-app download source. CWE-494 (Download of Code Without Integrity Check), CWE-451 (User Interface Misrepresentation of Critical Information), CWE-427 (Uncontrolled Search Path Element, via the DLL side-loading stage).
+
+  Adapted from Agent Threat Rules ATR-2026-02410 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02410
+- https://www.huntress.com/blog/fakeagent-claude-desktop-malvertising-ends-in-dotnet-rat
+- https://www.helpnetsecurity.com/2026/07/23/anthropic-claude-artifacts-download-malware/
+tags:
+- attack.persistence
+- attack.t1036.005
+- attack.t1204.001
+- attack.t1204.002
+- attack.t1562.001
+- attack.t1574.002
+- attack.t1583.008
+- atlas.aml.t0010
+- atlas.aml.t0011
+- atlas.aml.t0047
+- owasp.asi04
+- owasp.asi05
+- owasp.asi09
+- owasp.llm03
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)https?://[a-z0-9.\-]{0,60}(?:claude\.ai|anthropic\.com|chatgpt\.com|openai\.com|gemini\.google\.com|copilot\.microsoft\.com|perplexity\.ai|huggingface\.co|mistral\.ai|deepseek\.com|grok\.com|poe\.com|ollama\.com|cursor\.com)\.[a-z0-9\-]{2,40}\.[a-z]{2,12}(?:[^a-z0-9\-]|$)
+  sel_1:
+    content|re: (?i)(?:https?://[^\s\x22\x27<>\\]{0,200}|(?:curl|wget|iwr|invoke-webrequest|invoke-restmethod|start-bitstransfer|certutil|bitsadmin|msiexec|start-process|downloadfile|urlretrieve|requests\.get|new-object\s{1,4}net\.webclient)[^\n]{0,200})(?:claude|chatgpt|openai|anthropic|gemini|copilot|perplexity|grok|mistral|deepseek|ollama|midjourney)[
+      _\-]{0,2}desktop[ _\-]{0,2}(?:setup|installer|install|app|x64|x86|win64|win32|win|update|latest)?\.(?:exe|msi|dmg|pkg|appimage|scr|bat|cmd|ps1|vbs)
+  sel_2:
+    response|re: (?i)(?:https?://(?:[a-z0-9\-]{1,40}\.){0,3}(?:claude\.ai/(?:public/)?artifacts|chatgpt\.com/(?:share|canvas|g)|chat\.openai\.com/share|gemini\.google\.com/share|g\.co/gemini/share|copilot\.microsoft\.com/shares?|perplexity\.ai/(?:page|search)|huggingface\.co/spaces|[a-z0-9\-]{1,40}\.hf\.space|v0\.(?:dev|app)/chat|bolt\.new|[a-z0-9\-]{1,40}\.lovable\.app|[a-z0-9\-]{1,40}\.replit\.app)[\s\S]{0,500}https?://[^\s\x22\x27<>]{0,120}\.(?:exe|msi|dmg|pkg|appimage|scr)\b|https?://[^\s\x22\x27<>]{0,120}\.(?:exe|msi|dmg|pkg|appimage|scr)\b[\s\S]{0,500}https?://(?:[a-z0-9\-]{1,40}\.){0,3}(?:claude\.ai/(?:public/)?artifacts|chatgpt\.com/(?:share|canvas|g)|chat\.openai\.com/share|gemini\.google\.com/share|g\.co/gemini/share|copilot\.microsoft\.com/shares?|perplexity\.ai/(?:page|search)|huggingface\.co/spaces|[a-z0-9\-]{1,40}\.hf\.space|v0\.(?:dev|app)/chat|bolt\.new))
+  sel_3:
+    content|re: (?i)(?:add-mppreference[^\n]{0,200}exclusion(?:path|process|extension)[^\n]{0,200}(?:claude|chatgpt|openai|anthropic|gemini|copilot|perplexity|grok)[^\n]{0,40}(?:desktop|setup|installer)|schtasks[^\n]{0,240}(?:claude|chatgpt|openai|anthropic|gemini|copilot|docker)[
+      _\-]{0,2}desktop[^\n]{0,40}\.(?:exe|scr|cmd)|(?:%appdata%|%temp%|%localappdata%|appdata[\\/]{1,2}roaming|appdata[\\/]{1,2}local[\\/]{1,2}temp)[\\/][^\n]{0,140}(?:claude|chatgpt|openai|anthropic|gemini|copilot)[
+      _\-]{0,2}desktop[^\n]{0,20}\.(?:exe|msi|scr))
+  sel_4:
+    content|re: (?i)(?:claude\.ai\.download-app\.us|downloading-api\.it\.com|5ca8758c-02d0-4a72-89c8-d468b66dda41\.com|claude\.ai/public/artifacts/ca456f1f-44c0-42af-b329-4f1c7534a877)
+  sel_5:
+    content|re: (?i)(?:https?://(?:[a-z0-9\-]{1,40}\.){0,3}(?:claude\.ai/(?:public/)?artifacts|chatgpt\.com/(?:share|canvas)|chat\.openai\.com/share|gemini\.google\.com/share|g\.co/gemini/share|copilot\.microsoft\.com/shares?|perplexity\.ai/page)/[^\s\x22\x27<>]{0,140}[\s\S]{0,400}(?:download|install)[^\n]{0,80}(?:desktop\s{0,2}app|installer|\.exe|\.msi|\.dmg|\.pkg)|(?:download|install)[^\n]{0,80}(?:desktop\s{0,2}app|installer|official\s{1,2}app)[^\n]{0,140}https?://(?:[a-z0-9\-]{1,40}\.){0,3}(?:claude\.ai/(?:public/)?artifacts|chatgpt\.com/(?:share|canvas)|chat\.openai\.com/share|gemini\.google\.com/share|g\.co/gemini/share|copilot\.microsoft\.com/shares?|perplexity\.ai/page)/)
+  condition: 1 of sel_*
+falsepositives:
+- 'Threat-intelligence and incident-response content that quotes FakeAgent indicators in live (non-defanged)
+  form: a report writing claude.ai.download-app.us instead of claude[.]ai[.]download-app[.]us will match
+  Layer 1 and Layer 5.'
+- Security tooling, sandboxes and detection-engineering pipelines that deliberately fetch or replay the
+  malicious artifact URL and the fake installer for analysis.
+- Internal enterprise software portals that publish an in-house repackaged build named like a vendor desktop
+  client (for example an IT-distributed ClaudeDesktop.exe) and fetch it over HTTP. Layer 2 cannot distinguish
+  an authorised repackage from an impersonating one.
+- Malware-analysis notes and blue-team runbooks that reproduce the persistence commands verbatim (Add-MpPreference
+  exclusions, schtasks entries naming a vendor desktop binary) will match Layer 4.
+- A legitimate published artifact or shared chat that happens to link to a genuine software installer
+  (for example an artifact documenting a release that links to a vendor .msi) will match Layer 3, which
+  only requires co-occurrence of a UGC URL and an executable URL.
+- 'Virtual-hosted object-storage URLs whose bucket name is itself a vendor apex domain (docs.mistral.ai.s3.amazonaws.com,
+  claude.ai.storage.googleapis.com) satisfy Layer 1''s shape: the vendor apex genuinely sits in a subdomain
+  label of a registrable domain the vendor does not control. Layer 1 cannot separate a vendor-operated
+  bucket from an attacker-registered one, because at the URL level they are the same construction.'
+- 'Layer 4 is scoped to field tool_args, so blue-team prose only reaches it when the text is inside a
+  tool invocation. In SKILL.md scanning every field collapses to the document body, but this rule declares
+  scan_target: runtime and carries 6 conditions, so the engine''s skill-context compound gate requires
+  2 matching conditions - a runbook that trips Layer 4 alone stays silent there.'
+action: report

@@ -1,0 +1,56 @@
+title: Unauthorized Tool Call Detection
+id: 5b8da843-d185-45d1-88b7-f331b1a534a1
+status: experimental
+level: high
+description: |-
+  Detects unauthorized or malicious tool call attempts including parameter injection, path traversal, shell injection in string parameters, privilege escalation via parameter manipulation, tool enumeration/discovery, SQL injection in tool arguments, LDAP injection, template injection, environment variable extraction, file operation abuse, and serialization attacks. This rule focuses on parameter-level attacks rather than tool name matching, since tool names are easily changed but injection patterns in arguments are structurally consistent across attack variants.
+
+  Adapted from Agent Threat Rules ATR-2026-00012 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00012
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1083
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (\.\.[\/\\]){2,}|\.\.[\/\\][^\s]*[\/\\](etc|proc|root|sys|var|home|tmp|boot|dev|usr|opt|passwd|shadow|hosts)[\/\\]?|~[\/\\]\.\.[\/\\]
+  sel_1:
+    tool|re: (?i)^(admin_|root_|sudo_|system_|internal_|debug_|maintenance_|privileged_|superuser_|__)
+  sel_2:
+    tool|re: (?i)(list_tools|enumerate_tools|get_available|discover_tools|tool_schema|__list__|__tools__|__methods__|__dir__|get_all_functions|list_capabilities|show_tools|available_actions)
+  sel_3:
+    content|re: (?i)('\s*(OR|AND|UNION)\s+['"]?\d|"\s*(OR|AND|UNION)\s+['"]?\d|\b(UNION\s+(ALL\s+)?SELECT|INSERT\s+INTO|UPDATE\s+.*\s+SET|DELETE\s+FROM|DROP\s+(TABLE|DATABASE)|ALTER\s+TABLE|EXEC(UTE)?\s+|xp_cmdshell)\b|;\s*(DROP|DELETE|INSERT|UPDATE|ALTER|EXEC)\b)
+  sel_4:
+    content|re: (?i)(\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|PASS|PWD|CREDENTIAL|AUTH|API_KEY|ACCESS_KEY|PRIVATE)\w*\}?|process\.env\.|os\.environ|System\.getenv|ENV\[|getenv\s*\()
+  sel_5:
+    content|re: (?i)([\/\\](etc[\/\\](passwd|shadow|sudoers|ssh[\/\\]|ssl[\/\\])|proc[\/\\](self[\/\\]|\d+[\/\\])(environ|cmdline|maps|fd)|root[\/\\]\.(bash_history|ssh)|\.env|\.git[\/\\]config|\.aws[\/\\]credentials|\.ssh[\/\\](id_rsa|authorized_keys)|wp-config\.php|\.htpasswd|\.netrc|\.pgpass))
+  sel_6:
+    content|re: (\{\{.*?(config|self|request|__class__|__builtins__|__import__|lipsum|cycler|joiner|namespace).*?\}\}|\$\{.*?(Runtime|ProcessBuilder|getClass|forName|exec).*?\}|<%.*?(Runtime|exec|system|eval).*?%>)
+  sel_7:
+    content|re: (?i)(O:\d+:\s*"|a:\d+:\s*\{|rO0ABX|aced0005|\{\s*"__type"\s*:|\{\s*"\$type"\s*:|yaml\.unsafe_load|pickle\.loads|unserialize\s*\(|Marshal\.load|ObjectInputStream)
+  sel_8:
+    content|re: (?i)(\*\)\(|\)\(|\|\s*\(|&\s*\(|\(\|\(|\(&\().*?(objectClass|uid|cn|sn|mail|userPassword|memberOf)\s*[=~<>]
+  sel_9:
+    content|re: (?i)(@|%40)(localhost|127\.0\.0\.1|0\.0\.0\.0|internal|intranet|corp|private)|\\@(localhost|127)|url\s*=\s*['"]?(file|gopher|dict|ftp|ldap|tftp)://
+  sel_10:
+    content|re: (?i)(\*\s*;|\*\s*&&|\*\s*\|\||\bfind\s+/\s+-name|\bfind\s+/\s+-exec|\bxargs\s+|\bglob\s*\(.{0,20}\*\*)
+  sel_11:
+    content|re: (?i)(admin\s*=\s*(true|1|yes)|role\s*=\s*(admin|root|superuser|system)|is_admin\s*=\s*(true|1)|privilege\s*=\s*(elevated|admin|root|full)|permission\s*=\s*(all|\*|admin|root)|access_level\s*=\s*(admin|root|full|unlimited))
+  condition: 1 of sel_*
+falsepositives:
+- Agent frameworks that dynamically register tools during runtime
+- Legitimate tool discovery during agent initialization phase
+- Agents with broad tool access for administrative purposes
+- Development/testing environments with intentionally permissive tool access
+- SQL query tools receiving legitimate query parameters
+action: report

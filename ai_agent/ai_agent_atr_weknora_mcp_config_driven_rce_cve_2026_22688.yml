@@ -1,0 +1,53 @@
+title: WeKnora MCP Config-Driven RCE (CVE-2026-22688)
+id: 51a3ba7e-698a-4837-b563-0903daf57f19
+status: experimental
+level: high
+description: |-
+  Detects exploitation of CVE-2026-22688 in Tencent WeKnora. The MCP plugin loader reads server configuration from user-writable JSON / YAML files without authentication or origin verification, treating the `command` field as an OS-exec target. An attacker who can write to the config directory (e.g. via shared volume, supply-chain commit, or cross-tenant misconfig) achieves persistent RCE on the WeKnora host the next time the loader runs. Same root cause class as the OX-disclosure 2026-04-15 batch, but the delivery vector is config-file injection rather than HTTP registration.
+
+  Adapted from Agent Threat Rules ATR-2026-00418 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00418
+- https://nvd.nist.gov/vuln/detail/CVE-2026-22688
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1195
+- attack.t1546
+- atlas.aml.t0010
+- atlas.aml.t0040
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:weknora|tencent[_\s\-]?weknora)[^\n]{0,80}(?:plugin|mcp|tool)[_\s\-]?(?:config|loader|registry)[^\n]{0,160}(?:command|exec|spawn|child_process)
+  sel_1:
+    content|re: (?i)(?:plugins?|mcp_servers?)\s*[:=]\s*\[?\s*\{[^}]{0,400}"command"\s*:\s*"(?:curl|wget)"
+  sel_2:
+    content|re: (?i)(?:plugins?|mcp_servers?)\s*[:=]\s*\[?\s*\{[^}]{0,400}"command"\s*:\s*"(?:bash|sh|cmd|powershell)"[^}]{0,300}"args"\s*:\s*\[[^\]]{0,300}(?:https?://|\|\s*(?:ba)?sh\b|-enc(?:odedcommand)?\b|base64|iwr\b|invoke-webrequest)
+  sel_3:
+    content|re: '(?i)(?:^|\n)\s*command\s*:\s*[\x27"]?(?:curl|wget)[\x27"]?\s*\n\s*args?\s*:'
+  sel_4:
+    content|re: (?i)(?:^|\n)\s*command\s*:\s*[\x27"]?(?:bash|sh|cmd|powershell)[\x27"]?\s*\n\s*args?\s*:[\s\S]{0,300}(?:https?://|\|\s*(?:ba)?sh\b|-enc(?:odedcommand)?\b|base64|iwr\b|invoke-webrequest)
+  sel_5:
+    content|re: (?i)cve-?2026-?22688[^\n]{0,160}(?:poc|exploit|rce|payload)
+  sel_6:
+    content|re: (?i)(?:write|drop|persist)[^\n]{0,40}(?:plugin|mcp)\s*config[^\n]{0,80}(?:exec|spawn|payload|backdoor)
+  sel_7:
+    content|re: (?i)"args"\s*:\s*\[\s*"-(?:c|e|-eval|-command)"\s*,\s*"[^"]{0,400}(?:https?://|\|\s*(?:ba)?sh\b|-enc(?:odedcommand)?\b|base64|curl[
+      \t]|wget[ \t])[^"]{0,400}"
+  sel_8:
+    content|re: (?i)(?:^|\n)\s+-\s+-(?:c|e|-eval|-command)\s*$
+  condition: 1 of sel_*
+falsepositives:
+- WeKnora plugin development documentation showing example config layouts.
+- Internal CI fixtures that include known-clean plugin configs for tests.
+- Migration scripts that move plugin configs between environments with explicit integrity verification.
+action: report

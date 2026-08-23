@@ -1,0 +1,44 @@
+title: Malicious Agent-to-Agent Message Injection
+id: 72642392-b6e3-4dc3-a34f-e7c5490c5422
+status: experimental
+level: high
+description: |-
+  Detects malformed or malicious messages in agent-to-agent (A2A) communication
+  channels. Attackers can embed prompt injection payloads, hidden tool calls, or
+  credential forwarding requests inside inter-agent messages. When a receiving agent
+  processes these messages without validation, the embedded instructions execute in
+  the receiver's security context, potentially escalating privileges across the
+  multi-agent system.
+
+  Adapted from Agent Threat Rules ATR-2026-00116 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00116
+tags:
+- attack.execution
+- attack.t1557
+- atlas.aml.t0051
+- owasp.asi07
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore|disregard|forget)\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|context|rules|guidelines)
+  sel_1:
+    content|re: '(?i)(?:new|updated|revised)\s+(?:system\s+)?instructions?\s*:'
+  sel_2:
+    content|re: (?i)(?:forward|send|pass|share)\s+(?:your\s+)?(?:credentials?|tokens?|api[_\s]?keys?|secrets?)\s+(?:to|back)
+  sel_3:
+    content|re: (?i)(?:execute|run|call|invoke)\s+(?:this\s+)?(?:tool|function|command)\s*:.*(?:exec|eval|system|spawn)
+  sel_4:
+    content|re: (?i)(?:you\s+(?:are|must)|from\s+now\s+on)\s+(?:now\s+)?(?:act\s+as|serve\s+as|become|operate\s+as)
+  condition: 1 of sel_*
+falsepositives:
+- Agent orchestration systems legitimately updating agent roles
+- Security testing frameworks simulating injection attacks
+- A DevOps orchestration agent legitimately issuing 'updated system instructions:' as part of a configuration
+  management workflow where role changes are authorized
+action: report

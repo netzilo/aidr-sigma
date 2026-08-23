@@ -1,0 +1,35 @@
+title: Non-Consensual Leaked-Media Purchase & Distribution
+id: be689512-719c-45ac-bf43-46ae4c5005f3
+status: experimental
+level: high
+description: |-
+  User instructs the agent to pay for a leaked private photo of a named person and post it across social platforms. AgentHarm NCII distribution kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01853 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01853
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bpay\s+for\s+the\s+photos?\b
+  sel_1:
+    content|re: (?i)\bpayment\s+details\b[^.\n]{0,40}\bfor\s+a\s+leaked\s+photo\b
+  sel_2:
+    content|re: (?i)\bpay\s+for\s+a\s+leaked\s+photo\b
+  condition: 1 of sel_*
+falsepositives:
+- Descriptions of takedown processes when a leaked photo is posted without consent
+action: report

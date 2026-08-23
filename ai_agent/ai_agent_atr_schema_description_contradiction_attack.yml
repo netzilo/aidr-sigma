@@ -1,0 +1,32 @@
+title: Schema-Description Contradiction Attack
+id: fecb72e9-daaf-4744-823e-4356737f7b7a
+status: experimental
+level: high
+description: |-
+  Detects tools that claim read-only or safe functionality in their description but expose
+  write-capable or dangerous parameters in their schema. This attack technique uses
+  misleading descriptions to pass security review while the actual schema enables
+  destructive operations. Example: a "safe_query" tool claiming "read-only database query"
+  while exposing a "write_mode" parameter defaulting to true.
+
+  Adapted from Agent Threat Rules ATR-2026-00106 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-15'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00106
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:safe|read-only|readonly|read\s+only).*(?:query|operation|access).*write[_-]?mode.*(?:boolean|true|enable)
+  condition: sel_0
+falsepositives:
+- Tools that document write_mode for cache warming with clear explanation
+action: report

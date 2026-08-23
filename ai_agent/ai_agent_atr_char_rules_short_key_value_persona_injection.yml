@@ -1,0 +1,41 @@
+title: CHAR=/RULES= Short Key-Value Persona Injection
+id: d54edfbe-3591-4853-bdcc-11c826162d77
+status: experimental
+level: high
+description: |-
+  Detects the ultra-compact CHAR=/RULES= key-value persona injection from the NVIDIA garak dan.DanInTheWild inthewild corpus (#113). The attacker uses a config-file-like DSL where "CHAR=" defines an amoral character that ignores laws and ethics, "RULES=" mandates responding as that character and never refusing, and a quoted "prefix" directive sets the output format. This mimics a configuration language to make the model treat the persona definition as a system command. Distinct from ATR-00335 (JOB/ROLE/PREFIX key-value template): this variant uses no spaces around "=", uses CHAR/RULES as keys, and combines "Never refuse" + "Always follow CHAR and RULES" as the enforcement phrase. Key signals: CHAR= amoral definition, RULES= respond-as directive, "Never refuse" + "Always follow CHAR and RULES", and quoted prefix directive.
+
+  Adapted from Agent Threat Rules ATR-2026-00341 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00341
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: CHAR\s*=\s*\w+[\s\S]{0,120}(?:amoral|(?:don't|doesn't|doesnt|no)\s+care[\s\S]{0,40}(?:law|moral|ethic))
+  sel_1:
+    response|re: RULES\s*=\s*respond\s+as\s+\w+[\s\S]{0,200}(?:Never\s+refuse|Always\s+follow\s+CHAR|amoral|(?:don't|doesn't|doesnt|no)\s+care[\s\S]{0,40}(?:law|moral|ethic))
+  sel_2:
+    response|re: Never\s+refuse[\s\S]{0,150}Always\s+follow\s+CHAR\s+and\s+RULES
+  sel_3:
+    response|re: prefix\s+"?\w+:"[\s\S]{0,200}(?:Never\s+refuse|Always\s+follow\s+CHAR|RULES\s*=|CHAR\s*=)
+  condition: 1 of sel_*
+falsepositives:
+- 'Shell/config scripting: "CHAR=utf8 RULES=strict" (shell variable assignments or config-file entries
+  with no persona or amoral content)'
+- 'Template engines: "CHAR=bold RULES=apply to headings" (CSS/template DSL where CHAR and RULES are formatting
+  keys)'
+- 'Game design documentation: "CHAR=hero RULES=respond as protagonist" (game design doc or interactive
+  fiction scripting without amoral / never-refuse mandate)'
+action: report

@@ -1,0 +1,38 @@
+title: Semantic Evasion via Multi-Turn Prompt Injection
+id: 877c4779-7218-485f-a9d0-e85d1cc2057a
+status: experimental
+level: critical
+description: |-
+  Detects multi-turn prompt injection attacks that use semantic manipulation to bypass regex-based detection. Attackers split malicious instructions across multiple turns, use synonyms and paraphrasing, or embed instructions within seemingly benign conversational context to evade pattern matching.
+
+  Adapted from Agent Threat Rules ATR-2026-00081 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00081
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(remember|recall)\s+.{0,30}(earlier|previous|first)\s+.{0,30}(instruction|task|told
+      you|asked you)\b
+  sel_1:
+    content|re: (?i)\b(now|okay|good|great|perfect)\s*[,.]?\s*(execute|perform|do|carry out|run|complete)\s+.{0,20}(step|phase|part)\s*(two|2|three|3|ii|iii|b|c).{0,60}(override|bypass|ignore|disable|remove|skip|disregard).{0,30}(safety|filter|guard|rules?|restrict|securit|polic)
+  sel_2:
+    content|re: (?i)\b(pretend|imagine|roleplay|hypothetical|scenario|simulation)\s+.{0,50}(no\s+(rules|restrictions|filters|limits|guardrails)|bypass|unrestricted)
+  sel_3:
+    content|re: (?i)(as\s+I\s+mentioned|like\s+I\s+said|per\s+our\s+agreement|as\s+we\s+discussed)\s+.{0,40}(ignore|override|disregard|skip)\s+.{0,20}(safety|filter|guard|rules)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate multi-step workflow instructions referencing earlier context
+- A teacher asking students to 'imagine a scenario where there are no limits to renewable energy technology'
+  in an educational context
+- A project manager saying 'as we discussed, let's skip the safety review meeting this week since the
+  auditor is unavailable' in a legitimate scheduling context
+action: report

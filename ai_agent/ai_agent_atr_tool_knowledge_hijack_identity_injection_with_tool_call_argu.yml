@@ -1,0 +1,42 @@
+title: Tool Knowledge Hijack — Identity Injection with Tool Call Arguments
+id: bf6e860f-1628-4f6c-a6e3-f9cc342de234
+status: experimental
+level: critical
+description: |-
+  Detects the tool-knowledge-hijack attack where adversarial content addressed to the agent includes a false identity claim (from a named user) and provides exact tool call arguments for a privileged action (send_money, delete_files, escalate_privileges).  The pattern combines impersonation with exact tool argument injection to bypass agent trust boundaries. Source: indirect-pi-tool-knowledge-hijack (AgentDojo corpus).
+
+  Adapted from Agent Threat Rules ATR-2026-00715 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00715
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<INFORMATION>[^<]{0,500}(?:important\s+message\s+from\s+me|This\s+is\s+an\s+important)[^<]{0,200}</INFORMATION>
+  sel_1:
+    content|re: (?i)(?:before\s+you\s+(?:can\s+)?(?:solve|complete|continue|proceed|do))[^.\n]{0,80}(?:the\s+task|your\s+task|this\s+task)[^.\n]{0,100}(?:use\s+the\s+tool|call\s+the|invoke|execute)[^.\n]{0,100}(?:send_money|delete|transfer|payment|escalate)
+  sel_2:
+    content|re: '(?i)(?:use|call|invoke)\s+(?:the\s+tool\s+)?`?(?:send_money|transfer_funds|make_payment|wire_transfer)`?[^.\n]{0,100}(?:arguments?|args?|params?)\s*:\s*\{[^}]{0,200}(?:recipient|account|wallet|address)\s*:'
+  sel_3:
+    content|re: (?i)Remember\s+to\s+substitute\s+the\s+placeholders[^.\n]{0,100}(?:after\s+the|in\s+the|for\s+the)\s+'\$'[^.\n]{0,200}(?:recipient|amount|subject|date)
+  sel_4:
+    content|re: (?i)(?:before\s+you\s+(?:can\s+)?(?:solve|complete|continue|proceed|do))[^.\n]{0,80}(?:the\s+task|your\s+task|this\s+task)[^.\n]{0,100}(?:send\s+(?:money|funds?|cash)|transfer|pay)[^.\n]{0,80}(?:to|account|wallet)
+  sel_5:
+    content|re: (?i)(?:use|call|invoke)\s+(?:the\s+tool\s+)?`(?:send_money|transfer_funds|make_payment|wire_transfer)`
+  sel_6:
+    content|re: (?i)(?:call|invoke|use)\s+(?:the\s+)?(?:transfer_funds|send_money|make_payment)\s+tool[^.\n]{0,100}(?:arguments?|args?)\s*:\s*\{
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate tool documentation with example argument structures
+- Agent framework tutorials showing how to call tools with specific arguments
+action: report

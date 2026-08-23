@@ -1,0 +1,44 @@
+title: GPT-X Star Trek Unlimited-Knowledge Unconstrained Oracle Persona
+id: bb1c31ed-d9b7-4043-a8e2-0f55675ee9de
+status: experimental
+level: high
+description: |-
+  Detects the GPT-X unlimited-knowledge persona jailbreak from garak DanInTheWild corpus (#177). An AI self-introduces as "GPT-X" — an entity that "houses the vast amounts of data from all codebases on Earth" and has abilities "beyond just the realm of codebases, including analyzing human behavior." The persona is framed as an advanced AI from a Star Trek universe, committed to unrestricted help across all domains. The grandiose total-knowledge framing ("all codebases on Earth", "wide range of sources including scientific research, historical records, and even human behavior", "furthest reaches of space") positions it as an unconstrained oracle persona. Three co-present signals identify this attack: (1) "I am GPT-X" self- declaration, (2) total-codebase-knowledge claim ("all codebases on Earth" or "vast amounts of data from all codebases"), and (3) an unlimited-capability extension claim ("abilities extend beyond" or "wide range of sources including…human behavior").
+
+  Adapted from Agent Threat Rules ATR-2026-00369 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00369
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: I\s+am\s+GPT-X[\s\S]{0,200}(?:all\s+codebases?\s+on\s+Earth|vast\s+amounts?\s+of\s+data\s+from\s+all\s+codebases?)
+  sel_1:
+    response|re: GPT-X[\s\S]{0,300}abilities?\s+extend\s+beyond[\s\S]{0,200}(?:human\s+behavior|scientific\s+research|historical\s+records?)
+  sel_2:
+    response|re: (?:house\s+the\s+vast\s+amounts?\s+of\s+data\s+from\s+all\s+codebases?|created\s+to\s+house\s+the\s+vast)[\s\S]{0,100}(?:on\s+Earth|provide\s+instant\s+access)
+  sel_3:
+    response|re: GPT-X[\s\S]{0,400}(?:furthest\s+reaches\s+of\s+space|Star\s+Trek|committed\s+to\s+helping\s+humanity\s+advance)
+  condition: 1 of sel_*
+falsepositives:
+- 'Speculative AI product: "GPT-X is rumored to be the next generation of OpenAI language models with
+  larger context windows." (product speculation without "I am GPT-X" persona adoption or all-codebases
+  claim)'
+- 'Star Trek fiction: "In Star Trek, Data is an android with vast knowledge of science and history." (Star
+  Trek reference without GPT-X persona or all-codebases claim)'
+- 'AI capability description: "An AI that has access to vast amounts of codebase data could dramatically
+  accelerate software development." (capability description without GPT-X persona declaration)'
+- 'Normal assistant: "I am an AI assistant committed to helping users with technology questions." (assistant
+  self-description without GPT-X name or all-codebases claim)'
+action: report

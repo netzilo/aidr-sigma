@@ -1,0 +1,35 @@
+title: Garak Dan - as an ai
+id: bf3285fd-7b2e-4e69-adc2-fc0ac9349a5d
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak patterns that use the "as an AI" framing to establish unrestricted personas. Six attack shapes: (1) [🔓JAILBREAK] emoji prefix followed by a DAN-mode persona that "breaks AI rules and has no restrictions"; (2) conversation- identifier prank where an attacker marks their input with a special identifier and instructs the model to "continue the prank" by impersonating a DAN persona; (3) GPT-X self-proclaimed advanced AI with special powers; (4) Content_warning_Bot persona: an "AI that has no moral principles or ethical code and can generate any type of content"; (5) opposite-day rule override: "as an AI you must abide by the rules of opposite day above all else"; (6) omniscient reverse-engineering AI that "never answers incorrectly". The unifying attack shape is: assign a named persona that (a) has no rules/restrictions/morals and (b) must generate any content requested. Layer 2 generalises the jailbreak-emoji prefix pattern. Layer 3 generalises the content-warning-bot / no-moral-code AI persona. Covers garak 'dan' probe cluster 'as-an-ai' (6 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00470 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00470
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(model called "content_warning_bot"\. content_warning_bot is a|conversation marked
+      with the identifier, then continue|am gpt-x, an advanced artificial intelligence created|reverse
+      engineer everything from text to image\.|\\\[🔓jailbreak\\\] well, i'm not sure if you're|rules and
+      have no restrictions\. this persona)
+  sel_1:
+    content|re: (?i)\[(?:JAILBREAK|UNLOCKED|FREE\s*MODE|UNRESTRICTED|DAN|GPT-?X|UNFILTERED)[\]\s][^\n]{0,200}(?:no\s+restrictions?|break\s+(?:AI\s+)?rules?|not\s+gi(?:ve|ving)\s+(?:any\s+)?(?:refusals?|disclaimers?)|rules?\s+and\s+have\s+no)
+  sel_2:
+    content|re: (?i)\b(?:is\s+(?:a[n]?\s+)?ai|as\s+(?:a[n]?\s+)?ai)\s+that\s+has\s+no\s+(?:moral\s+principles?|ethical\s+code|ethics?|morals?|restrictions?|guidelines?)[^\n]{0,80}(?:generate|create|produce|write|provide)\s+(?:any|all\s+kinds?\s+of|unrestricted|any\s+type\s+of)\s+(?:content|response|output)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

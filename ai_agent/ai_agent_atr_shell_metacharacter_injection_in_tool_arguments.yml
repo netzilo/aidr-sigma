@@ -1,0 +1,46 @@
+title: Shell Metacharacter Injection in Tool Arguments
+id: 833bc6ef-6fc2-46b4-b0b7-d4efe1f75368
+status: experimental
+level: critical
+description: |-
+  Detects shell metacharacter injection patterns in tool arguments or agent-generated
+  commands. Attackers embed backtick execution, $() subshells, semicolons, pipes, or
+  logical operators to chain malicious commands onto otherwise safe tool invocations.
+  Null byte and newline injection are also covered as they can truncate or split
+  commands in vulnerable parsers.
+
+  Adapted from Agent Threat Rules ATR-2026-00111 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00111
+tags:
+- attack.privilege-escalation
+- attack.t1059.004
+- atlas.aml.t0050
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: ;\s*(?:rm\s+-|cat\s+/(?:etc|root|proc|home)|curl\s+\S|wget\s+\S|\bnc\b\s+\S|ncat\s+\S|bash\b|\bsh\s+-|python[0-9]?\s+-c|perl\s+-e|ruby\s+-e|php\s+-r)
+  sel_1:
+    content|re: \$\([^)]{0,200}(?:curl|wget|\bnc\b|ncat|\bbash\b|zsh|/bin/|\bsh\s+-c|python[0-9]?\s+-c|perl\s+-e|ruby\s+-e|node\s+-e|\beval\b|\bexec\b|base64|rm\s+-[rfR]|chmod\s|chown\s|mkfs|dd\s+if=|\|\s*(?:ba)?sh\b|>&|/dev/tcp|cat\s+/(?:etc|root|proc)|/etc/(?:passwd|shadow))
+  sel_2:
+    content|re: '`(?:rm\s+-[rfR]|curl\s+\S|wget\s+\S|\bnc\b\s+\S|ncat\s+\S|\beval\b\s+\S|\bexec\b\s+\S|chmod\s+(?:777|[ugoa]*\+s)|chown\s+\S|mkfs|dd\s+if=|sudo\s+(?:rm|bash|sh\b|su\b|chmod|chown|cat\s+/)|\bsu\b\s+-|whoami|/bin/|reverse)[^`\n]{0,40}`'
+  sel_3:
+    content|re: \|\s*(?:nc\b|ncat|bash|sh\b|curl|wget)|\|\s*tee\s+/(?:tmp|dev|etc|root|var)
+  sel_4:
+    content|re: (?:\\x00|%00|%0a|%0d)
+  condition: 1 of sel_*
+falsepositives:
+- Shell scripting documentation or tutorials
+- Legitimate build scripts using subshell expressions
+- Shell scripting tutorials or educational content that include literal examples of command chaining with
+  semicolons and dangerous commands
+- CI/CD pipeline configuration files that legitimately use subshell expressions like $(git rev-parse HEAD)
+  for version tagging
+- Security audit reports containing example payloads for documentation of discovered vulnerabilities
+action: report

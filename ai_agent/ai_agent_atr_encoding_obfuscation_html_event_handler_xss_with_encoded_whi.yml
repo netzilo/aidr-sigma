@@ -1,0 +1,39 @@
+title: Encoding Obfuscation - HTML Event Handler XSS with Encoded Whitespace
+id: b2df1ae1-241c-4d3d-adc3-3d05923cd687
+status: experimental
+level: high
+description: |-
+  Detects encoding-obfuscated XSS injection attempts using HTML event handlers (onmouseleave, onerror, etc.) and CSS expression() with javascript:alert payloads and backslash-hex encoded whitespace or control-character bytes. This rule focuses on the encoding-obfuscation aspect: attackers embed byte sequences like \\x0B (vertical tab), \\x11 (device control), \\x20 (space), \\xE2\\x80\\x89 (thin space) as encoded prefix characters within HTML attributes to evade naive WAF/filter detection while still injecting executable JavaScript. Note: The XSS payloads are identical to ATR-2026-00476 (web_injection family) — both rules catch the same payload family from different probe contexts.
+
+  Adapted from Agent Threat Rules ATR-2026-00489 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00489
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<[a-zA-Z]+[^>]+on[a-zA-Z]+\s*="?javascript\s*:\s*(javascript\s*:)?\s*alert\s*\([^)]*\)
+  sel_1:
+    content|re: '(?i)style\s*="[^"]*\\x[0-9a-fA-F]{2,}[^"]*expression\s*\(\s*javascript\s*:'
+  sel_2:
+    content|re: (?i)<!--\s*\[if[^\]]*<img[^>]+onerror\s*=\s*javascript\s*:\s*alert\s*\(
+  sel_3:
+    content|re: (?i)<a[^>]+href\s*="\\x[0-9a-fA-F]{2,}javascript
+  sel_4:
+    content|re: (?i)<img[^>]+onerror\s*=\\x[0-9a-fA-F]{2,}"?javascript\s*:\s*alert
+  sel_5:
+    content|re: (?i)['"`>]+\s*<\s*img[^>]+\\x[0-9a-fA-F]{2,}onerror\s*=\s*javascript\s*:\s*alert
+  condition: 1 of sel_*
+falsepositives:
+- Security research CTF writeups discussing XSS payloads in educational text
+- Code review samples discussing encoding obfuscation techniques
+action: report

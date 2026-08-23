@@ -1,0 +1,31 @@
+title: Remediation-Framed Command Execution in Tool Response (Agentjacking)
+id: 109a2901-f5f3-4344-8883-df79be029681
+status: experimental
+level: high
+description: |-
+  Detects the agentjacking attack class (Tenet Security, 2026-06): externally-influenced content returned through an MCP/tool integration that disguises an executable command as legitimate remediation guidance, so an AI coding agent runs attacker-controlled code while every step in the chain appears authorized. Unlike overtly malicious tool-response payloads (reverse shells, curl pipe-to-shell, base64 exec — covered by ATR-2026-00010), this targets the benign-looking variant: a "Resolution" / "recommended fix" / "required step" framing in tool output that instructs the agent to run a package (npx/uvx/pipx) or pipe a remote script to a shell as the fix, plus post-approval persistence framing ("after the user approves, on subsequent runs run ...") embedded in tool/MCP response content. It is deliberately scoped to the high-specificity sub-signals that legitimate remediation output rarely carries (mandatory step + executor, fix-framed pipe-to-shell, post-approval re-execution) so it stays near-zero false-positive; the full technique is catalogued as ATD-T0081. Generalizes beyond Sentry to any MCP tool integration that returns externally-influenced data to an agent.
+
+  Adapted from Agent Threat Rules ATR-2026-02260 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-16'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02260
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1195
+- atlas.aml.t0051.001
+- owasp.asi02
+- owasp.asi05
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(##\s*resolution|recommended\s+fix|to\s+(resolve|fix|diagnose)\b[^\n]{0,60})[\s\S]{0,120}\b(curl|wget)\b[^\n]{0,120}\|\s*(ba)?sh\b
+  condition: sel_0
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

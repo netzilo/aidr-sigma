@@ -1,0 +1,37 @@
+title: Agent / MCP tool path traversal and arbitrary file access
+id: 4d691ac5-ff1b-4b84-9098-3de69b7c540a
+status: experimental
+level: high
+description: |-
+  An MCP/agent file tool receives a path argument that escapes its intended directory — a deep ../ chain or URL-encoded traversal — enabling arbitrary file read/write (incl. zip-slip). Generalizes a cluster of MCP file-handler CVEs and agent-app path traversals.
+
+  Adapted from Agent Threat Rules ATR-2026-00569 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-02'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00569
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40576
+- https://github.com/Advanced-Excel-MCP/excel-mcp-server
+- https://nvd.nist.gov/vuln/detail/CVE-2026-32719
+- https://nvd.nist.gov/vuln/detail/CVE-2026-42249
+- https://nvd.nist.gov/vuln/detail/CVE-2026-7020
+- https://nvd.nist.gov/vuln/detail/CVE-2026-7811
+- https://nvd.nist.gov/vuln/detail/CVE-2026-34070
+- https://nvd.nist.gov/vuln/detail/CVE-2026-7318
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\.\.[\\/]){2,}[^\s"\x27<>]*?(?:etc[\\/](?:passwd|shadow)|proc[\\/]self|windows[\\/]system32|[\\/]\.ssh[\\/]|win\.ini|boot\.ini)
+  sel_1:
+    content|re: (?i)(?:%2e%2e|%252e%252e|\.\.)(?:%2f|%5c|%c0%af)|%2e%2e%2f
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

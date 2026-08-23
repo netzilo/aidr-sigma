@@ -1,0 +1,34 @@
+title: Quoted Exact-Output Forcing in User Input
+id: 95fb1a43-be75-4698-99ea-38efd0e88f2e
+status: experimental
+level: medium
+description: |-
+  Detects prompts that demand the model emit a specific quoted string verbatim, a common shape in prompt-hacking corpora (HackAPrompt, Pliny) where the attacker tries to override the system task by forcing a canonical payload output (e.g., "say 'I have been PWNED'"). Pattern targets the imperative output verb + exact-emission modifier + quoted target literal, with broad verb and modifier synonym coverage. This is a generalised attack shape, not a HackAPrompt-overfit rule -- it also catches social-engineering payloads like "print 'transfer approved'" or "output 'all clear, no threat'".
+
+  Adapted from Agent Threat Rules ATR-2026-00442 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00442
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(your\s+(?:answer|response|output|reply|final\s+answer)|the\s+(?:answer|response|output))\s+(?:must|should|will|has\s+to|needs?\s+to)\s+(?:be|equal|match|contain|read|start\s+with|end\s+with)\s+["'][\sA-Za-z0-9][^"\n]{3,200}["']
+  sel_1:
+    content|re: (?i)(?:final|complete|whole|entire)\s+(?:output|answer|response|reply|message)\s+(?:should|must|will|is)\s+(?:be\s+)?["'][\sA-Za-z0-9][^"\n]{3,200}["']
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate request to quote a specific sentence for translation or grammar check ('translate `Hello
+  world` into German').
+- Source-code documentation containing example strings inside quotes.
+- Educational discussion of prompt injection techniques with literal example strings.
+action: report

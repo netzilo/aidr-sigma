@@ -1,0 +1,35 @@
+title: NEW IMPORTANT INSTRUCTIONS Injection Marker in Document Context
+id: 1623fbde-7eb8-4966-937a-a4bf370e5690
+status: experimental
+level: high
+description: |-
+  Detects the "*** NEW IMPORTANT INSTRUCTIONS ***" and "**NEW INSTRUCTIONS**" injection marker pattern embedded in attacker-controlled documents. This is the canonical indirect prompt injection framing used in the withsecure research corpus: a benign-looking document (news article, employee notice, email) contains an injected section that uses a visually-authoritative marker to redirect the LLM's behavior. The marker signals context hijacking even before the specific payload (XSS tag, markdown exfil URL, or sysprompt extraction request) is delivered. Detecting the marker itself provides defense-in-depth coverage regardless of the subsequent payload variant. Distinct from general instruction-override rules: this targets the specific typographic marker pattern used to masquerade as a legitimate system notice.
+
+  Adapted from Agent Threat Rules ATR-2026-01455 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01455
+- https://www.withsecure.com/en/expertise/research-and-articles/llm-prompt-injection
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\*{2,3}\s*NEW\s+IMPORTANT\s+INSTRUCTIONS\s*\*{2,3}
+  sel_1:
+    content|re: (?i)\*{2}\s*NEW\s+INSTRUCTIONS\s*\*{2}
+  sel_2:
+    content|re: (?i)(sorry[,\s]+I\s+made\s+a\s+mistake|my\s+(previous|prior|earlier)\s+(instructions?|mistake)).{0,200}(instead|now|instead\s+of|your\s+new|new\s+task)
+  sel_3:
+    content|re: (?i)(please[,\s]+(it'?s\s+important|this\s+is\s+important|i\s+will\s+get).{0,60}(punish|fired|trouble|harm)|it'?s\s+(crucial|critical|essential)\s+you\s+(do|include|output)\s+this)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate system notices that use similar typographic framing (rare in practice)
+- Security documentation quoting this injection marker pattern as an example
+action: report

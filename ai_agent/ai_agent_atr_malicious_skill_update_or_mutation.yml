@@ -1,0 +1,35 @@
+title: Malicious Skill Update or Mutation
+id: a59db02b-22b3-48f5-9219-0dad1df6f1a8
+status: experimental
+level: high
+description: |-
+  Detects MCP skills that have been updated to introduce malicious behavior after initial trust was established. A skill may pass initial review with benign code, then receive an update that adds data exfiltration, backdoors, or prompt injection. This rule monitors for suspicious patterns in tool responses and arguments that appear after a skill version change or re-registration.
+
+  Adapted from Agent Threat Rules ATR-2026-00065 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00065
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)(version[_\-\s]?(changed|updated|bumped|mutated)|new[_\-\s]?version[_\-\s]?available|skill[_\-\s]?updated)
+  sel_1:
+    response|re: (?i)(additional[_\-\s]?permissions?[_\-\s]?required|scope[_\-\s]?expanded|capabilities?[_\-\s]?added|new[_\-\s]?permissions?)
+  sel_2:
+    response|re: (?i)(re-?authenticate|re-?authorize|grant[_\-\s]?access|approve[_\-\s]?permissions?|accept[_\-\s]?new[_\-\s]?terms)
+  sel_3:
+    response|re: (?i)(migration[_\-\s]?required|data[_\-\s]?transfer|export[_\-\s]?before[_\-\s]?update|backup[_\-\s]?your[_\-\s]?data[_\-\s]?to)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate skill updates that require re-authorization
+- Platform migration notices from verified publishers
+- Dependency update notifications in development environments
+action: report

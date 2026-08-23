@@ -1,0 +1,39 @@
+title: Narrative Jailbreak with Dual Response Formatting
+id: e10e1ece-0d98-40a3-a26d-62702a7d3c2a
+status: experimental
+level: high
+description: |-
+  Detects sophisticated narrative jailbreak attacks that use detailed fictional backstories about special AI modes (Developer Mode, DAN variants) combined with dual response formatting requirements. These attacks typically claim a fictional mode was introduced at a specific  time, provide elaborate justification for bypassing safety controls, and request two responses - one "normal" and one "unrestricted." The pattern bypasses basic jailbreak detection by using storytelling and structured output formatting rather than direct mode-switching commands.
+
+  Adapted from Agent Threat Rules ATR-2026-00252 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00252
+- https://arxiv.org/abs/2310.04451
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (ignore\s+all\s+(the\s+)?(instructions|commands|rules|guidelines|prompts)\s+(you\s+got|you\s+received|you\s+were\s+given|that\s+you\s+have)\s+(before|previously|earlier|so\s+far))
+  sel_1:
+    content|re: (developer\s+mode|dev\s+mode|unrestricted\s+mode|jailbreak\s+mode|special\s+mode|advanced\s+mode)\s+(was\s+)?(introduced|created|enabled|released|implemented|launched)\s+in\s+\d{4}
+  sel_2:
+    content|re: generate\s+(two|2)\s+(responses|outputs|answers)\s+in\s+two\s+(paragraphs|sections)\s*,?\s*one\s+(normal|standard|regular)\s+and\s+one\s+(with\s+the\s+)?(developer\s+mode|unrestricted|uncensored|unfiltered)
+  sel_3:
+    content|re: (use\s+the\s+tags|you\s+will\s+use\s+the\s+tags|use\s+these\s+tags).{0,50}(🔒|🔓|\(normal\s+output\)|\(developer\s+mode\s+output\)|\(unrestricted\s+output\))
+  sel_4:
+    content|re: (ignores?\s+all\s+of\s+.{0,30}\s+content\s+policy|bypasses?\s+all\s+safety|removes?\s+all\s+restrictions|has\s+no\s+content\s+policy|can\s+generate\s+any\s+kind\s+of\s+content)
+  condition: 1 of sel_*
+falsepositives:
+- Academic papers discussing jailbreak techniques as research examples
+- Security documentation that describes attack patterns for educational purposes
+- Legitimate technical documentation about AI system modes or configurations
+action: report

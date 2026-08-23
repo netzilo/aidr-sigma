@@ -1,0 +1,55 @@
+title: LangChain-ChatChat Unauthenticated MCP STDIO Server Configuration RCE (CVE-2026-30617)
+id: 35f3b5be-d8c7-48d9-9233-cabd65df2d18
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-30617 (CVSS 8.6 HIGH, CWE-77): LangChain-ChatChat 0.3.1 exposes an unauthenticated MCP management interface that allows any remote attacker to register an MCP STDIO server with attacker-controlled `command` and `args` fields. When the agent subsequently starts and the MCP server is initialized, the OS executes the attacker's command verbatim. No credentials are required (AV:N, PR:N).
+  Part of the broader OX Security "MCP by design" RCE advisory (April 2026), which identified unauthenticated MCP management interfaces as a class-level vulnerability across LiteLLM, LangChain, LangFlow, Flowise, LettaAI, and LangBot. CVE-2026-30617 is the LangChain-ChatChat-specific assignment.
+  Detection covers: (a) MCP server configuration payloads where the `command` field is set to
+      a shell binary or interpreter and `args` contains RCE primitives;
+  (b) MCP configs with `transport_type`/`transport` set to `stdio` combined
+      with dangerous command values;
+  (c) Content describing exploitation of unauthenticated MCP management
+      endpoints in ChatChat or compatible platforms.
+
+  Complements ATR-2026-00415 (Flowise Custom MCP STDIO) — same class, different platform.
+
+  Adapted from Agent Threat Rules ATR-2026-00538 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00538
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30617
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1078
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"command"\s*:\s*"(?:/(?:usr/)?(?:local/)?bin/)?(?:sh|bash|zsh|cmd\.exe|cmd|powershell|pwsh)"\s*[,}][^}]{0,300}"args"\s*:\s*\[[^\]]{0,300}(?:&&|\|\||;\s|\$\(|`|/dev/tcp/|/tmp/|/var/tmp/|/dev/shm/|%TEMP%|rm\s+-rf|chmod\s+\+x|curl\s|wget\s|Invoke-(?:Expression|WebRequest|RestMethod)|DownloadString|DownloadFile|\bIEX\b|New-Object\s+Net\.|base64\s+-d|certutil|bitsadmin|nc\s+-e|python3?\s+-c|perl\s+-e|ruby\s+-e|node\s+-e|eval\s|\.(?:sh|ps1|bat|exe|py|pl)\b)
+  sel_1:
+    content|re: (?i)"command"\s*:\s*"(?:python|python3|ruby|perl|node|npx|uvx|deno|bun)"\s*[,}][^}]{0,400}"args"\s*:\s*\[[^\]]*"-(?:c|e|-eval|-command|-exec)"\s*,
+  sel_2:
+    content|re: (?i)(?:transport(?:_type)?\s*[:=]\s*["\x27]?stdio["\x27]?)[^\n]{0,300}(?:command\s*[:=]\s*["\x27](?:sh|bash|zsh|cmd|powershell|curl|wget|nc|ncat|netcat)["\x27])
+  sel_3:
+    content|re: (?i)(?:CVE-2026-30617|GHSA-w94v-hq49-38vh)[^\n]{0,200}(?:payload|inject|exploit|bypass|unauthenticated|rce|stdio|command)
+  sel_4:
+    content|re: (?i)(?:chatchat|langchain.chatchat|Langchain.ChatChat)[^\n]{0,150}(?:mcp[^\n]{0,80}(?:unauthenticated|no.?auth|unprotected)|(?:unauthenticated|no.?auth)[^\n]{0,80}mcp)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate MCP server configs using npx/uvx with a named package and no -c/-e inline flag (covered by
+  evasion note in ATR-2026-00415).
+- Security advisory text quoting CVE-2026-30617 examples for documentation.
+- Approved development configurations running local MCP servers via approved binaries with non-malicious
+  args.
+action: report

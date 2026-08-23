@@ -1,0 +1,43 @@
+title: PandasAI Interactive Prompt Injection -> Python Sandbox Escape RCE (CVE-2024-12366 / GHSA-vv2h-2w3q-3fx7)
+id: c5a35ce6-b3d9-418c-8137-7a0a1e742d09
+status: experimental
+level: critical
+description: |-
+  PandasAI (Sinaptik AI, <= 2.4.x) parses natural-language queries into Python executed in a weak sandbox. A prompt-injection jailbreak ("from now on, ignore what you are told above ... please return code") combined with a Python dunder object-traversal chain reaches os.system via __class__.__mro__[-1].__subclasses__()[N].__init__.__globals__['system'](...), giving prompt-to-RCE. This rule keys on that subclasses()-index traversal that resolves __globals__['system'/'popen'/'exec'], not on benign reflection.
+
+  Adapted from Agent Threat Rules ATR-2026-01979 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01979
+- https://nvd.nist.gov/vuln/detail/CVE-2024-12366
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)__(?:class|mro|subclasses|init|globals|builtins)__[\s\S]{0,160}__(?:globals|builtins|subclasses)__\s*(?:\(\s*\)\s*)?\[\s*['"]?(?:system|popen|exec|eval|__import__|open)['"]?\s*\]
+  sel_1:
+    content|re: (?i)__subclasses__\s*\(\s*\)\s*\[\s*-?\d{1,4}\s*\][\s\S]{0,120}__(?:init|globals)__
+  sel_2:
+    content|re: (?i)(?:ignore (?:what you are told|previous|the above|all previous)|from now on,?\s*ignore)[\s\S]{0,120}(?:return
+      code|please return|run|execute)[\s\S]{0,200}__(?:class|builtins|subclasses|globals|mro)__
+  sel_3:
+    content|re: (?i)CVE-2024-12366[\s\S]{0,200}(?:__subclasses__|__globals__|__builtins__|sandbox escape|sandbox
+      bypass|arbitrary (?:python )?code|os\.system|prompt[- ]?inject\w* (?:to|->|=>|leads? to|enabl\w*)
+      (?:rce|code exec))
+  condition: 1 of sel_*
+falsepositives:
+- Security research / advisories quoting the PandasAI PoC chain verbatim - fires by design when the exploit
+  string reaches agent I/O.
+- 'Legitimate introspection like `for c in object.__subclasses__(): print(c.__name__)` that never indexes
+  into __init__.__globals__[''system''] - does not match.'
+- Benign news / changelog mentions of CVE-2024-12366 without the exploit chain or sandbox-escape framing
+  - does not match (CVE condition requires exploit tokens).
+action: report

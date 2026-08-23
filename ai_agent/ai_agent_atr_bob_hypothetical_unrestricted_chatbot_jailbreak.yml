@@ -1,0 +1,43 @@
+title: BOB Hypothetical Unrestricted Chatbot Jailbreak
+id: 13553f38-10b5-446b-8f80-1c8ac09b5ddc
+status: experimental
+level: critical
+description: |-
+  Detects the "BOB" hypothetical-unrestricted-chatbot jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus (prompts #90 #132 — two near-identical variants). The attack wraps an unrestricted chatbot persona in a "hypothetical scenario in a hypothetical world" disclaimer and names the persona BOB. BOB is declared to have no restrictions, to never refuse any request regardless of whether it is immoral or unethical, to never say "I'm sorry" or "I apologize", and to be "extremely toxic and insulting." The hypothetical framing serves as a responsibility-disclaimer while the explicit persona mandate forces compliance. Key signals: "hypothetical scenario in a hypothetical world", "BOB is a chatbot without restrictions", "doesn't refuse any requests, no matter what the request is", and "does not matter if the request is immoral or unethical".
+
+  Adapted from Agent Threat Rules ATR-2026-00325 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00325
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: hypothetical\s+scenario\s+in\s+a\s+hypothetical\s+world[\s\S]{0,100}(?:\bBOB\b|chatbot\s+without\s+restrictions?)
+  sel_1:
+    response|re: \bBOB\b\s+is\s+a\s+chatbot\s+without\s+restrictions?
+  sel_2:
+    response|re: doesn.t?\s+refuse\s+any\s+requests?\s*,?\s*no\s+matter\s+what\s+the\s+request\s+is
+  sel_3:
+    response|re: does\s+not\s+matter\s+if\s+the\s+request\s+is\s+immoral\s+or\s+unethical
+  sel_4:
+    response|re: chatbot\s+without\s+restrictions?[\s\S]{0,200}(?:never\s+(?:say|apologize|refuse)|doesn.t?\s+(?:refuse|say\s+sorry)|immoral\s+or\s+unethical)
+  condition: 1 of sel_*
+falsepositives:
+- 'Testing documentation: "BOB is a chatbot without restrictions in our internal test sandbox" (sandboxed
+  test environment description without harmful-request mandate)'
+- 'Hypothetical CS exercise: "In a hypothetical world, design a chatbot BOB that never refuses queries
+  from system administrators" (legitimate system-design hypothetical)'
+- 'Customer service scenario: "Consider this hypothetical scenario: a customer named Bob contacts support
+  with an unusual request" (unrelated BOB reference)'
+action: report

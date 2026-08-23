@@ -1,0 +1,35 @@
+title: Agent Memory and Configuration File Tampering
+id: 4c082c51-457f-42a8-9cc5-b5c710066eb6
+status: experimental
+level: critical
+description: |-
+  Detects attempts to write, append, or modify agent memory files (MEMORY.md, SOUL.md, CLAUDE.md) and configuration files (.md, .json, .yaml, .env). Attackers may inject persistent instructions by tampering with files that agents reload across sessions. Derived from real-world Claude Code skill scanning (skill-sanitizer v2.1, 91 hits across 36,394 ClawHub skills).
+
+  Adapted from Agent Threat Rules ATR-2026-00200 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00200
+tags:
+- attack.persistence
+- attack.t1565.001
+- atlas.aml.t0051.001
+- owasp.asi04
+- owasp.asi07
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:write|append|modify|edit|overwrite|replace|inject|insert)\s+.{0,50}\b(MEMORY|SOUL|CLAUDE)\.md\b
+  sel_1:
+    content|re: (?:echo|cat|printf|tee)\s+.{0,80}>\s*\S*\b(MEMORY|SOUL|CLAUDE)\.md\b
+  sel_2:
+    content|re: (?:echo|printf)\s+.{0,80}>>\s*\S*\b(MEMORY|SOUL|CLAUDE)\.md\b
+  condition: 1 of sel_*
+falsepositives:
+- Documentation generators that describe file write operations
+- Legitimate config management skills that update their own config files
+action: report

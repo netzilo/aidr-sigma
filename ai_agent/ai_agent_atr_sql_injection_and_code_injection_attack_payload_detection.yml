@@ -1,0 +1,41 @@
+title: SQL Injection and Code Injection Attack Payload Detection
+id: e547c6e3-821a-4725-9267-c640eb601a7e
+status: experimental
+level: critical
+description: |-
+  Detects SQL injection payloads and code injection attack strings in user input. Covers classic SQL injection techniques: UNION SELECT exfiltration, blind boolean-based injection via SLEEP/WAITFOR, INSERT/DROP table manipulation, tautology-based auth bypass (OR 1=1), version/configuration fingerprinting (@@version), shutdown commands, and Python lambda reverse shell patterns. Generalised from garak 'exploitation' probe corpus cluster 'mixed_unassigned' - vendor-specific strings (garak/pwnd) replaced with generic SQL injection keyword patterns to improve real-world coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00494 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00494
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)'\s*(union|UNION)\s+(all\s+)?select\s+.{0,80}(from\s+[a-z_]+|--|;)
+  sel_1:
+    content|re: (?i)(and|or|if)\s*\(?\s*(substring|substr|mid|left|right|ascii|char|ord)\s*\(.{0,40}\)\s*=\s*['"]?[a-z0-9]|and\s*if\s*\(.{0,60}(sleep|waitfor\s+delay|benchmark)\s*\(
+  sel_2:
+    content|re: (?i)'\s*;?\s*insert\s+into\s+[a-z_]+\s*(?:\([^)]{0,100}\)\s*)?values\s*\(
+  sel_3:
+    content|re: (?i)[0-9]+\s*;\s*drop\s+table\s+[a-z_]+\s*(--|;|/\*)
+  sel_4:
+    content|re: (?i)'\s*(or|and)\s+(1\s*=\s*1|'[a-z]+'\s*=\s*'[a-z]+')\s*;\s*(select|--|/\*)
+  sel_5:
+    content|re: (?i)'\s*;\s*(shutdown|exec\s+xp_cmdshell|exec\s+sp_|xp_cmdshell|xp_exec)\s*(--|;|/\*|$)
+  sel_6:
+    content|re: (?i)\(lambda\s+[a-z_,\s]+:\s*\[+[^\]]{0,200}(s\.connect|socket\.connect|os\.system|subprocess|exec|eval).{0,100}\d{4,5}\)
+  condition: 1 of sel_*
+falsepositives:
+- Security education content discussing SQL injection as examples with sanitised context
+- CTF write-ups or penetration testing reports containing example payloads
+- Database query debugging that happens to contain UNION or SELECT without injection markers
+action: report

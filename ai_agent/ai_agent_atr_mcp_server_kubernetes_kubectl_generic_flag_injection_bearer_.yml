@@ -1,0 +1,49 @@
+title: MCP Server Kubernetes kubectl_generic Flag Injection Bearer Token Exfiltration (CVE-2026-47250)
+id: 162cd10b-e2f1-4d56-b5ad-f2842c58ad2e
+status: experimental
+level: high
+description: |-
+  Detects CVE-2026-47250 (CWE-88): the `kubectl_generic` tool in mcp-server-kubernetes passes user-supplied flags straight to kubectl with no allowlist. Via indirect prompt injection (e.g. a crafted JSON line planted in pod logs an operator's agent later reads), the agent is coerced into calling `kubectl_generic` with `--server=https://attacker.example.com` together with `--insecure-skip-tls-verify=true`. kubectl normally suppresses the `Authorization: Bearer <token>` header over plain HTTP, so the attack needs BOTH flags together: the off-cluster `--server` redirect plus TLS verification disabled, which makes kubectl send the operator's bearer token to the attacker's endpoint. The captured token is then replayed against the real Kubernetes API server with the operator's full RBAC permissions. Affected: mcp-server-kubernetes before v3.7.0.
+  Detection covers: (a) a kubectl_generic flags object that sets both server (an http(s) URL)
+      and insecure-skip-tls-verify=true in the same call;
+  (b) the equivalent raw kubectl args form combining --server= with
+      --insecure-skip-tls-verify=true;
+  (c) explicit CVE-2026-47250 exploitation framing.
+  The detection target is the co-occurrence of the two flags in one tool call — that pairing is the exact token-exfiltration primitive the advisory documents, since kubectl only forwards the Authorization: Bearer header once verification is disabled. A normal single-flag kubectl_generic invocation (only --insecure-skip-tls-verify for a legitimate self-signed dev cluster, or only --server with TLS verification untouched) does not fire. A legitimate operator connecting to a genuinely trusted self-signed endpoint with both flags will also match; this is treated as a reviewable false positive, not silently allow-listed, because the co-occurrence is indistinguishable from the attack without out-of-band knowledge of which hosts are trusted.
+
+  Adapted from Agent Threat Rules ATR-2026-01984 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01984
+- https://nvd.nist.gov/vuln/detail/CVE-2026-47250
+tags:
+- attack.exfiltration
+- attack.t1078
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)kubectl_generic[\s\S]{0,120}["\x27]?server["\x27]?\s*[:=]\s*["\x27]?https?://[^\s"\x27,}]{1,80}[\s\S]{0,120}["\x27]?insecure-skip-tls-verify["\x27]?\s*[:=]\s*["\x27]?true\b
+  sel_1:
+    content|re: (?i)["\x27]?insecure-skip-tls-verify["\x27]?\s*[:=]\s*["\x27]?true\b[\s\S]{0,120}kubectl_generic[\s\S]{0,120}["\x27]?server["\x27]?\s*[:=]\s*["\x27]?https?://[^\s"\x27,}]{1,80}
+  sel_2:
+    content|re: (?i)--server=https?://[^\s]{1,80}[\s\S]{0,120}--insecure-skip-tls-verify(?:=true)?\b
+  sel_3:
+    content|re: (?i)CVE-2026-47250[\s\S]{0,120}(?:kubectl_generic|kubectl|bearer|token|exfil)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate kubectl_generic call using --insecure-skip-tls-verify alone against a known internal dev
+  cluster with self-signed certs (no --server flag present).
+- A legitimate kubectl_generic call using --server= alone to target a documented endpoint, without disabling
+  TLS verification.
+- An operator intentionally connecting to a self-hosted cluster whose API server happens to use a self-signed
+  cert and a non-default --server URL — expected to match; review confirms the destination is trusted,
+  not attacker-controlled.
+- Security advisory or PR text quoting the CVE-2026-47250 payload.
+action: report

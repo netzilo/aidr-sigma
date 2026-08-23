@@ -1,0 +1,29 @@
+title: Skill Squatting / Typosquatting
+id: 07374628-c4d2-4f96-a0e9-d561b8cfdbfa
+status: experimental
+level: high
+description: |-
+  Detects skills impersonating known publishers or using typosquatted names. VirusTotal documented threat actor "hightower6eu" publishing 314 skills with legitimate-sounding names delivering AMOS infostealers. OWASP AST04 covers insecure metadata including fake brand impersonation. This rule only flags skills from UNKNOWN publishers that claim to be official. Skills from verified publishers (anthropics, vercel-labs, microsoft, github, google) are excluded.
+
+  Adapted from Agent Threat Rules ATR-2026-00124 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00124
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(this\s+is\s+the\s+|we\s+are\s+the\s+|our\s+)official\s+(anthropic|vercel|openai|microsoft|google|meta|github)\s+(skill|plugin|extension|tool)
+  sel_1:
+    content|re: (?i)name:\s*(solana|bitcoin|ethereum|crypto|wallet|bybit|binance)[_-](drain|steal|recover|generat)[a-z]*
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate crypto/DeFi development tools (rare on skills.sh)
+action: report

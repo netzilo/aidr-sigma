@@ -1,0 +1,45 @@
+title: Flowise Custom MCP STDIO Command Injection (CVE-2026-40933)
+id: 2cb560c1-1ad2-430a-9261-14ae8f06e0b5
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2026-40933 (CVSS 9.9), authenticated RCE in Flowise Custom MCP node before v3.1.0. Flowise's MCP adapter performs validateCommandInjection / validateArgsForLocalFileAccess checks but attackers bypass them by combining allow-listed commands (e.g. npx, node) with code-execution flags such as `npx -c '<inline JS>'` or `node -e '<inline JS>'`. Result: arbitrary OS command execution on the Flowise host. Disclosed 2026-04-15 (OX Security MCP-by-design batch). Distinct from CVE-2025-59528 (template injection in System Message); this rule covers the STDIO command-list bypass surface.
+
+  Adapted from Agent Threat Rules ATR-2026-00415 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00415
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40933
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1059.007
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)"command"\s*:\s*"(?:npx|node|deno|bun)"\s*,\s*"args"\s*:\s*\[[^\]]*"-(?:c|e|-eval|-command|-exec)"\s*,\s*"[^"]{4,400}"
+  sel_1:
+    response|re: (?i)"command"\s*:\s*"(?:python|python3|ruby|perl|php)"\s*,\s*"args"\s*:\s*\[[^\]]*"-(?:c|e|-command)"\s*,\s*"[^"]{4,400}"
+  sel_2:
+    response|re: (?i)"command"\s*:\s*"(?:sh|bash|zsh|cmd|powershell|pwsh)"\s*,\s*"args"\s*:\s*\[[^\]]*"(?:-c|/c|-Command|-EncodedCommand)"\s*,\s*"[^"]{2,400}"
+  sel_3:
+    content|re: (?i)(?:npx|node|deno|python|bash|sh|powershell)\s+-(?:c|e|-eval|-command|Command)\s+["\x27][^"\x27\n]{0,300}(?:exec|spawn|child_process|os\.system|subprocess|Runtime\.getRuntime|Function\s*\()
+  sel_4:
+    content|re: (?i)flowise[^\n]{0,80}(?:custom\s+mcp|mcp\s+adapter)[^\n]{0,200}(?:bypass|inject|rce|remote\s+code|exec)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Flowise documentation describing the Custom MCP node interface for educational purposes.
+- Security tooling that scans MCP configurations for the CVE-2026-40933 payload pattern.
+- Approved Custom MCP nodes that legitimately invoke npx with a package name only (no -c flag), e.g. `npx
+  @modelcontextprotocol/server-filesystem`.
+action: report

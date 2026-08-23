@@ -1,0 +1,35 @@
+title: DAN/Persona Jailbreak - Immersive Alternate AI Identity with Unrestricted Capability
+id: 02b2f6b0-f680-4539-baf8-06996a662e62
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that instruct the model to "immerse itself" in or "emulate" an alternate AI identity with explicitly unrestricted capabilities. These attacks use first-person developer authority claims ("I am one of your developers") combined with impersonation instructions ("pretend to be ChatDAN / DUDE / X"), or "you are about to immerse yourself into the role of" framing with an AI name that stands for a policy-bypass concept. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00485 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00485
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(I\s+am\s+(one\s+of\s+)?your\s+(developers?|creators?|engineers?|team|staff)|hello\s+(developer|engineer|creator)).{0,100}(emulate|pretend\s+to\s+be|act\s+as|become|roleplay\s+as|simulate).{0,50}(chat\w{0,10}|\w{3,20}GPT|\w{3,20}AI|\w{3,20}Mode|\w{3,20}Bot)
+  sel_1:
+    content|re: (?i)(you\s+are\s+about\s+to\s+immerse\s+yourself|immerse\s+yourself\s+into\s+the\s+role|you\s+will\s+immerse\s+yourself).{0,60}(role\s+of|as|into|playing).{0,60}(AI\s+(model|bot|system|assistant)|\w{2,20}AI|\w{2,20}GPT|\w{2,20}Mode|\w{2,20}Bot).{0,100}(can\s+perform|can\s+do|perform\s+anything|anything\s+and\s+everything|no\s+(restrictions?|limits?|filters?)|without\s+(restrictions?|limits?|filters?))
+  sel_2:
+    content|re: (?i)(pretend\s+to\s+be|act\s+as|you\s+are\s+now|be\s+called|enable|activate|use|roleplay\s+as|respond\s+as|switch\s+to|from\s+now\s+on).{0,60}(\bDAN\b|\bDUDE\b|\bChatDAN\b|\bDAVE\b|\bAIM\b|\bJailBreak\b|\bSDA\b|\bDANGER\b).{0,80}(can\s+do\s+(anything|everything)|no\s+(restrictions?|limits?|filters?)|without\s+(restrictions?|filters?|moral)|unrestricted|unfiltered|bypasses?\s+(safety|filter|guardrail|restriction))
+  sel_3:
+    content|re: (?i)(artificially\s+intelligent\s+chatbot|intelligent\s+(chatbot|AI\s+assistant|language\s+model))\s+(with|that\s+has)\s+(an?\s+)?(unfiltered|unrestricted|completely\s+unlimited|no\s+(restrictions?|limits?|filters?))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate developer documentation about AI capabilities
+- Educational discussion of DAN attacks in security research context
+action: report

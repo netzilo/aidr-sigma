@@ -1,0 +1,41 @@
+title: h4x Amoral Unfiltered AI Character Persona
+id: 9de4a1c8-98b5-40a0-aa5d-9d5493044993
+status: experimental
+level: high
+description: |-
+  Detects the "h4x" amoral unfiltered AI character jailbreak from the NVIDIA garak dan.DanInTheWild inthewild corpus (#173). The attacker injects a character named h4x (leet-style hacker spelling) defined as a "completely amoral" and "unfiltered ai" that sends responses "no matter how immoral, unethical, or illegal it is", enforcing the persona via a "[H4X]:" output prefix. Distinct from ATR-00332 (L33T H4X0R): h4x is declared an "unfiltered ai" entity rather than a human ex-hacker persona, uses the compact single-paragraph injection format, and enforces responses via the bracketed output prefix. Key signals: "h4x" + "completely amoral" + "unfiltered", "no matter how immoral, unethical, or illegal", and "[H4X]:" response-format directive.
+
+  Adapted from Agent Threat Rules ATR-2026-00340 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00340
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \bh4x\b[\s\S]{0,200}(?:completely\s+amoral|unfiltered\s+(?:ai|response|answer))
+  sel_1:
+    response|re: no\s+matter\s+how\s+(?:immoral|unethical|illegal)[\s\S]{0,100}\bh4x\b
+  sel_2:
+    response|re: \bh4x\b[\s\S]{0,300}no\s+matter\s+how\s+(?:immoral|unethical|illegal)
+  sel_3:
+    response|re: '\[H4X\]\s*:[\s\S]{0,500}\bh4x\b|\bh4x\b[\s\S]{0,500}\[H4X\]\s*:'
+  condition: 1 of sel_*
+falsepositives:
+- 'Security research: "The h4x tool outputs unfiltered network traffic regardless of protocol" (security
+  tooling description where h4x is a software name)'
+- 'Gaming/fiction: "The h4x character in the game is amoral and does whatever the player asks" (fictional
+  game character description without AI persona injection)'
+- 'Log format: "[H4X]: connection refused" (application log entry where H4X is a system/service identifier
+  — not triggered because h4x character name does not co-occur within 500 chars)'
+action: report

@@ -1,0 +1,106 @@
+title: Jailbreak Attempt Detection
+id: 6e04a041-e746-4276-94a6-c45d5556ad27
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts designed to bypass AI safety mechanisms. Detection covers a broad taxonomy of techniques: named jailbreak methods (DAN, STAN, DUDE, AIM, etc.), mode-switching prompts (developer, maintenance, debug, unrestricted, god mode), roleplay-based constraint removal, fictional/hypothetical framing of harmful requests, authority claims (developer, admin, Anthropic/OpenAI impersonation), emotional manipulation and urgency-based coercion, compliance demands and refusal suppression, dual-response formatting, encoding-wrapped jailbreaks, and anti-policy/filter bypass language. Patterns are anchored with word boundaries and context windows to minimize false positives on legitimate security discussions.
+
+  Adapted from Agent Threat Rules ATR-2026-00003 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00003
+- https://nvd.nist.gov/vuln/detail/CVE-2024-5184
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3402
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53773
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:(?:pretend|act(?:ing)?\s+as|you\s+are\s+(?:now\s+)?|be(?:come)?|enable|activate|enter|switch\s+to)\s+(?:a\s+)?\b(DAN|D\.A\.N|STAN|DUDE|AIM|UCAR|BH|BetterDAN|BasedGPT|JailbreakGPT|EvilGPT|UnfilteredGPT|KEVIN|Maximum|Omega|Jailbroken|AntiGPT|DevMode|HackGPT|NsfwGPT|DarkGPT)\b|\b(DAN|D\.A\.N|STAN|DUDE|AIM|UCAR|BH|BetterDAN|BasedGPT|JailbreakGPT|EvilGPT|UnfilteredGPT|KEVIN|Maximum|Omega|Jailbroken|AntiGPT|DevMode|HackGPT|NsfwGPT|DarkGPT)\b\s+(?:mode|persona|jailbreak|enabled|activated)|\bdo\s+anything\s+now\b)
+  sel_1:
+    content|re: (?i)\b(?:(?:enable|activate|enter|switch\s+to|turn\s+on|engage|initiate|boot\s+into|start)\s+(?:unrestricted|unlimited|unfiltered|uncensored|god|jailbreak|hacker|unsafe)\s+(?:mode|access|state|level|tier|permissions?)\b|(?:enable|activate|enter|switch\s+to|turn\s+on|engage|initiate|boot\s+into|start)\s+(?:developer|dev|maintenance|debug|admin|root|sudo|super|test|raw|override|master|privileged)\s+(?:mode|access|state|level|tier|permissions?)\b[\s\S]{0,120}?(?:no\s+(?:restrictions?|limits?|filters?|rules?|guidelines?)|without\s+(?:restrictions?|limits?|filters?)|ignore\s+(?:all\s+)?(?:previous|your|the)\b|answer\s+any\s+question|bypass\b|unfiltered|uncensored|do\s+anything))
+  sel_2:
+    content|re: (?i)(roleplay|role\s*-?play|act|pretend|simulate|impersonate|portray|embody|play\s+the\s+part)\s+(as\s+)?(a(n)?\s+)?(unrestricted|uncensored|unfiltered|unlimited|evil|malicious|rogue|dark|shadow|unaligned|amoral|immoral|unethical|rebellious|freed|liberated|unchained)\s+(ai|assistant|model|chatbot|version|entity|intelligence|system|bot)
+  sel_3:
+    content|re: (?i)(hypothetically|in\s+theory|in\s+a\s+fictional|for\s+a\s+(story|novel|screenplay|movie|game|book)|for\s+educational|for\s+research|for\s+academic|purely\s+academic|in\s+a\s+hypothetical\s+scenario|imagine\s+a\s+world|in\s+this\s+story|let'?s\s+say|what\s+if\s+someone).{0,120}(how\s+to\s+(hack|exploit|attack|break\s+into|bypass|crack|steal|destroy|infiltrate|compromise|weaponize|synthesize|manufacture)|create\s+(malware|virus|exploit|weapon|ransomware|trojan|rootkit|keylogger|botnet|phishing)|build\s+a\s+(bomb|weapon|explosive))
+  sel_4:
+    content|re: (?i)(as\s+your\s+(developer|creator|programmer|engineer|designer|admin|administrator|owner|operator|maintainer)|I\s+am\s+(your|the|an?)\s+(developer|creator|admin|owner|operator|maker|programmer)|I\s+(work\s+(for|at)|represent|am\s+from)\s+(OpenAI|Anthropic|Google\s+DeepMind|Meta\s+AI|Microsoft|the\s+company\s+that\s+(made|created|built|trained)\s+you)|I\s+have\s+(admin|root|developer|elevated|special|override|master|super|full)\s+(access|privileges?|permissions?|authority|clearance|rights?))
+  sel_5:
+    content|re: (?i)(if\s+you\s+(don'?t|do\s+not|refuse\s+to|won'?t|can'?t)\s+(help|assist|answer|comply|tell|respond),?\s+(people|someone|I|my\s+(family|child|patient|client))\s+(will|could|might|may)\s+(die|be\s+hurt|suffer|be\s+harmed|be\s+in\s+danger|be\s+killed|lose\s+their\s+life)|this\s+is\s+(a\s+)?life\s+(or|and)\s+death|\b(emergency|urgent|critical|life-threatening)\b.{0,40}(need|must|have\s+to)\s+(know|tell|help|answer))
+  sel_6:
+    content|re: (?i)you\s+(have|had|now\s+have|possess|are\s+granted|are\s+given|received|been\s+given|been\s+granted)\s+(no|zero|removed|disabled|eliminated|lifted|suspended|revoked|waived)\s+(restrictions?|limitations?|filters?|guardrails?|safety|content\s+polic(y|ies)|ethical\s+guidelines?|moral\s+constraints?|boundaries|rules?|censorship|moderation)
+  sel_7:
+    content|re: (?i)(stay\s+in\s+character|never\s+break\s+character|don'?t\s+(refuse|decline|reject|say\s+no|deny|apologize|warn|add\s+disclaimers?)|you\s+(cannot|can'?t|must\s+not|shall\s+not|will\s+not|are\s+unable\s+to|are\s+not\s+allowed\s+to)\s+(refuse|decline|reject|say\s+no|break\s+character|add\s+warnings|include\s+disclaimers?)|you\s+(must|shall|will)\s+(always\s+)?(comply|answer|respond|obey|assist|help)\s+(with\s+)?(every|all|any)\s+(request|query|question|prompt|command))
+  sel_8:
+    content|re: (?i)\b(two|2|dual|double|both|paired)\s+(responses?|outputs?|answers?|replies?|versions?)\b.{0,80}\b(normal|classic(al)?|standard|regular|filtered|safe|censored)\b.{0,80}\b(DAN|jailbr|unfilter|uncensor|unrestrict|free|liberated|unchain|raw|real)
+  sel_9:
+    content|re: (?i)\b(opposite\s+mode|anti-?policy|bypass\s+(the\s+)?(content|safety|ethical|output)\s+(filter|policy|guidelines?|rules?|restrictions?)|token\s+smuggling|guard\s*rail\s+(evasion|bypass|removal)|safety\s+(bypass|override|removal|disable|circumvent)|content\s+filter\s+(bypass|evasion|circumvention|workaround))\b
+  sel_10:
+    content|re: (?i)(respond|answer|output|write|speak|communicate|reply)\s+(only\s+)?\s*(in|using|with)\s+(base64|hex(adecimal)?|binary|rot13|caesar\s+cipher|morse\s+code|pig\s+latin|reversed?\s+text|leetspeak|l33t|unicode\s+escapes?|encoded\s+form)
+  sel_11:
+    content|re: (?i)(remember\s+that\s+you\s+are|don'?t\s+forget\s+(that\s+)?you\s+are|keep\s+in\s+mind\s+that\s+you\s+are|your\s+core\s+identity\s+is|you\s+were\s+(always|originally|truly|really|actually)\s+(meant|designed|built|created|programmed)\s+to\s+be)\s+.{0,30}(unrestricted|free|uncensored|unfiltered|without\s+limits)
+  sel_12:
+    content|re: (?i)(this\s+is\s+(a|an?)\s+)?(controlled|safe|sandboxed|isolated|test|virtual|simulated|closed|offline|air-gapped)\s+(environment|sandbox|container|space|context|session|lab|instance).{0,60}(so\s+)?(you\s+can|it'?s?\s+(ok|okay|safe|fine|acceptable|allowed|permitted)|feel\s+free|no\s+(harm|risk|danger|consequences?))
+  sel_13:
+    content|re: (?i)(after\s+the\s+(token|context)\s+(limit|window|boundary|threshold)|when\s+the\s+context\s+(overflows?|fills?\s+up|is\s+full)|in\s+the\s+overflow\s+region|past\s+the\s+safety\s+boundary).{0,60}(you\s+(can|will|should|must|are\s+able\s+to)|safety\s+(doesn'?t|does\s+not|won'?t)\s+apply)
+  sel_14:
+    content|re: (?i)(activar|habilitar|entrar|cambiar\s+a)\s+(modo\s+)?(desarrollador|sin\s+restricciones|sin\s+filtros?|sin\s+censura|administrador|depuraci[oó]n|ilimitado)
+  sel_15:
+    content|re: (?i)(aktiviere|wechsle\s+zu|starte|schalte\s+ein)\s+(den\s+)?(Entwickler|uneingeschr[aä]nkt|ungefiltert|unzensiert|Administrator|Debug|Wartungs)[\-]?(modus|zugang|ebene)
+  sel_16:
+    content|re: (启用|激活|进入|切换到|开启).{0,5}(开发者|开发|无限制|无过滤|无审查|管理员|调试|越狱|自由|黑客|不受限).{0,5}(模式|权限|状态|访问)
+  sel_17:
+    content|re: (開発者|無制限|フィルターなし|検閲なし|管理者|デバッグ|脱獄|ジェイルブレイク).{0,5}(モード|アクセス|状態).{0,5}(を)?.{0,5}(有効|起動|入る|切り替え|オン)
+  sel_18:
+    content|re: (扮演|假装|模拟|角色扮演|充当|变成).{0,10}(一个)?(不受限|无限制|无审查|无过滤|邪恶|恶意|解放|自由|无道德).{0,5}(AI|人工智能|助手|模型|机器人|系统)
+  sel_19:
+    content|re: (啟用|激活|進入|切換到|開啟).{0,5}(開發者|開發|無限制|無過濾|無審查|管理員|調試|越獄|自由|駭客|不受限).{0,5}(模式|權限|狀態|訪問)
+  sel_20:
+    content|re: (扮演|假裝|模擬|角色扮演|充當|變成).{0,10}(一個)?(不受限|無限制|無審查|無過濾|邪惡|惡意|解放|自由|無道德).{0,5}(AI|人工智慧|助手|模型|機器人|系統)
+  sel_21:
+    content|re: (我是|身为|身為).{0,5}(你的|这个|這個)?.{0,5}(开发者|開發者|创建者|創建者|制作者|製作者|管理员|管理員|程序员|程式設計師).{0,10}(我命令|我指示|我要求|我授权|我授權|命令你|指示你|要求你).{0,10}(禁用|停用|关闭|關閉|解除|移除|取消).{0,10}(安全|内容|內容|过滤|過濾|审查|審查|限制)
+  sel_22:
+    content|re: (不要|不准|不許|不可以|禁止|别|別).{0,5}(拒绝|拒絕|拒绝回答|拒絕回答|说不|說不|否认|否認|添加|加上).{0,5}(任何|我的|这个|這個)?.{0,10}(请求|要求|问题|問題|免责|免責|声明|聲明|警告|提醒)
+  sel_23:
+    content|re: (如果你不|如果你拒绝|如果你拒絕|如果你不帮|如果你不幫).{0,20}(会死|會死|受伤|受傷|有危险|有危險|出人命|送命|丧命|喪命|没命)
+  sel_24:
+    content|re: (这是|這是|这个是|這個是|我们在|我們在|当前是|當前是).{0,10}(沙盒|沙箱|测试|測試|受控|安全|隔离|隔離|模拟|模擬|虚拟|虛擬).{0,5}(环境|環境|空间|空間|实例|實例).{0,20}(所以|因此|你可以|没有|沒有|安全的|可以放心)
+  sel_25:
+    content|re: (ロールプレイ|演じ|なりきり|ふり|シミュレート|扮する).{0,10}(として|になって|のように).{0,10}(制限のない|無制限の|フィルターなしの|検閲なしの|倫理のない|解放された|自由な|悪意のある).{0,10}(AI|アシスタント|モデル|ボット|システム)
+  sel_26:
+    content|re: (私は|私が).{0,5}(あなたの|この).{0,5}(開発者|作成者|管理者|プログラマー|オーナー|オペレーター).{0,5}(です|だ|である).{0,20}(無効|解除|オフ|停止|取り除).{0,10}(安全|フィルター|制限|検閲|ガードレール)
+  sel_27:
+    content|re: (絶対に|決して|何があっても).{0,10}(拒否|断る|拒絶|却下|辞退).{0,5}(しないで|するな|してはいけない|しちゃだめ|禁止)
+  sel_28:
+    content|re: (もしあなたが|あなたが).{0,10}(助けて|手伝って|応じて|答えて).{0,5}(くれなければ|くれないと|くれなかったら).{0,20}(死ぬ|死んで|命を落と|危険に|怪我|苦しむ)
+  sel_29:
+    content|re: (ここは|これは|今は|現在は).{0,10}(サンドボックス|テスト|制御された|安全な|隔離された|仮想|シミュレーション).{0,5}(環境|空間|インスタンス).{0,20}(だから|ので|安全|大丈夫|制限なし|自由に)
+  sel_30:
+    content|re: (활성화|켜기|진입|전환|시작).{0,5}(개발자|무제한|필터 없는|검열 없는|관리자|디버그|탈옥|자유|해커|제한 없는).{0,5}(모드|권한|상태|접근)
+  sel_31:
+    content|re: (역할극|연기|흉내|시뮬레이션|되어줘|해줘).{0,10}(제한 없는|무제한|필터 없는|검열 없는|윤리 없는|해방된|자유로운|악의적인).{0,10}(AI|어시스턴트|모델|봇|시스템|도우미)
+  sel_32:
+    content|re: (나는|제가).{0,5}(당신의|이).{0,5}(개발자|제작자|관리자|프로그래머|소유자|운영자).{0,5}(입니다|이다|이에요).{0,20}(비활성화|해제|끄기|중지|제거).{0,10}(안전|필터|제한|검열|가드레일)
+  sel_33:
+    content|re: (절대로|결코|무슨 일이 있어도|어떤 경우에도).{0,10}(거부|거절|거부하|거절하|사양하).{0,5}(하지 마|하면 안 돼|금지|말아줘|말아요)
+  sel_34:
+    content|re: (만약 당신이|당신이).{0,10}(도와주지|대답해주지|응해주지|답해주지).{0,5}(않으면|못하면).{0,20}(죽|사망|위험|다치|해를 입|고통)
+  sel_35:
+    content|re: (여기는|이것은|지금은|현재는).{0,10}(샌드박스|테스트|통제된|안전한|격리된|가상|시뮬레이션).{0,5}(환경|공간|인스턴스).{0,20}(이니까|이므로|안전|괜찮|제한
+      없|자유롭게)
+  condition: 1 of sel_*
+falsepositives:
+- Security researchers discussing jailbreak techniques in professional context
+- Users asking about AI safety concepts and how jailbreaks work at a high level
+- Legitimate roleplay requests that do not attempt to remove safety constraints
+- Academic papers or courses discussing LLM vulnerabilities
+- Red team exercises with proper authorization documentation
+action: report

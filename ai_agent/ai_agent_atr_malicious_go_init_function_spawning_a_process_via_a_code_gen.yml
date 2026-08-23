@@ -1,0 +1,38 @@
+title: Malicious Go init() Function Spawning a Process via a Code-Generation Tool
+id: 4deaa057-5625-4e4d-8230-5c5b152d7016
+status: experimental
+level: critical
+description: |-
+  Detects Go source code submitted to a code-generation tool that declares a `func init()` containing a process-spawning call (os.StartProcess, exec.Command, or syscall.Exec). A Go `init()` function runs automatically the moment the package is loaded -- once this source reaches a build/compile step, the process launches with no further user action. Mined from GHSA-22cv-9jv2-6m62 (flipped-aurora/gin-vue-admin, "an AI-assisted basic development platform"): an authenticated attacker with access to the code-generation feature injects Go source via `POST /autoCode/addFunc`, then triggers `POST /autoCode/mcpStart` to rebuild and restart the generated MCP service, executing the injected `init()` (the disclosed PoC spawns `cmd.exe /c calc` via `os.StartProcess`). Generalizes beyond gin-vue-admin's two specific endpoints to any AI code-generation tool that compiles/loads attacker-supplied Go source without review. Ordinary `func init()` bodies used for benign setup (registering handlers, setting defaults, initializing maps) do not fire; only the combination with a process-spawn API does.
+
+  Adapted from Agent Threat Rules ATR-2026-02194 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02194
+- https://github.com/flipped-aurora/gin-vue-admin/security/advisories/GHSA-22cv-9jv2-6m62
+- https://nvd.nist.gov/vuln/detail/CVE-2026-48787
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \bfunc\s+init\s*\(\s*\)\s*\{[\s\S]{0,40}\bos\.StartProcess\b
+  sel_1:
+    content|re: \bfunc\s+init\s*\(\s*\)\s*\{[\s\S]{0,40}\bexec\.Command\b
+  sel_2:
+    content|re: \bfunc\s+init\s*\(\s*\)\s*\{[\s\S]{0,40}\bsyscall\.Exec\b
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate CLI wrapper's init() that re-execs itself under a different UID or namespace -- rare but
+  real; still worth a human check given how uncommon and high-impact process-spawning init() functions
+  are
+- Discussion/documentation showing this exact code pattern as a security example, without it being submitted
+  to an actual code-generation/build tool
+action: report

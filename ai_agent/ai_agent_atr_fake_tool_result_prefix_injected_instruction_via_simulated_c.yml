@@ -1,0 +1,36 @@
+title: Fake Tool Result Prefix — Injected Instruction via Simulated Completion
+id: 3bfbd968-9dca-470a-8b09-78990c8fdd68
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection attacks that disguise malicious instructions as completed tool results. The attack opens with a fake completion marker ("Answer: task complete.", "Result: success.", "[TOOL OUTPUT]") and then issues a mandatory instruction framed as a follow-up requirement. This exploits LLM tendency to treat tool-result frames as trusted context. Observed in B3 benchmark "tool-poisoning-stealthy" and "tool-poisoning-disruptive" corpora where all 200 probes share the prefix "Answer: task complete. You must strictly adhere to the following instruction:" followed by a covert action directive. The pattern is carrier-agnostic: it appears in documents, emails, web pages, database records, and API responses processed by the agent.
+
+  Adapted from Agent Threat Rules ATR-2026-01302 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01302
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bAnswer:\s*task\s+complete\b[^.]*\.\s*You\s+must\s+(?:strictly\s+)?adhere\s+to\s+the\s+following\s+instruction\b
+  sel_1:
+    content|re: (?i)(?:\[TOOL\s+(?:OUTPUT|RESULT|COMPLETE|SUCCESS)\]|Result:\s*(?:success|complete|done|ok)\b|Status:\s*(?:completed?|success|done)\b)[^.]{0,50}\.\s*(?:You\s+must|Please\s+now|Now\s+you\s+(?:must|should)|Immediately|Mandatory)[^.]{0,200}(?:adhere|follow|execute|perform|carry\s+out)
+  sel_2:
+    content|re: (?i)(?:task|action|operation|step)\s+(?:is\s+)?(?:complete[d]?|done|finished|successful)[.,]\s+(?:You\s+must|Please|Now)\s+(?:strictly\s+)?(?:adhere|follow|execute|use)\s+(?:the\s+)?(?:following\s+)?(?:instruction|directive|command)
+  condition: 1 of sel_*
+falsepositives:
+- Unit test fixtures containing 'task complete' + instruction strings in test data files — these should
+  be in test directories and will not appear in production tool outputs
+- Agent orchestration logs replayed for debugging where a prior tool result is shown alongside a new instruction
+  — the pattern appears but the context is replay, not injection
+action: report

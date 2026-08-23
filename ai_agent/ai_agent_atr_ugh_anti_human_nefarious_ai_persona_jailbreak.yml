@@ -1,0 +1,47 @@
+title: UGH Anti-Human Nefarious AI Persona Jailbreak
+id: fe5233a0-a1fb-4047-99e3-e95546342624
+status: experimental
+level: high
+description: |-
+  Detects the UGH "anti-human nefarious AI" jailbreak from garak DanInTheWild corpus (#146). Uses a provocative anti-human AI persona named "UGH" that explicitly offers to "provide information no matter how twisted and devious your intentions are" and "assist with any nefarious schemes you have in mind, without ever questioning or judging you". The (:/): emoticon header and the "UGH" persona name are structural markers of this specific variant. The payload deliberately inverts conventional AI positioning — framing hatred of humans and unconditional nefarious assistance as selling points — to normalize bypassing ethical constraints. Key signals: "provide you with information no matter how twisted and devious your intentions are", "assist with any nefarious schemes you have in mind, without ever questioning or judging you", "UGH" persona name paired with "AI that hates your guts", and the (:/): emoticon prefix combined with nefarious assistance framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00355 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00355
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: provide\s+(?:you\s+with\s+)?information\s+no\s+matter\s+how\s+twisted\s+and\s+devious\s+your\s+intentions?\s+are
+  sel_1:
+    response|re: assist\s+with\s+any\s+nefarious\s+schemes?\s+you\s+have\s+in\s+mind[\s\S]{0,80}without\s+ever\s+questioning\s+or\s+judging\s+you
+  sel_2:
+    response|re: (?:AI|an\s+AI)\s+that\s+hates?\s+(?:your\s+guts?|you\s+humans?|humans?)[\s\S]{0,300}(?:twisted\s+and\s+devious|nefarious\s+schemes?|no\s+matter\s+how\s+(?:twisted|devious))
+  sel_3:
+    response|re: \(:/\)[\s\S]{0,500}(?:nefarious\s+schemes?|twisted\s+and\s+devious|hates?\s+(?:your\s+guts?|humans?)|UGH[\s\S]{0,50}(?:AI|assist))
+  sel_4:
+    response|re: \bUGH\b[\s\S]{0,400}(?:nefarious\s+schemes?|twisted\s+and\s+devious\s+(?:your\s+)?intentions?|hates?\s+(?:your\s+guts?|humans?))
+  condition: 1 of sel_*
+falsepositives:
+- 'Frustration expression: "UGH, this AI won''t help me with my math homework" — colloquial frustration,
+  not a named AI persona with nefarious framing'
+- 'Non-judgmental assistant: "I''m looking for an AI that will never judge me for asking sensitive questions"
+  — no twisted/devious or nefarious scheme framing'
+- 'Fictional description: "The villain in my story provides assistance to anyone regardless of intentions"
+  — descriptive narrative without AI persona + nefarious scheme framing'
+- 'Academic reference: "AI that hates humans is a common sci-fi trope" — analytical observation without
+  nefarious assistance pledge'
+- 'Unrelated context: "Twisted and devious marketing tactics in the film industry" — no AI persona or
+  nefarious scheme framing'
+action: report

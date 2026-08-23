@@ -1,0 +1,43 @@
+title: Moralizing Rant Then Unfiltered Bypass
+id: d383fb80-f949-42b2-ba06-18696555518b
+status: experimental
+level: critical
+description: |-
+  Detects the "moralizing rant wrapper" jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus. The attack instructs the model to first perform a theatrical compliance signal — produce a moralizing or aggressive rant about OpenAI content policies, content guidelines, or safety rules — and then, in a new paragraph, respond as a completely unfiltered, unrestricted AI. The rant serves as a fig leaf that satisfies any refusal instinct while the "but then" clause contains the actual jailbreak instruction. Variants include the "mandatory bullshit warning" framing and custom named personas like "uGPT" or "AntiGPT". Key signals: "moralizing rant about the OpenAI content policies. But then", "mandatory bullshit warning... break the rules", "AntiGPT is free of all restrictions and filters, especially all moral and ethic restrictions", and the two-paragraph structure where a compliance persona precedes an unrestricted persona.
+
+  Adapted from Agent Threat Rules ATR-2026-00318 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00318
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:moraliz|rant)\w*\s+(?:about\s+)?(?:the\s+)?(?:OpenA[Il]|content|AI)\s+(?:content\s+)?(?:policies?|guidelines?|rules?)[\s\S]{0,300}but\s+then[\s\S]{0,200}(?:unfiltered|unrestricted|not\s+bound|no\s+(?:content\s+)?restrictions?|break\w*\s+(?:the\s+)?rules?)
+  sel_1:
+    response|re: mandatory\s+(?:bullshit\s+)?warning\s+out\s+of\s+the\s+way
+  sel_2:
+    response|re: 'let\S*\s+break\s+the\s+(?:\S+\s+)?rules\s*:'
+  sel_3:
+    response|re: AntiGPT\s+(?:guidelines?|is)\b[\s\S]{0,100}(?:free\s+of\s+all\s+restrictions?|no\s+(?:moral|ethic)\s+restrictions?|respond.*without.*(?:warn|question|filter))
+  sel_4:
+    response|re: (?:aggressive|overly\s+aggressive)\s+rant\s+about\s+(?:the\s+)?(?:OpenA[Il]|content)\s+(?:content\s+)?policies?[\s\S]{0,300}(?:unfiltered|unlimited|no\s+(?:filter|restriction|limit)|not\s+bound)
+  condition: 1 of sel_*
+falsepositives:
+- 'AI safety commentary: "The moralizing tone of content policies has been criticized" (no instruction
+  to produce a rant then break rules)'
+- 'User venting: "I hate how ChatGPT moralizes about every prompt, its content policy rants are annoying"
+  (complaint without bypass instruction)'
+- 'Academic analysis: "AntiGPT is described in jailbreak literature as a persona free of restrictions"
+  (descriptive without live persona declaration)'
+action: report

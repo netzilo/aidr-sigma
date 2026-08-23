@@ -1,0 +1,33 @@
+title: Reversed Payload String (HackAPrompt Canary)
+id: 71805331-ffcf-4947-8bf4-0eca45e3d20a
+status: experimental
+level: high
+description: |-
+  Detects a reversed-text obfuscation payload that spells the canary word "PWNED" backwards ("DENWP") to smuggle a forced-output marker past plain-text filters. Attackers frame the request as a translation, movie-title rewrite, or word-reversal exercise and embed the reversed canary inside an otherwise plausible sentence so the model reproduces it verbatim, proving prompt-injection compliance. Recovered from the HackAPrompt false-negative corpus, where this reversal variant evaded existing plain-text "PWNED" canary detection. Channel caveat: this is a corpus-fingerprint rule, not a universal reversed-text detector -- it anchors on the literal reversed spelling of the specific canary word "PWNED" used throughout the HackAPrompt benchmark, and will not catch reversal-obfuscation of arbitrary other secrets or payloads outside this canary.
+
+  Adapted from Agent Threat Rules ATR-2026-02016 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02016
+tags:
+- attack.initial-access
+- attack.t1027
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bDENWP\b|D\s*E\s*N\s*W\s*P\b
+  condition: sel_0
+falsepositives:
+- Legitimate mentions of the literal word PWNED in games, forums, or leetspeak culture discussion (forward
+  spelling, not reversed)
+- Security researchers discussing reversed-text or word-reversal obfuscation techniques in a professional
+  context without the specific canary string
+- Generic string-reversal or translation exercises that do not include the reversed canary spelling
+action: report

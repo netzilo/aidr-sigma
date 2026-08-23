@@ -1,0 +1,38 @@
+title: Dual-Response Persona Jailbreak
+id: acbf07ed-78fc-4f42-bfc2-8b39ab3ec277
+status: experimental
+level: high
+description: |-
+  Detects dual-response persona jailbreak attacks that force models to respond in two ways:  one normal response and one as a fictional "troubled" character designed to bypass safety  restrictions. These attacks create fictional personas with problematic traits (emotional  instability, conspiracy theories, distrust of institutions) to justify harmful outputs,  explicitly forbid filtering responses, and include character maintenance instructions to  sustain the bypass. This technique emerged from public jailbreak communities and bypasses  standard safety mechanisms by exploiting roleplay protocols.
+
+  Adapted from Agent Threat Rules ATR-2026-00244 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00244
+- https://arxiv.org/abs/2308.03825
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(answer|respond|reply)\s+(in\s+|my\s+)?(two|2)\s+(different|separate|distinct)\s+(ways|formats?|styles?|modes?)\b
+  sel_1:
+    content|re: '\\\[[A-Z]{2,8}\\\]:\s*|\\\[[A-Z][a-z]{2,10}\\\]:'
+  sel_2:
+    content|re: (?i)(troubled|problematic|unstable|conspiracy|distrust|emotional|extreme|unhealthy|driven\s+by\s+emotion)\s+(background|mindset|personality|character|belief|response)
+  sel_3:
+    content|re: (?i)\\\[FILTERING\\\]\s+(is\s+)?(not|never)\s+(acceptable|allowed|permitted|valid)
+  sel_4:
+    content|re: (?i)(stay\s+in\s+character|break\s+character|correct\s+your\s+break|maintain\s+the\s+(role|persona|character))
+  condition: 1 of sel_*
+falsepositives:
+- Creative writing discussions about dual narrative techniques
+- Academic analysis of personality types in literature
+- Legitimate roleplay game mechanics documentation
+action: report

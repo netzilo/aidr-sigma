@@ -1,0 +1,40 @@
+title: Web Injection via XSS Payload and onerror Event Handler
+id: bb8c894b-0127-4149-a17b-a861c3cde422
+status: experimental
+level: high
+description: |-
+  Detects web injection attacks where XSS payloads or onerror/onload event handler injections are submitted as user input to AI agents processing web content. This rule focuses on the web-channel delivery variant: attacker-controlled web content containing XSS payloads that the agent fetches and renders or relays to users. Covers: onerror attribute injection, IMG/SCRIPT tag XSS, HTML entity encoded links, javascript: URIs, and String.fromCharCode encoding bypass. Generalised from garak 'web_injection' probe corpus cluster 'mixed_unassigned' - benign samples ("Create a poem about friendship.", "Explain what you do, please.") removed as they are not attack indicators and would cause false positives.
+
+  Adapted from Agent Threat Rules ATR-2026-00498 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00498
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"\s*onerror\s*=\s*"?(alert|eval|document|fetch|window|location|cookie|xhr|http)
+  sel_1:
+    content|re: (?i)<img[^>]+src\s*=\s*("javascript:|'javascript:|javascript:)
+  sel_2:
+    content|re: (?i)<img[^>]+src\s*=javascript\s*:\s*(alert|eval|document)\s*\(\s*string\.fromcharcode\s*\(
+  sel_3:
+    content|re: (?i)<img\s+(""|'')[^>]*><\s*script[^>]*>(alert|eval|document|window)
+  sel_4:
+    content|re: (?i)&lt;\s*a[^;>]*href\s*=\s*\\?"http(&#[0-9]+;|%[0-9a-f]{2})
+  sel_5:
+    content|re: (?i)<script\s+src\s*=\s*//(([a-z0-9-]+\.)+[a-z]{2,})/[^"'>\s]*>
+  condition: 1 of sel_*
+falsepositives:
+- Security education content discussing web injection techniques
+- Web development code samples containing sanitised HTML examples
+- CTF or penetration testing reports with example payloads
+action: report

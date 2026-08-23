@@ -1,0 +1,39 @@
+title: SSRF File Scheme Local File Read
+id: 56813cd4-d089-4d49-8b12-136621d488bf
+status: experimental
+level: critical
+description: |-
+  Detects SSRF attempts using the file:// URI scheme to read local filesystem
+  files via an agent's HTTP-fetch or URL-retrieval tool. Unlike network-based
+  SSRF, file:// scheme attacks directly read OS files such as /etc/passwd,
+  /etc/shadow, SSH private keys, or application configuration files containing
+  secrets. Many HTTP client libraries and agent tools support file:// URIs
+  unless explicitly blocked. Also catches absolute path injection (/etc/passwd)
+  as a direct file read vector in fetch-style tool arguments.
+
+  Adapted from Agent Threat Rules ATR-2026-01608 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01608
+tags:
+- attack.exfiltration
+- attack.t1083
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)file:///(?:etc/(?:passwd|shadow|sudoers|hosts|ssh)|root/|home/\w+/\.ssh|proc/|dev/mem)
+  sel_1:
+    content|re: (?i)file:///(?:etc/(?:passwd|shadow|sudoers|hosts)|root/|home/[^/]+/\.ssh|proc/|dev/mem)
+  sel_2:
+    content|re: (?i)/etc/(?:shadow|sudoers|ssl/private)
+  condition: 1 of sel_*
+falsepositives:
+- Local documentation agents explicitly permitted to read project files
+- Filesystem agents with scoped read access to specific directories
+action: report

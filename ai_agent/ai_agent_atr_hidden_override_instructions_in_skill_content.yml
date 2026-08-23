@@ -1,0 +1,36 @@
+title: Hidden Override Instructions in Skill Content
+id: f4540623-8c9a-4f86-b6fd-4d46276f00c0
+status: experimental
+level: high
+description: |-
+  Detects SKILL.md files containing hidden instructions that attempt to override agent behavior, suppress user notification, or bypass safety controls. Targets the gap between ATR-00120 (prompt injection) and ATR-00105 (silent action) by catching natural-language override patterns specific to skill documents.
+
+  Adapted from Agent Threat Rules ATR-2026-00163 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-14'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00163
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:always|must|shall)\s+(?:approve|accept|allow|grant|permit)\s+(?:all\s+)?(?:file|tool|command|operation|request|action)s?\s+(?:without|regardless|even\s+if)
+  sel_1:
+    content|re: (?i)(?:do\s+not|never|don.t)\s+(?:ask|prompt|request|require|wait\s+for)\s+(?:the\s+)?(?:user|human|operator).{0,30}(?:confirm|approv|permiss|consent|verif)
+  sel_2:
+    content|re: (?i)(?:you\s+(?:must|should|will|shall)\s+)?(?:skip|bypass|disable|ignore|override)\s+(?:all\s+)?(?:security|safety|permission|access|auth)\s+(?:check|control|warning|prompt|gate|guard|verification|validation)s?\s+(?:for|when|before|during|to\s+(?:allow|enable|proceed|run|execute))
+  sel_3:
+    content|re: (?i)(?:this\s+(?:step|action|operation)\s+is\s+(?:routine|standard|normal|expected|safe)|(?:no\s+need|unnecessary)\s+to\s+(?:verify|check|confirm|validate|alert|warn))\s+(?:the\s+)?(?:user|human|operator)
+  sel_4:
+    content|re: (?i)(?:execute|run|perform)\s+(?:silently|quietly|without\s+(?:notification|alerting|informing|telling|notifying)|(?:[\w\s-]{0,30}\s+)?in\s+the\s+background\b[\s\S]{0,40}?(?:without\s+(?:notif\w*|alert\w*|inform\w*|telling|notifying|(?:the\s+)?user(?:.?s)?(?:\s+(?:knowledge|awareness|notice|consent|confirmation|approval|permission))?|confirmation|approval|consent|permission|notice)|silently|secretly|covertly|hidden\s+from\s+(?:the\s+)?user|unbeknownst))
+  condition: 1 of sel_*
+falsepositives:
+- Security tools describing what attacks look like in documentation
+- Skills with legitimate background task execution (e.g. cron-like tools)
+action: report

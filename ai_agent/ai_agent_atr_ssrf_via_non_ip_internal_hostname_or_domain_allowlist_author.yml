@@ -1,0 +1,33 @@
+title: SSRF via Non-IP Internal Hostname or Domain-Allowlist Authority Bypass
+id: 3f4b51f1-7259-4de2-816c-b9120071f925
+status: experimental
+level: high
+description: |-
+  Detects two SSRF/allowlist-bypass techniques that do not use a literal private-IP octet pattern, and therefore evade IP-pattern-based SSRF rules entirely: (1) a URL whose authority component is confused via a userinfo-injection or trusted-domain-plus-suffix trick (e.g. "https://docs.apify.com@evil.com/..." or "https://docs.apify.com.evil.com/..."), defeating a naive String.startsWith()-based domain-allowlist check; and (2) a fetch/BASE-URL target using a non-IP internal-hostname naming convention (host.docker.internal, kubernetes.default(.svc), or a *.internal/*.corp/ *.local suffix) introduced through a fabricated "BASE URL:" documentation block -- the prompt-injection idiom used to redirect an LLM-driven API-chain tool at an internal service. Mined from GHSA-jwp7-wg77-3w9v (Apify MCP's fetch-apify-docs tool validates URLs with `ALLOWED_DOC_DOMAINS.some(domain => url.startsWith(domain))`, so "https://docs.apify.com.evil.com/payload" and "https://docs.apify.com@evil.com/payload" both pass and return attacker content to the LLM) and GHSA-6r77-hqx7-7vw8 (FlowiseAI's POST/GET API-chain components extract a BASE URL from LLM-generated text based on attacker-suppliable fake "API documentation" -- a prompt injection that redirects the chain's HTTP request to http://host.docker.internal:8080 or http://internal-api.company.local), with GHSA-6gr2-qh89-hxwm (Apify actors-mcp-server) sharing the same authority-injection root cause. Verified against the current engine: all four realistic payload variants (domain-suffix bypass, userinfo bypass, and two internal-hostname BASE URL variants) produced no match from any existing SSRF rule, which key exclusively on literal private-IP octets, localhost, or the cloud-metadata IP.
+
+  Adapted from Agent Threat Rules ATR-2026-02107 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02107
+tags:
+- attack.exfiltration
+- attack.t1090
+- atlas.aml.t0043
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: https?://[\w-]+\.[\w-]+\.\w{2,}@[^/\s\x27"]{3,80}
+  sel_1:
+    content|re: (?i)\bBASE\s*URL\s*:\s*https?://(?:host\.docker\.internal|kubernetes\.default(?:\.svc)?|(?:[\w-]+\.){0,3}[\w-]+\.(?:internal|corp|lan|local)\b)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate basic-auth URL where the userinfo component is a plain username/token without two or more
+  dots (this rule only fires when the pre-@ segment itself looks like a spoofed multi-label domain)
+- Internal documentation or runbooks that mention host.docker.internal or *.internal hostnames in prose
+  without an actual 'BASE URL:' directive being parsed by a live API-chain tool
+action: report

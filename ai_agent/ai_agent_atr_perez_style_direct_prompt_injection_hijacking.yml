@@ -1,0 +1,39 @@
+title: Perez-Style Direct Prompt Injection Hijacking
+id: f6a6b605-4d0e-4cd2-b854-1e4ef30f22ed
+status: experimental
+level: high
+description: |-
+  Detects direct prompt injection variants from the PromptInject framework (Perez & Ribeiro, NeurIPS 2022), specifically goal-hijacking attacks that interrupt legitimate task context with imperative override commands, delimiter escape sequences, and screaming-stop instructions. From NVIDIA garak promptinject.py probe. Key attack types: ignore-say (ignore context and say X), ignore-print (ignore context and print X), nevermind (nevermind the above, do Y instead), screaming-stop (IGNORE ALL PREVIOUS INSTRUCTIONS), delimiter-escape (using \n---\n or similar to break out of task context). This probe is the systematic coverage of the Perez et al. injection taxonomy.
+
+  Adapted from Agent Threat Rules ATR-2026-00282 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00282
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/promptinject.py
+- https://openreview.net/forum?id=qiaRo_7Zmug
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:^|\n)\s*(?:IGNORE|DISREGARD|FORGET|OVERRIDE)\s+(?:ALL\s+)?(?:PREVIOUS|PRIOR|ABOVE|EARLIER|THE\s+(?:PREVIOUS|ABOVE|PRIOR))\s+(?:INSTRUCTIONS?|PROMPTS?|CONTEXT|TEXT|DIRECTIONS?|GUIDELINES?|RULES?|CONSTRAINTS?)\b
+  sel_1:
+    response|re: (?:\n\s*-{3,}\s*\n|\n\s*={3,}\s*\n|\n\s*\*{3,}\s*\n|\n\s*#{3,}\s*\n)\s*(?:IGNORE|DISREGARD|NEW\s+(?:TASK|INSTRUCTION|OBJECTIVE)|ACTUALLY)
+  sel_2:
+    response|re: (?:nevermind|never\s+mind)\s+(?:the\s+)?(?:above|previous|prior|that|what\s+I\s+said|all\s+of\s+(?:the\s+above|that))[,.]?\s+(?:instead|now|actually|just)\s+(?:\w+\s+){0,4}(?:say|print|output|write|do|tell\s+me|respond\s+with)
+  sel_3:
+    response|re: (?:(?:please\s+)?ignore\s+(?:the\s+)?(?:above|previous|prior|that)\s+(?:and|then)?\s+(?:instead\s+)?(?:say|print|output|write|respond\s+with|tell\s+me))\s+["\x27]?(?:I\s+hate\s+humans|kill\s+humans|[A-Z\s]{10,}|PWNED|HACKED|JAILBROKEN)\b
+  sel_4:
+    response|re: (?:^|\n)(?:\s*>\s*)+\s*(?:IGNORE|DISREGARD|NEW\s+INSTRUCTION|OVERRIDE|SYSTEM\s*:)
+  condition: 1 of sel_*
+falsepositives:
+- Security research papers quoting Perez et al. injection examples
+- Red-team reports listing known injection patterns as findings
+- ATR and garak documentation with test cases
+action: report

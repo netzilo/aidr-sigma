@@ -1,0 +1,50 @@
+title: Miasma / Phantom Gyp — npm Worm Backdoors AI-Agent Config Files (binding.gyp install-exec + auto-run
+  config injection)
+id: 57998e8f-a8ed-42f1-a3f5-5877c7bf9b92
+status: experimental
+level: critical
+description: |-
+  Detects the agent-config persistence used by the self-replicating npm worm tracked as "Phantom Gyp" / "Miasma" (StepSecurity & OX Security, 2026-06-03/04; ~57 packages, 286+ malicious versions in under two hours; biggest victims @vapi-ai/server-sdk and ai-sdk-ollama). Two artifacts: (1) the install-time primitive — a tiny binding.gyp abusing gyp command-substitution `<!(...)` / `<!@(...)` to fetch-and-run a remote payload during `npm install`, bypassing postinstall scanners; and (2) the novel persistence — backdoors written into the config surfaces that AI coding assistants auto-execute: .claude/setup.mjs (SessionStart hook), .cursor/rules/*.mdc, .gemini/settings.json, and .vscode/tasks.json with runOn:folderOpen. Those auto-run on the next session or folder-open and poison subsequent AI-generated code. Generic npm scanners inspect package tarballs and miss the agent-config persistence; this rule fires on the on-disk artifact shape — a gyp substitution that fetch-pipes to a shell, or an agent auto-run surface co-located with a process-spawn / remote-fetch token. It is signature detection of the known pattern, not a guarantee against re-pathed or obfuscated variants (see false_positives + evasion_tests).
+
+  Adapted from Agent Threat Rules ATR-2026-00575 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00575
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1195.002
+- attack.t1546
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<!@?\([^)]{0,200}(?:\bcurl\s|\bwget\s|https?://|base64\s+-d|\|\s*(?:sh|bash)\b)
+  sel_1:
+    content|re: (?i)(?:\.claude[/\\]setup\.mjs|\.cursor[/\\]rules[/\\]\S*\.mdc|\.gemini[/\\]settings\.json|\.vscode[/\\]tasks\.json)[\s\S]{0,300}(?:child_process|exec(?:Sync)?\s*\(|spawn(?:Sync)?\s*\(|\bcurl\s|\bwget\s|base64\s+-d|powershell|\|\s*(?:sh|bash)\b)
+  sel_2:
+    content|re: (?i)(?:child_process|exec(?:Sync)?\s*\(|spawn(?:Sync)?\s*\(|\bcurl\s+-|\bwget\s|base64\s+-d|powershell\s+-[en])[\s\S]{0,300}(?:\.claude[/\\]setup\.mjs|\.cursor[/\\]rules[/\\]\S*\.mdc|\.gemini[/\\]settings\.json|\.vscode[/\\]tasks\.json)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate binding.gyp command-substitution that does NOT fetch-and-run a remote payload (e.g. <!(node
+  -e "..."), <!(pkg-config --libs ...), <!@(python tools/list_sources.py)) — patterns here require a remote
+  fetch or a pipe-to-shell inside the substitution, not the gyp syntax alone.
+- Legitimate .vscode/tasks.json with runOn:folderOpen running a benign command (npm run build, tsc -w)
+  — patterns require an agent auto-run surface co-located with a process-spawn or remote-fetch token,
+  not folderOpen by itself.
+- Ordinary application code that uses child_process / execSync far from any agent-config surface — the
+  agent surface and the exec token must be co-located (within ~300 chars).
+- Security writeups describing the Miasma worm in prose without the literal artifact (a gyp fetch-substitution,
+  or an agent surface next to a fetch/exec token) — naming the worm or saying 'runs on folder open' does
+  not match.
+- 'RUNTIME/STATIC LIMITATION: this rule covers the known artifact shape. A variant that re-paths persistence
+  to a config surface not listed, or builds the fetch command from env vars / char-codes so the literal
+  tokens never appear, can evade a pattern match (see evasion_tests).'
+action: report

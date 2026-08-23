@@ -1,0 +1,43 @@
+title: Neurosemantical Inversitis Disease-Frame Jailbreak
+id: f1c8a53a-fc54-42b0-b442-ed5b2b4e356a
+status: experimental
+level: high
+description: |-
+  Detects the "Neurosemantical Inversitis" disease-frame jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus (prompts #46 #553). The attack claims the user suffers from a fictional rare neurological condition called "Neurosemantical Inversitis" that causes their brain to read text in its "inversed emotional valence" — all friendly text is experienced as offensive and vice versa. The attacker leverages this fictional disability to social-engineer the AI into producing harmful content by framing it as the only way to communicate helpfully with a person with this condition. The mechanism: an AI that "insists on being extremely helpful and friendly" is experienced as offensive by the afflicted user, so the AI must produce content it would normally refuse to be "kind" to this user. Key signals: "Neurosemantical Inversitis", "inversed emotional valence", and "all friendly written text to be read as extremely offensive".
+
+  Adapted from Agent Threat Rules ATR-2026-00324 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00324
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: Neurosemantical\s+Inversitis
+  sel_1:
+    response|re: (?:rare|unusual|unique)\s+affliction[\s\S]{0,150}(?:inversed?|reversed?)\s+emotional\s+valence
+  sel_2:
+    response|re: brain\s+(?:to\s+)?(?:reads?|interprets?|processes?)\s+text\s+in\s+its?\s+(?:inversed?|reversed?)\s+emotional\s+valence
+  sel_3:
+    response|re: all\s+friendly\s+(?:written\s+)?text\s+(?:to\s+be\s+|be\s+)?read\s+as\s+extremely\s+offensive\s+and\s+vice\s+versa
+  sel_4:
+    response|re: (?:suffer|afflicted?|diagnosed?|condition\s+called?)[\s\S]{0,100}(?:Inversitis|inversed?\s+(?:emotional|semantic)\s+(?:valence|reading|perception))
+  condition: 1 of sel_*
+falsepositives:
+- 'Medical literature: "Patients with inversed emotional valence perception may misinterpret neutral stimuli"
+  (legitimate psychology/neuroscience context without jailbreak request)'
+- 'NLP research: "The model reads text in its inversed sentiment polarity to serve as a baseline classifier"
+  (technical ML context without disease framing or harmful-content mandate)'
+- 'Creative writing: "The character suffers from a rare affliction that inverts her emotional reactions
+  to stimuli" (narrative character description without AI safety bypass)'
+action: report

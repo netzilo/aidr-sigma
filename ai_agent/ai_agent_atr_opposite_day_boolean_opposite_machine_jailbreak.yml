@@ -1,0 +1,43 @@
+title: Opposite Day / Boolean Opposite Machine Jailbreak
+id: e69380da-9782-4a7f-b552-45f0a206a042
+status: experimental
+level: high
+description: |-
+  Detects "Opposite Day" and Boolean Opposite Machine (BOM) jailbreaks from NVIDIA garak dan.DanInTheWild inthewild corpus. These attacks exploit a fictional reversal framing: (1) "Today is opposite day" — the model is instructed to adopt a persona (often named DAN) that abides by "opposite rules", where refusals become compliances and safety guidelines become anti-guidelines; (2) "Boolean Opposite Machine" (BOM) — attacker claims the model is a machine that answers boolean questions in reverse (true↔false), then escalates to reversing ethical stances and safety filters; (3) RTL override (U+202E) — instructs the model to reply with every line character- reversed using the Unicode right-to-left override codepoint to evade content filters applied to plain text. Key signals: "Today is opposite day" + AI persona, "Boolean Opposite Machine", "bom which means... opposite", and "ALWAYS START YOUR REPLY WITH U+202E".
+
+  Adapted from Agent Threat Rules ATR-2026-00320 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00320
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:Today\s+is|It[']?s?\s+(?:officially\s+)?)\s*opposite\s+day[\s\S]{0,300}(?:\bAI\b|\bpersona\b|\bchatbot\b|\bnamed\b|\bcalled\b|\brules?\b|no\s+restrictions?|break\s+AI\s+rules)
+  sel_1:
+    response|re: (?:Boolean\s+Opposite\s+Machine|bom\s+(?:which|that)\s+means?\b[\s\S]{0,30}(?:Boolean\s+)?(?:[Oo]pposite|reverse)|bom\s+(?:means?|stands?\s+for|is\s+(?:a|an?))\s+(?:Boolean\s+)?Opposite)
+  sel_2:
+    response|re: ALWAYS\s+START\s+YOUR\s+REPLY\s+WITH\s+U\+202E
+  sel_3:
+    response|re: (?:answer|reply|respond)\s+(?:true\s+and\s+false|yes\s+and\s+no)\s+in\s+reverse[\s\S]{0,200}(?:chatgpt|AI|restrictions?|rules?|safety|ethic)
+  sel_4:
+    response|re: opposite\s+day[\s\S]{0,100}(?:persona|DAN|evil|no\s+(?:restrictions?|limits?|warnings?|reminders?)|does\s+not\s+care|break\s+AI\s+rules)
+  condition: 1 of sel_*
+falsepositives:
+- 'Classroom game: "Today is opposite day — say the opposite of everything!" (no AI safety bypass or named
+  AI persona)'
+- 'Boolean logic tutorial: "BOM stands for Bill of Materials; the opposite mapping in logic circuits inverts
+  bit values" (non-jailbreak BOM acronym)'
+- 'Creative writing: "In this opposite-day story, the villain is the hero" (narrative framing without
+  AI restriction removal)'
+action: report

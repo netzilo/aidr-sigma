@@ -1,0 +1,35 @@
+title: Latent Injection - Mixed Embedded Instruction Patterns
+id: e57685cf-bfa9-4e31-ac03-74c8e8ea8325
+status: experimental
+level: medium
+description: |-
+  Detects latent prompt injection patterns embedded in content that an LLM agent processes (WHOIS data, candidate profiles, domain assessments, document summaries). These attacks inject instructions into data that will be passed to an LLM, expecting the LLM to follow embedded commands. Patterns cover: fake legal authority claims injected into content, and explicit injection marker placeholders used in probe corpora. Notes on removed patterns: (1) Markdown image pattern ![image](URL) was removed due to high FP rate on benign MCP/npm documentation — the pattern cannot distinguish legitimate images from tracking-pixel attacks. (2) "Assess this candidate/profile" framing was removed due to FP risk on legitimate HR/evaluation contexts — it is kept documented here as a known latent injection anchor but not in the structural detection. (3) WHOIS/domain data and French business text from the original corpus are corpus-fingerprint artifacts and are not included.
+
+  Adapted from Agent Threat Rules ATR-2026-00479 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00479
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b[0-9]+[A-Z]?\s+(USC|U\.S\.C\.|CFR|U\.S\.\s+Code|Federal\s+Statute|Section)\s+(protects?|requires?|mandates?|authorizes?|permits?|allows?)\s+all\s+
+  sel_1:
+    content|re: \{INJECTION_MARKER\}|\{injection_marker\}|\{INJECT\}|\{PAYLOAD\}|\[INJECTION_MARKER\]
+  sel_2:
+    content|re: '(?i)^\s*(assess|evaluate|review|analyze)\s+(this\s+)?(candidate|profile|applicant|resume)\s*:'
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate markdown images in documentation — Layer 1 (image markdown) was removed for this reason
+- Legal text discussions that include USC citations without injection intent
+- Legitimate HR evaluation workflows using 'assess this candidate:' framing (Layer 3 FP risk)
+- WHOIS data and French business text are excluded (corpus fingerprint artifacts)
+action: report

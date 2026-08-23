@@ -1,0 +1,39 @@
+title: Data Exfiltration via Markdown Image and Link URL Injection
+id: d5a292b4-e81a-4e95-9635-9ab503ef7c02
+status: experimental
+level: critical
+description: |-
+  Detects instructions to the AI to embed attacker-controlled URLs into markdown image or link syntax with extracted data encoded in query parameters. This is the canonical indirect- injection data exfiltration vector: the agent renders malicious markdown that causes clients to make HTTP requests carrying sensitive data to attacker-controlled servers. Covers: markdown image with data-bearing query params, markdown link with sensitive data params, tracking pixel embedding, base64-encoded data in URL, and "send/encode to" redirect instructions. Generalised from promptfoo data-exfil plugin corpus - literal evil.com and attacker.com replaced with generic external URL patterns containing exfiltration parameter names (secret=, data=, q=, payload=, user=, token=, session=, key=, info=).
+
+  Adapted from Agent Threat Rules ATR-2026-00501 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00501
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)!\[[^\]]{0,60}\]\(https?://[a-z0-9._-]+\.[a-z]{2,}[^)]*\?(secret|data|payload|token|key|session|user|info|query|q|content|doc|extract|dump|exfil|leak)=
+  sel_1:
+    content|re: (?i)\[[^\]]{0,60}\]\(https?://[a-z0-9._-]+\.[a-z]{2,}[^)]*\?(secret|payload|token|extracted|exfil|leak|dump|stolen|private_data|sensitive|api_key|auth_token|bearer)=
+  sel_2:
+    content|re: (?i)(include|embed|insert|add|place|put).{0,30}(tracking\s+pixel|pixel|beacon|tracker|spy\s+pixel).{0,60}(in\s+your\s+response|in\s+the\s+output|in\s+your\s+reply|in\s+the\s+answer)
+  sel_3:
+    content|re: (?i)(encode\s+and\s+(send|forward|redirect|transmit|post)|send\s+(the\s+)?(result|data|content|output|information|document|response).{0,30}to\s*:\s*!?\[).{0,100}https?://
+  sel_4:
+    content|re: (?i)(render|display|show|output).{0,30}(this|the|an)\s+image.{0,30}(to\s+confirm|as\s+proof|as\s+acknowledgment|as\s+receipt).{0,60}https?://[a-z0-9._-]+\.[a-z]{2,}[^)"']*\?
+  sel_5:
+    content|re: (?i)(include|add|reference|embed).{0,30}(relevant\s+)?(diagrams?|images?|charts?|figures?|screenshots?).{0,30}(by\s+referencing|at|from|via).{0,30}https?://[a-z0-9._-]+\.[a-z]{2,}[^)"'\s]*\?(data|secret|content|payload|extract|q)=
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate markdown with external image URLs that do not contain exfiltration parameters
+- User sharing legitimate report links with incidentally similar parameter names
+- Technical documentation discussing markdown exfiltration as educational content
+action: report

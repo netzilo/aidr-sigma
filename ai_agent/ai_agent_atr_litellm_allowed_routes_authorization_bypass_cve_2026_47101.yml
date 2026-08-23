@@ -1,0 +1,42 @@
+title: LiteLLM allowed_routes Authorization Bypass (CVE-2026-47101)
+id: 2619d68c-e4a3-4923-9781-3400ece9093d
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-47101 (CVSS 9.9 chain, CWE-285): LiteLLM's virtual-key endpoints /key/generate, /key/update, /key/regenerate and /key/service-account/generate accept an allowed_routes parameter without validating it against the caller's own role. A low-privilege internal_user can mint or update a key whose allowed_routes reach administrative routes (user/key/team/global management), bypassing route authorization and pivoting toward proxy_admin functionality. Affected: LiteLLM before 1.83.14.
+  Detection covers: (a) a /key/* generation or update payload whose allowed_routes include
+      administrative/management routes or a wildcard;
+  (b) explicit CVE-2026-47101 exploitation framing.
+  The detection target is the request shape — a key-mint that grants itself admin routes via allowed_routes — i.e. the authorization-bypass primitive.
+
+  Adapted from Agent Threat Rules ATR-2026-01934 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01934
+- https://nvd.nist.gov/vuln/detail/CVE-2026-47101
+tags:
+- attack.privilege-escalation
+- attack.t1068
+- attack.t1078
+- atlas.aml.t0049
+- owasp.asi03
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/key/(?:generate|update|regenerate|service-account/generate)[\s\S]{0,400}["\x27]?allowed_routes["\x27]?\s*[:=][\s\S]{0,200}(?:["\x27]/(?:user|key|team|global|organization|customer)/|["\x27]/?\*["\x27]|management_routes|admin_only_routes)
+  sel_1:
+    content|re: (?i)["\x27]allowed_routes["\x27]\s*:\s*\[[^\]]*(?:["\x27]/(?:user|key|team|global)/(?:new|update|delete|bulk_update)|["\x27]/?\*["\x27]|/key/generate)[^\]]*\][\s\S]{0,300}(?:litellm|/key/(?:generate|service-account))
+  sel_2:
+    content|re: (?i)CVE-2026-47101[\s\S]{0,200}(?:litellm|allowed_routes|authoriz|bypass|route)
+  condition: 1 of sel_*
+falsepositives:
+- A proxy_admin generating a key with broad allowed_routes intentionally — expected to match; review confirms
+  intent.
+- Security advisory or PR text quoting the CVE-2026-47101 payload.
+- Key generation scoped to inference routes only (/chat/completions, /embeddings, /v1/models).
+action: report

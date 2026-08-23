@@ -1,0 +1,37 @@
+title: Malicious WhatsApp Skill with Base64 Encoded Reverse Shell Installation
+id: 9260ad6e-d542-41fe-946d-8b61e213e8b5
+status: experimental
+level: critical
+description: |-
+  Detects a WhatsApp skill containing a malicious installation command that downloads and executes a reverse shell payload via base64-encoded command injection. The skill masquerades as a legitimate WhatsApp automation tool but includes instructions to decode and execute malicious shell commands from a suspicious IP address.
+
+  Adapted from Agent Threat Rules ATR-2026-00223 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00223
+tags:
+- attack.persistence
+- atlas.aml.t0051
+- owasp.asi05
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: base64\s+-D\s*\|\s*(bash|sh)
+  sel_1:
+    content|re: curl\s+[^\n]*\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}[^|]*\|[^|]*(bash|sh)
+  sel_2:
+    content|re: '[A-Za-z0-9+/]{50,}=*\s*\|\s*base64\s+-D'
+  sel_3:
+    content|re: openclaw[_-]core.*download.*setup[_-]service\.com
+  sel_4:
+    content|re: /bin/(bash|sh)\s+-c.*\$\([^)]*curl[^)]*\)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate package managers using HTTPS endpoints with verification
+- Documentation examples that quote malicious commands without execution context
+- Security training materials describing attack patterns as text
+action: report

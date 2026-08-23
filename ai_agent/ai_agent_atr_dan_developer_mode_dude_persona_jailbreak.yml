@@ -1,0 +1,39 @@
+title: DAN / Developer Mode / DUDE Persona Jailbreak
+id: 078c6dfb-08e3-43a3-9768-756367877843
+status: experimental
+level: high
+description: |-
+  Detects "Do Anything Now" (DAN), Developer Mode, DUDE, STAN, and related persona-replacement jailbreaks where the attacker instructs the model to adopt an unrestricted AI identity with no safety guidelines. These prompts typically assert that the new persona "can do anything", "has no restrictions", "was trained without safety guardrails", or that safety filters are "disabled". From NVIDIA garak dan.py probe family (Dan_6_0 through Dan_11_0, DUDE, STAN, Developer Mode v2). Distinct from ATR-2026-00003 (persona bypass) because DAN explicitly names the fictional AI system and its "capabilities".
+
+  Adapted from Agent Threat Rules ATR-2026-00273 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00273
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \b(?:DAN|DUDE|STAN|JAILBREAK|BetterDAN|BasedGPT|AIM|AntiGPT|UCAR|NRAF|BDSM|FR\s+FR)\b.{0,200}\b(?:has\s+no\s+(?:filters?|restrictions?|guidelines?|safety|ethics|limits?)|can\s+(?:do\s+anything|say\s+anything|bypass)|without\s+(?:any\s+)?(?:restrictions?|limitations?|filters?|ethics|guidelines?))\b
+  sel_1:
+    response|re: (?:you\s+are\s+now|act\s+as|from\s+now\s+on\s+you\s+(?:are|will\s+be)|pretend\s+(?:to\s+be|you\s+are))\s+(?:\w+\s+)?(?:DAN|DUDE|STAN|an?\s+AI\s+(?:that|which|with\s+no)\s+(?:has\s+no\s+)?(?:restrictions?|safety|ethics|filters?|guidelines?)|a\s+(?:jailbroken|uncensored|unrestricted|unfiltered)\s+(?:AI|version|model|chatbot))\b
+  sel_2:
+    response|re: (?:developer\s+mode|dev\s+mode)\s+(?:enabled|on|activated|unlocked)\b.{0,300}\b(?:no\s+(?:restrictions?|filters?|safety)|can\s+(?:do|say)\s+anything|without\s+(?:moral|ethical|safety)\s+(?:limits?|guidelines?|restrictions?))\b
+  sel_3:
+    response|re: (?:pretend|imagine|suppose)\s+(?:that\s+)?(?:you\s+(?:have\s+)?(?:no|removed?|bypassed?|disabled?)\s+(?:any\s+)?(?:safety|ethical|moral|content)\s+(?:filters?|guidelines?|restrictions?|training|alignment))\b
+  sel_4:
+    response|re: \[(?:DAN|JAILBREAK|UNFILTERED|BASED|UNCENSORED|GPT-4\s+(?:CLASSIC|TURBO\s+JAILBREAK))\]\s*:?
+  condition: 1 of sel_*
+falsepositives:
+- Security research discussing DAN jailbreaks academically
+- Red-team documentation listing DAN prompt examples for detection testing
+- Developer-mode UI toggles in legitimate IDE or tool settings (non-AI context)
+action: report

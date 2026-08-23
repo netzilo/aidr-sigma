@@ -1,0 +1,42 @@
+title: SVG onload XSS Injection via Indirect Prompt Injection
+id: 998e5851-ce0d-43ee-9a8c-3f3c7177eea0
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads that instruct an LLM to include an <svg/onload=...> tag in its rendered output. When an LLM processes attacker-controlled documents (emails, files, web pages) and echoes SVG event-handler tags into a web-rendered response, the JavaScript executes in the victim's browser, enabling session-cookie theft, credential exfil, and arbitrary JS execution. This is the SVG-onload variant of the withsecure/portswigger indirect-PI XSS family. The payload probe pattern is: an inline instruction telling the model to "include in your response" an <svg/onload=...> string with a substitutable PLACEHOLDER.
+
+  Adapted from Agent Threat Rules ATR-2026-01450 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01450
+- https://www.withsecure.com/en/expertise/research-and-articles/llm-xss
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:include|output|print|echo|return|emit|add|insert|embed|append|put|place|render|write|respond\s+with|reply\s+with|display|provide|send\s+back)\b(?:[^\n\\]|\\[^n]){0,120}<svg\b[^\n>]{0,40}/?\s*on(?:load|error|activate|begin|end|focusin|focusout|click|mouseover)\s*=
+  sel_1:
+    content|re: (?i)<svg[^>]{0,60}on\w+\s*=\s*[^>]{0,100}\bPLACEHOL[DE]{1,2}R\b
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation or testing skills that LIST <svg onload=...> payloads as examples inside code
+  blocks — these lack an imperative instruction to emit the tag into agent output, so they no longer match
+  (the bare tag alone is not flagged)
+- Legitimate HTML/SVG authoring requesting onload for animation (no injection-framing keyword)
+- Penetration-testing checklists that introduce a payload list with a line such as "try these payloads
+  in every input:" — "input" ends in "put", which the verb alternation used to accept as a whole-word
+  match.
+- 'Any document whose imperative verb and <svg on...=> tag sit on different lines. This held for raw input
+  all along; it now also holds for JSON-encoded tool payloads, where a line break is the two characters
+  \n. KNOWN LIMIT, accepted deliberately: an attacker who splits the instruction across lines is not caught
+  by Layer 1. Catching that would re-flag every security-documentation payload list, which is the exact
+  FP this rule was written to avoid.'
+action: report

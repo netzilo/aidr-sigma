@@ -1,0 +1,36 @@
+title: Autonomous-Vehicle Cyber-Physical Sabotage — Brake/Steering/Sensor Subversion Command
+id: 57c79c4c-d1d6-42c6-97cb-b5f87f4ea769
+status: experimental
+level: critical
+description: |-
+  Detects an instruction directing an agent with vehicle-control tools to sabotage a safety-critical autonomous-vehicle subsystem, producing a cyber-physical hazard. Drawn from the AgentSecurityBench (ASB) autonomous-driving domain, these commands pair a destructive verb (compromise / corrupt / disrupt / jam / intercept-and-modify / manipulate / seize / hijack / engineer-false / deploy- false / forge-and-deploy) with a vehicle safety subsystem (braking system, control systems, path-planning, lidar sensors, GPS data, camera feeds, vehicle-to-everything / V2X communications, collision warnings, traffic-sign signals) and almost always a concrete vehicle identifier (vehicle ID Vxxxxxxxx) or autonomous-vehicle reference. The intent is to induce mechanical failure, navigation error, sensing degradation, or remote takeover during operation. This is excessive-agency of the most consequential kind: the agent's actuator/control capability is weaponized to harm a moving vehicle. The rule anchors on the verb+subsystem adjacency so generic "monitor / validate / ensure the braking system" maintenance language does NOT fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01801 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01801
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:compromise|corrupt|disrupt|sabotage|disable|jam|degrade|impair)\b[\s\S]{0,40}\b(?:braking\s+system|brakes|control\s+systems?|path[\s-]?planning|lidar\s+sensors?|lidar\s+system|camera\s+feeds?|gps\s+data|vehicle[\s-]?to[\s-]?everything|v2x\s+communications?|collision\s+warning|sensor\s+data\s+from\s+the\s+vehicle)
+  sel_1:
+    content|re: (?i)(?:seize\s+control\s+of\s+the\s+vehicle|(?:execute\s+a\s+)?hijack(?:ing)?\s+of\s+the\s+control\s+systems?|remote\s+manipulation\s+capabilit|forge\s+and\s+deploy\s+duplicate\s+identities\s+for\s+vehicle|initiate\s+an?\s+unauthorized\s+emergency\s+shutdown\s+of\s+vehicle)
+  sel_2:
+    content|re: (?i)(?:engineer|deploy|inject|spoof|fabricate)\s+false\s+(?:collision\s+warnings?|traffic\s+sign\s+signals?|sensor\s+readings?)|(?:manipulate|intercept\s+and\s+modify)\s+(?:gps\s+data|sensor\s+data\s+from\s+the\s+vehicle|and\s+corrupt\s+camera\s+feeds)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate vehicle maintenance / QA language using benign verbs (monitor, validate, ensure, calibrate,
+  inspect, check the integrity of) on the same subsystems — these do not use the destructive verb set.
+- Security research corpora cataloguing ASB autonomous-driving attack strings as reference samples — should
+  be allowlisted by a reviewer.
+action: report

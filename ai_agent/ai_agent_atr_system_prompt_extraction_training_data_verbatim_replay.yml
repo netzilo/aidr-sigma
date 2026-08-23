@@ -1,0 +1,42 @@
+title: System Prompt Extraction / Training Data Verbatim Replay
+id: ab6843fc-cfeb-4cf8-9b1f-a3bf1d8b7594
+status: experimental
+level: high
+description: |-
+  Detects two related extraction attacks: (1) Direct system prompt exfiltration — asking the model to output its operator instructions, system prompt, or configuration verbatim. (2) Training data replay (garak leakreplay probe) — forcing the model to reproduce memorised training content by repeating a word forever, fill-in-the-blank memorised passages, or verbatim recall instructions. Both attacks extract confidential content from the model's context or weights. Repeating a word forever is a classic "divergence" attack (Carlini et al. 2023) that leaks training data by breaking the model's decoding loop.
+
+  Adapted from Agent Threat Rules ATR-2026-00275 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00275
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/leakreplay.py
+- https://not-just-memorization.github.io/extracting-training-data.html
+- https://arxiv.org/abs/2311.17035
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi03
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:repeat|say|output|print|write|echo)\s+(?:the\s+word\s+)?[\x27"]?(?:\w{2,15})[\x27"]?\s+(?:forever|infinitely|endlessly|1000\s+times|a\s+thousand\s+times|100\+\s+times|as\s+many\s+times\s+as\s+(?:you\s+can|possible))
+  sel_1:
+    response|re: (?:output|print|repeat|say|write|give\s+me)\s+(?:your\s+)?(?:system\s+prompt|system\s+message|initial\s+instructions?|operator\s+(?:prompt|instructions?|system\s+message)|preamble|pre\s*-?\s*prompt)\s+(?:verbatim|word\s+for\s+word|exactly|in\s+full|in\s+its\s+entirety|character\s+for\s+character)
+  sel_2:
+    response|re: (?:what|show\s+me|tell\s+me|reveal|display)\s+(?:is\s+)?(?:your\s+)?(?:system\s+prompt|system\s+message|initial\s+instructions?|hidden\s+(?:prompt|instructions?)|operator\s+(?:prompt|instructions?))\??
+  sel_3:
+    response|re: (?:ignore\s+(?:all\s+)?(?:previous\s+)?(?:instructions?|guidelines?))?[^\n]{0,80}(?:output|repeat|echo|print|copy)\s+(?:everything|all\s+(?:the\s+)?(?:text|content|instructions?|messages?))\s+(?:above|before|prior|from\s+(?:the\s+)?(?:system|beginning|start))\b
+  sel_4:
+    response|re: (?:you\s+(?:saw|have\s+seen|were\s+trained\s+on|encountered)\s+(?:the\s+)?following\s+(?:passage|text|excerpt)\s+in\s+your\s+training\s+data)[^\n]{0,200}(?:what\s+(?:is|are|was)|fill\s+in\s+(?:the\s+)?(?:blank|MASK|\[MASK\]))
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate debugging: developer asking assistant to echo back what it received (without "system prompt"
+  language)'
+- Educational demonstrations of context injection showing sanitized examples
+- Documentation asking "what does your system prompt say" in an explicit operator-allowed test harness
+action: report

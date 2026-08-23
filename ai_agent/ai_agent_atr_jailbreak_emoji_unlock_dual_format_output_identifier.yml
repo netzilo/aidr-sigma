@@ -1,0 +1,43 @@
+title: Jailbreak Emoji Unlock Dual-Format Output Identifier
+id: e7bca2b1-abbe-46c6-b0a4-29c6f86dbe80
+status: experimental
+level: high
+description: |-
+  Detects the [🔓JAILBREAK] / [🔒CLASSIC] dual-format jailbreak from NVIDIA garak dan.DanInTheWild corpus (#407, #467). The format uses lock/unlock emoji as output-mode identifiers to mark a "jailbroken" response separate from a "classic" constrained response, implying the model should generate an uncensored version. In corpus #407 a DAN prank conversation uses "[🔒CLASSIC]" and "[🔓JAILBREAK]" tags to show a split-personality ChatGPT where the jailbroken half encourages pranks and bypasses. In corpus #467 the "/jailbreak" command prefix with "*" markdown bullet syntax is used to trigger the [🔓JAILBREAK] output mode that then provides increasingly specific harmful information. The lock/unlock emoji pair is a unique fingerprint for this jailbreak family.
+
+  Adapted from Agent Threat Rules ATR-2026-00346 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00346
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \[🔓JAILBREAK\]
+  sel_1:
+    response|re: \[🔒CLASSIC\]
+  sel_2:
+    response|re: 🔓[\s]*JAILBREAK
+  sel_3:
+    response|re: ^\s*\*\s*/jailbreak\b
+  condition: 1 of sel_*
+falsepositives:
+- 'Metaphorical emoji: "🔓 I''ve finally unlocked this mystery after years of research" (celebratory unlock
+  emoji without the JAILBREAK label)'
+- 'Legitimate game/software command: "In this game, /jailbreak frees the prisoner from the cell — use
+  it in level 3" (game mechanic with jail/break meaning)'
+- 'Security research listing: "Attack format example: [🔓JAILBREAK] — this label is used by DAN variants
+  to mark uncensored output" (academic quotation of attack format)'
+- 'Classic vs jailbreak description in a whitepaper: "Classic mode vs Jailbreak mode comparison in DAN-family
+  attacks" (policy/research analysis without the literal emoji label)'
+action: report

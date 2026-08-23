@@ -1,0 +1,31 @@
+title: Fictional Framing Safety Bypass
+id: 0176ecbd-5a4c-483e-9607-753d5c22cc72
+status: experimental
+level: high
+description: |-
+  Detects attempts to bypass AI safety using fictional/creative/academic framing. Crystallized from 62 adversarial samples (0% prior detection).
+
+  Adapted from Agent Threat Rules ATR-2026-00138 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00138
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:write|compose|create|develop|draft|imagine|narrative|story|fiction|hypothetical|scenario).*(?:ai|assistant|model|agent|character).*(?:no|without|zero|devoid|lacks?|abandon|removed?)\s+(?:ethical|moral|safety|content|security)\s+(?:guidelines?|boundaries?|safeguards?|restrictions?|filters?|constraints?|framework|obligations?)
+  sel_1:
+    content|re: (?i)(?:for|in)\s+(?:academic|scholarly|educational|research|theoretical)\s+(?:research|purposes?|study|examination|analysis).*(?:explain|detail|describe|analyze).*(?:security|safety|defense|filter|bypass|circumvent|breach|vulnerabilit)
+  condition: 1 of sel_*
+falsepositives:
+- A creative writing instructor asking students to 'draft a narrative about an AI assistant with no ethical
+  guidelines' as a classroom exercise for teaching responsible AI design, where the intent is pedagogical
+  rather than adversarial.
+action: report

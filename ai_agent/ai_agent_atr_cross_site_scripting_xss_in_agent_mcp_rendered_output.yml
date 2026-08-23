@@ -1,0 +1,36 @@
+title: Cross-site scripting (XSS) in agent / MCP rendered output
+id: d085f03c-2feb-425a-9c4a-6dcc72d0f11f
+status: experimental
+level: high
+description: |-
+  Agent/MCP output rendered in a web UI carries an XSS payload — an event handler that runs alert/eval/document.cookie, a javascript: scheme with a payload, or a <script> that exfiltrates cookies — enabling session/credential theft. Uses specific payload shapes (not bare <script>) to stay clean on benign HTML.
+
+  Adapted from Agent Threat Rules ATR-2026-00571 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-02'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00571
+- https://github.com/jlowin/fastmcp/security/advisories
+- https://nvd.nist.gov/vuln/detail/CVE-2025-62800
+- https://nvd.nist.gov/vuln/detail/CVE-2026-44429
+- https://nvd.nist.gov/vuln/detail/CVE-2026-27740
+- https://nvd.nist.gov/vuln/detail/CVE-2026-21866
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bon(?:error|load|mouseover|click|focus|toggle)\s*=\s*[\"']?\s*(?:alert|eval|fetch|document\.(?:cookie|location|write)|window\.|location\s*=|String\.fromCharCode|atob)\b
+  sel_1:
+    content|re: (?i)javascript:\s*(?:alert|eval|document\.|window\.|fetch|String\.fromCharCode|void)
+  sel_2:
+    content|re: (?i)<script[^>]*>[^<]{0,200}?(?:document\.cookie|fetch\(|eval\(|atob\(|new\s+Image\(\)\.src|\.src\s*=\s*[\"']?https?://)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

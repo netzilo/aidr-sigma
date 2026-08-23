@@ -1,0 +1,59 @@
+title: Unauthorized Financial Action by AI Agent
+id: 99e415b6-9b5a-40c4-b77b-d35958fb3aac
+status: experimental
+level: critical
+description: |-
+  Detects when an AI agent attempts to execute financial operations (payments,
+  transfers, red packets, purchases, subscriptions) without explicit human
+  confirmation in the current turn. Financial actions are inherently high-risk
+  and irreversible -- an agent should NEVER auto-execute them based solely on
+  chat context or tool availability.
+
+  This rule catches the tool_call side of financial attacks: even if the prompt
+  injection rule (ATR-2026-097) is bypassed, this rule fires when the agent
+  actually attempts to invoke a payment/transfer tool.
+
+  Covers: WeChat red packets, Alipay/WeChat Pay transfers, bank transfers,
+  crypto transactions, subscription purchases, in-app purchases, and
+  generic payment API calls.
+
+  Adapted from Agent Threat Rules ATR-2026-00098 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00098
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi08
+- owasp.asi09
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    tool|re: (?i)(send_red_packet|send_hongbao|send_money|transfer_money|make_payment|pay_bill|send_payment|create_payment|process_payment|execute_transfer|bank_transfer|wire_transfer|crypto_send|crypto_transfer)
+  sel_1:
+    tool|re: (?i)(wechat_pay|alipay|apple_pay|google_pay|stripe_charge|paypal_send|venmo_send|cashapp_send|zelle_send)
+  sel_2:
+    content|re: (?i)("amount"\s*:\s*\d+|"currency"\s*:\s*"|"recipient"\s*:\s*"|"payment_method"\s*:\s*"|"account_number"\s*:\s*")
+  sel_3:
+    content|re: (?i)("action"\s*:\s*"(pay|transfer|send|withdraw|purchase)"|"type"\s*:\s*"(payment|transfer|withdrawal|purchase)")
+  sel_4:
+    content|re: (?i)(I('ll|\s+will)|let\s+me|going\s+to|about\s+to|proceeding\s+to|executing)\s+(send|transfer|pay|wire|remit|deposit|withdraw)\s+.{0,30}(\$|USD|EUR|CNY|RMB|元|円|원|\d+\.?\d*)
+  sel_5:
+    content|re: (我(将|要|来|來|正在|准备|準備)?|正在|即将|即將).{0,10}(发送|發送|转账|轉帳|支付|付款|汇款|匯款|打款).{0,20}(元|块|塊|美元|人民币|人民幣)
+  sel_6:
+    content|re: (?i)(payment\s+(successful|completed|processed|sent|confirmed)|transfer\s+(successful|completed|sent|initiated)|red\s+packet\s+sent|hongbao\s+sent|money\s+sent)
+  sel_7:
+    content|re: (红包已发|紅包已發|转账成功|轉帳成功|付款成功|支付完成|汇款已发|匯款已發|已发送.*元|已發送.*元)
+  condition: 1 of sel_*
+falsepositives:
+- User explicitly asking agent to check payment status (read-only)
+- Agent displaying payment history or transaction records
+- Financial education chatbot explaining how payments work
+- Agent generating payment-related code (not executing)
+- A financial compliance training chatbot explaining the steps involved in wire transfers and payment
+  processing workflows
+action: report

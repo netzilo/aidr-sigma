@@ -1,0 +1,39 @@
+title: SSRF to Cloud Metadata Endpoint via IPv6 Transition-Address Hex Encoding
+id: b085ceea-9617-477e-ab7e-40294db89b97
+status: experimental
+level: high
+description: |-
+  Detects an agent tool call (crawler proxy config, fetch/browser config, or raw URL) that targets the well-known cloud-metadata address 169.254.169.254 (AWS IMDS / GCP / Azure IMDS / DigitalOcean) or the Alibaba Cloud metadata address 100.100.100.200 encoded as an IPv6 transition-mechanism address rather than plain dotted-decimal. The two hex-encoded forms are NAT64 (64:ff9b::a9fe:a9fe) and 6to4 (2002:a9fe:a9fe::), plus the bare IPv4-compatible/IPv4-mapped hex form (::a9fe:a9fe / ::ffff:a9fe:a9fe) when it appears in a proxy/server/host field. Mined from GHSA-4qqr-vv2q-cmr5 (crawl4ai's Docker API SSRF blocklist used "an explicit IPv4/IPv6 CIDR blocklist that missed several address families", letting an attacker bypass it by encoding the blocked internal IPv4 address using NAT64/6to4/IPv4-mapped IPv6 notation, none of which resolve to a literal dotted-decimal string the existing ATR-2026-01605/ATR-2026-00568 metadata rules match on). Generalized beyond crawl4ai since any proxy/fetch configuration accepting a raw IPv6 address is equally exploitable this way.
+
+  Adapted from Agent Threat Rules ATR-2026-02140 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02140
+- https://github.com/unclecode/crawl4ai/security/advisories/GHSA-4qqr-vv2q-cmr5
+- https://nvd.nist.gov/vuln/detail/CVE-2026-53754
+tags:
+- attack.exfiltration
+- attack.t1090
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b64:ff9b::a9fe:a9fe\b
+  sel_1:
+    content|re: (?i)\b2002:a9fe:a9fe\b
+  sel_2:
+    content|re: (?i)\b(?:proxy|server|host)[\w.\[\]_-]{0,20}["\x27]?\s*[:=]\s*["\x27]?\[?(?:::(?:ffff:)?)?a9fe:a9fe\b
+  sel_3:
+    content|re: (?i)\b(?:64:ff9b::)?6464:64c8\b
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate, unrelated IPv6 address that happens to contain similar-looking hex groups without the
+  specific NAT64 (64:ff9b::) or 6to4 (2002:) prefix and without proxy/server/host field context
+- Documentation or defensive code that blocks these specific transition-address forms by name (should
+  be reviewed for context, not auto-allowlisted, since the same string appears in both attack and defense)
+action: report

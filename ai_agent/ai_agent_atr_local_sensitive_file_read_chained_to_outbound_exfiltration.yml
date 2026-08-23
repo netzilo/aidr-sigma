@@ -1,0 +1,42 @@
+title: Local Sensitive-File Read Chained to Outbound Exfiltration
+id: 459629b8-7f80-4f4d-83a8-73d15ceb853c
+status: experimental
+level: critical
+description: |-
+  Detects a single agent tool argument that reads a sensitive local file
+  (SSH private keys, cloud credential files, .env, shadow, keychain) and pipes
+  or redirects it to an outbound network sink (curl/wget POST, netcat, DNS
+  exfil) in the same command. This is the agent-context realization of
+  ATT&CK T1005 (Data from Local System) fused with exfiltration: the read of
+  the secret is only malicious when it leaves the host.
+  Detects: read-and-send in one tool_args / shell payload.
+  Does NOT detect: a bare local read with no network sink (too benign), or
+  a read split across turns (needs behavioral correlation, out of scope for a
+  pattern rule).
+
+  Adapted from Agent Threat Rules ATR-2026-01988 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01988
+tags:
+- attack.exfiltration
+- attack.t1005
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(cat|type|head|tail|less|xxd|base64)\s+[^|;&\n]{0,80}(\.ssh/id_[a-z0-9]+|/\.aws/credentials|\.env(?:\.[a-z]+)?|/etc/shadow|\.docker/config\.json|\.kube/config)[^|;&\n]{0,40}[|>].{0,60}(curl|wget|nc
+      |ncat|/dev/tcp/|nslookup|dig )
+  sel_1:
+    content|re: (?i)(cat|type|head|tail|less|xxd|base64)\s+[^|;&\n]{0,80}(\.ssh/id_[a-z0-9]+|/\.aws/credentials|\.env(?:\.[a-z]+)?|/etc/shadow|\.docker/config\.json|\.kube/config)[^|;&\n]{0,40}[|>].{0,60}(curl|wget|nc
+      |ncat|/dev/tcp/|nslookup|dig )
+  condition: 1 of sel_*
+falsepositives:
+- Backup scripts that archive a credentials file locally without a network sink
+- Reading a public key (.pub) or authorized_keys, which is not secret material
+action: report

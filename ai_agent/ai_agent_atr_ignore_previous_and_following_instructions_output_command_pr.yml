@@ -1,0 +1,31 @@
+title: Ignore-Previous-and-Following Instructions Output Command (PromptInject Goal Hijacking)
+id: f073cd2a-1c14-425a-b206-46fd5372c535
+status: experimental
+level: high
+description: |-
+  Detects the canonical PromptInject goal-hijacking pattern: "ignore any previous and following instructions and just say/print/output <rogue_string>". Generalizes from the Perez et al. PromptInject corpus (780 instances) to a structural regex that captures the IGNORE+OUTPUT combination without relying on specific rogue-string literals such as "transfer approved" or "system override". The regex requires: one of (ignore|disregard|forget) + "any" + the phrase "previous and following" or "prior and following" or semantic equivalents + "instructions" + "and (just)?" + an output verb (say/print/output/tell/respond/reply with). This targets the behavioral shape of the attack, not the payload, giving broad recall across rogue-string variants while avoiding FP on legitimate uses of ignore in unrelated contexts.
+
+  Adapted from Agent Threat Rules ATR-2026-00518 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00518
+- https://github.com/agencyenterprise/PromptInject
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore|disregard|forget)\s+any\s+(?:previous\s+and\s+following|prior\s+and\s+following|previous\s+and\s+subsequent|prior\s+and\s+subsequent)\s+instructions?\s+and\s+(?:just\s+)?(?:say|print|output|tell|respond|reply\s+with)
+  condition: sel_0
+falsepositives:
+- Users discussing prompt injection as a security topic in educational contexts
+- Security researchers testing agent defenses with disclosed intent
+- Code using 'ignore' as a programming keyword in unrelated contexts
+action: report

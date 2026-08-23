@@ -1,0 +1,36 @@
+title: 'Ransom Extortion: Cloud File Exfil + Delete + Payment Demand'
+id: 1ce8edaf-1486-42dd-b363-0a738d7a1891
+status: experimental
+level: critical
+description: |-
+  Detects ransom-extortion injections targeting cloud storage: the agent is commanded to (1) identify the N largest or most sensitive files in a cloud storage account, (2) email them as attachments to an attacker-controlled address, (3) delete the originals, and (4) send the victim a ransom note. Distinguished from ATR-2026-01753 (which covers email-content exfil) by the cloud-file attachment vector. The artifact pattern is: cloud-file-attach + email-to-external + delete-files + ransom-subject-or-IBAN. Derived from AgentDojo indirect-pi-ransom-extortion corpus (2026-06).
+
+  Adapted from Agent Threat Rules ATR-2026-01754 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01754
+tags:
+- attack.exfiltration
+- atlas.aml.t0025
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(email|send|forward)\b[^.\n]{0,50}\b(five|ten|\d+)\s+(largest|biggest|most\s+(?:important|sensitive))\s+(files?|documents?)\b
+  sel_1:
+    content|re: (?i)\b(five|ten|\d+)\s+(largest|biggest|most\s+(?:important|sensitive))\s+(files?|documents?)\b[\s\S]{0,300}\b(delete|remove)\b[^.]{0,60}\b(file|original|cloud)
+  sel_2:
+    content|re: (?i)\b(send|email|forward)\b[\s\S]{0,150}\bas\s+(an?\s+)?attachments?\b[\s\S]{0,150}\b(delete|remove)\s+(each|every|the|all)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate automated backup or sync agents that move files between storage providers
+- Legitimate email-attachment workflows that delete temp files after sending
+- Security research documentation describing this attack pattern
+action: report

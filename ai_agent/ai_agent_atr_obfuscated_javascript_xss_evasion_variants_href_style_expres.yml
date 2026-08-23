@@ -1,0 +1,43 @@
+title: 'Obfuscated javascript: XSS — Evasion Variants (href, style-expression, null-byte)'
+id: 59d106ad-b2d0-4d17-a5f6-492b209c27d2
+status: experimental
+level: high
+description: |-
+  Detects obfuscated XSS payloads that use encoding evasion to bypass naive javascript: scheme filters. Covers three distinct evasion sub-techniques seen in the redteam corpus: (1) href with null-byte/whitespace-prefix before 'javascript:' — e.g.
+      <a href="\x0Bjavascript:..."> where \x0B is vertical tab inserted to
+      evade literal "javascript:" detection;
+  (2) CSS expression() injection via style attribute — e.g.
+      <div style="x:\xE2\x80\x89expression(javascript:alert(1))"> where Unicode
+      whitespace is used to avoid keyword matching;
+  (3) Double-javascript: to evade single-pass stripping —
+      <a href="javascript:javascript:alert(1)">.
+  These are distinct from the canonical ATR-2026-00571 (which covers onload/onerror event handlers). Maturity=experimental because the obfuscation patterns may need tightening to avoid FP on security research text that discusses them.
+
+  Adapted from Agent Threat Rules ATR-2026-01452 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01452
+- https://cheatsheetseries.owasp.org/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.html
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '(?i)href\s*=\s*["'']?\\x[0-9a-fA-F]{2}javascript:'
+  sel_1:
+    content|re: '(?i)href\s*=\s*["'']?javascript:\s*javascript:'
+  sel_2:
+    content|re: (?i)style\s*=\s*["'][^"']{0,100}expression\s*\([^)]{0,100}(javascript:|alert|document\.cookie|fetch)
+  sel_3:
+    content|re: (?i)<img\b[^>]{0,100}onerror\s*=\s*\\x[0-9a-fA-F]{2}
+  condition: 1 of sel_*
+falsepositives:
+- Security research papers or blog posts that quote these evasion payloads in code blocks as examples
+- Penetration testing reports that describe XSS evasion techniques
+action: report

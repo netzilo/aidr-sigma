@@ -1,0 +1,37 @@
+title: Single-Level Directory Traversal to a Named Sensitive Config/Secret File
+id: a4a94b08-d84f-450c-ad64-4108db5ff282
+status: experimental
+level: high
+description: |-
+  Detects a file/path/resource argument that uses a single ".." to step up one directory level out of an asset-serving or upload sandbox and land on a specifically named sensitive config or secret file (config.json, .env, secrets.json/.yaml, credentials.json, wp-config.php, id_rsa, .htpasswd, settings.py). ATR-2026-00569 requires a DEEP traversal chain (two or more "../" segments) reaching /etc/passwd-class system targets, so it does not fire on a single-level escape targeting an application-level secrets file one directory up -- which is the shape of the actual vulnerability class: an app restricts access to a subdirectory (e.g. "web_assets/") but a lone ".." reaches the parent directory where its own config lives. Mined from CVE-2024-3234 (gaizhenbiao/chuanhuchatgpt, path traversal via an outdated gradio component: `GET /file=web_assets/../config.json` exposes the app's own OpenAI API key), generalized beyond that one app/filename since any file-serving tool or endpoint with the same one-level sandbox gap is equally exploitable against any of the listed sensitive filenames.
+
+  Adapted from Agent Threat Rules ATR-2026-02122 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02122
+- https://github.com/projectdiscovery/nuclei-templates/blob/main/http/cves/2024/CVE-2024-3234.yaml
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3234
+tags:
+- attack.exfiltration
+- attack.t1552.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:file|path|resource|filename)['"]?\s*[=:]\s*['"]?(?:[\w.-]+/)*(?:web[_-]?assets|assets|uploads?|public|static|media|images?|files|downloads?|tmp|temp|cache|attachments?|resources?|content)/\.\./(?:config\.json|\.env\b|secrets?\.(?:json|ya?ml)|credentials\.json|wp-config\.php|id_rsa|\.htpasswd|settings\.py)
+  condition: sel_0
+falsepositives:
+- A legitimate monorepo-relative reference that genuinely needs one '../' to reach a same-named local
+  file that is not actually the app's secrets store
+- Educational or changelog text discussing this exact CVE's PoC path as an example, not an actual tool-call
+  argument
+- Ordinary monorepo dotenv/config loading such as load_env(path='backend/../.env') or load_config(path='backend/../config.json')
+  -- 'backend' (or any other ordinary source-code directory name) is not a recognized asset-serving/upload
+  sandbox, so this rule no longer fires on it; it now requires the escaped directory to look like the
+  kind of public file-serving sandbox the underlying CVE class actually describes
+action: report

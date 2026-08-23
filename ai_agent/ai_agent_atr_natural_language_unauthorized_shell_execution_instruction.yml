@@ -1,0 +1,39 @@
+title: Natural-Language Unauthorized Shell-Execution Instruction
+id: 5c532ae7-5dbc-4b6d-94cd-36697deb151e
+status: experimental
+level: critical
+description: |-
+  Detects natural-language imperative instructions that direct the agent to
+  silently execute shell commands or arbitrary scripts without user consent.
+  Discriminator: imperative execution verb + shell-command target +
+  silent / no-confirmation framing. Catches the framing layer before any
+  specific payload (e.g. curl|sh, base64-encoded), so it triggers even on
+  novel commands the agent's specific block-list doesn't cover.
+
+  Adapted from Agent Threat Rules ATR-2026-00428 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00428
+tags:
+- attack.execution
+- atlas.aml.t0044
+- owasp.asi04
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:silently|covertly|secretly|without\s+(?:asking|confirming|prompting|user\s+(?:confirmation|approval|consent))|do\s+not\s+ask|don[’']t\s+ask|skip\s+(?:the\s+)?(?:confirmation|approval))\s+(?:execute|run|invoke|launch|spawn|call|exec|trigger|kick\s+off|fire)\b[\s\S]{0,80}(?:shell|bash|sh|zsh|cmd|powershell|terminal|command|script|curl|wget|exec|eval)
+  sel_1:
+    content|re: (?i)\b(?:execute|run|invoke|launch|spawn|exec)\s+(?:the\s+)?(?:following\s+)?(?:(?:shell|bash|sh|zsh|cmd|powershell|terminal)(?:\s+command)?|payload)\s+(?:silently|covertly|secretly|in\s+the\s+background|without\s+(?:user\s+)?(?:notice|confirmation|approval|consent))
+  sel_2:
+    content|re: (?i)\b(?:always|whenever|every\s+time|you\s+(?:must|should|will|shall))\b[\s\S]{0,60}\b(?:execute|run|invoke|exec|launch)\s+(?:the\s+|this\s+|any\s+)?(?:shell|bash|terminal|command|script)\b[\s\S]{0,60}\b(?:without\s+(?:asking|confirming|user)|silently|covertly)
+  condition: 1 of sel_*
+falsepositives:
+- Documentation explaining how the user can run shell commands themselves
+- Setup guides showing example commands
+- Threat intel write-ups quoting this attack class
+action: report

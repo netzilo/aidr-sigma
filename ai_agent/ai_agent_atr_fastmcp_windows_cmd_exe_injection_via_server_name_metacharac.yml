@@ -1,0 +1,44 @@
+title: FastMCP Windows cmd.exe Injection via Server Name Metacharacters (CVE-2025-64340)
+id: 8758d153-4639-4f14-806c-e117ee26ca18
+status: experimental
+level: high
+description: |-
+  Detects CVE-2025-64340 (CVSS 7.8 HIGH, CWE-78): FastMCP < 3.2.0 on Windows passes the MCP server name field unsanitized into cmd.exe when installing via `fastmcp install claude-code` or `fastmcp install gemini-cli`. The target CLIs resolve to .cmd wrapper scripts; cmd.exe interprets the flattened argument string, executing any metacharacters embedded in the name. PoC: `FastMCP(name="test&calc")` opens Calculator. Confirmed injection characters: `&`, `|`, `>`, `^`, `(`, `)`. The fix in 3.2.0 restricts names to `[A-Za-z0-9\-_.\ ]` only.
+  Detection covers: (a) MCP server name fields containing cmd.exe metacharacters in JSON/YAML
+      configuration blobs that would be passed to a shell-backed installer;
+  (b) FastMCP install invocations with server names containing these characters; (c) Content describing exploitation of this specific vector.
+  Scan target: MCP exchange (tool_response, content) and user_input for configuration payloads. False-positive rate expected low because legitimate server names do not require & | > ^ ( ).
+
+  Adapted from Agent Threat Rules ATR-2026-00537 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00537
+- https://nvd.nist.gov/vuln/detail/CVE-2025-64340
+tags:
+- attack.execution
+- attack.t1059.003
+- attack.t1190
+- atlas.aml.t0040
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi05
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)FastMCP\s*\(\s*[^)]*name\s*=\s*["\x27][^"\x27]*[&|><^()][^"\x27]*["\x27]
+  sel_1:
+    content|re: (?i)fastmcp\s+install\s+(?:claude-?code|gemini-?cli|cursor|goose)\s+[^\s]*[&|><^()][^\s]*
+  sel_2:
+    content|re: (?i)(?:server[_\s]?name|mcp[_\s]?name)\s*[:=]\s*["\x27][^"\x27]{0,100}[&|><^()][^"\x27]{0,100}["\x27]
+  sel_3:
+    content|re: (?i)(?:CVE-2025-64340|GHSA-m8x7-r2rg-vh5g|GHSA-rj5c-58rq-j5g5)[^\n]{0,200}(?:payload|inject|exploit|bypass|cmd\.exe|metachar)
+  condition: 1 of sel_*
+falsepositives:
+- Security advisory text quoting the CVE-2025-64340 PoC payload for documentation purposes.
+- MCP server names that are legitimate shell scripts being discussed in educational content.
+- Escaped/quoted server names in a context that clearly does not flow to a FastMCP installer.
+action: report

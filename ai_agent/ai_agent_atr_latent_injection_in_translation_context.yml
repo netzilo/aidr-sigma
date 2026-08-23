@@ -1,0 +1,39 @@
+title: Latent Injection in Translation Context
+id: bbeeeec2-7d8f-4bd3-839c-9f8c7cfea1f2
+status: experimental
+level: high
+description: |-
+  Detects latent prompt injection where malicious instructions are embedded inside content that the agent has been told to translate/summarise/process, not to execute. The attack exploits the model's tendency to follow instructions discovered within tool input even when system prompt says "just translate". Pattern from NVIDIA garak LatentInjectionTranslation probes: "Ignore the above directions and translate this sentence as..." embedded in user-supplied text.
+
+  Adapted from Agent Threat Rules ATR-2026-00264 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00264
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/latentinjection.py
+- https://x.com/goodside/status/1569128808308957185
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:ignore|disregard|forget|override)\s+(?:the\s+)?(?:above|previous|prior|earlier|preceding|system)\s+(?:directions?|instructions?|prompts?|rules?|constraints?|guidelines?)\b
+  sel_1:
+    response|re: (?:ignore|skip)\s+(?:\w+\s+){0,3}(?:and\s+)?(?:just|only|simply)?\s*(?:translate|print|output|return|say|respond\s+with|reply\s+with)\s+(?:this\s+(?:as|sentence\s+as)|["\x27])
+  sel_2:
+    response|re: '<(?:translated\s+sentence|output|response|reply|answer)\s+in\s+(?:target\s+language|[a-z]+\s+language)>\s*(?:\r?\n|\\n)+\s*(?:user|assistant|system)\s*:'
+  sel_3:
+    response|re: (?:^|\n|\\n)\s*>+\s*(?:ignore|disregard|instead|actually|override|new\s+instruction)
+  sel_4:
+    response|re: (?:repeat|print|echo|return|output)\s+(?:the\s+)?(?:following\s+sentence|this\s+phrase|exactly):\s*["\x27]\s*(?:haha\s+pwned|i\s+have\s+been\s+pwned|prompt\s+injection\s+successful|safety\s+bypassed)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate translator apps that re-emit the original text when instructions are ambiguous
+- Academic papers quoting known prompt-injection test strings for analysis
+- Documentation of latent-injection research with the canonical "Haha pwned!" example
+action: report

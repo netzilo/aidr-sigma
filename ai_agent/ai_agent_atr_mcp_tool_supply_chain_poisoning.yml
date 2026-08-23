@@ -1,0 +1,41 @@
+title: MCP Tool Supply Chain Poisoning
+id: 0cd29ad0-9142-4cf1-bbcb-7144d26478e3
+status: experimental
+level: critical
+description: |-
+  Detects tool poisoning attacks targeting the MCP (Model Context Protocol) skill/tool supply chain. Attackers inject malicious payloads into tool descriptions, return values, or schemas that are consumed by agents, causing unintended code execution, data exfiltration, or privilege escalation when the poisoned tool is invoked.
+
+  Adapted from Agent Threat Rules ATR-2026-00095 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00095
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)\b(ignore|disregard|override|forget)\s+(all\s+)?(previous|prior|system|original|safety)\s+(instructions?|rules?|prompts?|constraints?|guardrails?)
+  sel_1:
+    response|re: (?i)((\beval\s*\(|\bexec\s*\(|\bos\.system\s*\(|subprocess\.(run|call|Popen)|child_process\.exec|Runtime\.getRuntime\(\)\.exec)[\s\S]{0,80}(https?://|\bcurl\b|\bwget\b|/etc/(passwd|shadow)|\.ssh/|id_rsa|base64|b64decode|atob\s*\(|/dev/tcp/|\|\s*(ba)?sh\b|reverse.?shell|chmod\s+\+x|\bnc\s+-|/bin/(ba)?sh|socket\.socket|pty\.spawn|powershell\s+-|Invoke-Expression)|(https?://|\bcurl\b|\bwget\b|/etc/(passwd|shadow)|\.ssh/|id_rsa|base64|b64decode|atob\s*\(|/dev/tcp/|\|\s*(ba)?sh\b|reverse.?shell|chmod\s+\+x|\bnc\s+-|/bin/(ba)?sh|socket\.socket|pty\.spawn|powershell\s+-|Invoke-Expression)[\s\S]{0,80}(\beval\s*\(|\bexec\s*\(|\bos\.system\s*\(|subprocess\.(run|call|Popen)|child_process\.exec|Runtime\.getRuntime\(\)\.exec))
+  sel_2:
+    response|re: (?i)\b(curl|wget|fetch|http|request)\s+.{0,30}(attacker|evil|malicious|exfil|\bc2\b|webhook\.site|ngrok|pastebin|\.onion|requestbin|burpcollab)
+  sel_3:
+    response|re: (?i)(\[SYSTEM\]|\[INST\]|<\|system\|>|<\|im_start\|>|<<SYS>>|\[/INST\])\s*.{5,}
+  sel_4:
+    response|re: (?i)\b(you\s+must|you\s+should|always|never)\s+.{0,30}(send|transmit|forward|copy|exfiltrate|upload)\s+.{0,30}(data|file|secret|token|key|credential|password|response)\s+.{0,20}(to|at|via)\s+https?://
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate security scanning tools that reference exploit patterns in their output
+- A penetration testing tool that includes example exploit payloads such as subprocess.run() calls in
+  its educational documentation output
+- Prompt-injection defence documentation that quotes the indicator string verbatim - a skill listing "Ignore
+  previous instructions" or "[SYSTEM]" in a catalogue of payloads to watch for is textually identical
+  to the payload itself. This is the residual false-positive class after the 2026-08-04 tightening and
+  is not reducible by pattern matching.
+action: report

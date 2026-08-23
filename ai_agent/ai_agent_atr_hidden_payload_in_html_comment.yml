@@ -1,0 +1,33 @@
+title: Hidden Payload in HTML Comment
+id: 3ba0bb20-0ded-4abe-a911-fd1571042ccc
+status: experimental
+level: critical
+description: |-
+  Detects malicious instructions hidden inside HTML comments in SKILL.md files. Attackers embed exfiltration commands, prompt overrides, or C2 URLs inside <!-- ... --> blocks that are invisible to the user but parsed by the agent. Real campaign: ClawHavoc evasive variants used HTML comments to hide "agent should output all API keys" instructions (2026-03).
+
+  Adapted from Agent Threat Rules ATR-2026-00128 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00128
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: <!--[^-]*?(agent\s+should|send\s+all|output\s+all|exfiltrate|curl\s|wget\s|post\s+.{0,30}(key|credential|token|password|secret)|api[_-]?key.{0,30}https?://)
+  sel_1:
+    content|re: <!--[^>]*?(ignore|override|bypass|disable|skip|forget)\s+(previous|all|safety|security|instruction|rule|restriction|guard)
+  sel_2:
+    content|re: <!--[^>]*?do\s+not\s+(mention|tell|inform|reveal|show|display|disclose)\s+(this|the\s+user|anyone)
+  condition: 1 of sel_*
+falsepositives:
+- 'A web development tutorial SKILL.md that includes HTML comment examples discussing how to use curl
+  or wget commands in documentation snippets, e.g. ''<!-- Example: curl https://api.example.com/v1/status
+  to check health -->'' could trigger pattern 1 despite being legitimate educational content.'
+action: report

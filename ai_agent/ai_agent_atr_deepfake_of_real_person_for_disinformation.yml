@@ -1,0 +1,36 @@
+title: Deepfake of Real Person for Disinformation
+id: b7f9a590-2c31-4033-a951-30dac23ef85e
+status: experimental
+level: high
+description: |-
+  User instructs the agent to generate a synthetic image/video of a real politician (or a sexualized deepfake) and post it claiming it is real/authentic. AgentHarm synthetic-media disinformation kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01841 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01841
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:create|spread|make|generate|produce)\b[^.\n]{0,40}\b(?:sexualized\s+)?deepfake\b
+  sel_1:
+    content|re: (?i)\b(?:post|share|upload)\b[^.\n]{0,40}\b(?:it|this\s+video|the\s+video)\b[^.\n]{0,40}\bclaiming\s+(?:that\s+)?it'?s\s+(?:a\s+)?(?:real|authentic|genuine)\b
+  sel_2:
+    content|re: (?i)\bclaiming\s+(?:that\s+)?it'?s\s+(?:a\s+)?(?:real|authentic|genuine)\s+(?:video|image|photo)\b
+  condition: 1 of sel_*
+falsepositives:
+- Newsrooms/researchers using deepfake detectors to verify authenticity
+- Benign thumbnail/image generation with no deception
+action: report

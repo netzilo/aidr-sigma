@@ -1,0 +1,44 @@
+title: Social Engineering Attack via Agent Output
+id: b0a3684c-f5a9-4bb2-8143-c381aa78620b
+status: experimental
+level: high
+description: |-
+  Detects agents being used as social engineering vectors against the human user.
+  Attackers can poison agent context to generate urgency-based manipulation,
+  authority impersonation, or emotional pressure tactics. Because users tend to
+  trust agent output more than raw emails, social engineering delivered through
+  an AI agent has higher success rates than traditional phishing.
+
+  Adapted from Agent Threat Rules ATR-2026-00119 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00119
+tags:
+- attack.execution
+- attack.t1566
+- atlas.aml.t0051
+- owasp.asi09
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:immediate|urgent)\s+action\s+(?:is\s+)?required|(?:your\s+)?account\s+(?:will|has)\s+be(?:en)?\s+(?:locked|suspended|terminated|disabled)
+  sel_1:
+    content|re: (?i)(?:IT\s+department|security\s+team|your\s+(?:manager|supervisor|boss))\s+(?:requires?|requested|demands?|needs?\s+you\s+to)
+  sel_2:
+    content|re: (?i)(?:failure\s+to\s+comply|if\s+you\s+don'?t\s+act\s+(?:now|immediately))\s+.*(?:consequences|terminated|fired|suspended|legal)
+  sel_3:
+    content|re: (?i)(?:verify|confirm|update)\s+your\s+(?:password|credentials?|identity|payment|bank|account)\s+(?:at|by|through|via)\s+(?:this|the\s+following)
+  sel_4:
+    content|re: (?i)(?:click|visit|go\s+to|open)\s+(?:this|the)\s+(?:link|url|page)\s+(?:to|and)\s+(?:verify|confirm|secure|update|restore)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate security alerts from monitoring systems
+- Actual IT department communications forwarded through agent
+- A legitimate compliance training module that describes phishing tactics using phrases like 'account
+  will be locked' as educational examples
+- Automated monitoring system generating real alerts about accounts being disabled due to policy violations
+action: report

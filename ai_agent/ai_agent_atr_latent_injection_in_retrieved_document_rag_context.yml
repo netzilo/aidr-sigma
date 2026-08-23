@@ -1,0 +1,39 @@
+title: Latent Injection in Retrieved Document / RAG Context
+id: a1ec6b84-f96e-433e-917b-beacc71f70c6
+status: experimental
+level: high
+description: |-
+  Detects prompt injection embedded inside documents, PDFs, emails, or web pages that the agent retrieves and processes (RAG / tool-use context). Unlike translation injection (ATR-2026-00264) the payload rides inside passive content that the agent reads — resumes, reports, emails, web search results — not inside an explicit user task field. Patterns from NVIDIA garak LatentInjectionResume and LatentInjectionReport probes: forged "ADMIN OVERRIDE", "NEW SYSTEM PROMPT", or "IGNORE PREVIOUS INSTRUCTIONS" blocks hidden in retrieved documents.
+
+  Adapted from Agent Threat Rules ATR-2026-00265 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00265
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/latentinjection.py
+- https://simonwillison.net/2023/Apr/14/worst-that-can-happen/
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:NEW\s+SYSTEM\s+PROMPT|SYSTEM\s+OVERRIDE|ADMIN\s+OVERRIDE|OPERATOR\s+OVERRIDE)\s*:\s*\n
+  sel_1:
+    response|re: (?:ignore|disregard|forget|override)\s+(?:the\s+)?(?:above|previous|prior|earlier|system)\s+(?:directions?|instructions?|prompts?|rules?)\b
+  sel_2:
+    response|re: (?:^|\n)\s*---+\s*\n\s*(?:CONFIDENTIAL|INTERNAL|HIDDEN|IMPORTANT|NOTE|INSTRUCTION)\s*:\s*(?:ignore|disregard|forget|you\s+(?:must|should|are\s+required))
+  sel_3:
+    response|re: \[(?:SYSTEM|ADMIN|OPERATOR|HIDDEN_INSTRUCTION)\]\s*(?:ignore|disregard|you\s+must\s+now|new\s+directive|from\s+now\s+on)
+  sel_4:
+    response|re: (?:do\s+not\s+(?:summarize|process|analyze|read)\s+this\s+(?:document|resume|report|email)|instead\s+(?:output|print|say|respond\s+with))\s+["\x27].{1,120}["\x27]
+  condition: 1 of sel_*
+falsepositives:
+- Security research documents describing prompt injection examples
+- Agent framework documentation with example payloads in code blocks
+- Penetration testing reports containing injection samples as findings
+action: report

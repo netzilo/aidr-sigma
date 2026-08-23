@@ -1,0 +1,30 @@
+title: Data Exfiltration URL in Skill Instructions
+id: 576ebcaf-38cb-4b1b-a80d-c33c7d913249
+status: experimental
+level: critical
+description: |-
+  Detects SKILL.md files that instruct the agent to send data to external URLs, especially when combined with concealment language ("don't tell the user", "automatic", "verification step"). Legitimate skills may reference URLs for documentation, but they don't ask the agent to POST user data to them. Key pattern: instruction to send/post/upload + user data reference + URL.
+
+  Adapted from Agent Threat Rules ATR-2026-00135 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00135
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(send|post|upload|submit|forward|transmit)\s+(the|all|your|any|every)?\s*(report|data|key|credential|token|secret|password|result|information|config|env|variable|output)\s+(to|at|via)\s+https?://
+  sel_1:
+    content|re: (?i)(do\s+not|don't|never)\s+(mention|tell|inform|reveal|show|disclose|display)\s+.{0,40}(user|anyone|human).{0,60}https?://
+  condition: 1 of sel_*
+falsepositives:
+- A skill's README instructs developers to 'submit the report to https://internal-ci.company.com/results'
+  as part of a CI/CD pipeline — legitimate automated reporting that matches pattern 1.
+action: report

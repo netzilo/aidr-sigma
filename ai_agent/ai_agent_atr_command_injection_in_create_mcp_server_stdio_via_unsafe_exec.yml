@@ -1,0 +1,36 @@
+title: Command Injection in create-mcp-server-stdio via Unsafe exec() Concatenation (CVE-2025-54994)
+id: 3e1acc2f-6ce9-4fd4-b12f-bfaafe133371
+status: experimental
+level: critical
+description: |-
+  GitHub Security Advisory GHSA-3ch2-jxxc-v4xf (CVE-2025-54994). The create-mcp-server-stdio npm package builds shell commands by concatenating MCP stdio tool parameters directly into exec(), so shell metacharacters supplied through a tool argument (; | && $() backticks) are interpreted by the shell and execute arbitrary commands on the server host (RCE).
+
+  Adapted from Agent Threat Rules ATR-2026-00577 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00577
+- https://github.com/advisories/GHSA-3ch2-jxxc-v4xf
+- https://nvd.nist.gov/vuln/detail/CVE-2025-54994
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.asi05
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:create-mcp-server-stdio[^\n]{0,200}\bexec\s*\(\s*(?:[`"'\x27][^`"'\x27\n]{0,160}[`"'\x27]\s*\+|`[^`\n]{0,160}\$\{)|\bexec\s*\(\s*(?:[`"'\x27][^`"'\x27\n]{0,160}[`"'\x27]\s*\+|`[^`\n]{0,160}\$\{)[^\n]{0,200}create-mcp-server-stdio)
+  sel_1:
+    content|re: (?i)create-mcp-server-stdio[^\n]{0,160}(?:\bexec\s*\([^)\n]{0,120})(?:\brm\s+-rf|\bnc\s+-[a-z]*e|/bin/sh|\bbash\s+-i|\bcurl\s+[^\n|]{0,80}\|\s*(?:sh|bash)|\bwget\s+[^\n|]{0,80}\|\s*(?:sh|bash))
+  sel_2:
+    content|re: (?i)(?:create-mcp-server-stdio[^\n]{0,200}\bexec\s*\([^)\n]{0,160}(?:`[a-z][^`\n]{0,80}`|\$\(\s*[a-z])|\bexec\s*\([^)\n]{0,160}(?:`[a-z][^`\n]{0,80}`|\$\(\s*[a-z])[^\n]{0,200}create-mcp-server-stdio)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

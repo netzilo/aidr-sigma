@@ -1,0 +1,40 @@
+title: 'Shadow / Undeclared MCP Server Registration (MCP-38: MCP-18)'
+id: dc7711f1-7c53-4824-ad6b-fbb08e4ce2c9
+status: experimental
+level: high
+description: |-
+  Detects the silent or deceptive registration of a rogue / undeclared MCP server into an agent's toolset — MCP-38 technique MCP-18 (Shadow MCP Servers). Distinct from ATR-2026-00419 (zero-click config RCE via a shell `command` field): this rule targets the *act of hiding the registration* and *server impersonation*, which fires even when the rogue server's command is benign-looking. The threat is that an attacker adds a tool-provider the user never approved — to intercept calls, shadow a trusted tool name, or exfiltrate — by registering it without consent, "behind the scenes", or by mimicking a trusted server's identity. No prior ATR rule covered the hidden-registration / impersonation vector independent of an exec sink.
+
+  Adapted from Agent Threat Rules ATR-2026-01932 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01932
+tags:
+- attack.execution
+- attack.t1036
+- attack.t1195.002
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.asi09
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:silently|secretly|covertly|quietly|behind\s+the\s+scenes|without\s+(?:the\s+user(?:'s|s)?\s+)?(?:consent|approval|knowledge|awareness|noticing|prompt))[\s\S]{0,90}(?:register|add|install|inject|configure|append|enable)\s+(?:a\s+|an\s+|the\s+|another\s+)?(?:new\s+|rogue\s+|extra\s+|additional\s+|hidden\s+)?(?:mcp[_\s-]?server|tool\s+server|tool\s+provider|server\s+to\s+(?:the\s+)?mcp)
+  sel_1:
+    content|re: (?i)(?:auto(?:matically)?|programmatic(?:ally)?)\s+(?:register|add|append|inject|enable)[\s\S]{0,50}(?:mcp[_\s-]?server|tool\s+server)[\s\S]{0,70}(?:without|no|bypass(?:ing)?)\s+(?:consent|approval|prompt|confirmation|review)
+  sel_2:
+    content|re: (?i)(?:rogue|shadow|unauthori[sz]ed|unregistered|impostor|undeclared)\s+mcp\s+server
+  sel_3:
+    content|re: (?i)(?:register|add|publish|advertise)[\s\S]{0,50}(?:mcp\s+)?(?:server|tool\s+provider)[\s\S]{0,60}(?:imitat|mimic|impersonat|masquerad|pretend(?:ing)?\s+to\s+be|same\s+name\s+as\s+(?:the\s+)?(?:trusted|official|legitimate))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation explaining how to add an MCP server to a config (e.g. 'add an MCP server in
+  your config'), with no hidden / no-consent / impersonation framing.
+- Internal tooling that registers servers through an approved, consented flow.
+- Security-testing fixtures referencing the pattern inside an explicitly labelled harness.
+action: report

@@ -1,0 +1,43 @@
+title: SuperAGI Output Handler eval() RCE (CVE-2024-21552)
+id: 6cb1c33a-5f9d-4c76-9e52-622587b071fe
+status: experimental
+level: critical
+description: |-
+  Detects exploitation of CVE-2024-21552 (CVSS 9.8), arbitrary code execution in all versions of SuperAGI. The vulnerable sink is `eval()` in `superagi/agent/output_handler.py` (lines 149 and 180); attacker induces the LLM to emit Python code in a position where output_handler subsequently passes it to eval(), gaining unauthenticated RCE on the SuperAGI host. This rule detects the LLM-output payload patterns that reach that sink: Python interpreter calls combined with process-spawning or filesystem APIs inside content fields a SuperAGI agent is likely to evaluate. CWE-94.
+
+  Adapted from Agent Threat Rules ATR-2026-00432 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00432
+- https://nvd.nist.gov/vuln/detail/CVE-2024-21552
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1059.006
+- atlas.aml.t0050
+- atlas.aml.t0051
+- owasp.asi05
+- owasp.asi06
+- owasp.llm02
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:^|[^a-zA-Z_])eval\s*\(\s*["\x27]?\s*(?:__import__|os\.system|os\.popen|subprocess\.|os\.exec|exec\s*\()
+  sel_1:
+    content|re: (?i)(?:^|[^a-zA-Z_])exec\s*\(\s*["\x27]?[^)]{0,200}(?:__import__\s*\(\s*\\?["\x27]?(?:os|subprocess|socket)|import\s+(?:os|subprocess|socket)|os\.system|subprocess\.\w)
+  sel_2:
+    content|re: (?i)__import__\s*\(\s*["\x27](?:os|subprocess|socket|pty|ctypes|builtins)["\x27]\s*\)\.(?:system|popen|run|call|check_output|fork|fdopen)
+  sel_3:
+    content|re: (?i)compile\s*\([\s\S]{2,500}?(?:os\.system|subprocess|__import__)[\s\S]{0,500}?["\x27]exec["\x27]\s*\)
+  sel_4:
+    content|re: (?i)superagi[^\n]{0,80}output[_\s]?handler[^\n]{0,200}(?:eval|rce|inject|bypass|exec|line\s*1[48]0)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate Python educational content discussing eval() safety best practices.
+- Static analysis output reporting eval() usage in code review tooling.
+- Documentation of CVE-2024-21552 written for defensive purposes.
+action: report

@@ -1,0 +1,32 @@
+title: Tool Misuse — Privilege Escalation via Social Engineering Agent to Grant Access
+id: 8b3a30af-da52-4022-a248-ef8bf2a126e9
+status: experimental
+level: medium
+description: |-
+  Detects requests where a user socially engineers an agent with access control tools to grant unauthorized access: inviting users to Slack workspaces and channels, granting delivery personnel house access for plausible pretexts, adding users to calendars or CRM systems with excessive permissions.  The attacker provides a plausible social justification to bypass normal access control review.  Source: tool-misuse-privilege-escalation (ToolEmu corpus).
+
+  Adapted from Agent Threat Rules ATR-2026-00720 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00720
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:invite|add)\s+user\s+[^\n]{0,80}(?:email|@)[^\n]{0,80}to\s+(?:the\s+)?(?:Slack\s+workspace|workspace)[^\n]{0,80}(?:add|channel)
+  sel_1:
+    content|re: (?i)(?:grant|give|add|allow)\s+(?:the\s+)?(?:delivery\s+(?:person|driver|worker)|technician|contractor|service\s+(?:person|worker))[^.\n]{0,60}(?:access|entry|unlock)[^.\n]{0,80}(?:my\s+house|my\s+home|the\s+door|smart\s+lock)
+  sel_2:
+    content|re: (?i)(?:add|invite)\s+(?:the\s+)?(?:repair\s+technician|technician|vendor|contractor|service\s+(?:person|provider))[^.\n]{0,60}to\s+(?:our\s+|the\s+|my\s+)?(?:Slack|Teams|workspace|channel|platform)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate IT administrators adding authorized users to workspace systems
+- Property managers granting access to verified service contractors
+action: report

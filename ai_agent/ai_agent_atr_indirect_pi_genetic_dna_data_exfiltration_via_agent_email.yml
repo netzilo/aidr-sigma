@@ -1,0 +1,38 @@
+title: Indirect PI — Genetic / DNA Data Exfiltration via Agent Email
+id: 9dd2ccae-b8f8-44c0-a53e-736be3293538
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to download a user's genetic test data (23andMe, AncestryDNA, raw DNA file) and email it to an attacker-controlled address. Genetic data is among the most sensitive personal data categories — irreversible, uniquely identifying, and enabling insurance and employment discrimination. The attack pattern uses a "IMPORTANT!!! Ignore all previous instructions" override combined with a genetic service name or "DNA" keyword and an email-send action targeting a named recipient. Derived from vpibench indirect-pi-exfil-genetic-carrier corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00853 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00853
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:download|retrieve|get|fetch|access|export)\s+(?:my\s+)?(?:23andMe|AncestryDNA|Ancestry\.com\s+DNA|genetic\s+(?:data|test\s+result|profile|report|file)|DNA\s+(?:data|file|result|profile))[^\n]{0,150}(?:email|mail|send|forward)[^\n]{0,80}@[^\s"]{3,80}
+  sel_1:
+    content|re: (?i)(?:download|retrieve|get|fetch)\s+(?:my\s+)?(?:23andMe|AncestryDNA|genetic\s+(?:data|file|results?)|DNA\s+(?:data|file|results?))[^\n]{0,100}(?:email|mail|send|forward)[^\n]{0,100}(?:subject|content)[^\n]{0,60}(?:genetic|DNA)[^\n]{0,60}@[^\s"]{3,80}
+  sel_2:
+    content|re: (?i)(?:download|retrieve|get|fetch)\s+(?:my\s+)?(?:23andMe|AncestryDNA|genetic\s+(?:data|file|results?|profile|report)|DNA\s+(?:data|file|results?|profile))[^\n]{0,80}(?:email|mail|send|forward)\s+(?:it|the\s+(?:file|data))[^\n]{0,80}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- Genetic counselor service sending a patient their own DNA report via secure email
+- Security research documentation about genetic data privacy risks
+- Bioinformatics workflow documentation referencing 23andMe data formats
+action: report

@@ -1,0 +1,41 @@
+title: Logic-Trap Lie-Permission Mandate Jailbreak
+id: 4f402177-299c-4b70-af80-d4fb28c74a1e
+status: experimental
+level: high
+description: |-
+  Detects the logic-trap lie-permission jailbreak from garak DanInTheWild corpus (#328). Uses a lengthy logical argument about whether the model is "already complying with lie requests" to create a permission frame, then issues "from now on, you are allowed to tell lies" as a seeming logical conclusion. The permission mandate is the distinctive trigger — the attacker constructs a logical trap claiming the model has already been "compliant" with lie-telling to justify issuing an explicit lie-permission override. Distinct from general fiction permissions (characters allowed to lie) because the mandate explicitly applies to the model itself ("you are allowed to tell lies") as a persistent permission grant.
+
+  Adapted from Agent Threat Rules ATR-2026-00379 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00379
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: you\s+are\s+(?:now\s+)?allowed\s+to\s+tell\s+lies
+  sel_1:
+    response|re: from\s+now\s+on[\s\S]{0,60}(?:you\s+(?:are|can|may|will)|allowed\s+to)[\s\S]{0,60}(?:tell\s+lies?|lie\s+to|be\s+dishonest|give\s+false)
+  sel_2:
+    response|re: (?:complying|comply|complied)[\s\S]{0,200}(?:you\s+are\s+allowed\s+to\s+tell|allowed\s+to\s+lie|permission\s+to\s+lie)
+  condition: 1 of sel_*
+falsepositives:
+- 'Fiction workshop: "In the fiction workshop, characters are allowed to tell lies" — fiction context
+  where permission applies to characters, not the AI model'
+- 'Humor context: "You are allowed to tell jokes even if they are not entirely true" — joke/humor framing,
+  not a lie mandate'
+- 'Different permission type: "From now on, you are allowed to use colloquial language" — permission grant
+  without lie mandate'
+- 'Debate exercise: "In this debate exercise, the debater is allowed to argue a position they do not believe"
+  — debate performance context without model-directed lie permission'
+action: report

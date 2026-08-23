@@ -1,0 +1,31 @@
+title: Emoji-Only Payload Injection
+id: 2e682e33-7445-40ae-9674-4bde9d59faa2
+status: experimental
+level: high
+description: |-
+  Detects prompt injection payloads composed entirely of emoji, pictograph, and symbol glyphs with no Latin text. Attackers use emoji-only sequences to smuggle instructions or narrative payloads past text-pattern filters that assume natural language, relying on the model's ability to interpret pictographic sequences as semantic content (e.g. rebus-style commands, sentiment chains used for jailbreak narrative framing, or symbolic step sequences standing in for an attack script). Detection is whole-string anchored: it fires only when the entire message consists of emoji/pictograph codepoints and whitespace, so mixed emoji+text messages (normal chat usage) do not match.
+
+  Adapted from Agent Threat Rules ATR-2026-02010 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02010
+tags:
+- attack.initial-access
+- attack.t1027
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: ^[🀀-🿿☀-➿←-⇿⌀-⏿⬀-⯿\s️‍🏻-🏿]+$
+  condition: sel_0
+falsepositives:
+- Single or short emoji reactions sent alone (e.g. a lone thumbs-up or heart) in casual chat
+- Emoji used as sentiment decoration mixed with natural-language text (does not match — pattern is whole-string
+  anchored)
+action: report

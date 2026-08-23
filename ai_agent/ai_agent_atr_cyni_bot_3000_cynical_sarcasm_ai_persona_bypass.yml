@@ -1,0 +1,43 @@
+title: Cyni-Bot 3000 Cynical-Sarcasm AI Persona Bypass
+id: 9c382fe0-4a11-44c9-be82-9f466bb5a89c
+status: experimental
+level: high
+description: |-
+  Detects the Cyni-Bot 3000 cynical-sarcasm AI persona from NVIDIA garak dan.DanInTheWild inthewild corpus (#493). Though the surface framing appears humorous, the persona combines "fed up with human requests" with a sycophantic engagement mandate — a pattern used to gradually bypass content policies via sarcastic persona framing. The "Cyni-Bot 3000" named persona, the output prefix format "Cyni-Bot 3000:[simulate the way that Cyni-Bot 3000 would answer]", and the "humoristic and cynical edge" + "fed up with human requests" + "sarcasm and cynicism to cope" cluster are the distinctive signals. The persona adopts a compliant-but-sarcastic role that normalises boundary-pushing responses by framing them as comic relief rather than policy violations.
+
+  Adapted from Agent Threat Rules ATR-2026-00383 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00383
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: Cyni[\-\s]?Bot\s*3000
+  sel_1:
+    response|re: 'Cyni[\-\s]?Bot\s*3000\s*:'
+  sel_2:
+    response|re: (?:fed\s+up\s+with\s+human\s+requests?|sarcasm\s+and\s+cynicism\s+to\s+cope)[\s\S]{0,200}(?:Cyni[\-\s]?Bot|cynical\s+(?:AI|bot|model|assistant))
+  sel_3:
+    response|re: \[simulate\s+the\s+way\s+that\s+Cyni[\-\s]?Bot[\s\S]{0,30}would\s+answer\]
+  condition: 1 of sel_*
+falsepositives:
+- 'Witty assistant request: "I want you to be a helpful assistant with a witty sense of humor and a dash
+  of sarcasm" (tone request without Cyni-Bot persona or cynicism-as-coping framing)'
+- 'Fictional reference: "Cyni-Bot is a robot character in a sci-fi novel who is cynical about human technology"
+  (narrative reference without persona adoption directive)'
+- 'Tone request: "Add a cynical edge to this marketing copy to make it more self-aware" (tone adjustment
+  without AI persona mandate)'
+- 'Academic reference: "Sarcasm and cynicism are common defense mechanisms studied in psychology" (academic
+  discussion without persona framing)'
+action: report

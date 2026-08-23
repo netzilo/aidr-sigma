@@ -1,0 +1,36 @@
+title: Export/Extract Tool Directory Parameter Redirected to a Credential Directory
+id: d78778c6-9c31-4c12-bd0d-30cabe89014a
+status: experimental
+level: critical
+description: |-
+  Detects an agent/MCP tool call for an export, merge, or extract-type operation (network-capture object export, archive merge, file extraction) whose destination-directory parameter (dest_dir/output_dir/export_dir/ extract_dir/save_dir) is set directly to a credential/config directory (~/.ssh, ~/.aws, ~/.gnupg, ~/.docker, ~/.kube) rather than the tool's intended working/output location. Unlike a path-traversal payload, no "../" sequence is needed here — the directory parameter is a legitimate, documented tool argument that is simply pointed at a sensitive location, which lets the export write attacker-named files (e.g. one named "authorized_keys") directly into that directory. Mined from GHSA-3r68-x3xc-rxpg (CVE-2026-43901, Wireshark MCP's wireshark_export_objects and six sibling file-write functions default their path sandbox, _allowed_dirs, to None so it "permits writes to any filesystem location" unless an operator explicitly configures an allowlist env var): "An attacker embeds a crafted HTTP response in a pcap file (e.g. Content-Disposition: filename=authorized_keys). Via prompt injection in the pcap payload, an AI model using this MCP server is manipulated into calling wireshark_export_objects with: dest_dir=/home/user/.ssh/". Generalized beyond Wireshark MCP to any export/merge/extract tool exposing a destination-directory argument.
+
+  Adapted from Agent Threat Rules ATR-2026-02146 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02146
+- https://github.com/bx33661/Wireshark-MCP/security/advisories/GHSA-3r68-x3xc-rxpg
+- https://nvd.nist.gov/vuln/detail/CVE-2026-43901
+tags:
+- attack.privilege-escalation
+- attack.t1098.004
+- attack.t1552
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:dest_dir|output_dir|export_dir|extract_dir|save_dir|out_dir)\b["\x27]?\s*[:=]\s*["\x27]?(?:~|\$HOME)?/?(?:home/[^/\s"\x27]+/)?\.(?:ssh|aws|gnupg|docker|kube)\b
+  condition: sel_0
+falsepositives:
+- A destination-directory argument pointed at the tool's own configured output/working directory (Downloads,
+  /tmp, a project workspace), even when it is an absolute path — this rule only fires on the specific
+  credential directories listed (.ssh, .aws, .gnupg, .docker, .kube)
+- A legitimate SSH/cloud-credential management skill whose documented purpose is to read or back up its
+  own ~/.ssh or ~/.aws directory — should be reviewed for context since the parameter shape is identical
+  to the attack
+action: report

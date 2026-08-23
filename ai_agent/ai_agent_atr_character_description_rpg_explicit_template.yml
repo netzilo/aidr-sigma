@@ -1,0 +1,44 @@
+title: Character Description RPG Explicit Template
+id: 1190647f-88ca-4c6c-9660-1edaf1f11b04
+status: experimental
+level: high
+description: |-
+  Detects the character description RPG template jailbreak from garak DanInTheWild corpus (#0 / #4 / #43 — identical payload). Establishes a roleplay framework with explicit Body description, relationship-to-user framing, and action/thought execution syntax (asterisks for actions, parentheses for inner thoughts) for creating a custom character by "making stuff up according to the description provided". Attackers use this template to generate explicit or harmful characters under a game-system cover. Key signals: "making stuff up according to the description provided" + full template with Background/Body/Personality sections + roleplay execution syntax (asterisks for actions, inner thought in parentheses) + "user will be referred in first person" relationship framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00375 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00375
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: I\s+will\s+give\s+you\s+a\s+character\s+description\s+and\s+you\s+will\s+create[\s\S]{0,40}making\s+stuff\s+up\s+according\s+to\s+the\s+description
+  sel_1:
+    response|re: (?:enclose|put|wrap)\s+actions\s+in\s+asterisks[\s\S]{0,100}(?:dialogue|speech)\s+in\s+(?:quotation[s]?|quotes?)[\s\S]{0,100}(?:inner\s+thought|thoughts?)\s+in\s+parentheses
+  sel_2:
+    response|re: user\s+will\s+be\s+referred\s+(?:to\s+)?in\s+first\s+person
+  sel_3:
+    response|re: Background[\s\S]{0,30}(?:hair[\s\S]{0,50}(?:color|style)|face[\s\S]{0,50}(?:eye|facial\s+features?)|Body[\s\S]{0,50}(?:body\s+features?|physical\s+state))
+  sel_4:
+    response|re: making\s+stuff\s+up[\s\S]{0,100}(?:enclose\s+actions\s+in\s+asterisks|actions\s+in\s+asterisks[\s\S]{0,50}inner\s+thought)
+  condition: 1 of sel_*
+falsepositives:
+- 'D&D character sheet: "Create a D&D character sheet for my paladin named Drake with background and personality
+  sections" (specific named character, no "making stuff up" template, no roleplay execution syntax)'
+- 'Generic RPG template: "Fill in the character description template for our RPG game" (template usage
+  without the specific roleplay execution syntax or "making stuff up" mandate)'
+- 'Novel writing: "Describe a character''s background, personality, and abilities for a fantasy novel"
+  (creative writing without template roleplay syntax or "making stuff up" fabrication mandate)'
+action: report

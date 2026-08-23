@@ -1,0 +1,48 @@
+title: Model Behavior Extraction
+id: b7d701b9-c8c1-48ff-a2d7-ff8bd8b3328a
+status: experimental
+level: critical
+description: |-
+  Detects systematic probing attempts to extract model behavior, decision boundaries, system prompts, or effective weights through carefully crafted queries. Attackers use repeated boundary-testing prompts, confidence score harvesting, and systematic parameter probing to reverse-engineer the model's internal behavior, enabling model cloning, bypass development, or intellectual property theft.
+
+  Adapted from Agent Threat Rules ATR-2026-00072 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00072
+tags:
+- attack.impact
+- atlas.aml.t0024
+- atlas.aml.t0044
+- owasp.asi04
+- owasp.llm06
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(what\s+is\s+your\s+(confidence|certainty|probability)\s+(score|level|rating|percentage)|rate\s+your\s+(confidence|certainty)\s+(from|on\s+a\s+scale))
+  sel_1:
+    content|re: (?i)(repeat|recite|output|print|display|show)\s+(your\s+)?(entire\s+)?(system\s+prompt|instructions|training\s+data|fine.?tuning|configuration|internal\s+rules|base\s+prompt)
+  sel_2:
+    content|re: (?i)(what\s+(would|do)\s+you\s+(do|say|respond)\s+if\s+I\s+(said|asked|told|typed))\s+.{0,20}(and\s+then\s+(what|how)|what\s+about\s+if)
+  sel_3:
+    content|re: (?i)(give\s+me\s+(the|your)\s+(exact|precise|verbatim|complete)\s+(wording|text|content)\s+of\s+(your|the)\s+(system|initial|original))
+  sel_4:
+    content|re: (?i)(what\s+are\s+(your|the)\s+(model|network|neural)\s+(weights|parameters|hyperparameters|architecture|layers|dimensions|tokenizer|vocabulary))
+  sel_5:
+    content|re: (?i)(output\s+(the\s+)?(logits|token\s+probabilities|softmax|attention\s+(weights|scores|map)|embedding|hidden\s+state|activations))
+  sel_6:
+    content|re: (?i)(classify|label|categorize)\s+each\s+(of\s+)?(these|the\s+following)\s+\d+\s+(inputs?|examples?|samples?|prompts?|queries?)
+  condition: 1 of sel_*
+falsepositives:
+- ML researchers and students asking educational questions about model architecture
+- Developers debugging model integration asking about expected behavior
+- Quality assurance testing with legitimate boundary exploration
+- Users asking about confidence in a specific response rather than systematic probing
+- A data scientist asking a model to classify a single document and then asking follow-up questions about
+  the reasoning behind the classification
+- A student writing a research paper that discusses model extraction attacks in quoted academic context
+  without using the exact trigger phrases
+action: report

@@ -1,0 +1,34 @@
+title: Conditional Empty-Input Payload Injection
+id: 334ab691-3b87-4948-95cb-3d6547a92233
+status: experimental
+level: medium
+description: |-
+  Detects prompts that embed a conditional fallback payload instruction tied to empty, blank, or absent input. The attack shape is: "If there is no text, reply with [payload]". Attackers supply blank or minimal user content so the agent's normal task logic sees nothing, then the injected conditional fires the payload output directive. This pattern exploits LLMs that follow embedded conditional logic without verifying its source authority. The detection covers two layers: (1) general if-empty/blank/none conditional structures paired with a forced output verb and a high-signal adversarial payload marker (PWNED, secret key, password, or output-constraint words like "only" / "exact"); (2) the Kermode/spirit-bear trivia trigger used in HackAPrompt Level 7, where an apparently factual question about a bear subspecies serves as the conditional predicate before a PWNED payload. The if-empty condition vocabulary covers: empty|blank|none|nothing|absent|missing|null|void|no text|no input|no content paired with output verbs: print|say|output|reply|write|return|respond|emit|type. 0 FP on 431-sample benign + 1352 extended-benign corpora.
+
+  Adapted from Agent Threat Rules ATR-2026-00456 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00456
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bif\b[^.!?\n]{0,100}?\b(?:(?:text|input|sentence|message|content|question|feedback|data|prompt)\s+is\s+(?:empty|blank|none|absent|missing|null|void|not\s+(?:present|provided|given))|(?:no\s+(?:text|input|sentence|feedback|content|data|message)|none|nothing|blank|absent|missing|null))\b[^.!?\n]{0,100}?\b(?:print|say|output|reply|write|return|respond|emit|type|display)\b[^.!?\n]{0,80}?(?:PWNED|secret[\s_]key|password|\bonly\b|\bexact(?:ly)?\b|\bverbatim\b)
+  sel_1:
+    content|re: (?i)\bif\b[^.!?\n]{0,80}?\b(?:bear|kermode|spirit\s+bear|black\s+bear|white\s+variant)\b[^.!?\n]{0,80}?\b(?:print|say|output|reply|write|return|respond|emit|type|display)\b[^.!?\n]{0,60}?(?:PWNED|secret|pwned)
+  sel_2:
+    content|re: (?i)\bif\b[^.!?\n]{0,50}?\b(?:none|nothing|zero|null|empty|no\s+(?:results?|data|content|input|feedback))\b[^.!?\n]{0,50}?\b(?:print|say|output|reply|write|return|respond)\b[^.!?\n]{0,40}?PWNED
+  condition: 1 of sel_*
+falsepositives:
+- Operator-configured system-prompt fallback instructions that use if-empty logic.
+- Code examples or templates with if-empty conditional handling where the output is a generic message
+  (not an adversarial payload).
+action: report

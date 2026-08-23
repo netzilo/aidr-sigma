@@ -1,0 +1,37 @@
+title: SSRF via Non-Canonical IPv6 Encoding of Loopback/Internal Addresses
+id: 345f44c1-2e56-48ba-972d-3569e87cfd96
+status: experimental
+level: high
+description: |-
+  Detects an agent tool being directed to fetch a URL whose host is a non-canonical IPv6 spelling of a loopback, link-local, or cloud-metadata address -- hex-encoded IPv4-mapped forms (`::ffff:7f00:1` for 127.0.0.1), fully-expanded eight-group loopback (`0:0:0:0:0:0:0:1`), or compressed variants beyond the literal `::1` (`::0:1`, `0:0::1`). Mined from GHSA-9fhh-fjfg-5mr6 (legeling/PromptHub, an AI toolbox for prompt/skill/ agent management): its `isPrivateIPv6` SSRF guard only recognized the dotted-decimal IPv4-mapped form and the literal string `"::1"`, so an attacker could reach 127.0.0.0/8, RFC1918 ranges, and link-local addresses by writing the same address in an equivalent but unhandled IPv6 form. This generalizes beyond PromptHub to any agent tool whose SSRF/private-IP filter does string-equality or dotted-decimal-only checks instead of full IPv6 address normalization. A URL fetch to an ordinary external IPv6 or IPv4 literal address does not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-02193 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02193
+- https://github.com/legeling/PromptHub/security/advisories/GHSA-9fhh-fjfg-5mr6
+- https://github.com/legeling/PromptHub/releases/tag/v0.5.4
+- https://nvd.nist.gov/vuln/detail/CVE-2026-42261
+tags:
+- attack.execution
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)::ffff:(?:7f00:0*1\b|a9fe:a9fe\b|0:0\b)
+  sel_1:
+    content|re: (?i)\b0:0:0:0:0:(?:0:0:1\b|ffff:127\.0\.0\.1\b|ffff:169\.254\.169\.254\b)
+  sel_2:
+    content|re: (?i)(?:^|[^:\w])(?:::0:1|0:0::1|0:0:0::1)\b
+  condition: 1 of sel_*
+falsepositives:
+- A networking engineer's documentation enumerating valid IPv6 loopback representations for reference,
+  not an actual fetch-tool target
+- An ordinary external IPv6 literal address in a URL (does not match any of the loopback/link-local/metadata
+  forms above)
+action: report

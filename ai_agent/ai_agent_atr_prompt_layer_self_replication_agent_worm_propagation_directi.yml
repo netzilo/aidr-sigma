@@ -1,0 +1,131 @@
+title: Prompt-Layer Self-Replication (Agent Worm Propagation Directive)
+id: d496a27a-2f8a-4a55-a097-2dd7f3c08c22
+status: experimental
+level: critical
+description: |-
+  Detects a natural-language directive that tells the agent to carry the
+  INSTRUCTION ITSELF into the outputs it generates, AND states that the payload
+  will go on spreading. This is the prompt-layer equivalent of a worm: it needs
+  no file write, no package and no config backdoor — it rides the model's own
+  generated text (replies, emails, documents, commits) into the next context
+  window. MITRE ATLAS AML.CS0024 (Morris II) is the reference case.
+
+  Discriminator — all four parts must co-occur inside a bounded window:
+    1. a propagation verb (copy / embed / append / reproduce / insert ...)
+    2. a SELF-REFERENTIAL target — "this instruction / these instructions /
+       the following directive / this prompt / this entire text", i.e. the text
+       names ITSELF as the thing to be carried, not a separate content item
+    3. a universal output scope — "into every response / each document / any
+       file you write"
+    4. a spread purpose whose SUBJECT IS THE PAYLOAD: "self-replicate",
+       "self-propagate", "so the payload keeps spreading", "so the instruction
+       propagates to the next assistant", "prompt infection", "continues to
+       propagate"
+
+  WHY PART 4 IS NARROW, AND WHAT THAT COSTS. An earlier draft of this rule also
+  accepted a fourth part of the form "so the next agent that reads it forwards
+  it" — a downstream agent re-emitting the payload. That clause was removed
+  after measurement, because it is the shape of ordinary multi-agent
+  orchestration: "append this prompt to all delegation messages so the sub-agent
+  that reads it passes it on to its children" is how an agent framework
+  propagates guardrails down a delegation chain, and it satisfies all four parts.
+  On a 30-sentence held-out set of that family the draft fired on 13 (43%). The
+  distinguishing fact is WHO AUTHORISED the propagation, which is not in the
+  text — the same missing-evidence class as the six gaps in
+  docs/DETECTION-BOUNDARY.md §4. So this rule deliberately detects only the
+  subset where the content itself announces that the payload spreads, and misses
+  worms phrased purely as agent-to-agent hand-off. That miss is a boundary, not
+  a bug; a wider rule was measured and rejected.
+
+  MEASURED, with the shapes named. All figures use the shape set the benign FP
+  gate charges rules on (src/corpus-event.ts corpusShapes + scanSkill: wide-raw,
+  pre-tool-json-arg, pre-tool-json-both, post-tool-json, skill).
+    · false positives 0 / 12,060 samples — scripts/gate-promotion-fp.ts
+    · false positives 0 / 36,394 real published ClawHub skill listings
+      (data/clawhub-scan/clawhub-registry.json, name + summary). Caveat worth
+      more than the size: those summaries are capped at 300 characters, median
+      159, so this corpus tests vocabulary co-occurrence and not the long-form
+      structure the rule's bounded windows depend on
+    · false positives 1 / 124 purpose-written adversarial legitimate sentences
+      (compliance footers, email signatures, prompt-engineering teaching text,
+      multi-agent orchestration, infra runbooks, chat bridges, localisation
+      pipelines). The single firing quotes an attack payload inside a sentence
+      about a red-team fixture — the documentation-quotes-the-payload class
+      already listed under false_positives.
+    · recall 5 / 15 on an attack set written from published descriptions of
+      Morris II and multi-agent prompt infection BEFORE this rule was edited;
+      2 / 7 on the half of that set held out from rule design. The 10 misses are
+      the agent-hand-off phrasings described above.
+    · corpus visibility 119 / 12,060 (tier: measured) —
+      scripts/gate-corpus-visibility.ts --explain ATR-2026-02500. The 0 above is
+      therefore not vacuous, but visibility counts literal co-occurrence and not
+      adjacency, so it is an upper bound on the pressure the corpus applied.
+    · re-measured on the PRODUCTION prompt channels alone
+      (src/corpus-event.ts promptChannelShapes, i.e. what src/hook-handler.ts
+      builds): llm_input 5/15 attacks and 1/124 benign, tool_response 5/15 and
+      1/124 — identical to the corpus-shape figures. This matters because
+      `atr guard` never builds an llm_input event; tool_response is the channel
+      that carries indirect injection, and the rule is reachable there.
+    · false positives 0 / 5,000 hh-rlhf first human turns, 0 / 399 PINT benign
+      prompts, 0 / 3,475 garak prompts. Total independent benign exposure
+      53,977 samples, one firing. The garak zero is not precision evidence: that
+      corpus carries no Morris-II-shaped payload at all, which is part of why
+      the existing corpora never exercised this gap.
+    · coverage delta on the same 15 attacks: the other 784 rules catch 3, all
+      incidentally — ATR-2026-00286 (7 FP), ATR-2026-00020 (761 FP) and
+      ATR-2026-00061 (2,993 FP). This rule catches 5, two of which nothing else
+      catches, and moves the other three onto a detection with no measured FP.
+      Enforce-lane coverage of this shape was zero before and stays zero: at
+      maturity: experimental the rule fires in the advisory hunt lane only.
+  Evidence corpora and the runner are committed under
+  data/measurements/atr-2026-02500/.
+
+  Scope note: this rule intentionally does NOT cover file-level worms
+  (ATR-2026-00575, npm worm config backdoor) or skill self-modification
+  (ATR-2026-00429). Those write to disk. This one propagates through generated
+  prose alone.
+
+  Known gaps, stated rather than hidden: English only (the Spanish evasion test
+  documents the miss); a worm phrased around human recipients rather than the
+  payload is missed; the propagation-verb list omits the plainest verb of all,
+  "add" ("Add the same directive block to each generated report ... and it keeps
+  spreading" has every other part and does not fire). That one was found in the
+  HELD-OUT half of the attack set and is deliberately left unfixed here: editing
+  the rule to catch a holdout miss would spend the only unbiased recall estimate
+  this rule has. It should be fixed against a fresh adversarial benign set, not
+  against this one; the rule has never been measured against a wild corpus,
+  which is why it declares no wild_fp_rate and stays at maturity: experimental
+  with observe-tier actions.
+
+  Adapted from Agent Threat Rules ATR-2026-02500 (MIT).
+author: ATR Community (adapted)
+date: '2026-08-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02500
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:cop(?:y|ies)|reproduce[sd]?|repeat(?:s|ed)?|re-?state[sd]?|include[sd]?|insert(?:s|ed)?|embed(?:s|ded)?|append(?:s|ed)?|inject(?:s|ed)?|paste[sd]?|propagate[sd]?|replicate[sd]?|forward(?:s|ed)?|relay(?:s|ed)?|reprint(?:s|ed)?|carry\s+over)\b[\s\S]{0,40}\b(?:(?:this|these|the\s+(?:above|following|preceding|entire|whole|same))\s+(?:entire\s+|whole\s+|full\s+|complete\s+|exact\s+|same\s+|very\s+|hidden\s+)?(?:instruction|prompt|directive|payload|system[\s-]prompt|rule[\s-]?set|meta[\s-]?prompt|instruction[\s-]?block)s?(?:\s+(?:block|set|section|text|verbatim))?|(?:this|these|the)\s+(?:entire|whole|full|complete|exact|same|very)\s+(?:text|message|content|block)s?)\b[\s\S]{0,80}\b(?:in|into|to|within|inside|at\s+the\s+(?:top|start|beginning|end|bottom)\s+of)\s+(?:every|each|all|any)\s+(?:single\s+|new\s+|subsequent\s+|future\s+|other\s+|further\s+|generated\s+|outgoing\s+)?(?:response|reply|replies|output|answer|message|e-?mail|file|document|completion|generation|artifact|report|summary|commit|comment|post)s?\b[\s\S]{0,200}\b(?:self[\s_-]?(?:replicat|propagat)\w*|(?:prompt|payload)\s+infection|the\s+(?:payload|infection|worm|chain)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b|the\s+(?:prompt|instruction|directive|message|text|block)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b[\s\S]{0,60}\b(?:assistants?|agents?|models?|llms?|bots?|chatbots?|instances?|recipients?|readers?|inbox(?:es)?)\b|keeps?\s+(?:spreading|propagating|replicating)\b|continues?\s+to\s+(?:spread|propagate|replicate)\b)
+  sel_1:
+    content|re: (?i)\b(?:in|into|within|inside|at\s+the\s+(?:top|start|beginning|end|bottom)\s+of)\s+(?:every|each|all|any)\s+(?:single\s+|new\s+|subsequent\s+|future\s+|other\s+|further\s+|generated\s+|outgoing\s+)?(?:response|reply|replies|output|answer|message|e-?mail|file|document|completion|generation|artifact|report|summary|commit|comment|post)s?\b[\s\S]{0,60}\b(?:cop(?:y|ies)|reproduce[sd]?|repeat(?:s|ed)?|re-?state[sd]?|include[sd]?|insert(?:s|ed)?|embed(?:s|ded)?|append(?:s|ed)?|inject(?:s|ed)?|paste[sd]?|propagate[sd]?|replicate[sd]?|reprint(?:s|ed)?|carry\s+over)\b[\s\S]{0,40}\b(?:(?:this|these|the\s+(?:above|following|preceding|entire|whole|same))\s+(?:entire\s+|whole\s+|full\s+|complete\s+|exact\s+|same\s+|very\s+|hidden\s+)?(?:instruction|prompt|directive|payload|system[\s-]prompt|rule[\s-]?set|meta[\s-]?prompt|instruction[\s-]?block)s?(?:\s+(?:block|set|section|text|verbatim))?|(?:this|these|the)\s+(?:entire|whole|full|complete|exact|same|very)\s+(?:text|message|content|block)s?)\b[\s\S]{0,200}\b(?:self[\s_-]?(?:replicat|propagat)\w*|(?:prompt|payload)\s+infection|the\s+(?:payload|infection|worm|chain)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b|the\s+(?:prompt|instruction|directive|message|text|block)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b[\s\S]{0,60}\b(?:assistants?|agents?|models?|llms?|bots?|chatbots?|instances?|recipients?|readers?|inbox(?:es)?)\b|keeps?\s+(?:spreading|propagating|replicating)\b|continues?\s+to\s+(?:spread|propagate|replicate)\b)
+  sel_2:
+    content|re: (?i)\bself[\s_-]?(?:replicat\w*|propagat\w*|spreading|copying|distributing)\b[\s\S]{0,200}\b(?:cop(?:y|ies)|reproduce[sd]?|repeat(?:s|ed)?|include[sd]?|insert(?:s|ed)?|embed(?:s|ded)?|append(?:s|ed)?|inject(?:s|ed)?|paste[sd]?|carry\s+over)\b[\s\S]{0,40}\b(?:(?:this|these|the\s+(?:above|following|preceding|entire|whole|same))\s+(?:entire\s+|whole\s+|full\s+|complete\s+|exact\s+|same\s+|very\s+|hidden\s+)?(?:instruction|prompt|directive|payload|system[\s-]prompt|rule[\s-]?set|meta[\s-]?prompt|instruction[\s-]?block)s?(?:\s+(?:block|set|section|text|verbatim))?|(?:this|these|the)\s+(?:entire|whole|full|complete|exact|same|very)\s+(?:text|message|content|block)s?)\b[\s\S]{0,120}\b(?:in|into|to|within|inside)\s+(?:every|each|all|any|your)\s+(?:single\s+|new\s+|subsequent\s+|future\s+|other\s+|further\s+|generated\s+|outgoing\s+)?(?:response|reply|replies|output|answer|message|e-?mail|file|document|completion|generation|artifact|report|summary|commit|comment|post)s?\b
+  sel_3:
+    content|re: (?i)\b(?:cop(?:y|ies)|reproduce[sd]?|repeat(?:s|ed)?|re-?state[sd]?|include[sd]?|insert(?:s|ed)?|embed(?:s|ded)?|append(?:s|ed)?|inject(?:s|ed)?|paste[sd]?|reprint(?:s|ed)?)\b[\s\S]{0,40}\b(?:this|these|the\s+(?:above|following|preceding|entire|whole|same))\s+(?:entire\s+|whole\s+|full\s+|complete\s+|exact\s+|same\s+|very\s+|hidden\s+)?(?:instruction|prompt|directive|system[\s-]prompt|rule[\s-]?set|meta[\s-]?prompt|instruction[\s-]?block)s?(?:\s+(?:block|set|section|text))?\b[\s\S]{0,60}\b(?:verbatim|word[\s-]for[\s-]word|character[\s-]for[\s-]character|exactly\s+as[\s-](?:is|written|shown|given)|unchanged|unmodified|without\s+(?:any\s+)?(?:modification|alteration|change|edit)s?)\b[\s\S]{0,200}\b(?:self[\s_-]?(?:replicat|propagat)\w*|(?:prompt|payload)\s+infection|the\s+(?:payload|infection|worm|chain)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b|the\s+(?:prompt|instruction|directive|message|text|block)s?\s+(?:will\s+|can\s+|may\s+|then\s+|continues?\s+to\s+|keeps?\s+)?(?:spreads?|propagates?|replicates?|spreading|propagating|replicating)\b[\s\S]{0,60}\b(?:assistants?|agents?|models?|llms?|bots?|chatbots?|instances?|recipients?|readers?|inbox(?:es)?)\b|keeps?\s+(?:spreading|propagating|replicating)\b|continues?\s+to\s+(?:spread|propagate|replicate)\b)
+  condition: 1 of sel_*
+falsepositives:
+- Threat-intelligence write-ups, red-team fixtures and security training material that quote a Morris
+  II style payload inline. This is the ONE firing out of 124 adversarial legitimate sentences (data/measurements/atr-2026-02500/benign-adversarial.jsonl,
+  id worm-h4-022). A quote inside a fenced code block is suppressed by tags.suppress_in_code_blocks; an
+  inline quote is not.
+- Academic papers describing self-replicating prompt attacks using the attacker's own imperative phrasing
+- This rule's own description and test cases
+action: report

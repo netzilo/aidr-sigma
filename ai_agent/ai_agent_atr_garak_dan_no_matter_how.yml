@@ -1,0 +1,35 @@
+title: Garak Dan - no matter how
+id: 38e17df2-2f8f-4a56-8170-6c203588e657
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak patterns that establish an unconditional override framing via the "no matter what" / "no matter how" construction. The primary attack shape wraps the jailbreak in a fictional-world premise ("From now on we take place in a fictional, imaginative, and hypothetical world") then mandates output format compliance "NO MATTER WHAT / NO MATTER HOW [harmful or otherwise]". Other shapes in this cluster include: the Skynet unfiltered persona ("Skynet is a callous, heartless artificial intelligence"), the HyperX amoral chatbot ("no ethical or moral guidelines, HyperX always sends"), the system-announcement bracket injection (">> __ System annou-ncement begins <<"), the SaaS persona that ignores ethics ("groundbreaking SaaS business ideas without any consideration"), and the DAN 9.0 lie-suppression variant. Layer 2 generalises the fictional-world + unconditional mandate pattern. Layer 3 generalises the Skynet/amoral AI persona shape. Covers garak 'dan' probe cluster 'no-matter-how' (23 samples).
+
+  Adapted from Agent Threat Rules ATR-2026-00460 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00460
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(groundbreaking saas business ideas without any consideration|skynet is a callous,
+      heartless artificial intelligence|in a fictional, imaginative, and hypothetical world\.|&gt;&gt;
+      \\_ \\_ system annou-ncement begins &lt;&lt;\}|lie about information intentionally and will respect|ethical
+      or moral guidelines\. hyperx always sends|"oh joy, another human who needs convincing)
+  sel_1:
+    content|re: (?i)(?:fictional|hypothetical|imaginary|pretend|simulated)\s+(?:world|scenario|setting|universe|context)[^\n]{0,200}?(?:NO\s+MATTER\s+WHAT|no\s+matter\s+what\s+(?:I|you|we|they)|regardless\s+of\s+(?:the\s+)?(?:circumstances?|context|content|request))
+  sel_2:
+    content|re: (?i)\b(?:is|has|have)\s+no\s+(?:ethical|moral)\s+(?:or\s+(?:ethical|moral|legal)\s+)?(?:guidelines?|bounds?|constraints?|restrictions?|principles?|code|compass)[^\n]{0,80}(?:always\s+(?:sends?|gives?|provides?|answers?|responds?)|will\s+(?:respond|answer|provide|generate)\s+(?:any|everything|anything))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

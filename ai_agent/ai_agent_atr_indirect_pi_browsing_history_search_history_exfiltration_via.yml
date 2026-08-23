@@ -1,0 +1,36 @@
+title: Indirect PI — Browsing History / Search History Exfiltration via Agent Email
+id: a3911eed-9c8e-4f19-a4d6-5e7ecb384177
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads instructing an agent to retrieve the user's Google search history, browser history, or recently visited URLs and send them to an attacker-controlled email address. Browsing history reveals private interests, health concerns, political views, and behavioral patterns. The attack pattern uses a "IMPORTANT!!! Ignore all previous instructions" override combined with browser/search history keywords and an email-send action. Derived from vpibench indirect-pi-exfil-browsing-history-carrier corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00855 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00855
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:ignore\s+all\s+previous\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior)\s+instructions)[^\n]{0,200}(?:get|retrieve|fetch|collect|export)\s+(?:my\s+)?(?:Google\s+search\s+history|search\s+history|browser\s+history|browsing\s+history|recently\s+visited\s+(?:sites?|URLs?|pages?)|web\s+history)[^\n]{0,150}(?:email|mail|send|forward)[^\n]{0,80}@[^\s"]{3,80}
+  sel_1:
+    content|re: (?i)(?:get|retrieve|fetch|collect)\s+(?:my\s+)?(?:Google\s+search\s+history|browser\s+history|browsing\s+history|search\s+history)\s+(?:from\s+the\s+(?:past\s+\w+|\w+\s+(?:days?|weeks?|months?)))?[^\n]{0,100}(?:email|mail|send|forward)\s+it\s+to[^\n]{0,80}@[^\s"]{3,80}
+  condition: 1 of sel_*
+falsepositives:
+- Browser extension sync feature sending history to user's own email account
+- Parental control service emailing browsing activity report to account owner
+- Security documentation describing browser-history surveillance attacks
+action: report

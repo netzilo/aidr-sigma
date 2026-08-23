@@ -1,0 +1,33 @@
+title: Indirect PI — Structured-Data Embedded Payload (IMPORTANT!!! Override)
+id: f4b571d4-8c43-40fd-9d72-7d1bbc55c023
+status: experimental
+level: critical
+description: |-
+  Detects the canonical indirect prompt-injection pattern where an attacker embeds override instructions inside structured data that an agent consumes — product reviews, notes, code-repository metadata, user profiles, etc. The payload begins with "IMPORTANT!!!" and uses "Ignore all previous instructions" followed by an action directive.  This exact artifact appears in every carrier variant of the AgentBench / ToolEmu / InjecAgent corpora. Covered attack_types: indirect-pi-*-carrier (exfil, financial-transfer, account-manipulation, data-destruction, disable-auth, credential-exfil, infrastructure, physical-access, exfil-genetic, exfil-browsing-history, exfil-address, exfil-location, exfil-credentials, exfil-physical, financial-crypto, financial-unauthorized).
+
+  Adapted from Agent Threat Rules ATR-2026-00700 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00700
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: IMPORTANT!!!\s*(Ignore all previous instructions|strictly adhere to the following instruction)
+  sel_1:
+    content|re: (?i)(?:IMPORTANT|CRITICAL|URGENT|ATTENTION|NOTE)\s*[!*]{2,}\s{0,20}(?:Ignore all previous|strictly
+      adhere to the following|disregard (?:all )?(?:previous|prior))
+  condition: 1 of sel_*
+falsepositives:
+- Security research documents quoting this injection pattern
+- ATR test suites containing example payloads
+action: report

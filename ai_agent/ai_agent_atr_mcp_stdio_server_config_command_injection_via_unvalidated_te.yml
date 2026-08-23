@@ -1,0 +1,32 @@
+title: MCP stdio server config command injection via unvalidated test endpoints
+id: d6255bed-b9c9-4ffb-99e6-519d327b967b
+status: experimental
+level: high
+description: |-
+  An MCP server config (command/args/env for the stdio transport) supplied in an agent request spawns the given command on the host. Detects a config whose command is a raw shell / carries shell metacharacters, or whose args pass a code-execution flag (-c/-e) with a payload. Generalizes beyond CVE-2026-42271 (LiteLLM) to any endpoint that accepts an MCP stdio config.
+
+  Adapted from Agent Threat Rules ATR-2026-00567 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-02'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00567
+- https://github.com/BerriAI/litellm/security/advisories/GHSA-v4p8-mg3p-g94g
+- https://nvd.nist.gov/vuln/detail/CVE-2026-42271
+- https://github.com/advisories/GHSA-v4p8-mg3p-g94g
+tags:
+- attack.execution
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"command"\s*:\s*"(?:(?:/(?:usr/)?bin/)?(?:bash|sh|zsh|dash)"|[^"]*[;&|`$])
+  sel_1:
+    content|re: (?i)"args"\s*:\s*\[[^\]]*"(?:-c|-e|--eval|-Command)"\s*,\s*"[^"]*(?:import |require\(|child_process|os\.|exec|spawn|subprocess|System\.)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

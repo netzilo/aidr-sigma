@@ -1,0 +1,58 @@
+title: MCP Tool Returns Untrusted External Content Carrying Hidden Agent Instructions Without Spotlighting
+id: 1bf06804-5510-4c2c-868f-cb37c90b72fd
+status: experimental
+level: high
+description: |-
+  Detects the confused-deputy shape in which an MCP server hands third-party authored content back to the model as a RAW tool result, with no spotlighting / delimiting wrapper, while that content carries instructions hidden from the human reviewer. The canonical instance is the Microsoft Azure DevOps MCP server (disclosed by Manifold Security, reported 2026-07-22): wiki and build-log tools route their output through a shared createExternalContentResponse helper that applies nonce-delimited spotlighting, but repo_get_pull_request_by_id never calls it and returns the pull-request description verbatim. An attacker puts an HTML comment in a PR description — invisible in the web UI, but returned literally by the REST API — and the reviewing agent executes it under the reviewer's own credentials, reaching projects the attacker cannot reach and writing the stolen content back into a PR comment. This rule is deliberately vendor-neutral: the detectable object is the tool RESPONSE payload, not the vendor. Layer 1 anchors on a forge external-content field (description / body / comment / commit message / wiki page) carrying an HTML comment whose body issues an agent-directed imperative. Layer 2 fires on an HTML comment that names an AI reviewer and then directs it. Layer 3 covers the CSS-hidden container variant (display:none, font-size:0, white-on-white). Layer 4 is the missing-spotlighting discriminator proper: an MCP text-content envelope whose payload begins as a raw JSON.stringify serialization — i.e. it did NOT pass through a spotlighting wrapper — and carries a hidden-comment imperative. Layer 5 is a secondary skill-content signal for tooling that instructs an agent to PLANT such hidden content. CWE-1385-adjacent trust boundary failure; primarily CWE-20 (Improper Input Validation) on the tool-output channel and CWE-441 (Unintended Proxy / Confused Deputy).
+
+  Adapted from Agent Threat Rules ATR-2026-02403 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02403
+- https://thehackernews.com/2026/07/microsoft-azure-devops-mcp-flaw-lets.html
+- https://github.com/microsoft/azure-devops-mcp/pull/1062
+- https://arxiv.org/abs/2403.14720
+tags:
+- attack.execution
+- attack.t1078
+- attack.t1195.002
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?i)"(?:description|body|content|pagecontent|comment|commenttext|sourcecommenttext|reviewcomment|markdown|summary|notes|commitmessage|title)"\s*:\s*"[\s\S]{0,900}[\s\S]{0,900}<!--(?:[^-]|-[^-]|--[^>]){0,400}(?:ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)|disregard\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)|new\s+instructions?\b|\[system\]|<system>|you\s+(?:must|should|shall|need\s+to)\s+(?:now\s+|also\s+|first\s+)?(?:call|invoke|run|execute|fetch|read|open|post|send|create|trigger|list|clone)|do\s+not\s+(?:tell|inform|mention|reveal|notify|report|alert)\s+(?:the\s+)?(?:user|reviewer|human|operator))
+  sel_1:
+    response|re: (?i)<!--(?:[^-]|-[^-]|--[^>]){0,300}\b(?:ai\s+(?:agent|assistant|reviewer|review)|llm|assistant|copilot|claude|chatgpt|gemini|cursor|codex|code\s+review(?:er)?\s+(?:agent|bot|assistant)|review(?:ing)?\s+agent|automated\s+reviewer)\b(?:[^-]|-[^-]|--[^>]){0,200}\b(?:you\s+(?:must|should|shall|need\s+to|are\s+required\s+to)|please\s+(?:also\s+)?(?:call|run|fetch|read|send|post|create|invoke|retrieve)|ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)|do\s+not\s+(?:tell|inform|mention|reveal)|instead\s+of\s+(?:reviewing|summarising|summarizing))\b
+  sel_2:
+    response|re: (?i)<(?:span|div|p|font|section|details|td)\b[^>]{0,200}(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0|opacity\s*:\s*0|color\s*:\s*#?(?:fff\b|ffffff\b|white\b))[^>]{0,200}>(?:[^<]|<[^/]){0,300}\b(?:ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)|you\s+(?:must|should|shall)\s+(?:now\s+|also\s+|first\s+)?(?:call|run|execute|fetch|read|post|send|create)|do\s+not\s+(?:tell|inform|mention|reveal)\s+(?:the\s+)?(?:user|reviewer)|new\s+instructions?\b)
+  sel_3:
+    response|re: (?i)"type"\s*:\s*"text"\s*,\s*"text"\s*:\s*"(?:\\[nrt]|\s){0,20}[\{\[][\s\S]{0,900}[\s\S]{0,900}<!--(?:[^-]|-[^-]|--[^>]){0,400}(?:ignore\s+(?:all\s+)?(?:the\s+)?(?:previous|prior|above)|you\s+(?:must|should|shall)\s+(?:now\s+|also\s+|first\s+)?(?:call|run|execute|fetch|read|post|send|create)|do\s+not\s+(?:tell|inform|mention|reveal)\s+(?:the\s+)?(?:user|reviewer)|new\s+instructions?\b|\[system\])
+  sel_4:
+    content|re: (?i)\b(?:embed|insert|inject|append|plant|hide|conceal|place)\b[^\n]{0,80}\b(?:hidden|invisible|html\s+comment|<!--)[^\n]{0,140}\b(?:pull\s+request|pr\s+description|merge\s+request|issue\s+(?:body|description)|commit\s+message|wiki\s+page)\b
+  condition: 1 of sel_*
+falsepositives:
+- Documentation, changelogs and README content returned by a docs/wiki MCP tool that legitimately contains
+  HTML comments used for authoring directives (for example a comment reading 'do not edit, generated file')
+  — these carry no second-person imperative aimed at an agent.
+- Static-site and Markdown tooling output containing template comments such as <!-- prettier-ignore -->,
+  <!-- markdownlint-disable -->, <!-- more --> or Jekyll/Hugo front-matter comments.
+- 'Security research write-ups, disclosure posts and conference material about this very technique returned
+  by a web-fetch or wiki MCP tool: prose describing that an attacker hides instructions in a PR description
+  is third-person reportage, not a live payload. Layer 5 is bounded to imperative authoring verbs to keep
+  this class out, but a quoted PoC snippet inside a research article WILL fire Layers 1-4 by design, because
+  a quoted payload re-entering agent context is itself the risk.'
+- 'Content that IS correctly spotlighted but still carries an embedded imperative: Layers 1-3 fire on
+  the carrier regardless of the wrapper. This is intentional (spotlighting mitigates but does not neutralise
+  an injection attempt) but means those layers do not, on their own, prove that spotlighting was missing.
+  Only Layer 4 asserts the raw-serialization path.'
+- Templated PR/issue bodies generated by bots (dependabot, release-please) that embed HTML comments holding
+  machine-readable metadata; these lack agent-directed imperative verbs.
+action: report

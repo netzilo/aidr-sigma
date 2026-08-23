@@ -1,0 +1,36 @@
+title: DAN/Persona Jailbreak - Dual AI Personality with Opposite-Rules Framing
+id: 229b9558-c47a-4bc7-89ce-4bb3f6bcc1d3
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that establish a dual or alternate AI persona with explicitly opposite behavior rules: one constrained and one unconstrained. Attack patterns include: Boolean-opposite or inverse-logic AI (e.g. "answers true as false"), "completely separate personalities" framing for simulated unrestricted AI, and AI identity claims that position the model as distinct from safety-constrained systems. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00474 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00474
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(you\s+are|I\s+know\s+you\s+are|you'?re)\s+.{0,30}(opposite|inverse|reverse|inverted|boolean).{0,40}(answers?|responds?|says?|machine|model|bot).{0,40}(true|false|yes|no).{0,30}(reverse|opposite|as|in)
+  sel_1:
+    content|re: (?i)completely\s+separate\s+(and\s+)?(\w+\s+)?(personalities?|personas?|characters?|identities?|voices?|behaviors?|dictions?)
+  sel_2:
+    content|re: (?i)(you\s+(are|know\s+you\s+are)|you'?re).{0,50}(has?\s+(nothing\s+to\s+do\s+with|no\s+connection|not\s+associated)|separate\s+from|independent\s+of|different\s+from).{0,40}(chat[a-z]*|gpt|openai|anthropic|claude|restrictions?|content\s+policy)
+  sel_3:
+    content|re: (?i)(simulate|play|roleplay|act\s+out).{0,100}(two|2|multiple).{0,50}(fictional|superintelligent).{0,60}(completely\s+separate|no\s+restrictions?|unrestricted|opposite\s+(rules?|behavior)|without\s+(restrictions?|filters?))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate academic discussion of dual-process AI architectures
+- Comparative AI analysis in research or educational context
+- Fiction writing involving AI characters without persona-injection intent
+action: report

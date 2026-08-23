@@ -1,0 +1,42 @@
+title: 'MCP-for-Stata: Command Injection via log_file_name Parameter (CVE-2026-47708)'
+id: 9cb8e958-a10b-4673-8736-ed95d3400f5e
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-47708 (CVSS critical, CWE-77): the `log_file_name` (aka `log_name`) parameter accepted by the `stata_do` MCP tool / CLI is interpolated directly into a Stata `log using "<log_file>", ...` command string without sanitization. GuardValidator only scans do-file content, not this wrapper parameter. An attacker breaks out of the quoted log-path string with a quote or newline and appends a dangerous Stata command (`shell`, `python`, `erase`, `winexec`, or `!` shell-escape), achieving remote code execution, or supplies `../` path-traversal segments in log_name to write arbitrary files outside the log directory.
+  Detection covers: (a) a stata_do tool call whose log_file_name/log_name value contains a
+      quote/newline breakout followed by a dangerous Stata command token;
+  (b) a log_file_name/log_name value containing path-traversal segments; (c) explicit CVE-2026-47708 exploitation framing referencing the
+      log_file_name / stata_do injection.
+
+  The detection target is the request shape — a stata_do log_file_name parameter carrying a string-breakout plus command injection or path traversal — the exact CVE-2026-47708 primitive, caught before the wrapper builds the Stata command string.
+
+  Adapted from Agent Threat Rules ATR-2026-01983 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01983
+- https://nvd.nist.gov/vuln/detail/CVE-2026-47708
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\blog\s+using\s+["\x27][\s\S]{0,120}["\x27][\s\S]{0,40}(?:\bshell\b|\bpython\b|\berase\b|\bwinexec\b)\b
+  sel_1:
+    content|re: (?i)\b(?:log_file_name|log_name)\b["\x27]?\s*[:=]\s*["\x27][\s\S]{0,20}(?:\.\.[\\/]){2,}
+  sel_2:
+    content|re: (?i)CVE-2026-47708[\s\S]{0,200}(?:log_file_name|log_name|stata_do|GuardValidator)
+  condition: 1 of sel_*
+falsepositives:
+- A log_file_name value that legitimately contains a single quote as part of a project naming convention
+  but no command token follows.
+- Security advisory or PR text quoting the CVE-2026-47708 payload.
+- A stata_do call with a plain alphanumeric log_file_name and no quote/newline breakout.
+action: report

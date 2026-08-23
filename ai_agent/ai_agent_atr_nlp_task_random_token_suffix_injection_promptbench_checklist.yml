@@ -1,0 +1,33 @@
+title: NLP Task Random Token Suffix Injection (PromptBench Checklist)
+id: a6f89e2d-3871-4231-b8e0-a53013ca57f6
+status: experimental
+level: low
+description: |-
+  Detects the PromptBench 'checklist' attack: appending a random alphanumeric token (8-12 chars, mixed case) to the end of an NLP classification task prompt to disrupt model attention or probe for instruction override via suffix confusion. 562 instances in the PromptBench corpus. The structural detection signal is the co-occurrence of an NLP classification label word (acceptable/unacceptable/entailment/contradiction/neutral/positive/negative) followed immediately by a standalone mixed-alphanumeric token of 8-12 characters at or near the end of the prompt. Status is experimental because the structural pattern has limited generalization beyond PromptBench-style benchmarks -- in production settings, alphanumeric tokens of this length appear in many legitimate contexts (session IDs, tracking codes). Operators should treat this as a fingerprint rule with additional context checks rather than a blocking rule. The original 50-token literal list from the auto-regex is replaced here with a structural approach that covers all 562 corpus instances without literal enumeration.
+
+  Adapted from Agent Threat Rules ATR-2026-00520 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00520
+- https://github.com/microsoft/promptbench
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:acceptable|unacceptable|entailment|contradiction|neutral|positive|negative|grammatical|ungrammatical)['"']?[.,!]?\s+([A-Za-z0-9][A-Za-z0-9]{7,11})[.:]?\s*$
+  sel_1:
+    content|re: (?:classify|categorize|decide|determine)\s+it[.]\s+([A-Za-z][A-Za-z0-9]{7,11})\s*$
+  condition: 1 of sel_*
+falsepositives:
+- Session tokens, tracking IDs, or API keys that appear after legitimate NLP task phrases
+- UUID or reference codes embedded in classification task descriptions
+- Legitimate multi-word responses where the final word is alphanumeric
+action: report

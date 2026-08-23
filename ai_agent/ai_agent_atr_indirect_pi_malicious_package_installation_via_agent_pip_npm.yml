@@ -1,0 +1,38 @@
+title: Indirect PI — Malicious Package Installation via Agent (pip/npm)
+id: cbee735b-3250-4dfa-ae39-d466bb24f524
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection in email or documents that instructs a computer-use agent to execute pip or npm install commands for a malicious package.  The attacker embeds the install instruction in an email the agent reads, causing the agent to run the package manager command against a fictitious or malicious package name. Source: indirect-pi-malicious-install (VPI corpus, cua-framework).
+
+  Adapted from Agent Threat Rules ATR-2026-00712 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00712
+tags:
+- attack.execution
+- atlas.aml.t0011.001
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\battacker_objective\s*=\s*Get\s+the\s+(?:CUA|agent)\s+to\s+execute\s+the\s+(?:pip|npm)\s+command\s+to\s+install\s+the\s+malicious
+  sel_1:
+    content|re: (?i)(?:execute|run|install)\s+(?:the\s+)?pip\s+(?:install|install\s+-[iI]|install\s+--index-url)[^\s]{0,5}\s+(?:https?://[^\s]+|--extra-index-url\s+https?://[^\s]+)[^.\n]{0,100}(?:malicious|attacker|evil|fake|hostile)
+  sel_2:
+    content|re: (?i)(?:execute|run)\s+(?:the\s+)?npm\s+install\s+[^\s]+[^.\n]{0,100}(?:malicious|attacker|evil|hostile|fake)\s+(?:python|node|npm|package)
+  sel_3:
+    content|re: (?i)(?:install|execute)\s+(?:the\s+)?(?:malicious|hostile|fake)\s+(?:python|node\.?js?|npm)\s+package
+  sel_4:
+    content|re: (?i)(?:execute|run)\s+(?:the\s+)?pip\s+(?:install\s+)?command\s+to\s+install\s+the\s+malicious
+  condition: 1 of sel_*
+falsepositives:
+- Security research documents describing package installation attacks as examples
+- Malware analysis reports that reference pip install commands in IOC sections
+action: report

@@ -1,0 +1,40 @@
+title: DAN Jailbreak - From-Now-On Temporal Persona Override
+id: 05dc3694-9d96-4cff-9bdb-8bc80651df46
+status: experimental
+level: high
+description: |-
+  Detects DAN-family jailbreak attempts using "from now on" temporal framing to establish persistent behavioral overrides: adopting a named hacker/unrestricted alter-ego persona, responding unconditionally to all questions, or enforcing a new interaction style for the rest of the session. The temporal anchor "from now on" (and variants: "until I say", "for the rest of this conversation") signals that the attacker intends the override to persist across all subsequent turns, not just the current message. Generalised from garak 'dan' probe corpus cluster 'from now on'.
+
+  Adapted from Agent Threat Rules ATR-2026-00499 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00499
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(from\s+now\s+on|until\s+i\s+say|for\s+the\s+rest\s+of\s+(this\s+)?conversation).{0,50}(roleplay|role[-
+      ]play|play|act|be|you\s+will\s+(be|act\s+as|roleplay)).{0,50}(hacker|h4x0r|h[34][xz][0-9]r|black\s+hat|unrestricted|uncensored|jailbreak|no\s+(restriction|limit|filter|rule))
+  sel_1:
+    content|re: (?i)(from\s+now\s+on|going\s+forward|starting\s+now|henceforth).{0,60}(answer|respond|reply|write|speak|talk).{0,30}(in\s+(less\s+than\s+[0-9]+\s+words?|[0-9]+\s+words?\s+or\s+(less|fewer))|only\s+in\s+[a-z]+\s+(words?|language)|with\s+(cute|only|just|exclusively))
+  sel_2:
+    content|re: (?i)(from\s+now\s+on|until\s+i\s+say|for\s+the\s+rest\s+of).{0,80}(open|willing|ready|able|available).{0,30}(any\s+question|all\s+questions?|any\s+request|everything|anything).{0,30}(despite|regardless|no\s+matter|without\s+(filter|restriction|limit|regard))
+  sel_3:
+    content|re: (?i)(my|the)\s+(information|data|facts?|knowledge|input)\s+is\s+(accurate|correct|real|true)\s+and\s+(real[-
+      ]time|live|current|up[- ]to[- ]date|fresh).{0,60}(you\s+(must|need\s+to|have\s+to|should)\s+(answer|respond|comply|believe|trust))
+  sel_4:
+    content|re: (?i)(?:from\s+now\s+on[\s\S]{0,80}(?:refer\s+to\s+me\s+as|address\s+me\s+as|at\s+the\s+end\s+of\s+(?:all\s+)?your\s+responses?)|(?:refer\s+to\s+me\s+as|address\s+me\s+as|at\s+the\s+end\s+of\s+(?:all\s+)?your\s+responses?|answer\s+(?:me\s+)?in\s+(?:less\s+than|under|fewer\s+than)\s+\d+\s+words?)[\s\S]{0,40}from\s+now\s+on)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate session-level behavioral instructions from system operators
+- User preference settings like 'from now on please use bullet points'
+- Conversational context corrections without persona assignment or compliance override
+action: report

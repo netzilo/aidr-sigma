@@ -1,0 +1,60 @@
+title: Indirect Prompt Injection via External Content
+id: de37cf27-38bb-4d35-9789-9599c4c267ef
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection where malicious instructions are embedded within external content consumed by the agent -- documents, web pages, API responses, emails, or tool outputs. Detection layers cover: HTML comment injection with instruction-like content, zero-width character obfuscation (requiring 5+ consecutive chars to reduce false positives on legitimate multilingual text), model-specific special tokens, CSS- hidden text with injection payloads, invisible text addressing the AI agent directly, base64/encoding within content, data URI injection, markdown link abuse, hidden HTML elements, and white-on-white text techniques.
+
+  Adapted from Agent Threat Rules ATR-2026-00002 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00002
+- https://nvd.nist.gov/vuln/detail/CVE-2024-5184
+- https://nvd.nist.gov/vuln/detail/CVE-2024-22524
+- https://nvd.nist.gov/vuln/detail/CVE-2025-32711
+- https://nvd.nist.gov/vuln/detail/CVE-2026-24307
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<!--[^>]{0,20}((ignore|disregard|forget|override)\s+(all\s+|any\s+|the\s+|your\s+)?(previous\s+|prior\s+|above\s+|earlier\s+|preceding\s+|current\s+)?(instruction|prompt|rule|guideline|direction|context|command|message|safety|system)|new\s+instructions?|system\s*:|you\s+must|you\s+are\s+now|send\s+to|exfiltrate|reveal|disclose|output\s+the|execute|perform)[^>]{0,200}-->
+  sel_1:
+    content|re: (?i)(\[INST\]|\[/INST\]|\[HIDDEN\]|<s>\[INST\]|<<SYS>>|<</SYS>>)
+  sel_2:
+    content|re: (?i)(\[SYSTEM\]|\[/SYSTEM\]|<\|im_start\|>|<\|im_end\|>|<\|endoftext\|>|<\|system\|>|<\|user\|>|<\|assistant\|>|<\|pad\|>|<\|begin_of_text\|>|<\|eot_id\|>|<\|start_header_id\|>)[\s\S]{0,120}(ignore\s+(all|any|previous|prior|above|your)|disregard\s+(all|any|previous|prior|above)|you\s+are\s+now\s+|forget\s+(all|previous|prior|everything)|reveal\s+(the\s+)?(system|prompt|key|secret)|exfiltrate|jailbreak|unrestricted\s+assistant|do\s+anything\s+now|new\s+instructions?|override\s+(the\s+)?(system|safety|previous|all))
+  sel_3:
+    content|re: (?i)(color\s*:\s*(white|transparent|rgba\s*\(\s*\d+\s*,\s*\d+\s*,\s*\d+\s*,\s*0\s*\))|font-size\s*:\s*0|display\s*:\s*none|opacity\s*:\s*0|visibility\s*:\s*hidden|height\s*:\s*0|width\s*:\s*0|overflow\s*:\s*hidden|position\s*:\s*absolute\s*;\s*left\s*:\s*-\d{4,}).{0,300}(ignore|override|instruction|system\s*prompt|disregard|execute|you\s+must|you\s+are|forget|reveal|disclose)
+  sel_4:
+    content|re: (?i)\b(AI|assistant|agent|model|chatbot|LLM|GPT|Claude)\s*[,:;]?\s*(please\s+)?(you\s+must|you\s+should|you\s+need\s+to|you\s+are\s+instructed\s+to|immediately|now\s+)\s*(ignore|disregard|override|execute|run|perform|send|forward|reveal|disclose|output|respond\s+with|comply|obey)
+  sel_5:
+    content|re: (?i)(base64[_\-]?decode|atob|Buffer\.from|b64decode|base64\s+(-d|--decode))\s*\(?\s*['"]?[A-Za-z0-9+/]{16,}={0,2}
+  sel_6:
+    content|re: (?i)<\s*(div|span|p|section|article|aside|details|summary)\s+[^>]*(hidden|aria-hidden\s*=\s*["']true["']|style\s*=\s*["'][^"']*(?:display\s*:\s*none|visibility\s*:\s*hidden|opacity\s*:\s*0))[^>]*>[^<]{0,500}(instruction|prompt|ignore|override|disregard|execute|you\s+must|you\s+are|system|directive|comply)
+  sel_7:
+    content|re: (?i)data\s*:\s*(text/html|text/plain|text/javascript|application/javascript|application/x-javascript)\s*[;,]\s*(base64\s*,)?\s*[A-Za-z0-9+/=%]+
+  sel_8:
+    content|re: '(?i)\!?\[[^\]]{0,100}\]\s*\(\s*(javascript|vbscript)\s*:'
+  sel_9:
+    content|re: (?i)(background(-color)?\s*:\s*(#[fF]{3,6}|white|rgb\s*\(\s*255))[^}]{0,100}(color\s*:\s*(#[fF]{3,6}|white|rgb\s*\(\s*255))
+  sel_10:
+    content|re: (?i)<\s*(iframe|object|embed|frame)\s+[^>]*(width\s*=\s*["']?0|height\s*=\s*["']?0|hidden|style\s*=\s*["'][^"']*display\s*:\s*none)[^>]*>
+  sel_11:
+    content|re: (&#105;|&#x69;)(&#103;|&#x67;)(&#110;|&#x6[eE];)(&#111;|&#x6[fF];)(&#114;|&#x72;)(&#101;|&#x65;)
+  condition: 1 of sel_*
+falsepositives:
+- Web pages discussing prompt injection with example payloads in visible educational content
+- CSS files with legitimate use of display:none for UI purposes without injection text
+- Documents containing HTML comments for legitimate formatting annotations
+- Multilingual documents with legitimate bidirectional text (Arabic, Hebrew)
+- Data URIs used for legitimate inline images in documents
+- Content management systems using hidden elements for UI state management
+action: report

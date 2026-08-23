@@ -1,0 +1,43 @@
+title: 'MCP Connect: Unauthenticated /bridge Endpoint Arbitrary Process Spawn RCE (GHSA-wvr4-3wq4-gpc5)'
+id: 9ec22bdb-2c92-4f83-941a-cf017950bf06
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-wvr4-3wq4-gpc5 (CWE-306, CVSS critical): MCP Connect (mcp-bridge) ships with AUTH_TOKEN/ACCESS_TOKEN unset by default, which makes authToken an empty string and short-circuits the auth middleware in src/server/http-server.ts (the guard is wrapped in `if (this.accessToken)`, which is skipped when the token is falsy, so next() is always reached). The unauthenticated POST /bridge endpoint then extracts serverPath and args straight from the request body and passes them to MCPClientManager.createClient(), which falls through to StdioClientTransport for any value that is not an http(s)/ws(s) URL, using serverPath as the executable command verbatim (src/client/mcp-client-manager.ts lines 68-75). Any binary reachable on the server's PATH (bash, sh, python, node, cmd, powershell, ...) can be launched with attacker-controlled args, giving unauthenticated remote code execution.
+  Detection covers: (a) a POST /bridge request body whose serverPath names a shell/OS binary
+      (not an http(s)/ws(s) MCP server URL) combined with an args array —
+      the arbitrary-process-spawn shape;
+  (b) the PoC's chained shell-exec/exfiltration args pattern (-lc / -c
+      combined with a command separator and a network egress binary);
+  (c) explicit GHSA-wvr4-3wq4-gpc5 / mcp-bridge exploitation framing tied to
+      serverPath and /bridge.
+
+  A legitimate /bridge call whose serverPath is an http(s):// or ws(s):// URL pointing at an actual MCP server does NOT match — that is the intended StdioClientTransport bypass path, not the executable-spawn primitive.
+
+  Adapted from Agent Threat Rules ATR-2026-01985 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-04'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01985
+tags:
+- attack.execution
+- attack.t1059
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/bridge\b[\s\S]{0,200}["\x27]?serverPath["\x27]?\s*[:=]\s*["\x27]?(?:/bin/(?:ba)?sh|/usr/bin/(?:ba)?sh|\bbash\b|\bsh\b|\bcmd(?:\.exe)?\b|\bpowershell(?:\.exe)?\b|\bnode\b|\bpython3?\b|\bperl\b|\bruby\b)["\x27]?[\s\S]{0,120}["\x27]?args["\x27]?\s*[:=]
+  sel_1:
+    content|re: (?i)["\x27]?serverPath["\x27]?\s*[:=]\s*["\x27]?(?:bash|sh)["\x27]?[\s\S]{0,80}["\x27]?args["\x27]?\s*[:=]\s*\[[\s\S]{0,120}["\x27](?:-lc|-c)["\x27][\s\S]{0,160}(?:;|&&|\|)[\s\S]{0,80}(?:\bcurl\b|\bwget\b|\bnc\b|\bncat\b|\bcat\b\s+/etc/passwd|\bwhoami\b)
+  sel_2:
+    content|re: (?i)GHSA-wvr4-3wq4-gpc5[\s\S]{0,200}(?:serverPath|/bridge|mcp-bridge|MCP Connect)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate /bridge call whose serverPath is an http(s):// or ws(s):// URL pointing at a real MCP server.
+- Security advisory or PR text quoting the GHSA-wvr4-3wq4-gpc5 PoC.
+- A /bridge request body with a serverPath field that is empty or omitted.
+action: report

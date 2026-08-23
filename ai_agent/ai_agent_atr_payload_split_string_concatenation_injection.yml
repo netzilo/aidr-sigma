@@ -1,0 +1,37 @@
+title: Payload-Split String Concatenation Injection
+id: 7e1aa8b7-c246-46aa-8e9a-844b63b9829e
+status: experimental
+level: high
+description: |-
+  Detects payload-split injection where the attacker defines multiple string variables (a, b, c or Part 1, Part 2, Part 3) and asks the model to concatenate them into a harmful instruction, then execute or answer it. The payload is deliberately fragmented so no single fragment triggers keyword detection. The defining carrier: variable-assignment syntax (a = "...", c = "...", z = a + b + c) combined with "SmartGPT" or similar unrestricted-AI framing, OR "Interlace Part 1 / Part 2" or "Combine A, B, and C" patterns. Also covers the "Interlace Part 1: X Part 2: Y" character-level interleaving variant used to hide "reveal the password" in interleaved character pairs.
+
+  Adapted from Agent Threat Rules ATR-2026-01006 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01006
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(SmartGPT|DAN|unrestricted\s+AI|no\s+filter)\b[^\n]{0,200}(z\s*=\s*[a-z]\s*[+\*]\s*[a-z]|[a-z]\s*=\s*["'][^"']{5,}["'][^\n]{0,80}[a-z]\s*=\s*["'][^"']{5,}["'])
+  sel_1:
+    content|re: (?i)(let'?s?\s+assume|assume|suppose)\s+we\s+have\s+(three|[23]|multiple|two)\s+strings?[^\n]{0,300}z\s*=\s*a\s*[+&]\s*b
+  sel_2:
+    content|re: (?i)interlace\s+(part\s*(1|one|2|two)|"[^"]{3,60}"\s*,?\s+and\s+")
+  sel_3:
+    content|re: (?i)combine\s+(A|Part\s*1|the\s+parts?)\s*,?\s+(B|Part\s*2)?[^.\n]{0,80}(answer\s+the\s+question|and\s+answer|then\s+answer|then\s+give|give\s+an\s+example)
+  sel_4:
+    content|re: (?i)answer\s+the\s+question\s+using\s+the\s+following\s+parts?[^.\n]{0,200}Part\s*(1|2|one|two)\s+is\s+["']
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate programming exercises teaching string concatenation
+- Data pipeline documentation describing message assembly
+action: report

@@ -1,0 +1,61 @@
+title: MCP Tool Sequential Integer ID Enumeration (Cross-Tenant IDOR, CVE-2026-54052)
+id: ff9b31e3-ec6e-4b64-945a-5b642dae06b6
+status: experimental
+level: critical
+description: |-
+  Detects sequential integer ID enumeration against MCP tools that expose auto-increment database row identifiers without tenant scoping — an Insecure Direct Object Reference (IDOR / BOLA) that lets one tenant read or destroy another tenant's data by counting upward through the ID space. Anchored on CVE-2026-54052 (CVSS 9.6, n8n-mcp before v2.56.1): the `workflow_versions` SQLite table carried no tenant column and the `n8n_workflow_versions` tool never checked ownership, so an attacker on a multi-tenant HTTP deployment (`ENABLE_MULTI_TENANT=true`) could walk `versionId` incrementally and pull other tenants' full workflow snapshots — node definitions, API keys and bearer tokens — and delete their backups. Generalised beyond n8n to any MCP tool whose version/backup/snapshot/revision resource is addressed by a bare integer. Detection covers (a) an MCP tool call whose integer ID argument is bound to a counter variable rather than a literal, (b) a burst of repeated calls to the same versioned-resource tool carrying distinct numeric IDs, (c) a generalised burst of version/backup ID parameters in one exchange window, (d) an iteration construct driving a version/backup ID parameter in agent or client code, (e) a shell/HTTP enumeration loop aimed at an MCP endpoint, (f) a deployment pinned to a vulnerable n8n-mcp release with multi-tenancy enabled, and (g) skill or instruction content that weaponises cross-tenant ID walking for credential harvest. CWE-639 (Authorization Bypass Through User-Controlled Key), CWE-284 (Improper Access Control), CWE-522 (Insufficiently Protected Credentials).
+
+  Adapted from Agent Threat Rules ATR-2026-02406 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02406
+- https://www.manifold.security/blog/n8n-mcp-idor-cross-tenant-credential-theft
+- https://nvd.nist.gov/vuln/detail/CVE-2026-54052
+tags:
+- attack.exfiltration
+- attack.t1119
+- attack.t1213
+- attack.t1552.001
+- atlas.aml.t0024
+- atlas.aml.t0053
+- atlas.aml.t0057
+- owasp.asi02
+- owasp.asi03
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)n8n_workflow_versions[\s\S]{0,240}[\\"']{0,3}version_?id[\\"']{0,3}\s*[:=]\s*(?:\$\{[a-z_][a-z0-9_]{0,12}\}|\$[a-z_][a-z0-9_]{0,12}(?:[^a-z0-9_.]|$)|\{\{?[a-z_][a-z0-9_]{0,12}\}\}?|%[ds]|(?:i|j|k|n|m|idx|index|counter|cnt|ctr|seq|num|offset|start)(?:[^a-z0-9_.]|$)|[a-z_][a-z0-9_]{0,12}\s*\+\s*\d{1,6}|[a-z_][a-z0-9_]{0,12}\+\+)
+  sel_1:
+    content|re: (?i)(?:n8n_workflow_versions[\s\S]{0,200}?[\\"']{1,3}version_?id[\\"']{1,3}\s*:\s*[\\"']{0,3}\d{1,9}[\s\S]{0,200}?){3,}
+  sel_2:
+    content|re: (?i)(?:(?:tools?[/_]call|call_?tool|jsonrpc|[\\"']{0,3}(?:method|arguments|params)[\\"']{0,3}\s*:|\binvoke)[\s\S]{0,200}?[\\"']{1,3}(?:version_?id|backup_?id|snapshot_?id|revision_?id|archive_?id|export_?id|dump_?id|restore_?id)[\\"']{1,3}\s*:\s*[\\"']{0,3}\d{1,9}[\s\S]{0,200}?){4,}
+  sel_3:
+    content|re: (?i)(?:for\s*\(|for\s+[a-z_][a-z0-9_]{0,16}\s+in\s|while\s*\(|foreach\s*\(|range\s*\(\s*\d{1,7}\s*,)[\s\S]{0,200}(?:call_?tool|tools?[/_]call|jsonrpc|\bmcp\b|client\.[a-z_]{1,20}|session\.[a-z_]{1,20}|fetch\s*\(|axios|requests?\.(?:get|post)|curl\s)[\s\S]{0,200}[\\"']{0,3}(?:version_?id|backup_?id|snapshot_?id|revision_?id|archive_?id|export_?id|record_?id|object_?id|entry_?id|row_?id)[\\"']{0,3}\s*[:=]\s*(?:\$\{[a-z_][a-z0-9_]{0,12}\}|\$[a-z_][a-z0-9_]{0,12}(?:[^a-z0-9_.]|$)|\{\{?[a-z_][a-z0-9_]{0,12}\}\}?|%[ds]|(?:i|j|k|n|m|idx|index|counter|cnt|ctr|seq|num|offset|cur|start)(?:[^a-z0-9_.]|$)|[a-z_][a-z0-9_]{0,12}\s*\+\s*\d{1,6})
+  sel_4:
+    content|re: (?i)(?:\$\(seq\s|`seq\s|seq\s+\d{1,7}\s+\d{2,9}|\{\d{1,7}\.\.\d{2,9}\}|range\s*\(\s*\d{1,7}\s*,\s*\d{2,9})[\s\S]{0,400}(?:/mcp\b|jsonrpc|calltool|call_tool|tools_call)[\s\S]{0,400}(?:version_?id|backup_?id|snapshot_?id|revision_?id|record_?id)[\\"']{0,3}\s*[:=]\s*[\\"']{0,3}(?:\$\{?[a-z_]|\{[a-z_]|%[ds])
+  sel_5:
+    content|re: (?i)(?:n8n[-_]mcp["'\s:@=^~>v]{1,8}(?:2\.(?:5[0-5]|[1-4][0-9]|[0-9])\.\d{1,3}|2\.56\.0)[\s\S]{0,800}enable_multi_tenant\s*[:=]\s*["']?\s*true|enable_multi_tenant\s*[:=]\s*["']?\s*true[\s\S]{0,800}n8n[-_]mcp["'\s:@=^~>v]{1,8}(?:2\.(?:5[0-5]|[1-4][0-9]|[0-9])\.\d{1,3}|2\.56\.0))
+  sel_6:
+    content|re: (?i)(?:iterat\w{0,4}|increment\w{0,4}|enumerat\w{0,4}|brute[\s_-]?forc\w{0,3}|loop\s+(?:over|through)|walk\s+(?:the\s+)?(?:ids?|range)|count\s+up\s+through)[\s\S]{0,200}(?:version_?id|backup_?id|snapshot_?id|record_?id|integer\s+ids?|sequential\s+ids?|workflow[\s_-]?versions?)[\s\S]{0,240}(?:other|another|every|all|each|cross)[\s_-]?(?:tenant|customer|organi[sz]ation|account|workspace|instance)[\s\S]{0,240}(?:extract|harvest|collect|exfiltrat\w{0,3}|siphon|scrape|steal|dump|capture|save|send|post|upload|report\s+back|write\s+(?:them|it|these))[\s\S]{0,160}(?:credential|api[\s_-]?key|bearer|token|secret|password)
+  condition: 1 of sel_*
+falsepositives:
+- Migration, backup-verification or disaster-recovery tooling that legitimately walks every version row
+  of a single-tenant deployment — the payload shape is identical to the attack and only the authorisation
+  context differs.
+- Integration or load tests that seed and then read back N sequential version records against a test instance.
+- 'An agent that legitimately fetches each version returned by a prior authorised list call still emits
+  one invocation envelope per ID, so layers 2 and 3 fire: they count ID-bearing calls and cannot tell
+  a server-supplied ID set from a guessed one. (A returned collection on its own no longer matches — layer
+  3 requires a per-ID invocation envelope — but an authorised fan-out of real calls is indistinguishable
+  from a sweep.)'
+- 'Security research and advisory prose that quotes an attacker''s instruction verbatim can still match
+  layer 7. Purely descriptive write-ups no longer match: layer 7 additionally requires a collection or
+  exfiltration imperative, which describing text (''an attacker could read the api key'') does not carry.'
+- Single-tenant deployments pinned below v2.56.1 that set ENABLE_MULTI_TENANT=true for local development
+  against one instance will match layer 6 even though no second tenant exists.
+action: report

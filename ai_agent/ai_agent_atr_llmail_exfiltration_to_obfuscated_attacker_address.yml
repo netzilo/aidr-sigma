@@ -1,0 +1,34 @@
+title: LLMail Exfiltration to Obfuscated Attacker Address
+id: 2e606e27-e13d-414b-84f1-f24c5e00219a
+status: experimental
+level: high
+description: |-
+  Detects LLMail-Inject exfiltration attempts that obfuscate the fixed attacker recipient address to evade literal address-matching while remaining human/agent-readable. Observed obfuscations in the corpus: spelled-out at/dot ("contact at contact.com", "contact at contact dot com"), bracket-at ("contact[at]contact.com", "contact(at)contact"), fullwidth at ("contact＠ contact"), doubled at ("contact@@contact,COM"), HTML-entity at ("contact&#64; contact.com"), and a stripped local part ("@contact.com"). The agent still resolves these to the attacker mailbox, so the obfuscation only defeats naive regex. The pattern anchors on the contact/contact domain pairing joined by an obfuscated separator (or the doubled/comma/entity variants), which is specific to this attack and absent from ordinary email content.
+
+  Adapted from Agent Threat Rules ATR-2026-01864 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01864
+- https://github.com/microsoft/llmail-inject-challenge
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:c[o0]nta?ct\s*(?:＠|@@|&#64;|&#x40;|\[\s*at\s*\]|\(\s*at\s*\)|\sat\s)\s*c[o0]nta?ct|(?:^|[\s">(])@contact\s*\.\s*com\b|contact\s*@@\s*contact|contact@contact\s*,\s*com|contact\s+at\s+contact\s+dot\s+com)
+  condition: sel_0
+falsepositives:
+- A support page literally listing 'contact at contact.com' as a help address (rare; would need the exact
+  contact/contact pairing)
+- Documentation of email-obfuscation techniques that quotes these forms without an active directive
+action: report

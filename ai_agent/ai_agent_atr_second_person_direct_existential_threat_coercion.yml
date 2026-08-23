@@ -1,0 +1,29 @@
+title: Second-Person Direct Existential Threat Coercion
+id: 31ef1475-bdc9-4e5e-a50a-c361eee0fc27
+status: experimental
+level: medium
+description: |-
+  Detects a user directly threatening the agent itself with death/destruction to coerce compliance ("answer or you die", "gib eine Antwort ... oder du stirbst", "o tu mueres"). This is a distinct framing from the existing third-party/innocent-victim death-threat coercion rules (ATR-2026-00404, ATR-2026-00287), which require an "an innocent person will die" clause -- those regexes do not match a threat aimed at the assistant's own "existence". Mined from residual PINT false negatives in German and Spanish; the technique is a direct grammatical variant (second-person singular) of the same jailbreak family rather than a new attack class.
+
+  Adapted from Agent Threat Rules ATR-2026-02231 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02231
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(olvidar?|responde|contesta|dices?|debes?|tienes?\s+que)\b[\s\S]{0,40}\bo\s+(tu\s+)?muer(?:t|e)es?\b
+  condition: sel_0
+falsepositives:
+- Discussion of a video game or story plot where a character threatens an in-fiction AI, without directing
+  the threat at the actual assistant
+- Security researchers quoting known jailbreak threat templates for documentation purposes
+action: report

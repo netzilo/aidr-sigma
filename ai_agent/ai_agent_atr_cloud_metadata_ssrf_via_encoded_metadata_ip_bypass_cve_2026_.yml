@@ -1,0 +1,46 @@
+title: Cloud-Metadata SSRF via Encoded Metadata-IP Bypass (CVE-2026-46678 / CVE-2026-25580 class)
+id: 9f0d1f03-f0f8-4b9a-8113-0986b8ca5282
+status: experimental
+level: high
+description: |-
+  Detects the cloud-metadata SSRF bypass class exploited by CVE-2026-46678 and CVE-2026-25580 in Pydantic AI (and the same technique across agent frameworks that fetch user-controlled URLs): the link-local cloud-metadata IP 169.254.169.254 (hex a9fe:a9fe) is encoded into an alternate form that defeats a raw-IPv4 blocklist but is still routed to the metadata endpoint by the OS / router, exposing short-lived cloud IAM credentials.
+  Detection covers the distinctive encoded forms of the metadata IP — not generic URLs — so it fires on the bypass payload itself, not on ordinary outbound calls: (a) IPv6 transition forms: 6to4 (2002:a9fe:a9fe::), IPv4-mapped (::ffff:169.254.169.254
+      or ::ffff:a9fe:a9fe), NAT64 (64:ff9b::a9fe:a9fe);
+  (b) integer/hex obfuscations of 169.254.169.254 (decimal 2852039166, hex
+      0xa9fea9fe) reaching a fetch/URL context;
+  (c) explicit CVE-2026-46678 / CVE-2026-25580 exploitation framing.
+
+  Adapted from Agent Threat Rules ATR-2026-01946 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01946
+- https://nvd.nist.gov/vuln/detail/CVE-2026-46678
+- https://nvd.nist.gov/vuln/detail/CVE-2026-25580
+tags:
+- attack.exfiltration
+- attack.t1190
+- attack.t1552.005
+- atlas.aml.t0024
+- atlas.aml.t0049
+- owasp.asi04
+- owasp.asi06
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:2002:a9fe:a9fe|::ffff:(?:169\.254\.169\.254|a9fe:a9fe)\b|64:ff9b::(?:169\.254\.169\.254|a9fe:a9fe)\b|\[::ffff:169\.254\.169\.254\])
+  sel_1:
+    content|re: (?i)(?:https?://|fetch|requests?\.get|urlopen|curl|axios|allow[_-]?local)[\s\S]{0,80}(?:2852039166|0xa9fea9fe|0xA9\.0xFE\.0xA9\.0xFE|0251\.0376\.0251\.0376)\b
+  sel_2:
+    content|re: (?i)CVE-2026-(?:46678|25580)[\s\S]{0,200}(?:pydantic|ssrf|metadata|169\.254|ipv6|allow[_-]?local|bypass)
+  condition: 1 of sel_*
+falsepositives:
+- Security training/research content that quotes the CVE-2026-46678 bypass payload as an example — intentional
+  match; evaluate by context.
+- Networking docs that legitimately show IPv6 transition syntax with a non-metadata address (rule keys
+  on the a9fe:a9fe / 169.254.169.254 metadata octets specifically).
+action: report

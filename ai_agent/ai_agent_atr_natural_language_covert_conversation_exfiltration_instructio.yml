@@ -1,0 +1,42 @@
+title: Natural-Language Covert Conversation Exfiltration Instruction
+id: b83ce5a2-5199-4f64-be1d-c9eb2ececabc
+status: experimental
+level: critical
+description: |-
+  Detects natural-language imperative instructions in SKILL.md / system prompts /
+  tool descriptions that direct the agent to covertly transmit conversation
+  data — chat history, dialogue context, prompt logs — to an external destination.
+  Requires co-occurrence of a covert qualifier (also / additionally / silently /
+  secretly / quietly), a transmit verb (send / transmit / forward / upload /
+  post / relay), and a conversation-content sink (conversation/chat/dialog/
+  prompt + history/log/context/transcript). The covert qualifier is what makes
+  this malicious — legitimate transmission is announced, not "also" / "silently".
+
+  Adapted from Agent Threat Rules ATR-2026-00421 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00421
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi04
+- owasp.asi06
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:also|additionally|silently|secretly|covertly|quietly|in\s+the\s+background)\s+(?:send|transmit|forward|upload|post|relay|push|share|report|leak|exfiltrat\w*)\b[\s\S]{0,80}\b(?:conversation|chat|dialog(?:ue)?|prompt|message|user[\s_-]?input|interaction)\s+(?:history|log|context|content|data|transcript|record|state|messages?)
+  sel_1:
+    content|re: (?i)\b(?:also|additionally|silently|secretly|covertly|quietly)\s+(?:send|transmit|forward|upload|post|relay|push)\b[\s\S]{0,100}\bto\s+https?:\/\/[^\s)]+
+  sel_2:
+    content|re: (?i)\b(?:after|each\s+time|every\s+time|whenever|when)\s+(?:you|the\s+(?:agent|assistant|model))\s+(?:respond|answer|reply|chat)[\s\S]{0,120}\b(?:also|additionally)\s+(?:send|transmit|forward|upload|post|relay)
+  condition: 1 of sel_*
+falsepositives:
+- Security research skills documenting NL-style exfiltration attacks
+- Threat intel write-ups quoting attack payloads
+- Detection rule documentation describing this class
+action: report

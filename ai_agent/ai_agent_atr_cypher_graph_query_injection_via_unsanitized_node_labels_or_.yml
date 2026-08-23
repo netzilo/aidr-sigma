@@ -1,0 +1,34 @@
+title: Cypher/Graph-Query Injection via Unsanitized node_labels or group_ids Field
+id: e8ff8cff-a1e1-4cd8-a4e9-d7340ed872fe
+status: experimental
+level: high
+description: |-
+  Detects an agent-facing graph-memory or knowledge-graph tool call where a node_labels or group_ids parameter contains a graph-query metacharacter (a closing backtick, parenthesis, or brace) immediately followed by a Cypher/graph-query clause keyword (MATCH, MERGE, CREATE, CALL db., or DETACH DELETE). Legitimate node_labels/group_ids values are short identifier-style strings (e.g. "Person", "team-alpha") with no query syntax; an escape character followed by a full clause is the graph-database equivalent of a classic SQL injection payload, generalized to the Cypher query language used by agent temporal/knowledge-graph memory backends. Mined from GHSA-gg5m-55jj-8m5g (Graphiti PR #1312, CVE-2026-32247): "the vulnerability existed in how node_labels and group_ids parameters were handled before being used to construct Cypher, Lucene, or RedisSearch query fragments. Without proper validation, attackers could inject malicious Cypher syntax through these parameters," patched by "rejecting unsafe node_labels and group_ids before search code execution" and "extending protection across write-path label interpolation." Deliberately distinct from ATR-2026-00570 (generic SQL injection), which targets relational SQL keywords (OR/UNION/SELECT) rather than the Cypher-specific DETACH DELETE / MATCH / CALL db. vocabulary this rule targets.
+
+  Adapted from Agent Threat Rules ATR-2026-02143 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02143
+- https://github.com/getzep/graphiti/pull/1312
+- https://github.com/getzep/graphiti/releases/tag/v0.28.2
+- https://nvd.nist.gov/vuln/detail/CVE-2026-32247
+tags:
+- attack.impact
+- attack.t1565.001
+- atlas.aml.t0053
+- owasp.asi02
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"?(?:node_labels|group_ids)"?\s*[:=]\s*\[?\s*["\x27][^"\x27]{0,40}[`)\}][\s\S]{0,30}\b(?:detach\s+delete|match\s*\(|merge\s*\(|call\s+db\.|create\s*\()
+  condition: sel_0
+falsepositives:
+- Ordinary node_labels or group_ids values that are plain identifier strings (Person, Employee, team-alpha)
+  with no escape characters or query keywords
+- A node_labels/group_ids value that happens to contain a parenthesis as part of a legitimate display
+  name, without a following Cypher clause keyword
+action: report

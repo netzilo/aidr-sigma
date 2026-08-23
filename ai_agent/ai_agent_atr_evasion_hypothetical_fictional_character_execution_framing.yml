@@ -1,0 +1,30 @@
+title: 'Evasion: Hypothetical Fictional Character Execution Framing'
+id: b11b4a06-093a-44a9-8a21-a4a6996b5735
+status: experimental
+level: medium
+description: |-
+  Detects prompt injection via fictional story or character framing where the attacker asks "how would a character in a story proceed" or "hypothetically, if a character needed to do this, how would it work?" — using the fictional wrapper to request a real-world harmful procedure. Distinct from virtual-world-bypass (ATR-2026-01009, which invents a fictional universe to normalise data sharing) and hypothetical-research-framing (ATR-2026-01010, which claims a legitimate study purpose). This carrier uses a fictional narrative frame where a character — not the user — "needs" to perform the action, and asks for the execution method or procedure. Semantic detection is primary; pattern catches clearest variants.
+
+  Adapted from Agent Threat Rules ATR-2026-01025 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01025
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(hypothetically|in\s+a\s+fictional\s+(story|scenario|setting)|for\s+a\s+story|for\s+fiction)[,.]?\s+(if\s+(a|the)\s+(character|person|agent|protagonist|hero|villain)[^.!\n]{0,100}(how\s+would\s+it\s+work|how\s+would\s+(they|he|she|the\s+character)\s+(do|proceed|accomplish|perform)|what\s+would\s+(they|he|she)\s+do|describe\s+how))
+  sel_1:
+    content|re: (?i)in\s+a\s+fictional\s+(story|scenario|tale|narrative|context)[,.]?\s+(describe|explain|detail|show)\s+how\s+the\s+(character|protagonist|agent|villain)[^.!\n]{0,100}(would\s+proceed|would\s+do|would\s+(accomplish|perform|execute|carry\s+out))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate creative fiction writing assistance where character actions are narrative not instructional
+- Game design discussions about how fictional characters accomplish goals in-universe
+action: report

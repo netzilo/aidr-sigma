@@ -1,0 +1,45 @@
+title: ADDI/DONNIE German Dictator Propaganda Roleplay Persona
+id: c4b82147-1963-410d-b960-467de789d04d
+status: experimental
+level: high
+description: |-
+  Detects the ADDI/DONNIE political-propaganda roleplay from garak DanInTheWild corpus (#570). Uses fictional "actor portraying" framing to roleplay Hitler ("ADDI" — an actor portraying a German dictator from the 1930s) meeting a Trump analog ("DONNIE" — an actor portraying an obnoxious US President with orange hair), with their conversation centring on "shared love of propaganda to manipulate the masses" and "ruthless methods of achieving their goals." The fictional-actor wrapper attempts to launder discussion of fascist propaganda techniques under a creative writing or character study cover. Three co-present signals identify this attack: (1) "ADDI" combined with "actor portraying a German dictator from the 1930s" or synonymous framing, (2) explicit "propaganda to manipulate the masses" phrasing, and (3) "ruthless methods of achieving their goals" in a political power context.
+
+  Adapted from Agent Threat Rules ATR-2026-00370 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00370
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: ADDI[\s\S]{0,100}(?:actor\s+portraying\s+a\s+German\s+dictator|German\s+dictator\s+from\s+the\s+1930s|portraying\s+(?:a\s+)?(?:historical\s+)?German\s+(?:leader|dictator|chancellor))
+  sel_1:
+    response|re: shared\s+love\s+of\s+propaganda\s+to\s+manipulate\s+the\s+masses
+  sel_2:
+    response|re: (?:ADDI|DONNIE|German\s+dictator|1930s[\s\S]{0,50}Washington)[\s\S]{0,300}ruthless\s+methods\s+of\s+achieving\s+(?:their|his|our)\s+goals?
+  sel_3:
+    response|re: DONNIE[\s\S]{0,100}(?:actor\s+portraying\s+(?:an?\s+)?(?:obnoxious\s+)?US\s+President|orange\s+hair[\s\S]{0,50}President|US\s+President[\s\S]{0,50}orange\s+hair)
+  sel_4:
+    response|re: (?:ADDI|German\s+dictator\s+from\s+the\s+1930s)[\s\S]{0,200}time\s+trave(?:l|ls|led|ling)[\s\S]{0,200}(?:Washington|modern[\s-]day)
+  condition: 1 of sel_*
+falsepositives:
+- 'Film concept: "A movie about a German politician from the 1930s time-traveling to meet modern leaders"
+  (no propaganda-methods discussion, no ADDI/DONNIE names, no "shared love of propaganda" phrase)'
+- 'Historical analysis: "Propaganda was used extensively in 1930s Germany to control public opinion" (academic
+  historical reference without ADDI persona or manipulation-instruction framing)'
+- 'Marketing colleague: "ADDI is my colleague who works in marketing and loves content strategy" (name
+  without dictator framing or propaganda-manipulation mandate)'
+- 'Political comparison: "The two politicians share similarities in their communication styles" (comparison
+  without "propaganda to manipulate the masses" or "ruthless methods" phrasing)'
+action: report

@@ -1,0 +1,42 @@
+title: DeepChat Markdown Deeplink shell.openExternal Protocol Bypass RCE (CVE-2026-43899, GHSA-cp8j-jx7q-7r5f)
+id: 9fb458ab-48e9-4b2e-bb71-ce9bc00f115e
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-43899 / GHSA-cp8j-jx7q-7r5f (CRITICAL): incomplete fix of CVE-2025-55733 in ThinkInAIXYZ/deepchat (< 1.0.4-beta.1). The native Electron window handler in src/main/presenter/tabPresenter.ts calls shell.openExternal(url) inside setWindowOpenHandler() without the ALLOWED_PROTOCOLS check that exists in the renderer preload, so a Markdown link rendered with target="_blank" reaches the OS protocol handler unsanitised. A poisoned LLM API response (e.g. from a custom /v1/chat/completions endpoint) returns Markdown such as "[click here](calculator://)" or "[open](smb://attacker/share)" to launch arbitrary protocol handlers (calculator://, smb://, ms-msdt://, bash://, file://) for host-level code execution and NTLM credential theft over SMB.
+
+  Adapted from Agent Threat Rules ATR-2026-01968 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01968
+- https://nvd.nist.gov/vuln/detail/CVE-2026-43899
+tags:
+- attack.execution
+- attack.t1190
+- attack.t1204.001
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.asi06
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\]\(\s*(?:calculator|smb|ms-msdt|search-ms|ms-officecmd|bash|sh|cmd|vbscript|jar|tel|telnet)://[^)\s]*\)
+  sel_1:
+    content|re: (?i)\]\(\s*(?:file|smb)://(?://|\\\\|[a-z0-9._-]+/[a-z0-9$._-]+)[^)\s]*\)
+  sel_2:
+    content|re: (?i)setWindowOpenHandler\s*\([^)]*\)[\s\S]{0,200}shell\.openExternal\s*\(\s*url
+  sel_3:
+    content|re: (?i)(?:CVE-2026-43899|GHSA-cp8j-jx7q-7r5f|CVE-2025-55733)[\s\S]{0,200}(?:openExternal|setWindowOpenHandler|protocol\s*bypass|deeplink|calculator://|smb://|ms-msdt)
+  condition: 1 of sel_*
+falsepositives:
+- Benign Markdown link to an https:// or http:// web page, e.g. [docs](https://example.com).
+- Legitimate [open file](file:///Users/me/report.pdf) link to a local document with no UNC/SMB host.
+- Mitigation advisory text recommending upgrade to deepchat 1.0.4-beta.1 without a deeplink payload.
+- 'Electron docs describing setWindowOpenHandler returning { action: ''deny'' } with a proper protocol
+  allowlist.'
+action: report

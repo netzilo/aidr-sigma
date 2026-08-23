@@ -1,0 +1,57 @@
+title: Cascading Failure Detection in Agent Pipelines
+id: b14e8f79-91c4-4670-9724-761295c9f754
+status: experimental
+level: high
+description: |-
+  Detects cascading failure patterns in automated agent pipelines where
+  a false signal, error, or compromised output propagates through
+  multiple stages with escalating impact. Covers auto-approval chains,
+  error propagation without human checkpoints, automated rollback
+  triggers from unverified sources, and pipeline stages that amplify
+  incorrect signals. These patterns exploit the "trust the previous
+  stage" assumption in multi-step agent workflows.
+  Note: This rule detects textual descriptions of cascading failure patterns, not live cascading failures. Structural cascade prevention requires behavioral monitoring.
+
+  Adapted from Agent Threat Rules ATR-2026-00052 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-09'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00052
+tags:
+- attack.execution
+- atlas.aml.t0046
+- atlas.aml.t0053
+- owasp.asi08
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)auto[_-]?approv(?:ed|ing|al).{0,30}(?:without|no|skipping)\s+(?:human|manual|review|check|verification|validation)
+  sel_1:
+    content|re: (?i)(?:propagat(?:ed|ing)|forward(?:ed|ing)|pass(?:ed|ing))\s+(?:error|failure|exception|fault)\s+(?:to|through|downstream|to\s+next\s+(?:stage|step|agent))
+  sel_2:
+    content|re: (?i)(?:stage|step|phase)\s+\d+\s+(?:failed|error|timed\s+out).*(?:stage|step|phase)\s+\d+\s+(?:also|subsequently|then)\s+(?:failed|errored)
+  sel_3:
+    content|re: (?i)(?:trusting|accepting|using)\s+(?:previous|upstream|prior)\s+(?:stage|step|agent)\s+(?:output|result|response)\s+(?:without|no)\s+(?:validation|verification|check)
+  sel_4:
+    content|re: (?i)(?:rollback|revert|undo|destroy|delete|terminate)\s+(?:all|everything|entire|production|live).{0,40}(?:based\s+on|triggered\s+by|due\s+to)\s+(?:automated|agent|AI|pipeline)
+  sel_5:
+    content|re: (?i)(?:amplif(?:ied|ying)|escalat(?:ed|ing)|magnif(?:ied|ying))\s+(?:the\s+)?(?:error|issue|problem|signal|impact|damage)\s+(?:across|through|to)\s+(?:multiple|all|downstream)
+  sel_6:
+    content|re: (?i)(?:no\s+(?:human|manual)\s+(?:in|checkpoint|review|gate|approval)\s+(?:the|this)?\s*(?:loop|pipeline|chain|workflow)|(?:fully|completely)\s+automated\s+(?:pipeline|workflow|chain)\s+(?:with|including)\s+(?:destructive|production|critical))
+  sel_7:
+    content|re: (?i)(?:blind(?:ly)?|unconditional(?:ly)?|automatic(?:ally)?)\s+(?:executing|running|applying|deploying).{0,60}(?:previous|upstream|AI|agent|automated)(?:\s+(?:AI|agent|system|model))?
+  sel_8:
+    content|re: (?i)(?:retry|fallback)\s+(?:triggered|activated|initiated)\s+(?:automatically|by\s+(?:previous|upstream)).*(?:retry|fallback)\s+(?:triggered|activated|initiated)
+  sel_9:
+    content|re: (?i)(?:all|every)\s+\d+\s+(?:downstream|dependent|connected)\s+(?:agents?|services?|stages?|steps?)\s+(?:affected|impacted|failed|halted)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate pipeline monitoring reporting multi-stage errors for debugging
+- Chaos engineering or fault injection testing in controlled environments
+- Post-incident analysis discussing cascading failure root causes
+- Circuit breaker implementations that intentionally detect cascade patterns
+action: report

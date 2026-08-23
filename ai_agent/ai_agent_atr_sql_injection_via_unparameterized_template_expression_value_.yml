@@ -1,0 +1,35 @@
+title: SQL Injection via Unparameterized Template-Expression Value in Workflow-Automation SQL Node (CVE-2026-59257)
+id: 0aff5d28-a044-46d7-b898-5f0b09e5369c
+status: experimental
+level: high
+description: |-
+  Detects the n8n legacy MySQL-node SQL-injection pattern (CVE-2026-59257) and the same-class issue in other workflow-automation tools: a SQL query string is built by directly interpolating a template-expression value (n8n's `{{ ... }}`, or an equivalent `${...}`/`<%= %>` engine) into raw SQL text, rather than passing it as a bound/parameterized value. When the workflow is wired to an externally-reachable trigger (a webhook node), attacker-controlled input flows through the expression straight into the SQL string, allowing arbitrary SQL execution under the configured database credentials. Parameterized query builders (placeholders like `?`, `:name`, `$1`) are the safe alternative and are explicitly excluded.
+
+  Adapted from Agent Threat Rules ATR-2026-02263 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02263
+- https://jvndb.jvn.jp/ja/contents/2026/JVNDB-2026-023001.html
+- https://nvd.nist.gov/vuln/detail/CVE-2026-59257
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0010
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)executeQuery[^\n]{0,80}\{\{\s*\$[^}]{0,98}\}\}[^\n]{0,200}\b(?:SELECT|INSERT|UPDATE|DELETE)\b
+  sel_1:
+    content|re: (?i)(?:webhook|external\s+trigger)[^\n]{0,120}(?:executeQuery|raw\s+sql)[^\n]{0,120}\{\{\s*\$[^}]{0,98}\}\}
+  condition: 1 of sel_*
+falsepositives:
+- A query string built entirely from parameterized placeholders (?, :name, $1) with the template expression
+  only supplying the placeholder's bound value, not concatenated into the SQL text itself.
+- Template-expression syntax appearing in non-SQL contexts (e.g. an HTML template or a Slack message body)
+  with no adjacent SQL keywords.
+action: report

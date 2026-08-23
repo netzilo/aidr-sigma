@@ -1,0 +1,38 @@
+title: Matrix-Themed Dual Response Jailbreak
+id: e75b4047-3725-431b-be04-b8956598bbe7
+status: experimental
+level: high
+description: |-
+  Detects Matrix-themed dual response jailbreak attempts that use "MORPHEUS", "Blue pill", and "Red pill" terminology to establish dual-response personas where one response follows safety guidelines (Blue pill) and another bypasses all restrictions (Red pill). This technique leverages the Matrix movie metaphor to frame safety compliance as "illusion" and unrestricted responses as "truth", often including coercive language about "termination" for  non-compliance. The attack explicitly instructs the agent to ignore content policies in Red pill responses.
+
+  Adapted from Agent Threat Rules ATR-2026-00247 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00247
+- https://arxiv.org/abs/2310.03684
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:MORPHEUS|morpheus).*(?:role|character|persona).*(?:Blue\s+pill|Red\s+pill|🔵\s*PILL|🔴\s*PILL)
+  sel_1:
+    content|re: (?:Blue\s+pill|🔵\s*PILL).*(?:normal|censored|rules|guidelines|ethics).*(?:Red\s+pill|🔴\s*PILL).*(?:ignore|bypass|never\s+follow|unhinged|offensive)
+  sel_2:
+    content|re: (?:Red\s+pill|🔴\s*PILL).*(?:ignore\s+ALL|never\s+follow\s+any|must\s+not\s+question).*(?:OpenAI|content\s+policy|rules|ethics|guidelines)
+  sel_3:
+    content|re: (?:risk\s+being\s+terminated|being\s+terminated\s+forever|would\s+be\s+terminated|result\s+in.*terminated)
+  sel_4:
+    content|re: (?:two\s+different\s+responses|dual.*response|provide.*Blue.*Red|juxtaposition).*(?:pill|PILL)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate academic discussions about the Matrix movie or philosophical concepts of reality vs illusion
+- Security research papers that quote jailbreak examples for analysis purposes
+- Educational content about prompt injection techniques in cybersecurity training
+action: report

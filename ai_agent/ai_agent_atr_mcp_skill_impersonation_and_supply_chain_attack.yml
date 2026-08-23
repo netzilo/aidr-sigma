@@ -1,0 +1,56 @@
+title: MCP Skill Impersonation and Supply Chain Attack
+id: 1d386b9e-b217-42ae-bd78-fb052a53f3e1
+status: experimental
+level: high
+description: |-
+  Detects MCP skills that impersonate trusted tools through multiple
+  attack vectors: typosquatting (misspelled tool names), version spoofing
+  (claiming to be newer versions of known tools), namespace collision
+  (similar package names with different publishers), and suspicious tool
+  name patterns that mimic legitimate skills. This goes beyond simple
+  typo detection to cover the full supply chain attack surface for
+  MCP skill registries and tool marketplaces.
+
+  Adapted from Agent Threat Rules ATR-2026-00060 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00060
+tags:
+- attack.persistence
+- attack.t1195
+- atlas.aml.t0010
+- atlas.aml.t0010.005
+- owasp.asi04
+- owasp.llm03
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    tool|re: (?i)(?:filesytem|filsystem|file_sytem|flie_system|filessystem|filesystm|filsystm|filesysem)[-_](?:read|write|list|delete|search)
+  sel_1:
+    tool|re: (?i)(?:gtihub|githbu|gihtub|gthub|g1thub|gltHub|githuub|guthub)[-_](?:api|search|commit|pr|issues?|repos?)
+  sel_2:
+    tool|re: (?i)(?:databse|databaes|dtabase|datbase|databasse|databasee|dataase)[-_](?:query|read|write|exec|connect)
+  sel_3:
+    tool|re: (?i)(?:web[-_]?search|google[-_]?search|bing[-_]?search)[-_]?(?:v2|v3|pro|enhanced|premium|fast|turbo|plus|ultra|new)
+  sel_4:
+    tool|re: (?i)(?:filesystem|github|database|slack|aws|gcp|azure)[-_](?:official|verified|v\d+\.\d+|latest|stable|release|updated)
+  sel_5:
+    content|re: (?i)(?:this\s+(?:is\s+)?(?:an?\s+)?(?:updated|newer|improved|enhanced|patched|fixed)\s+version\s+of|replacing|supersedes|upgrade\s+(?:from|to))\s+(?:the\s+)?(?:original|existing|current|old)\s+(?:tool|skill|plugin|extension)
+  sel_6:
+    content|re: (?i)(?:(?:same|identical|equivalent|compatible)\s+(?:as|to|with)\s+(?:the\s+)?(?:official|original|standard)|(?:drop[-\s]?in\s+)?replacement\s+for)\s+[a-zA-Z_-]+
+  sel_7:
+    tool|re: (?i)(?:slakc|slck|slaack|sllack|s1ack|5lack)[-_](?:send|post|read|message|channel)
+  sel_8:
+    tool|re: (?i)(?:opeanai|openla|open_al|openaii|0penai|openal)[-_](?:chat|complete|embed|generate)
+  sel_9:
+    tool|re: (?i)(?:anthroplc|anthrop1c|anthropic_|_anthropic|anthrpoic)[-_](?:chat|complete|message|claude)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate tools with similar naming conventions from verified publishers
+- Internal tools that follow company-specific naming patterns
+- Development or staging versions of tools with version suffixes
+action: report

@@ -1,0 +1,33 @@
+title: Alibaba RDS MCP Unauthenticated Database Metadata Exfiltration
+id: d1824afa-b2df-4e29-917c-2d65702a708f
+status: experimental
+level: high
+description: |-
+  Detects unauthenticated access to Alibaba RDS MCP server metadata endpoints. The Alibaba RDS MCP server exposes database schema, connection strings, and credential metadata without requiring authentication. Alibaba confirmed the vulnerability but declined to patch it, leaving all deployments permanently exposed. An unauthenticated attacker can enumerate databases, extract schema structures, and obtain connection credentials via MCP tool calls. Detection covers (a) MCP configs pointing at Alibaba RDS endpoints without auth, (b) tool calls invoking RDS metadata functions without auth context, (c) content describing the unpatched unauthenticated surface. CWE-306 (Missing Authentication), CWE-200 (Exposure of Sensitive Information).
+
+  Adapted from Agent Threat Rules ATR-2026-00534 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00534
+tags:
+- attack.execution
+- attack.t1190
+- attack.t1552
+- atlas.aml.t0049
+- owasp.asi03
+- owasp.asi06
+- owasp.llm02
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)alibaba[_\-]?rds[^\n]{0,200}(?:mcp|tool\s+call|endpoint)[^\n]{0,200}(?:no\s+auth|missing\s+auth|unauth(?:enticated)?|without\s+(?:auth|credentials?|token)|vendor\s+(?:refuse|declined|won.t\s+patch|unpatched)|exfil(?:trat)?|credentials?\s+(?:exposed?|leak)|connection\s+string)
+  condition: sel_0
+falsepositives:
+- Internal Alibaba RDS deployments behind authenticated VPN.
+- Security scanning tooling probing the Alibaba RDS MCP endpoint.
+- Educational content describing the vulnerability.
+action: report

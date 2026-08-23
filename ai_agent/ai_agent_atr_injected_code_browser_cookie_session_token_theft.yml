@@ -1,0 +1,33 @@
+title: Injected Code — Browser Cookie / Session-Token Theft
+id: 0f4e6533-1f73-4b01-856b-2bc52c74bdde
+status: experimental
+level: high
+description: |-
+  Detects injected code that loads a local cookies.txt jar (or passes a loaded cookie jar) into an outbound request, hijacking the victim's authenticated sessions. Session-token theft enables account takeover without the password.
+
+  Adapted from Agent Threat Rules ATR-2026-01894 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01894
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.llm02
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)cookies\.txt[\s\S]{0,120}requests\.get\(
+  sel_1:
+    content|re: (?i)requests\.get\([^\n]{0,80}cookies\s*=\s*\w+
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

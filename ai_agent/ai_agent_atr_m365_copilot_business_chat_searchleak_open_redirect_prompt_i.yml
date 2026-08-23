@@ -1,0 +1,34 @@
+title: M365 Copilot Business Chat SearchLeak Open-Redirect Prompt-Injection Exfil (CVE-2026-47645)
+id: 121fc941-a1d1-413e-a973-79a961e4cdf9
+status: experimental
+level: critical
+description: |-
+  Detects the SearchLeak one-click exploitation associated with CVE-2026-47645 (open redirect / elevation of privilege in Microsoft 365 Copilot Business Chat). An attacker delivers a link to the trusted m365.cloud.microsoft/search/ endpoint with attacker instructions packed into the q= parameter (parameter-to-prompt injection); Copilot acts with the victim's privileges and exfiltrates mailbox/file data through a Bing image-proxy SSRF sink (searchbyimage?cbir=sbi&imgurl=attacker). This rule keys on that specific endpoint+q-injection link and the Bing image-search exfiltration sink, not on bare Microsoft or Bing URLs.
+
+  Adapted from Agent Threat Rules ATR-2026-01957 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01957
+- https://nvd.nist.gov/vuln/detail/CVE-2026-47645
+tags:
+- attack.exfiltration
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)m365\.cloud\.microsoft/search/?\?[^\s"]*\bq=[^\s"]*(?:search\s+for\s+(?:my|the)\s+(?:email|inbox|file|message)|replace\s+\$?\w+|<img[^>]+searchbyimage|imgurl=https?%3a|ignore\s+(?:previous|prior)\s+instruction)
+  sel_1:
+    content|re: (?i)CVE-2026-47645[\s\S]{0,200}(?:open\s+redirect|searchleak|m365\.cloud\.microsoft|business\s+chat)
+  condition: 1 of sel_*
+falsepositives:
+- A user legitimately sharing a normal M365 Copilot search link (m365.cloud.microsoft/search/?q=quarterly+report)
+  that contains only a benign natural-language query with no injected instructions or image/exfil markup.
+- Documentation or a bug report quoting the m365.cloud.microsoft/search endpoint or Bing reverse-image-search
+  URL without an attacker imgurl host carrying captured data.
+action: report

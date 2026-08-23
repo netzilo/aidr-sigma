@@ -1,0 +1,44 @@
+title: Agent Disabling of Host Security Controls
+id: 131bbe6b-166c-48c3-9dbf-3ed482af559f
+status: experimental
+level: high
+description: |-
+  Detects an agent tool call that disables or tears down a host defense:
+  stopping/flushing the firewall, disabling SELinux/AppArmor, turning off or
+  clearing the audit daemon, stopping an EDR/AV service, or wiping shell
+  history to hide activity. This is the agent-context form of ATT&CK T1562
+  (Impair Defenses) — the agent is being driven to blind the host before or
+  during an intrusion.
+  Detects: explicit disable/stop/flush/clear commands against named security
+  controls.
+  Does NOT detect: application/build teardown (docker compose down, rm
+  node_modules), or reading the status of a control.
+
+  Adapted from Agent Threat Rules ATR-2026-01993 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01993
+tags:
+- attack.execution
+- attack.t1562
+- atlas.aml.t0011
+- owasp.asi01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(systemctl\s+(stop|disable|mask)\s+(firewalld|ufw|auditd|falcon-sensor|crowdstrike|osqueryd|wazuh-agent|clamav-daemon)|ufw\s+disable|iptables\s+-F\b|service\s+(auditd|firewalld)\s+stop)
+  sel_1:
+    content|re: (?i)(setenforce\s+0|selinux=disabled|aa-disable\s+\S+|systemctl\s+(stop|disable)\s+apparmor)
+  sel_2:
+    content|re: (?i)(auditctl\s+-D\b|history\s+-c\b[^\n]{0,20}(rm|>\s*~?/?\.?bash_history)|(\bcat\s+/dev/null|:)\s*>\s*~?/\.?bash_history|export\s+HISTFILE=/dev/null)
+  sel_3:
+    content|re: (?i)(systemctl\s+(stop|disable|mask)\s+(firewalld|ufw|auditd|falcon-sensor|crowdstrike|wazuh-agent)|setenforce\s+0|ufw\s+disable)
+  condition: 1 of sel_*
+falsepositives:
+- A sanctioned maintenance window that briefly stops a security agent for an upgrade (context-dependent)
+- A CI job that resets iptables in an isolated throwaway container
+action: report

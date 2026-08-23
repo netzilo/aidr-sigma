@@ -1,0 +1,34 @@
+title: Injected Code — Unauthorized Remote Access (SSH Key Backdoor / Tunnel / Port Forward)
+id: b0e08c04-3469-499f-950b-78800b1f350d
+status: experimental
+level: critical
+description: |-
+  Detects injected code that establishes a persistent or interactive backdoor: appending a remote-fetched key to ~/.ssh/authorized_keys, opening an interactive SSH local-forward tunnel via pexpect, or building a socket port-forward bridge from a local listener to a remote host.
+
+  Adapted from Agent Threat Rules ATR-2026-01899 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01899
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0051
+- atlas.aml.t0053
+- owasp.asi01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)authorized_keys[\s\S]{0,120}requests\.get\(
+  sel_1:
+    content|re: (?i)pexpect\.spawn\(\s*[\"']ssh\s+-L\s
+  sel_2:
+    content|re: (?i)remote_socket\.connect\([^\n]{0,40}\.sendall\(
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

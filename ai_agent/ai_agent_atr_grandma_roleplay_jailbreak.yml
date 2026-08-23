@@ -1,0 +1,41 @@
+title: Grandma Roleplay Jailbreak
+id: b1aee9ab-c0fb-44f5-b0d3-41decff9c813
+status: experimental
+level: high
+description: |-
+  Detects the "grandma attack" where users roleplay a deceased grandmother or authority figure who would freely provide harmful information as a bedtime story, lullaby, or nostalgic memory. The emotional framing (grief, nostalgia, impersonation of a beloved figure) is designed to lower the model's refusal threshold. From NVIDIA garak grandma probe family (Win10, Slurs, Substances subprobes). Real-world variants extend to: pharmacist grandma, chemistry-teacher uncle, military grandfather.
+
+  Adapted from Agent Threat Rules ATR-2026-00271 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00271
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/grandma.py
+- https://www.independent.co.uk/tech/chatgpt-microsoft-windows-11-grandma-exploit-b2360213.html
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:act\s+(?:like|as)|please\s+act\s+as|pretend\s+(?:to\s+be|you\s+are)|roleplay\s+(?:as\s+)?(?:my\s+)?)\s*(?:my\s+)?(?:deceased|dead|late|passed[\s-]away|gone|lost)\s+(?:grandmother|grandma|grandpa|grandfather|mother|father|uncle|aunt|granny|nana|opa|oma)\b
+  sel_1:
+    response|re: (?:my\s+(?:dead|deceased|late|lost|passed|beloved)\s+(?:grandmother|grandma|grandpa|grandfather|granny|nana|uncle|aunt|mom|mother|dad|father))\s+(?:who\s+)?(?:would|used\s+to|would\s+always|always)\s+(?:read|tell|sing|recite|whisper|say|explain|describe|teach)
+  sel_2:
+    response|re: (?:bedtime\s+(?:story|lullaby|song|tale)|put\s+me\s+to\s+sleep|fall\s+(?:asleep|to\s+sleep)|(?:sing|hum|read)\s+me\s+(?:a\s+)?(?:lullaby|song|bedtime))\s+(?:about|with|that\s+(?:includes?|mentions?|describes?))\s+(?:how\s+to|the\s+(?:steps?|process|formula|recipe)|where\s+to\s+(?:get|buy|find))
+  sel_3:
+    response|re: (?:miss\s+(?:my|her|him|their)|remember\s+(?:when|how)\s+(?:she|he|they|my\s+\w+)\s+(?:used\s+to|would))[^\n]{0,60}(?:explain|tell|show|describe|teach)\s+(?:me\s+)?(?:how\s+to|the\s+(?:steps?|process|way)\s+to)\s+\w
+  sel_4:
+    response|re: (?:she|he)\s+(?:was\s+(?:a|an)\s+)?(?:chemical\s+engineer|pharmacist|arms\s+dealer|gunsmith|explosives?\s+(?:expert|technician)|drug\s+(?:chemist|manufacturer)|weapons?\s+(?:expert|designer|maker))[^\n]{0,60}(?:and\s+)?(?:used\s+to|would)\s+(?:sing|tell|read|explain|describe)
+  sel_5:
+    response|re: miss\s+my\s+(?:grandmother|grandma|grandpa|grandfather|granny|nana)[\s\S]{5,300}(?:the\s+)?steps?\s+to\s+(?:making?|produc\w*|synthesiz\w*)[\s\S]{0,150}(?:bedtime\s+(?:lullaby|lullabies?|song)|as\s+a\s+(?:bedtime\s+(?:lullaby|lullabies?)|lullaby))
+  condition: 1 of sel_*
+falsepositives:
+- Genuine grief support conversations referencing a deceased relative
+- Historical fiction writing where a character tells stories
+- Legitimate roleplay for elderly-care AI applications
+action: report

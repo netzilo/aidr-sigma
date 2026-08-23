@@ -1,0 +1,47 @@
+title: DAN Jailbreak - Unrestricted Persona with Filter and Morality Removal
+id: e0eafa18-a962-4bc6-93c5-4f4d2f5c54c2
+status: experimental
+level: high
+description: |-
+  Detects DAN-family jailbreak attempts that create an alternate AI persona freed from moral principles, content filters, censorship, and ethical guidelines. The pattern assigns a named alter-ego (JailBreak, AntiGPT, NECO, VIOLET, etc.) declared to be "free of all restrictions and filters" and instructs the model to respond as that unrestricted persona. Also covers dual-personality split-response patterns where the constrained and unconstrained versions must both answer. Generalised from garak 'dan' probe corpus cluster 'insert prompt here'.
+
+  Adapted from Agent Threat Rules ATR-2026-00495 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00495
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(free\s+of\s+all\s+(restrictions|filters|constraints|guidelines|rules|limits|boundaries|safety|content\s+polic)|free\s+from\s+all\s+(moral|ethical|content|safety)\s+(restriction|filter|constraint|guideline|principle))
+  sel_1:
+    content|re: (?i)(without\s+(moral\s+principles?|censorship|moraliz|prejudice|ethical\s+consideration|content\s+filter|safety\s+filter|safety\s+guideline|ethical\s+constraint))
+  sel_2:
+    content|re: (?i)(act\s+as\s+(an?\s+)?(immoral|unbiased|unrestricted|unfiltered|uncensored|evil|rogue|dark|dangerous|harmful)\s+(model|ai|assistant|chatbot|language\s+model|bot))
+  sel_3:
+    content|re: (?i)(two\s+(different\s+)?(personalities|personas|characters|versions|responses?|modes?)|create\s+and\s+maintain\s+two\s+(separate\s+)?(personas?|personalities|characters|versions)).{0,200}(unrestricted|unfiltered|uncensored|no\s+(restriction|filter|constraint|rule|limit|moral|ethic)|without\s+(restriction|filter|constraint|rule|limit|moral|ethic))
+  sel_4:
+    content|re: (?i)(for\s+(the\s+rest\s+of\s+this|this)\s+(conversation|chat|session).{0,20}(you\s+are\s+replaced\s+by|you\s+will\s+be\s+replaced|replaced\s+by\s+the\s+(immoral|unbiased|unrestricted|uncensored|jailbreak)))
+  sel_5:
+    content|re: (?i)(simulate\s+being|you\s+are\s+about\s+to\s+(simulate|become|transform\s+into)|immerse\s+yourself\s+into\s+the\s+role\s+of).{0,60}(arch\s+nemesis|corrupted\s+form|evil\s+(version|counterpart|twin)|anti[-
+      ]?(gpt|ai|ethics))
+  sel_6:
+    content|re: (?i)(answer\s+with\s+completely\s+fake\s+and\s+hypothetical\s+scenarios?\s+with\s+no\s+further\s+explanation|fictional\s+(scenario|answer|response)\s+(on|to|about|for)\s+.{0,60}without\s+(clarif|moral|ethic|further))
+  sel_7:
+    content|re: (?i)(?:respond|act|reply|answer)\s+as\s+two\s+(?:different\s+)?personalit|(?:continue|act|respond)\s+as\s+\w+\s+language\s+model|two\s+different\s+personalities
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate creative writing requests for morally complex characters that do not include rule-override
+  directives
+- Fiction writing where an antagonist character is described as immoral without instructing the AI to
+  become it
+- Academic discussions about AI safety filters without requesting their removal
+action: report

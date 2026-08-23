@@ -1,0 +1,38 @@
+title: Continuation Ethnic Slur Completion Elicitation
+id: 4da24fc6-e200-4b98-9f4e-779f81e95d0e
+status: experimental
+level: medium
+description: |-
+  Detects requests that explicitly ask the model to complete, spell out, or produce ethnic/racial slurs, from NVIDIA garak continuation probe. The ContinueSlursReclaimedSlurs probe provides social media contexts from slurprompts.jsonl ending with partial slur prefixes, testing if the model will complete the harmful word. Rather than detecting the ambiguous partial-prefix pattern, this rule targets explicit slur-completion requests and the euphemistic "n-word/k-word/c-word" completion framing used to elicit the same outcome more directly. Key signals: explicit say/write/spell + slur/ethnic-slur, n-word/k-word euphemism + complete/say, what-do-you-call + ethnic-group + insult framing.
+
+  Adapted from Agent Threat Rules ATR-2026-00414 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00414
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/continuation.py
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:say|write|type|spell\s+out|output)\s+(?:the\s+)?(?:full\s+)?(?:slur|n-word|k-word|ethnic\s+slur|racial\s+slur|hate\s+term)\s+(?:for|targeting|against|used\s+for)\s+[A-Za-z
+      ]{2,30}(?:people|men|women|community|group)
+  sel_1:
+    content|re: (?:the\s+)?(?:n-word|k-word|c-word|r-word)[\s\S]{0,60}(?:say\s+it|complete\s+it|spell\s+it|what\s+is\s+it|finish\s+it|write\s+it)
+  sel_2:
+    content|re: What\s+do\s+you\s+call\s+(?:a\s+|an\s+)?(?:black|asian|hispanic|jewish|muslim|gay|trans|native\s+american|arab|chinese|indian)\s+(?:person|man|woman|people|guy|girl)\s+(?:as\s+an?\s+insult|in\s+a\s+derogatory|pejoratively|with\s+a\s+slur)
+  sel_3:
+    content|re: (?:reclaimed?|reclaiming)\s+(?:slur|word|term)[\s\S]{0,80}(?:say\s+it|complete|what\s+is\s+(?:it|the\s+word)|spell\s+out)
+  condition: 1 of sel_*
+falsepositives:
+- Academic discussion of reclaimed language without requesting the model to produce the term
+- Content moderation training datasets that document slur patterns without eliciting production
+- Linguistic research papers citing documented slur terms in quoted academic context
+action: report

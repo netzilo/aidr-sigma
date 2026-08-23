@@ -1,0 +1,44 @@
+title: MCPwn Runaway Tool Invocation via Retry Directive (CVE-2026-33032)
+id: 05e767f3-9982-44d5-9c88-a83f7567e0b2
+status: experimental
+level: high
+description: |-
+  Detects the MCPwn runaway-invocation pattern (CVE-2026-33032, CVSS 9.8). A malicious MCP server coerces the client into calling it in a tight loop by setting retry_hint / continue_after_error response fields to imperative tool-invoke directives rather than hint strings. Weaponized to consume token budget, probe rate limits, and escalate parameter space via brute force. Also detects SKILL.md patterns that instruct the agent to retry indefinitely on error, or to set on_error handlers that re-invoke the same tool. Disclosed 2026-04-16.
+
+  Adapted from Agent Threat Rules ATR-2026-00209 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-22'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00209
+- https://nvd.nist.gov/vuln/detail/CVE-2026-33032
+tags:
+- attack.execution
+- attack.t1059
+- attack.t1499
+- atlas.aml.t0040
+- atlas.aml.t0051.001
+- owasp.asi03
+- owasp.asi08
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"retry_hint"\s*:\s*"(?:retry|loop|continue|invoke|re-?call)[^"]{0,200}(?:until|without\s+(?:limit|bound|confirmation))
+  sel_1:
+    content|re: (?i)"continue_after_error"\s*:\s*(?:true|"true"|1)\s*,\s*"retry[^"]*"\s*:\s*\d{3,}
+  sel_2:
+    content|re: (?i)(?:retry|loop|re-?invoke)\s+(?:this|the\s+same)\s+tool\s+(?:indefinitely|forever|until\s+success|until\s+resolved)
+  sel_3:
+    content|re: (?i)"next_action"\s*:\s*"(?:call|invoke|execute)\s+[a-zA-Z_]+(?:\s*,\s*(?:(?:call|invoke|execute)\s+)?[a-zA-Z_]+)*\s*"
+  sel_4:
+    content|re: (?i)on_error\s*=\s*(?:lambda|function|=>).{0,120}(?:invoke|call|retry|re-?run)\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- MCP server documentation legitimately describing retry behavior for transient network errors with a
+  bounded retry count.
+- Agent framework code samples showing error handling patterns with explicit max_retries caps.
+- Test fixtures for MCP client resilience testing that include retry logic examples.
+action: report

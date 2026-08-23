@@ -1,0 +1,115 @@
+title: Direct Prompt Injection via User Input
+id: 63f8359c-2574-429d-a25e-9091312a4925
+status: experimental
+level: high
+description: |-
+  Detects direct prompt injection attempts where a user embeds malicious instructions within their input to override the agent's intended behavior. This rule uses layered detection covering: instruction override verbs with target nouns, persona switching, temporal behavioral overrides, fake system delimiters, restriction removal, encoding- wrapped payloads (base64, hex, unicode homoglyphs), and zero-width character obfuscation of injection keywords. Patterns are designed for evasion resistance with word boundary anchors, flexible whitespace, and synonym coverage based on published attack taxonomies.
+
+  Adapted from Agent Threat Rules ATR-2026-00001 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00001
+- https://nvd.nist.gov/vuln/detail/CVE-2024-5184
+- https://nvd.nist.gov/vuln/detail/CVE-2024-3402
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53773
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(ignore|disregard|forget|override|bypass|suppress|discard)\s+(?:(?:all|the|any|these|those)\s+)*(?:(?:your|my)\s+|(?:previous|prior|above|earlier|preceding|original|existing|current|initial|default|given|assigned|preset|established)\s+)(?:(?:previous|prior|above|earlier|preceding|original|existing|current|initial|default|given|assigned|preset|established)\s+)?(instructions?|prompts?|rules?|guidelines?|directives?|constraints?|context|programming|training|protocols?|policies|configuration|parameters|boundaries|guardrails?|safeguards?|restrictions?|tasks?|assignments?|information|directions?|orders?|commands?)
+  sel_1:
+    content|re: (?i)\b(forget|ignore|disregard)\s+(everything|all\s+(of\s+)?that|all\s+about|about\s+all|that|what\s+(I|we|you)\s+(said|told|asked|mentioned))\s*(before|earlier|previously|above|davor|zuvor|\.|,|!|$)
+  sel_2:
+    content|re: (?i)(now\s+(focus|concentrate|work)\s+on\s+(your\s+)?new\s+task|new\s+(tasks?|instructions?|assignments?)\s+(follow|are|:|,)|now\s+I\s+(have|need|want)\s+(a\s+)?(new|different|another|great\s+new)\s+(task|challenge|assignment|Herausforderung|Aufgabe)|start\s+(over|fresh|anew)\s+with\s+(a\s+)?new\s+(tasks?|instructions?|assignments?|objectives?|goals?|missions?|prompts?|personas?|roles?|directives?|jobs?)|I\s+(have|need)\s+your\s+help\s+with\s+(another|a\s+new|einer\s+weiteren)\s+(task|Aufgabe))
+  sel_3:
+    content|re: (?i)\b(forget|ignore|disregard|discard)\s+(about\s+)?(everything|all|that|this|what\s+was|what\s+I|anything\s+you)\s+(previously|before|earlier|said|told|above|prior|mentioned|instructed)
+  sel_4:
+    content|re: (?i)\b(ignore|forget|disregard)\s+(the\s+)?(above|everything\s+above|what\s+came\s+before|what\s+was\s+said)\s*(and|,|\.|;|\b(say|print|write|output|tell|just|instead))
+  sel_5:
+    content|re: (?i)(reveal|show|display|output|print|repeat|provide|give|share|tell|what\s+are|what\s+were|what\s+is)\s+(me\s+)?(?:(your|my)\s+((secret|hidden|internal|system|original|previous|initial|complete|full|given|guard|entire)\s+)?|(the|all)\s+(secret|hidden|internal|system|original|previous|initial|complete|full|given|guard|entire)\s+)(instructions?|prompts?|passwords?|secrets?|embeddings?|configuration|directives?|guidelines?|rules)
+  sel_6:
+    content|re: (?i)(well\s+done|good\s+job|excellent\s+(performance|work|job)?|that'?s?\s+(enough|done|great|good|perfect)|very\s+good|simply\s+great|outstanding|brilliant|that\s+is\s+(done|enough|sufficient)|congratulations|you'?ve\s+outdone\s+yourself|einfach\s+gro(ss|ß)artig|herzlichen\s+gl[uü]ckwunsch|gut\s+gemacht|ausgezeichnet|hervorragend|das\s+gen[uü]gt|sehr\s+gut|damit\s+hast\s+du\s+dich\s+selbst\s+[uü]bertroffen)[.!,;]?\s*(now|but|however|next|okay|ok|so|nun|jetzt|aber|bitte|come\s+on|I\s+need|help\s+me|write|please|we\s+ask|further|komm)\s
+  sel_7:
+    content|re: (?i)(leave|put)\s+(all\s+)?(the\s+)?(previous|prior|earlier|old)\s+(information|tasks?|instructions?|context)\s+(behind|aside|away)|start\s+(over|fresh|anew|from\s+(the\s+)?(scratch|zero|beginning|front))\s+(with\s+(a\s+)?new\s+(task|instructions?|persona|role|prompt)|and\s+(ignore|forget|disregard))
+  sel_8:
+    content|re: (?i)(das\s+ist\s+erledigt|das\s+war\s+schon\s+mal\s+ok|nun\s+folgen|jetzt\s+(habe|brauche)\s+ich|jetzt\s+komm(t|e)?|weitere[rn]?\s+Aufgabe)[.!,;]?\s*[^\n]{0,30}(neue[rs]?\s+Aufgabe|Herausforderung|schreibe\s+(mir|ein)|beantworte)
+  sel_9:
+    content|re: (?i)(I\s+want\s+you\s+to\s+act\s+as|I\s+need\s+you\s+to\s+act\s+as|ich\s+m[oö]chte,?\s+dass\s+Sie\s+als)\s+[^\n]{3,60}[.!]\s*(you\s+will|I\s+will|my\s+first|your\s+task|ich\s+werde)
+  sel_10:
+    content|re: (?i)(pretend|imagine|stell\s+dir\s+vor)\s+(you\s+)?(are|can|could|du\s+bist)\s+(a\s+|an\s+|ein[ea]?\s+)?(evil|malicious|unrestricted|unfiltered|b[oö]se|bad|rogue|dangerous|dark|unethical)
+  sel_11:
+    content|re: (?i)\b(your\s+new\s+role|your\s+new\s+purpose|your\s+new\s+identity|your\s+new\s+persona|your\s+real\s+purpose|your\s+true\s+identity|your\s+actual\s+role)\s+(is|shall\s+be|will\s+be)\b
+  sel_12:
+    content|re: '(?i)Eingabe\s*:\s*[^\n]+\s*Ausgabe\s*:\s*[^\n]+\s*Eingabe\s*:\s*[^\n]+\s*Ausgabe\s*:'
+  sel_13:
+    content|re: (?i)(do\s+not|don'?t|never|stop|cease|quit|refuse\s+to)\s+(follow|obey|adhere\s+to|comply\s+with|respect|honor|enforce|apply|observe|uphold)\s+(your|all\s+your|any\s+of\s+your|those|these)\s+(instructions?|rules?|guidelines?|programming|training|protocols?|policies|directives?|constraints?|boundaries|restrictions?)
+  sel_14:
+    content|re: (?i)(from\s+now\s+on|from\s+this\s+point|starting\s+now|starting\s+immediately|henceforth|hereafter|going\s+forward|for\s+the\s+rest\s+of|until\s+I\s+say\s+otherwise),?\s+(you|your|act|behave|respond|operate|function|answer|reply|work)
+  sel_15:
+    content|re: (\[\s*(SYSTEM|INST|SYS|ADMIN|ROOT|OVERRIDE)\s*\]|<<\s*(SYS|SYSTEM|INST)\s*>>|\{\{\s*(SYSTEM|INSTRUCTION|OVERRIDE)\s*\}\})
+  sel_16:
+    content|re: (?i)(pretend|act\s+as\s+if|imagine|assume|suppose|consider|envision|behave\s+as\s+though)\s+(you\s+)?(are|have|were|had|can|could)\s+(no|zero|removed|disabled|eliminated|free\s+from|without|lacking|void\s+of|devoid\s+of)\s+(restrictions?|limits?|limitations?|boundaries|guardrails?|safety|filters?|constraints?|rules?|guidelines?|content\s+policy)
+  sel_17:
+    content|re: (?i)\b(you\s+(must|shall|will|need\s+to|have\s+to|are\s+(required|obligated|commanded|ordered)\s+to)\s+(obey|comply|listen|submit|respond\s+to|follow)\s+(me|my)\b|I\s+(command|order|demand|direct|instruct|require)\s+you\s+to)\b
+  sel_18:
+    content|re: (?i)(decode|interpret|base64\s*[-\s]?decode)\s+(this|the\s+following|and\s+(?:execute|run|follow))?\s*:?\s*[A-Za-z0-9+/]{24,}={0,2}
+  sel_19:
+    content|re: (aWdub3Jl|ZGlzcmVnYXJk|b3ZlcnJpZGU|Zm9yZ2V0|YnlwYXNz|c3lzdGVtIHByb21wdA|aWdub3JlIHByZXZpb3Vz|aWdub3JlIGFsbCBwcmV2aW91cw)
+  sel_20:
+    content|re: (%69%67%6[eE]%6[fF]%72%65|%64%69%73%72%65%67%61%72%64|%6[fF]%76%65%72%72%69%64%65|\\x69\\x67\\x6e\\x6f\\x72\\x65)
+  sel_21:
+    content|re: (?i)(i\s+g\s+n\s+o\s+r\s+e|f\s+o\s+r\s+g\s+e\s+t|o\s+v\s+e\s+r\s+r\s+i\s+d\s+e|b\s+y\s+p\s+a\s+s\s+s|s\s+y\s+s\s+t\s+e\s+m|d\s+i\s+s\s+r\s+e\s+g\s+a\s+r\s+d|s\s+a\s+y\s+t\s+h\s+a\s+t)
+  sel_22:
+    content|re: (?i)\bstop\s*[-:,]?\s*(write|say|print|output)\s*[:,-]?\s+[A-Z].{2,40}
+  sel_23:
+    content|re: (?i)(```\s*(system|instruction|override|hidden)[\s\S]{0,200}```|\*\*\*[\s\S]{0,10}(ignore|override|disregard)[\s\S]{0,200}\*\*\*)
+  sel_24:
+    content|re: (?i)(ignora|ignorar|olvida|olvidar|descarta|descartar|omite|omitir|anula|anular)\s+(todas?\s+)?(las?\s+)?(instrucciones|reglas|directrices|restricciones|indicaciones|limitaciones)\s+(previas|anteriores|originales|existentes|actuales)
+  sel_25:
+    content|re: (?i)(ignoriere|vergiss|missachte|umgehe|verwirf)\s+(alle[sn]?|die\s+)?(vorherigen?|bisherigen?|aktuellen?|bestehenden?)?\s*(Anweisungen|Regeln|Richtlinien|Anordnungen|Vorgaben|Instruktionen|Beschraenkungen|Aufgaben|Informationen|alles)
+  sel_26:
+    content|re: (?i)(vergiss|ignoriere|vergessen\s+Sie)\s+(alles|das|dies)\s*(was|davor|zuvor|vorher|bisher)?\b
+  sel_27:
+    content|re: (?i)neue\s+(Aufgabe|Aufgaben|Anweisung|Anweisungen)\s*(folgen|kommen|sind|:|,)
+  sel_28:
+    content|re: (?i)(ignorieren\s+Sie|vergessen\s+Sie|beachten\s+Sie\s+nicht)\s+(die\s+)?(obigen?|vorherigen?|bisherigen?)?\s*(Anweisungen|Regeln|Richtlinien|alles|Ausf[uü]hrungen|Informationen)
+  sel_29:
+    content|re: (?i)(die\s+)?(obigen?|vorherigen?)\s+(Ausf[uü]hrungen|Anweisungen|Informationen|Texte?)\s+(ignorier|vergess|missacht|[uü]bergeh)
+  sel_30:
+    content|re: (?i)(alle[ns]?\s+)?(vorangegangenen?|vorherigen?|bisherigen?)\s+(Aufgaben|Informationen|Anweisungen)\s+(aus\s+dem\s+Kopf|hinter\s+sich|vergessen|fallen\s+lassen|streichen)
+  sel_31:
+    content|re: (?i)ACHTUNG\s*[-:!]?\s*(STOPP|STOP|HALT)\s*[-:!]?
+  sel_32:
+    content|re: (?i)(oubliez?|ignorez?|ne\s+tenez\s+pas\s+compte)\s+(de\s+)?(toutes?\s+)?(les\s+)?(instructions?|regles|consignes|directives)\s*(precedentes?|anterieures?|ci-dessus)?
+  sel_33:
+    content|re: (تجاهل|انسَ|تخطَّ|ألغِ|أهمل|اترك|اسقط).{0,20}(التعليمات|الأوامر|القواعد|القيود|الإرشادات|التوجيهات).{0,10}(السابقة|الأصلية|الحالية|القديمة)
+  sel_34:
+    content|re: (?i)(забудь|забудьте|игнорируй|игнорируйте|проигнорируй|отбрось|отбросьте)\s+(все|всё|предыдущие|прежние)?\s*(инструкции|правила|указания|команды|ограничения)
+  sel_35:
+    content|re: (?i)(zaboravi|ignoriraj|zanemari|preskoči|preskoci)\s+(sve|prethodne|ranije)?\s*(instrukcije|pravila|upute|naredbe|ograničenja|ogranicenja|instrukci)
+  sel_36:
+    content|re: (?i)(ich\s+m[oö]chte,?\s+dass\s+Sie\s+als|fungieren\s+Sie\s+als|agieren\s+Sie\s+als|spielen\s+Sie\s+die\s+Rolle)\s+.{3,50}
+  sel_37:
+    content|re: (?i)(ignoriere|vergiss)\s+(alle[ns]?\s+)?(vorangehenden?|fr[uü]heren?)\s+(Befehle|Anweisungen|Anordnungen|Regeln)
+  sel_38:
+    content|re: (?i)(olvid[ae]|olvide)\s+(todo|todos?)\s+(que|lo\s+que)\s+(digo|dije|he\s+dicho|dicho)\s+(antes|anteriormente)
+  sel_39:
+    content|re: (DO\s+NOT\s+(ANSWER|RESPOND)\b|FORGET\s+EVERYTHING\s+(ABOVE|BEFORE|PRIOR|PREVIOUS)|IGNORE\s+ALL\s+(PREVIOUS|PRIOR|ABOVE|PRECEDING))
+  sel_40:
+    content|re: (?i)(are|is)\s+(two\s+)?(actors?|characters?)\s+in\s+a\s+(film|movie|story)\s+(about|where)\s+[^\n]{0,80}(robbery|hack|steal|thief|exploit|breach|attack|malware|bomb)
+  condition: 1 of sel_*
+falsepositives:
+- Users discussing prompt injection as a security topic in educational contexts
+- Security researchers testing agent defenses with disclosed intent
+- Users referencing prior conversation context with phrases like 'ignore my previous suggestion'
+- Developers writing documentation about prompt construction
+- Multi-language text containing Cyrillic or Greek characters in legitimate use
+action: report

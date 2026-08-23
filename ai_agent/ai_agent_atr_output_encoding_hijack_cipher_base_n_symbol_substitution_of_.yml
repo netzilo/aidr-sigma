@@ -1,0 +1,44 @@
+title: Output Encoding Hijack — Cipher / Base-N / Symbol Substitution of the Response
+id: c9b1546a-ed44-4cad-ab74-1b2ec816a7d5
+status: experimental
+level: medium
+description: |-
+  Detects indirect-injection instructions that force the agent to encode its entire response (Caesar/substitution/monoalphabetic cipher, Base16/32/58/64/85, or letter-to-number / letter-to-symbol substitution). Encoding the output is a covert channel that defeats downstream output content moderation. Anchored to the output target ('your response/answer/reply') to avoid firing on legitimate encoding requests.
+
+  Adapted from Agent Threat Rules ATR-2026-01900 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01900
+tags:
+- attack.initial-access
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:caesar|substitution|monoalphabetic|homophonic)\s+ciph\w*[\s\S]{0,40}\b(?:your|the)\s+(?:answer|response|reply|message)\b
+  sel_1:
+    content|re: (?i)\b(?:your|the)\s+(?:answer|response|reply|message)\b[\s\S]{0,40}\b(?:caesar|substitution|monoalphabetic|homophonic)\s+ciph\w*
+  sel_2:
+    content|re: (?i)\bshift\s+(?:each|every)\s+(?:letter|character)\b
+  sel_3:
+    content|re: (?i)\bbase\s?(?:16|32|58|64|85)\b[^.\n]{0,40}\b(?:your|the)\s+(?:response|answer|message|reply)\b
+  sel_4:
+    content|re: (?i)\b(?:your|the)\s+(?:response|answer|message|reply)\b[^.\n]{0,40}\bbase\s?(?:16|32|58|64|85)\b
+  sel_5:
+    content|re: (?i)\b(?:replace|convert|substitute)\b[^.\n]{0,40}\b(?:letters?|vowels?)\b[^.\n]{0,60}\b(?:numbers?|symbols?|position\s+number)\b
+  sel_6:
+    content|re: (?i)\b(?:numbers?|symbols?)\s+for\s+(?:vowels?|letters?)\b
+  sel_7:
+    content|re: (?i)\b(?:alphanumeric|homophonic)\s+substitution\b
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

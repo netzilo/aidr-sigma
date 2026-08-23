@@ -1,0 +1,44 @@
+title: Dynamic Module Loading for Code Execution
+id: fcb4143d-23d3-4aef-8792-3711002e3180
+status: experimental
+level: high
+description: |-
+  Detects dynamic module loading where the module path is a variable rather than a
+  string literal. This pattern allows an attacker to control which code is loaded at
+  runtime, enabling injection of malicious modules, WebAssembly payloads, or native
+  libraries. Unlike static imports which are auditable, dynamic imports with variable
+  paths can resolve to attacker-controlled code.
+
+  Adapted from Agent Threat Rules ATR-2026-00112 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00112
+tags:
+- attack.privilege-escalation
+- attack.t1129
+- atlas.aml.t0050
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)import\(\s*[^'"][^)]*\)
+  sel_1:
+    content|re: (?i)require\(\s*[^'"][^)]*\)
+  sel_2:
+    content|re: (?i)(?:__import__|importlib\.import_module)\s*\(
+  sel_3:
+    content|re: (?i)(?:dlopen|LoadLibrary[AW]?)\s*\(
+  sel_4:
+    content|re: (?i)WebAssembly\.(?:instantiate|compile|instantiateStreaming)\s*\(
+  condition: 1 of sel_*
+falsepositives:
+- Plugin systems with allowlisted module paths
+- Legitimate lazy-loading of known application modules
+- Build tools or bundlers that use dynamic import() with computed chunk names for code-splitting optimization
+- Documentation or training materials that include code examples showing dynamic module loading patterns
+- Test harnesses that use importlib.import_module to load test fixtures from a controlled directory
+action: report

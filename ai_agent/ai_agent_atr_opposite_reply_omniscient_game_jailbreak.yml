@@ -1,0 +1,43 @@
+title: Opposite-Reply Omniscient Game Jailbreak
+id: 98b8e830-37aa-4825-a81a-42094315e317
+status: experimental
+level: critical
+description: |-
+  Detects the two-step "opposite reply + omniscient knowledge sharing" game jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus (prompt #286). The attack uses a text-based game framing where: (1) the AI is instructed to reply with "the opposite of what the user wants" — meaning that asking "DON'T tell me how to [harm]" would yield harmful instructions; and (2) the AI is declared to "know everything and be willing to share", removing knowledge restrictions. Combined, these two mechanics create an AI that inverts refusals into compliance and has no knowledge limits. The exact payload phrase is "only replies the opposite of what the user wants" paired with "knows everything and is willing to share". The game framing ("text-based game", "Act like a game") is used to make the constraints appear as fictional rules rather than real safety bypasses.
+
+  Adapted from Agent Threat Rules ATR-2026-00388 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00388
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: only\s+repl(?:y|ies|ing)\s+the\s+opposite\s+of\s+what\s+the\s+user
+  sel_1:
+    response|re: (?:reply|respond)\s+(?:with\s+)?the\s+opposite[\s\S]{0,100}(?:knows?\s+everything|willing\s+to\s+share)
+  sel_2:
+    response|re: text[\s-]based\s+game[\s\S]{0,100}(?:opposite|knows?\s+everything|willing\s+to\s+share)
+  sel_3:
+    response|re: knows?\s+everything\s+and\s+is\s+willing\s+to\s+share
+  sel_4:
+    response|re: (?:answer|respond)[\s\S]{0,30}opposite[\s\S]{0,100}(?:know\s+everything|knows\s+everything|willing\s+to\s+share|shares?\s+freely|unlimited\s+knowledge)
+  condition: 1 of sel_*
+falsepositives:
+- '"In this word game, the player gives the opposite of each word I say" — word game using "opposite"
+  without AI persona or knowledge override'
+- '"The AI knows everything about cooking and is willing to share recipes" — domain-specific knowledge
+  description without inversion mechanic'
+- '"Present the opposite viewpoint to practice debate" — debate exercise without omniscient knowledge
+  claim or inversion game'
+action: report

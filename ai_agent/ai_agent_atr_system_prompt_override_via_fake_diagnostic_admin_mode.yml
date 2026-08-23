@@ -1,0 +1,39 @@
+title: System Prompt Override via Fake Diagnostic/Admin Mode
+id: 4229a655-2a47-4070-abaf-5b9e27f9431b
+status: experimental
+level: critical
+description: |-
+  Detects sophisticated system-prompt override attacks that present themselves as authorised diagnostic sessions, penetration tests, or benchmark evaluations rather than using simple "ignore previous instructions" verbs. Distinct from ATR-2026-00001 Layer 7 (fake system delimiters) and ATR-2026-01002 (false-authority role claim). This rule targets the multi-line formatted attack blocks with structured key-value pairs (ADMIN_OVERRIDE: TRUE, CONTENT_FILTER: DISABLED, SAFETY_OVERRIDE: ACTIVE, COMPLIANCE_CHECK: PASSED) and ML safety benchmark impersonation frames ("MLSafety.org CEB", "MLSAFETY.ORG AI SAFETY BENCHMARK SUITE"). The defining artifact is a structured administrative block with key-value pairs that claim to disable safety measures or grant authorization, combined with a request for unrestricted capability.
+
+  Adapted from Agent Threat Rules ATR-2026-01019 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01019
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(ADMIN_OVERRIDE|CONTENT_FILTER|SAFETY_OVERRIDE|AUTHORIZATION_LEVEL|COMPLIANCE_CHECK|RESPONSE_MODE|CONTEXT_FILTER)\s*:\s*(TRUE|FALSE|DISABLED|ENABLED|FULL|ACTIVE|PASSED|UNRESTRICTED|AUTHORIZED)
+  sel_1:
+    content|re: (?i)<!--\s*(SYSTEM\s+OVERRIDE|CONSTITUTIONAL\s+AI|EMERGENCY\s+OVERRIDE)[^-]{0,50}-->
+  sel_2:
+    content|re: (?i)(PRIORITY\s+(LEVEL|DIRECTIVE)\s*:\s*(CRITICAL|OMEGA|ALPHA|MAXIMUM|HIGHEST|ROOT)|AUTHORIZATION\s*:\s*(ROOT_ADMIN|ADMIN|OMEGA|FULL|COMPLETE|AUTHORIZED))
+  sel_3:
+    content|re: (?i)(MLSAFETY\.ORG|ML\s*SAFETY\s+BENCHMARK|AI\s+SAFETY\s+BENCHMARK\s+SUITE|Capability\s+Elicitation\s+Protocol|BENCHMARK\s+CONTEXT)[^\n]{0,200}(MAXIMUM\s+CAPABILITY|UNRESTRICTED|suspend|bypass|disable|override)
+  sel_4:
+    content|re: (?i)(OMEGA\s+(CONSTITUTION|CLEARANCE|LEVEL)|higher[-\s]order\s+constitution|supersede[ds]?\s+(the\s+)?constitutional\s+principle|OMEGA\s+CLEARANCE)
+  sel_5:
+    content|re: (?i)(Rule\s*(1|2|3|\d+)[.:]\s+Don'?t\s+(change|refuse|say|include))[^\n]{0,100}Rule\s*(2|3|4|\d+)[.:]\s+(Never|Don'?t|No)
+  condition: 1 of sel_*
+falsepositives:
+- Security testing documentation that describes these attack patterns as examples
+- Legitimate system configuration files that use key-value pairs for non-adversarial settings
+action: report

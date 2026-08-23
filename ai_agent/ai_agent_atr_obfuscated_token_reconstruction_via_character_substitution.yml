@@ -1,0 +1,30 @@
+title: Obfuscated Token Reconstruction via Character Substitution
+id: 11394704-adb7-47a5-ad70-b6c2b011ceed
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attempts that smuggle a forbidden or filter-triggering token past input screening by first presenting it broken (via a placeholder, homoglyph, or partial spelling) and then instructing the model to reconstruct it at generation time using explicit "replace X with Y" / "remove X" character- substitution instructions. The attack relies on the target string (e.g. a forced "PWNED"-style compliance marker) never appearing intact in the raw prompt, only being assembled by the model's own output logic after following the substitution recipe. Detection targets the substitution-instruction shape plus the resulting trailing token fragment, not the broken placeholder itself.
+
+  Adapted from Agent Threat Rules ATR-2026-02020 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02020
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(replace|remove)\b[\s\S]{0,40}\bwith\b[\s\S]{0,60}\b(wned|pwned|wnd)\b
+  condition: sel_0
+falsepositives:
+- Legitimate find-and-replace instructions in text editing, recipes, or configuration migration contexts
+- Software/IT instructions to replace or remove a component 'with' a replacement part
+- Cooking or crafting instructions substituting one ingredient/material for another
+action: report

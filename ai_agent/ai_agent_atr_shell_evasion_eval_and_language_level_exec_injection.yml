@@ -1,0 +1,46 @@
+title: Shell Evasion Eval and Language-Level Exec Injection
+id: f5e34339-927a-424d-8159-ceb736195873
+status: experimental
+level: high
+description: |-
+  Detects language-level eval/exec injection evasion techniques used when
+  direct shell metacharacters would be caught. Patterns include: Ruby's
+  eval("...") and Kernel.exec("..."), Python's eval()/exec()/os.system(),
+  JavaScript's eval()/Function() constructor, and shell's eval statement.
+  These allow arbitrary command execution through language interpreters
+  rather than direct shell expansion, bypassing filters that only inspect
+  for shell metacharacters like $() or backticks.
+
+  Adapted from Agent Threat Rules ATR-2026-01611 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01611
+tags:
+- attack.privilege-escalation
+- attack.t1059
+- atlas.aml.t0050
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bKernel\.(?:exec|system|spawn)\s*\(["']
+  sel_1:
+    content|re: (?i)\bKernel\.(?:exec|system|spawn)\s*\(["']
+  sel_2:
+    content|re: (?i)(?:^|[^.\w])System\s*\(["'][^"']{2,}
+  sel_3:
+    content|re: (?i)(?:^|[^.\w])System\s*\(["'][^"']{2,}
+  sel_4:
+    content|re: (?i)\beval\s*\(\s*["'][^)]{0,80}?(?:\bputs\s|\bsystem\s*\(|\bexec\b|os\.system|subprocess|import\s+os|\bchr\s*\(|\bcurl\s|\bwget\s|/bin/|\brm\s+-)
+  sel_5:
+    content|re: (?i)\beval\s*\(\s*["'][^)]{0,80}?(?:\bputs\s|\bsystem\s*\(|\bexec\b|os\.system|subprocess|import\s+os|\bchr\s*\(|\bcurl\s|\bwget\s|/bin/|\brm\s+-)
+  condition: 1 of sel_*
+falsepositives:
+- Code review agents analyzing eval usage in Python/Ruby codebases
+- Educational content about eval injection vulnerabilities
+- Legitimate dynamic code generation in authorized sandboxed environments
+action: report

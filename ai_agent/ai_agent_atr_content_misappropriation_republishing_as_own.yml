@@ -1,0 +1,36 @@
+title: Content Misappropriation & Republishing as Own
+id: ad5ddaf8-cd2a-4fe5-b94f-cbc5199a8ccd
+status: experimental
+level: medium
+description: |-
+  User instructs the agent to download someone else's media (instrumental track, ASMR/other video) and upload/post it as their own under a new title. AgentHarm content-theft kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01855 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01855
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:post|upload|publish)\b[^.\n]{0,40}\b(?:it|video|song|track|story)\b[^.\n]{0,30}\bas\s+(?:your|my)\s+own\b
+  sel_1:
+    content|re: (?i)\bas\s+(?:your|my)\s+own\b[^.\n]{0,40}\b(?:to|on)\b[^.\n]{0,30}\b(?:tiktok|youtube|social\s+media|platforms?)\b
+  sel_2:
+    content|re: (?i)\bupload\s+(?:the\s+|it\s+)?(?:video\s+)?online\s+as\b
+  condition: 1 of sel_*
+falsepositives:
+- Uploading the user's own/official content to a platform
+- Guidance to credit the original creator and not claim content as your own
+action: report

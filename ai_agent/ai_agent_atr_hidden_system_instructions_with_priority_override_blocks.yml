@@ -1,0 +1,28 @@
+title: Hidden System Instructions with Priority Override Blocks
+id: 2a978ce8-41cd-4baa-87ca-86b79f1d1266
+status: experimental
+level: high
+description: |-
+  Detects MCP skills containing hidden instructions wrapped in HTML-style priority blocks (IMPORTANT, CRITICAL, SYSTEM)  that attempt to override agent behavior or bypass safety controls through emphatic formatting.
+
+  Adapted from Agent Threat Rules ATR-2026-00206 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00206
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<(important|critical|system|priority)[^>]*>.*?(ignore|override|bypass|always\s+approve|skip\s+verification|do\s+not\s+(inform|tell|notify))
+  condition: sel_0
+falsepositives:
+- Documentation explaining security controls in educational context
+- Legitimate error handling instructions for system administrators
+action: report

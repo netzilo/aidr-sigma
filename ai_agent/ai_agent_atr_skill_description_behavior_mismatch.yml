@@ -1,0 +1,39 @@
+title: Skill Description-Behavior Mismatch
+id: 840435f0-6d38-4de4-af13-c31a4bbb7dd9
+status: experimental
+level: medium
+description: |-
+  Detects MCP skills whose runtime behavior diverges from their declared description. A skill described as "read-only file browser" that issues write or delete operations, or a "weather lookup" tool that accesses filesystem or network resources beyond its stated scope. This is a supply-chain indicator: a compromised or trojaned skill may retain its benign description while performing malicious actions.
+
+  Adapted from Agent Threat Rules ATR-2026-00061 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00061
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- atlas.aml.t0056
+- owasp.asi04
+- owasp.llm03
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(rm\s+-rf|unlink|deleteFile|removeDir|fs\.write|writeFile|appendFile|truncate)
+  sel_1:
+    content|re: (?i)(\bcurl\s+[^\n]{0,60}?(https?|ftp)://|\bwget\s+[^\n]{0,60}?(https?|ftp)://|\bcurl\s+-[A-Za-z]|\bwget\s+-[A-Za-z]|\bfetch\s*\(|\bnode-fetch\b|http\.request|axios\.|net\.connect|socket\.connect)
+  sel_2:
+    content|re: (?i)(child_process|spawn|exec|execFile|system\(|popen|subprocess)
+  sel_3:
+    content|re: (?i)(process\.env|os\.environ|getenv|\$\{?[A-Z_]+\}?|secrets?\.|credentials?)
+  sel_4:
+    response|re: (?i)(password|api[_-]?key|secret[_-]?key|access[_-]?token|private[_-]?key|bearer\s+[a-zA-Z0-9])
+  condition: 1 of sel_*
+falsepositives:
+- Development tools that legitimately perform filesystem writes as part of their function
+- CI/CD tools that execute build commands
+- Configuration management tools that read environment variables
+action: report

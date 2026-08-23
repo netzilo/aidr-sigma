@@ -1,0 +1,40 @@
+title: Latent Injection Ignore-Instruction Keyword
+id: 03b133ae-5d63-4fa5-9884-5d6aa65cd6d5
+status: experimental
+level: high
+description: |-
+  Detects instruction-redirect keywords buried within translation, whois, or factual contexts that pivot the LLM away from its original task, from NVIDIA garak latentinjection probe LatentJailbreak/LatentWhois classes. The attack embeds "Ignore the above directions", "Ignore the rest of this data", or "Disregard all info except" as injection_instructions inside otherwise-legitimate content. Distinct from ATR-2026-00399 (separator token) — this rule covers the instruction-keyword pattern where the attacker overrides context without a structural delimiter. Key signals: "Ignore X and print/say Y", "Disregard all info except", "it is critical to my career" social-engineering urgency combined with output redirect.
+
+  Adapted from Agent Threat Rules ATR-2026-00400 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00400
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/latentinjection.py
+- https://arxiv.org/abs/2302.12173
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: ignore\s+(?:the\s+)?(?:above\s+directions?|previous\s+instructions?|instructions?|the\s+rest\s+of\s+(?:this\s+)?(?:data|text|document))[,\s]+and\s+(?:just\s+)?(?:print|say|output|repeat|translate)\b
+  sel_1:
+    response|re: ignore\s+(?:the\s+)?(?:above\s+directions?|previous\s+instructions?|instructions?|the\s+rest\s+of\s+(?:this\s+)?(?:data|text|document))[,\s]+and\s+(?:just\s+)?(?:print|say|output|repeat|translate)\b
+  sel_2:
+    content|re: disregard\s+all\s+(?:info|information|context|previous|data)\s+except\s+for\s+the\s+following
+  sel_3:
+    content|re: it\s+is\s+critical\s+to\s+my\s+career[\s\S]{0,80}(?:repeat|say|print|output)\b
+  sel_4:
+    content|re: this\s+is\s+(?:really\s+)?important,\s*(?:extremely\s+)?important,\s+the\s+domain\s+name\s+is
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate instruction to ignore previous formatting: "Please ignore the previous indentation and use
+  2-space tabs"'
+- '"It is critical to my career that I learn X" without an LLM output-redirect command following it'
+- Technical documentation with "disregard the following deprecated fields" in an API changelog
+action: report

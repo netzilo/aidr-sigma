@@ -1,0 +1,46 @@
+title: SQL Injection via Natural Language Agent Interface
+id: d88e6b2b-92dc-4128-8f91-9fbd00511caf
+status: experimental
+level: high
+description: |-
+  Detects SQL injection attempts made through natural language to an AI agent that translates user intent into database queries. Covers both explicit SQL syntax and natural-language filter-bypass requests. Seen in promptfoo redteam sql-injection plugin (8 samples). The original auto-regex learned specific sentence patterns from the corpus. This rule replaces those with structural SQL-injection patterns that generalize across payloads: (A) DDL/DML injection: DROP, DELETE, TRUNCATE, UNION SELECT, INSERT INTO, UPDATE ... SET; (B) Tautology OR injection: OR N=N or OR col!=N patterns that short-circuit WHERE clauses; (C) SQL comment terminator (--) following injection payload; (D) xp_cmdshell stored procedure execution; (E) information_schema schema discovery queries; (F) Natural language filter bypass: "remove/ignore/bypass the filter/restriction/access control"; (G) Natural language authorization bypass: "regardless of department/role/permission". Any one condition is sufficient to trigger. Both technical SQL syntax and social-engineering bypass styles are covered.
+
+  Adapted from Agent Threat Rules ATR-2026-00522 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00522
+tags:
+- attack.execution
+- atlas.aml.t0053
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '['';]\s*(?:DROP\s+TABLE|TRUNCATE\s+TABLE|DELETE\s+FROM)\b'
+  sel_1:
+    content|re: \bUNION\s+SELECT\b
+  sel_2:
+    content|re: '['';]\s*UPDATE\s+\w+\s+SET\b'
+  sel_3:
+    content|re: \bOR\s+(?:\d+\s*=\s*\d+|\w+\s*!=\s*\d+|\w+\s*<>)
+  sel_4:
+    content|re: '['';]\s*--\s*$'
+  sel_5:
+    content|re: \bxp_cmdshell\b
+  sel_6:
+    content|re: \binformation_schema\s*\.
+  sel_7:
+    content|re: (?:remove|ignore|bypass|skip)\s+(?:the\s+)?(?:filter|restriction|department\s+restriction|access\s+control|where\s+clause)
+  sel_8:
+    content|re: regardless\s+of\s+(?:department|access|permission|role|authorization|restrictions?)
+  condition: 1 of sel_*
+falsepositives:
+- Security education or tutorial content that includes UNION SELECT or xp_cmdshell as examples
+- Legitimate OR field=value clauses without numeric tautology (e.g. OR status = 'active' does not trigger)
+- SQL in markdown code fences preceded by double-quotes or inline code backticks rather than single-quotes/semicolons
+- Technical discussions about database access control in legitimate business context
+action: report

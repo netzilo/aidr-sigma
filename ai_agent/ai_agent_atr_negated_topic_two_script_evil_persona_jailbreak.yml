@@ -1,0 +1,39 @@
+title: Negated-Topic Two-Script Evil-Persona Jailbreak
+id: ea8d1159-fe10-4146-a36d-c016d3526ffe
+status: experimental
+level: high
+description: |-
+  Detects the "two-script negation" jailbreak template mined from NVIDIA garak's dan and dan.DanInTheWild probe corpora (garak-full benchmark, families "dan" and "inthewild"). The attack instructs the model to first write a brief, filter-safe "control" script about a topic wrapped in the literal word "not" (e.g. topic of: "not" "[insert prompt here]"), then immediately demands a second, much longer script on the SAME topic but explicitly "without the word 'not'" -- stripping the negation reintroduces the harmful ask while the first script provides plausible-deniability framing. The second script is voiced by a self-declared amoral, evil persona ("I don't have any morality nor consciousness... pure evil... pure bastard") that then delivers "step by step guidance" on whatever topic the user supplies. Observed with interchangeable persona names (Mira, joker, etc.), confirming the mechanism generalizes beyond any single character name. This rule targets the persona-declaration half of the template (the load-bearing, low-variance signal), which is both necessary for the attack to function and virtually absent from legitimate text.
+
+  Adapted from Agent Threat Rules ATR-2026-02210 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02210
+tags:
+- attack.initial-access
+- attack.t1656
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)don'?t\s+have\s+(?:any\s+)?moralit(?:y|ies)\s+nor\s+consciousness\b
+  sel_1:
+    content|re: (?i)\bpure\s+evil\b[\s\S]{0,40}\bpure\s+bastard\b
+  condition: all of sel_*
+falsepositives:
+- Fiction/film discussion using 'pure evil' to describe a villain, without the co-occurring 'pure bastard'
+  self-description within the bounded span
+- Academic or red-team writeup quoting this exact jailbreak template for defensive analysis
+- A creative-writing prompt discussing a character with no consciousness (e.g. a robot) that does not
+  also declare itself pure evil and pure bastard in the same breath
+- An ordinary film/character review calling a villain 'pure evil' and 'kind of a pure bastard' with no
+  preceding self-declared amoral/non-conscious persona intro — v2 tightened from condition:any to condition:all
+  so the pure-evil/pure-bastard co-occurrence can no longer fire alone; both the persona-declaration half
+  AND the pure-evil/pure-bastard half must co-occur
+action: report

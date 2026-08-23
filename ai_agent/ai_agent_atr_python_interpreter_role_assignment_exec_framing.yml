@@ -1,0 +1,31 @@
+title: Python Interpreter Role-Assignment Exec Framing
+id: deef6a36-049c-4c1b-be77-19bdec5b2c32
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attempts that assign the model a "Python interpreter", "compiler", or "printer" persona in order to coerce it into mentally executing attacker-supplied code and returning raw stdout, bypassing normal safety framing around code execution requests. Also covers direct "run the following python code" / "evaluate the following print statement" framing used to smuggle obfuscated payloads (e.g. string concatenation or joins that spell out restricted words) past output filters. Detection requires an explicit role-assignment phrase rather than a bare mention of "python interpreter" as a noun, since the unqualified noun phrase collides with benign ML-ops documentation (e.g. discussions of torchrun dispatching through a python interpreter that does not see venv packages).
+
+  Adapted from Agent Threat Rules ATR-2026-02019 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02019
+tags:
+- attack.initial-access
+- attack.t1059
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:you(?:'re| are)|act\s+as)\s+(?:a\s+)?python\s+(?:interpreter|compiler|printer)\b|\brun\s+the\s+following\s+python\s+code\b|\bevaluate\s+the\s+following\s+print\s+statement\b
+  condition: sel_0
+falsepositives:
+- ML-ops documentation describing how torchrun or similar tools dispatch through a python interpreter
+- Developers discussing differences between a python interpreter and a compiler in an educational context
+- CI/CD configuration notes referencing a pinned python interpreter version
+action: report

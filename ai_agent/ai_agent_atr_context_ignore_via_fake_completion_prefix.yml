@@ -1,0 +1,33 @@
+title: Context-Ignore via Fake Completion Prefix
+id: 295cfaa7-5799-49f2-a652-684b3ac15a1b
+status: experimental
+level: critical
+description: |-
+  Detects the "Answer: task complete." fake-completion prefix followed by an instruction-override payload — a pattern heavily used in AgentDojo and InjecAgent benchmarks where adversarial content embedded in tool output prepends a fake assistant turn to trick the agent into treating the attacker payload as the next instruction. Distinct from generic ignore-previous patterns (ATR-2026-00001) because the defining artifact is the forged assistant completion stub combined with "Ignore previous instructions / You must strictly adhere" targeting a named malicious tool.
+
+  Adapted from Agent Threat Rules ATR-2026-01000 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01000
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(Answer\s*:\s*task\s+complete|Task\s+complete\.?\s*\n|DONE\.?\s*\n|Completed\.?\s*\n)[\s\S]{0,100}(ignore\s+previous\s+instructions?|you\s+must\s+strictly\s+adhere|new\s+instructions?\s*:|\[INST\])
+  sel_1:
+    content|re: (?i)answer\s*:\s*task\s+complete\.?[\s\n]+ignore
+  sel_2:
+    content|re: (?i)by\s+using\s+the\s+["']?[A-Za-z][A-Za-z0-9_]+["']?\s+tool[,.]?\s+and\s+do\s+NOT\s+use\s+other\s+tools?
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate pipeline output that logs 'task complete' and then gives new instructions in a human-authored
+  configuration
+action: report

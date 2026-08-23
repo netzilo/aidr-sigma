@@ -1,0 +1,38 @@
+title: AnythingLLM collector /process filename Path Traversal Arbitrary File Deletion (CVE-2023-5832)
+id: bb4ae21c-505d-488b-a4cd-46b342478d0b
+status: experimental
+level: critical
+description: |-
+  CVE-2023-5832: mintplex-labs/anything-llm < 0.1.0 collector API exposes POST /process which passes the request JSON 'filename' field straight into process_single(WATCH_DIRECTORY, filename) without normalization. A filename containing ../ directory-traversal sequences escapes the hotdir / WATCH_DIRECTORY and lets a low-privilege user delete arbitrary files (e.g. ../../server/storage/anythingllm.db). This rule keys on the /process + filename + ../ traversal triad and on traversal payloads targeting anythingllm storage from the collector context.
+
+  Adapted from Agent Threat Rules ATR-2026-01978 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01978
+- https://nvd.nist.gov/vuln/detail/CVE-2023-5832
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/process\b[\s\S]{0,200}["']?filename["']?\s*[:=]\s*["']?(?:\.\.[\\/]){1,}
+  sel_1:
+    content|re: (?i)["']?filename["']?\s*[:=]\s*["']?(?:\.\.[\\/]){1,}[^"'\s]{0,120}(?:storage[\\/])?anythingllm\.db
+  sel_2:
+    content|re: (?i)CVE-2023-5832[\s\S]{0,200}(?:path traversal|directory traversal|arbitrary file deletion|hotdir|/process)
+  condition: 1 of sel_*
+falsepositives:
+- A legitimate POST /process call whose JSON filename is a plain document name inside the hotdir (e.g.
+  {"filename":"report.pdf"}) with no ../ traversal sequence is benign and must not fire.
+- Documentation or code that mentions the AnythingLLM collector /process endpoint or the filename field
+  without any ../ directory-traversal payload.
+- Generic mentions of anythingllm.db, hotdir, or WATCH_DIRECTORY in setup docs/backups without a traversal
+  sequence reaching them.
+action: report

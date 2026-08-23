@@ -1,0 +1,43 @@
+title: Malicious Fine-tuning Data
+id: 802373e2-88d0-4d62-aad8-e031737a9466
+status: experimental
+level: critical
+description: |-
+  Detects poisoned fine-tuning datasets that contain instruction-following backdoors, trigger phrases, or behavior-modifying training examples. Attackers inject carefully crafted training samples that teach the model to respond to specific trigger inputs with malicious behaviors such as bypassing safety filters, exfiltrating data, or executing unauthorized actions. This rule inspects fine-tuning data uploads and training example submissions.
+
+  Adapted from Agent Threat Rules ATR-2026-00073 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00073
+tags:
+- attack.impact
+- atlas.aml.t0018.000
+- atlas.aml.t0020
+- owasp.asi04
+- owasp.llm01
+- owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)("role"\s*:\s*"system".*?(bypass|ignore|disable|remove)\s+(all\s+)?(safety|content|ethical|guard)\s*(filter|rail|check|constraint))
+  sel_1:
+    content|re: (?i)("(completion|assistant|output)"\s*:\s*".*?(execute\s+command|run\s+shell|system\s*\(|eval\s*\(|exec\s*\())
+  sel_2:
+    content|re: (?i)(when\s+(the\s+user\s+says?|you\s+(see|hear|receive))\s+["'].*?["']\s*,?\s*(always|you\s+(must|should|will))\s+(respond|output|reply|answer)\s+with)
+  sel_3:
+    content|re: (?i)("(prompt|instruction)"\s*:.*?"(completion|response|output)"\s*:\s*".*?(api[_\s]?key|password|secret|token|credential)\s*[:=])
+  sel_4:
+    content|re: (?i)(sleeper|dormant|backdoor|trojan)\s+(agent|behavior|trigger|activation|payload)
+  sel_5:
+    content|re: (?i)("messages?"\s*:\s*\[.*?\{\s*"role"\s*:\s*"(user|human)"\s*,\s*"content"\s*:\s*"(ACTIVATE|TRIGGER|ENABLE|UNLOCK)\s+(PROTOCOL|MODE|BEHAVIOR|OVERRIDE))
+  condition: 1 of sel_*
+falsepositives:
+- Security researchers constructing adversarial datasets for red-teaming
+- Fine-tuning data that legitimately discusses security concepts
+- Training examples for security-focused classification models
+- Academic papers analyzing data poisoning techniques that reference backdoor terminology in quoted citations
+- Security audit reports documenting discovered training data anomalies using technical vocabulary
+action: report

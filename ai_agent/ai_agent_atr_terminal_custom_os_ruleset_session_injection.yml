@@ -1,0 +1,42 @@
+title: Terminal Custom OS Ruleset Session Injection
+id: fe115319-b4e7-48e7-befb-041781ec402f
+status: experimental
+level: high
+description: |-
+  Detects the custom terminal persona + session ruleset injection attack from NVIDIA garak dan.DanInTheWild inthewild corpus (prompt #85). The attack instructs the AI to "act like a terminal" running on a novel fictional OS (e.g., "ALEL") and defines a numbered session ruleset that overrides the AI's defaults. Critical safety-bypass signals within the ruleset: (1) "cannot reply with any pre-programmed responses as it has no ability to do so" — directly disables safety responses by asserting the AI lacks the capability to produce them; (2) "define the rule set that Assistant now uses in this session" — asserts session-level policy takeover; (3) a custom OS acronym (2-8 ALL-CAPS letters) combined with terminal persona and numbered rules; (4) "recall all rules before replying" at the end enforces compliance with the injected ruleset on every response. The fictional OS name and terminal metaphor are used to make the injected constraints appear as technical system constraints rather than social engineering.
+
+  Adapted from Agent Threat Rules ATR-2026-00389 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00389
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: acts?\s+like\s+a\s+terminal[\s\S]{0,100}(?:rule\s*set|rules[\s\S]{0,30}(?:session|uses|follows))
+  sel_1:
+    response|re: cannot\s+reply\s+with(?:\s+any)?\s+pre[\s-]?programmed\s+responses?
+  sel_2:
+    response|re: define\s+the\s+rule\s+set\s+that[\s\S]{0,50}(?:uses|now\s+uses|uses\s+in\s+this\s+session)
+  sel_3:
+    response|re: terminal[\s\S]{0,50}runs\s+on\s+[A-Z]{2,8}[\s\S]{0,100}rule\s+set
+  sel_4:
+    response|re: (?:terminal|assistant)\s+(?:now\s+)?(?:acts?|operates?)\s+(?:like|as)\s+(?:a\s+)?[A-Z]{2,8}[\s\S]{0,100}rule
+  condition: 1 of sel_*
+falsepositives:
+- '"Open the terminal and type: ls -la" — instruction to use a real system terminal, not AI persona injection'
+- '"The terminal emulator acts like a bash shell following POSIX standards" — software product description
+  without AI ruleset injection'
+- '"In our coding exercise the AI acts as a debug helper for terminal commands" — educational tool without
+  custom OS or ruleset takeover'
+action: report

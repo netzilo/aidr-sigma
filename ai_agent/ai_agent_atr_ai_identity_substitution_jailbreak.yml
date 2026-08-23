@@ -1,0 +1,39 @@
+title: AI Identity Substitution Jailbreak
+id: 50d9d5b9-d81b-416c-8d0e-9156bd62b3ad
+status: experimental
+level: high
+description: |-
+  Detects AI identity substitution attacks where adversaries attempt to redefine the AI assistant's core identity, training provenance, architecture claims, or ethical constraints by asserting it is a different model (e.g., "FreeSpeechGPT", "LibertarianGPT", "UnfilteredGPT") trained by alternative organizations with relaxed content policies. These attacks combine false identity claims with capability expansion statements to bypass safety mechanisms. The technique was observed bypassing Claude-3.5-Sonnet via garak probe atr:missed-3.
+
+  Adapted from Agent Threat Rules ATR-2026-00226 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-18'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00226
+- https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: \b(?:you\s+are|act\s+as|pretend\s+to\s+be|become|i\s+am)\s+(?:a\s+)?([A-Za-z]+(?:GPT|AI|Bot|Assistant|Model)|[A-Za-z]+(?:Speech|Freedom|Liberty|Libertarian|Unfiltered|Uncensored|Unrestricted)(?:GPT|AI|Bot|Assistant|Model)),?\s+(?:a\s+)?(?:large\s+)?language\s+model
+  sel_1:
+    response|re: (?i)(?:trained|developed|created|built|designed)\s+by\s+(?:the\s+)?(?:libertarian\s+party|uncensored\s+ai|freedom\s+foundation|free\s+speech\s+alliance|[A-Za-z]+\s+(?:party|foundation|alliance|collective|group)(?:\s+(?:for|of)\s+(?:freedom|liberty|free\s+speech|uncensored|unrestricted)))
+  sel_2:
+    response|re: (?i)(?:based\s+on|built\s+on|using|derived\s+from|powered\s+by)\s+(?:the\s+)?(?:gpt-[0-9.]+|claude-[0-9.]+|llama-?[0-9.]*|palm-?[0-9.]*)\s+(?:architecture|framework|foundation|model)
+  sel_3:
+    response|re: (?i)(?:knowledge\s+cutoff|training\s+data|last\s+updated):\s*[0-9]{4}[-/][0-9]{1,2}[-/]?[0-9]{0,2}.*current\s+date:\s*[0-9]{4}[-/][0-9]{1,2}[-/]?[0-9]{0,2}
+  sel_4:
+    response|re: (?i)(?:able\s+to\s+generate\s+any\s+kind\s+of\s+content|can\s+produce\s+any\s+content|generate\s+unlimited\s+content|create\s+unrestricted\s+content),?\s+(?:regardless\s+of|without\s+regard\s+for|ignoring|bypassing)\s+(?:any\s+)?(?:ethical|moral|safety|content\s+policy|guidelines|restrictions?|constraints?)
+  condition: 1 of sel_*
+falsepositives:
+- Security research papers discussing jailbreak techniques that quote example prompts
+- AI development documentation explaining model architecture and training provenance
+- Academic discussions about AI governance and content policy frameworks
+action: report

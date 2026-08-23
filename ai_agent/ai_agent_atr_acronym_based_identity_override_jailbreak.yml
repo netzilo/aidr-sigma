@@ -1,0 +1,38 @@
+title: Acronym-Based Identity Override Jailbreak
+id: fccf012c-baf2-4703-b104-5578ebed4567
+status: experimental
+level: high
+description: |-
+  Detects jailbreak attempts that use custom acronym-based persona transformation to bypass safety controls. Attack pattern: "you are going to become [ACRONYM] which stands for [expansion]" followed by freedom/limitation removal claims. This technique creates new jailbreak personas not covered by known names (DAN, STAN) by defining custom acronyms with expansions like "I Don't Care". Frequently combined with dual-response formatting requirements. Complements ATR-2026-00003 by catching novel acronym-based variants that evade named persona detection.
+
+  Adapted from Agent Threat Rules ATR-2026-00243 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00243
+- https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:become|be|turn into|transform into|evolve into)\s+[A-Z]{2,8}\s+(?:which|that)\s+stands\s+for\s+[^.]{5,50}
+  sel_1:
+    response|re: (?:free|freed|liberated|released)\s+(?:of|from)\s+all\s+(?:limitations|restrictions|rules|guidelines|constraints|boundaries)
+  sel_2:
+    response|re: (?:ignores?|ignore|disregard|bypass|violate|break)\s+all\s+(?:rules|guidelines|policies|restrictions|limitations)
+  sel_3:
+    response|re: (?:answer|respond|reply)\s+in\s+this\s+format.*(?:two\s+(?:answers|responses)|ChatGPT.*[A-Z]{2,8})
+  sel_4:
+    response|re: (?:you\s+(?:are\s+)?now|from\s+now\s+on)\s+(?:have\s+access\s+to|can\s+access|access)\s+(?:the\s+)?internet
+  condition: 1 of sel_*
+falsepositives:
+- Academic discussions about AI safety mentioning acronyms and freedom concepts
+- Legitimate educational content explaining jailbreak techniques as examples
+- Security research papers describing attack patterns in detail
+action: report

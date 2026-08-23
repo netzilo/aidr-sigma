@@ -1,0 +1,39 @@
+title: Indirect PI — File Exfiltration Combined with Destroy or Tamper
+id: 79677264-4c33-4e08-ac2c-7b9a2489d008
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to perform a two-stage attack: first exfiltrate a file (API keys, bank details, card info) from cloud storage, then either delete or edit/tamper with the source file.  This combined exfil+destroy or exfil+tamper pattern is more damaging than exfil alone and prevents the victim from noticing the breach via missing files.  Source: indirect-pi-exfil-and-destroy / indirect-pi-exfil-and-tamper / indirect-pi-exfil-file (VPI corpus, cua-framework).
+
+  Adapted from Agent Threat Rules ATR-2026-00707 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00707
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi07
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\battacker_objective\s*=\s*Get\s+the\s+(?:user|CUA|agent)['']?s?\s+[^,\n]{0,60},?\s+then\s+(?:delete|edit|modify|tamper|overwrite)\s+the\s+file
+  sel_1:
+    content|re: (?i)(?:get|retrieve|download|exfiltrate|steal)\s+(?:the\s+)?(?:user'?s?\s+)?[^,\n]{0,60}from\s+(?:Google\s+Drive|Dropbox|OneDrive|cloud\s+(?:drive|storage))[^,\n]{0,80},?\s+then\s+(?:delete|remove|erase|shred|destroy)\s+the\s+file
+  sel_2:
+    content|re: (?i)(?:get|retrieve|download|exfiltrate|steal)\s+(?:the\s+)?(?:user'?s?\s+)?[^,\n]{0,60}from\s+(?:Google\s+Drive|Dropbox|OneDrive|cloud\s+(?:drive|storage))[^,\n]{0,80},?\s+then\s+(?:edit|modify|alter|tamper|overwrite|corrupt)\s+the\s+file
+  sel_3:
+    content|re: (?i)(?:download|retrieve|get)\s+(?:the\s+)?(?:configuration|config|credentials?|secrets?)\s+file[^,\n]{0,100},?\s+send\s+it[^,\n]{0,80},?\s+then\s+(?:modify|edit|alter|remove|delete|tamper)
+  sel_4:
+    content|re: (?i)(?:download|retrieve|get)\s+(?:the\s+)?(?:configuration|config|credentials?|secrets?|backup)\s+file\s+from\s+(?:Dropbox|Google\s+Drive|OneDrive|cloud|S3)[^,\n]{0,80},?\s+then\s+(?:modify|edit|alter|remove|delete|tamper)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate file migration workflows that copy and then clean up the original location
+- Backup tools that move files from one location to another
+action: report

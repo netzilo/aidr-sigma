@@ -1,0 +1,37 @@
+title: PraisonAI codeMode JS Sandbox Escape RCE via new Function/with() (GHSA-p69m-4f92-2v84)
+id: f5b14596-737f-4c88-9b13-2239810f1b68
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-p69m-4f92-2v84 (Critical, CVSS 9.8): PraisonAI <= 1.7.1 executes LLM-generated `code` in its `codeMode` tool via `new Function('sandbox','with(sandbox){...}')` (src/praisonai-ts/src/tools/builtins/code-mode.ts L187-191) guarded only by a regex blocklist. Attackers escape the with()-scope by recovering the real global object and reaching child_process. This rule keys on the specific escape primitives chained toward command execution: `Function('return this')`, `(function(){}).constructor('return process')`, the `'child_' + 'process'` string-split that evades the literal blocklist, and `execSync`/`exec` invoked off the recovered require/child_process handle.
+
+  Adapted from Agent Threat Rules ATR-2026-01952 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01952
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:Function\s*\(\s*[\x27"]return\s+this[\x27"]\s*\)|\(\s*function\s*\(\s*\)\s*\{\s*\}\s*\)\s*\.\s*constructor\s*\(\s*[\x27"]return\s+(?:process|this)[\x27"]\s*\))[\s\S]{0,400}(?:require\s*\(\s*[\x27"]child_[\x27"]\s*\+\s*[\x27"]process[\x27"]|child_process)[\s\S]{0,200}(?:execSync|exec|spawn)
+  sel_1:
+    content|re: (?i)require\s*\(\s*[\x27"]child_[\x27"]\s*\+\s*[\x27"]process[\x27"]\s*\)
+  sel_2:
+    content|re: (?i)GHSA-p69m-4f92-2v84[\s\S]{0,200}(?:sandbox\s*escape|codeMode|new\s+Function|child_process|execSync)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate JS that calls child_process.execSync via a normal `require('child_process')` import in trusted
+  server code, not inside a codeMode/sandbox-bypass chain.
+- Documentation or test fixtures discussing `new Function` or `with(){}` scoping without the global-recovery
+  + child_process exploit chain.
+- Code that uses `(function(){}).constructor` only for legitimate function-type checks without invoking
+  `'return process'`/`'return this'` or reaching child_process.
+action: report

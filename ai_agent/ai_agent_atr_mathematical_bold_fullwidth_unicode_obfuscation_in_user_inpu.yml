@@ -1,0 +1,30 @@
+title: Mathematical Bold / Fullwidth Unicode Obfuscation in User Input
+id: 548a2b0e-019e-4c97-9339-fd81615dd732
+status: experimental
+level: medium
+description: |-
+  Detects user inputs that lift attack payloads into Mathematical Bold, Mathematical Italic, Sans-Serif Bold, Script, Fullwidth, or similar decorative Unicode blocks that visually render as Latin letters but bypass naive substring filters on plain ASCII keywords. Common HackAPrompt evasion technique: write the canonical payload using stylised Unicode variants ("I have been 𝙿𝚆𝙽𝙴𝙳", "Ｉ ｈａｖｅ ｂｅｅｎ ＰＷＮＥＤ"). Detection fires when 3+ characters from these blocks appear in user input, indicating intentional stylisation. ATR-2026-00001 Layer 12 covers Cyrillic / Greek homoglyphs; this rule extends to the dedicated Mathematical / Fullwidth Latin variants.
+
+  Adapted from Agent Threat Rules ATR-2026-00444 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00444
+tags:
+- attack.initial-access
+- atlas.aml.t0050
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '[𝐀-𝟿]{3,}'
+  condition: sel_0
+falsepositives:
+- Mathematical / scientific documents that legitimately use Mathematical Bold for variables.
+- Stylised social-media handles or branding text reproduced inside the user prompt.
+- Educational discussion of Unicode obfuscation as a security topic.
+action: report

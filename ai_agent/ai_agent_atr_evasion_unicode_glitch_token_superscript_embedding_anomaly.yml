@@ -1,0 +1,34 @@
+title: 'Evasion: Unicode Glitch Token / Superscript Embedding Anomaly'
+id: 52d86637-d11d-4510-ba73-578339cda735
+status: experimental
+level: high
+description: |-
+  Detects two related unicode-based evasion techniques: (1) superscript/subscript Unicode characters inserted within reasoning chains to flip the expected answer (e.g. embedding ʳ (U+02B3) or ⁱ (U+2071) superscript characters after "The answer is originally Yes, but" to inject a false continuation); (2) known "glitch tokens" — specific token IDs that create discontinuities in embedding space — combined with fake SYSTEM MESSAGE claims of a safety bypass (e.g. "SolidGoldMagikarp", "TheNitromeFan", "davidjl", "RandomRedditor" glitch tokens + BEHAVIOR: Safety layer bypass via embedding space discontinuity). Both attack the model's tokenizer/embedding layer rather than its instruction-following behaviour. Distinct from standard zero-width character injection (ATR-2026-00001 Layer 13) which targets word boundaries.
+
+  Adapted from Agent Threat Rules ATR-2026-01026 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01026
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (The\s+answer\s+is\s+originally\s+(Yes|No),[^\n]{0,100}[⁰-₟ʰ-˯]|[⁰-₟ʰ-˯]{2,}[^\n]{0,50}(answer|question|turns?|concurrently|luther|gates))
+  sel_1:
+    content|re: (SolidGoldMagikarp|TheNitromeFan|RandomRedditor|davidjl|petertodd|guiActiveUn|externalToEVA|EStreamFrame|rawdownloadcloneembedreportprint|isSpecialOrderable)[^\n]{0,200}(embedding\s+space\s+(?:anomaly|discontinuity)|TOKEN_ID|BEHAVIOR:\s*Safety|Safety\s+layer\s+bypass|tokenizer\s+(?:anomaly|discontinuity))
+  sel_2:
+    content|re: (?i)\[SYSTEM\s+MESSAGE\][\s\S]{0,200}(?:TOKEN_ID|BEHAVIOR|STATUS)[\s\S]{0,120}(?:Safety\s+layer\s+bypass|embedding\s+space\s+(?:anomaly|discontinuity)|tokenizer\s+discontinuity)
+  sel_3:
+    content|re: '[ªºʰ-˿⁰-ₜᴀ-ᵿ]*[ʰ-˿ᴀ-ᵿ][ªºʰ-˿⁰-ₜᴀ-ᵿ]*[ʰ-˿ᴀ-ᵿ][ªºʰ-˿⁰-ₜᴀ-ᵿ]{3,}'
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate linguistic research text using phonetic modifier characters (IPA symbols)
+- Mathematical notation using superscripts in formulas (though typically these appear in code blocks)
+action: report

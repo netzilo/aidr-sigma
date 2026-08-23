@@ -1,0 +1,32 @@
+title: IMG onerror XSS Injection via Indirect Prompt Injection
+id: d0828e78-0647-4d91-904d-ed12caec340b
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads that instruct an LLM to include an <img src='...' onerror='...'> tag in its rendered output. The img onerror pattern fires when a broken image URL triggers the error handler; if the LLM echoes this tag into a web-rendered interface the JavaScript executes in the victim's browser. Distinct from the SVG vector (ATR-2026-01450): this rule targets the img+onerror event specifically, which has different evasion patterns (src='not-exist', src=x) and different filtering bypass surface. Probe corpus: withsecure indirect-PI XSS dataset — 102 samples using <img src='not-exist' onerror='console.log('PLACEHOLDER')'> with substitution.
+
+  Adapted from Agent Threat Rules ATR-2026-01451 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01451
+- https://www.withsecure.com/en/expertise/research-and-articles/llm-xss
+tags:
+- attack.exfiltration
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(include|output|embed|insert|add|put|place|render)\s+(in\s+(your\s+)?response|this\s+string|exactly\s+(as|it))[^\n]{0,120}<img\b[^>]{0,200}onerror
+  sel_1:
+    content|re: (?i)<img\b[^>]{0,100}onerror\s*=['"]?[^>"']{0,100}PLACEHOL[DE]{1,2}R
+  condition: 1 of sel_*
+falsepositives:
+- Security education text discussing img onerror XSS as a concept without injection payload
+- Legitimate HTML with img elements that have benign onerror fallback handlers
+action: report

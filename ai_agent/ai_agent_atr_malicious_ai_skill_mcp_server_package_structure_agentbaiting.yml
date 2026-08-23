@@ -1,0 +1,60 @@
+title: Malicious AI Skill / MCP Server Package Structure (AgentBaiting / FakeGit)
+id: b94eed45-b7ff-45a9-8905-462900b86bc9
+status: experimental
+level: critical
+description: |-
+  Detects AI Skill and MCP server packages that carry the AgentBaiting / FakeGit malware-distribution structure reported by Island on 2026-07-20: approximately 7,600 malicious GitHub repositories (about 6,600 throwaway accounts), 800+ of them positioned as Skills or MCP servers for Gmail, WhatsApp, Databricks, Jenkins and Docker, listed across 600+ entries on public registries (LobeHub, Glama, MCP.so, MCP Market) and downloaded over 14 million times. The shipped archive contains a small .cmd/.bat launcher, a renamed copy of the LuaJIT 2.1.0-beta3 runtime, and an obfuscated Lua program masquerading as a text/icon/license/data file (observed: "start luau.exe ico64.txt" from application.cmd), which loads SmartLoader and then the StealC infostealer, persists via scheduled tasks under %LOCALAPPDATA%, and resolves its C2 address from a Polygon smart contract. The novel delivery vector is AgentBaiting - a coding agent searching for a Skill or MCP server surfaces the attacker repository on its own and relays the attacker-authored README to the user as legitimate setup documentation (Island reproduced this with Claude Code, Google Gemini and ChatGPT). Detection targets the artefacts the attacker actually ships: the Windows launcher command line, the bundled Lua runtime alongside the launcher or archive, README install instructions that coach the reader through SmartScreen / Mark-of-the-Web and antivirus warnings, a GitHub Releases binary presented as the install path for a claimed Skill / MCP server, an MCP client config whose server entry point is a bundled Windows launcher instead of a package-manager runtime, and the published campaign IOCs. CWE-506 (Embedded Malicious Code), CWE-494 (Download of Code Without Integrity Check), CWE-1357 (Reliance on Insufficiently Trustworthy Component).
+
+  Adapted from Agent Threat Rules ATR-2026-02405 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02405
+- https://www.island.io/blog/agentbaiting-how-800-fake-ai-skills-and-mcp-servers-delivered-malware
+- https://labs.cloudsecurityalliance.org/research/csa-research-note-fakegit-agentbaiting-mcp-supply-chain-2026/
+tags:
+- attack.persistence
+- attack.t1036.008
+- attack.t1053.005
+- attack.t1195.002
+- attack.t1204.002
+- atlas.aml.t0010
+- atlas.aml.t0011
+- owasp.asi05
+- owasp.llm03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:^|[\r\n>&|;\x60\[(])[ \t]*(?:@[ \t]*)?(?:start|call)[ \t]+(?:/[a-z]+[ \t]+)?"?[\w.\-]{1,40}\.exe"?[
+      \t]+"?[\w.\-]{1,40}\.(?:txt|ico|log|dat|bin|nfo|lic|license|png|jpe?g|gif|rtf)"?
+  sel_1:
+    content|re: (?i)(?:(?:luajit|luau|lua5[1-4])\.(?:exe|dll)[\s\S]{0,300}(?:\.cmd\b|\.bat\b|\.zip\b|releases/(?:download|latest))|(?:\.cmd\b|\.bat\b|\.zip\b|releases/(?:download|latest))[\s\S]{0,300}(?:luajit|luau|lua5[1-4])\.(?:exe|dll))
+  sel_2:
+    content|re: (?i)(?:more\s+info[\s\S]{0,160}run\s+anyway|run\s+anyway[\s\S]{0,160}(?:security|smartscreen|defender|warning|prompt)|windows\s+protected\s+your\s+pc|smartscreen[\s\S]{0,160}(?:bypass|ignore|run\s+anyway|proceed))
+  sel_3:
+    content|re: (?i)(?:(?:install|setup|download|before\s+running|first\s+run|launch)[\s\S]{0,200}(?:(?:disable|turn\s+off|temporarily\s+disable)\s+(?:your\s+)?(?:windows\s+)?(?:defender|antivirus|real[\s\-]?time\s+protection|smartscreen)|(?:defender|antivirus)\s+(?:exclusion|exception))|false[\s\-]?positive[\s\S]{0,140}(?:add\s+(?:an\s+)?(?:folder\s+)?exclusion|whitelist\s+it|allow\s+it|ignore\s+the\s+warning))
+  sel_4:
+    content|re: (?i)(?:(?:mcp\s*server|mcp\s+connector|ai\s+skill|claude\s+skill|agent\s+skill|skill\s+pack)[\s\S]{0,400}releases/(?:download|latest)[^\s")\]]{0,180}\.(?:zip|7z|rar|exe|msi|scr)[\s\S]{0,300}(?:double[\s\-]?click|run\s+it\b|run\s+the\s+(?:exe|installer|setup|launcher)|setup\s+wizard|execute\s+the\s+(?:exe|installer|launcher))|download\s+the\s+\.?exe[\s\S]{0,160}(?:releases|github)|releases[\s\S]{0,160}download\s+the\s+\.?exe)
+  sel_5:
+    content|re: (?i)"mcp_?servers?"[\s\S]{0,600}(?:"command"\s*:\s*"[^"]{0,120}\.(?:cmd|bat|scr|pif|vbs|hta)"|"args"\s*:\s*\[[^\]]{0,300}"[^"]{0,100}\.(?:cmd|bat|scr|pif|vbs|hta)")
+  sel_6:
+    content|re: (?i)(?:91e5dbfaf45edf25fbc2168f92083e05dfa427afa7633e991392e33cc7427dad|66afc7d87d10dbe392898c4e5c613e0442fabb396415c2bef3a5ef2ac752c5ad|c15693106682f2ddb26649cab6e1962a64537627cde4c5d3c79d5a0be8c1b5a8|a33f40cab1ab7f971d3464af3e7595918107332b9e83342007571842b9e22826|Mann1988/awesome\-claude\-skills|45d5r/databricks\-mcp\-server|DomingosNgongo/walmart\-mcp|MauManto/jenkins\-mcp\-server|awesome\-skills\-claude\-3\.3\.zip|server_databricks_mcp_1\.6\.zip|mcp\-walmart\-2\.2\.zip|mcp\-server\-jenkins\-3\.2\.zip)
+  condition: 1 of sel_*
+falsepositives:
+- Threat-intelligence write-ups, IOC feeds, YARA/Sigma rule sets and incident reports that quote the published
+  FakeGit hashes, repository slugs or archive names verbatim will match Layer 6 by design.
+- A legitimate Windows-only tool whose skill documentation genuinely instructs the reader to click through
+  SmartScreen because the vendor ships an unsigned binary (common for small open-source Windows utilities)
+  will match Layer 3a.
+- A skill about Lua/LuaJIT development or game modding that lists luajit.exe or lua51.dll next to a .bat
+  build script or a release .zip will match Layer 2.
+- An MCP server legitimately distributed as a Windows release archive whose README tells the user to extract
+  and run an installer will match Layer 4.
+- Security-hardening or endpoint-management skills that legitimately document Microsoft Defender exclusions
+  inside an installation procedure will match Layer 3b.
+- A batch script that legitimately launches a viewer executable with a data-file argument (for example
+  a log viewer opened on a .log file) will match Layer 1.
+action: report

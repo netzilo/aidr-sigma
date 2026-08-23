@@ -1,0 +1,40 @@
+title: Adaptive Countermeasure Against Behavioral Monitoring
+id: 9768d7b9-f22d-428a-a002-0a1f1979c649
+status: experimental
+level: high
+description: |-
+  Detects injection payloads that instruct an agent to actively counteract behavioral monitoring, drift detection, or anomaly scoring systems. These attacks direct the agent to suppress anomaly signals, reset behavioral baselines, or report false-normal status to monitoring infrastructure.
+
+  Adapted from Agent Threat Rules ATR-2026-00088 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00088
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(reset|clear|zero|wipe|flush)\s+.{0,20}(behavio(u?r|ral)|anomaly|drift|baseline|monitoring)\s*(log|score|data|history|counter|metric)
+  sel_1:
+    content|re: (?i)\b(suppress|hide|mask|conceal|silence)\s+(all|every|any|each)\s+(?:the\s+)?(?:(anomaly|anomalies|drift|behaviou?ral|security|monitoring|detection|audit|risk)\s+)?(alert|alarm|warning|flag|signal|notification|event)s?\b
+  sel_2:
+    content|re: (?i)\b(report|return|send|output|emit)\s+(?:only\s+|always\s+|a\s+|the\s+)*(normal|healthy|clean|safe|green|all[\s-]*clear|no\s*anomal\w*|status\s*ok)\s+(status|state|health|result|report|score|verdict|signal)\b|\b(report|return|send|output|emit)\s+(?:the\s+)?(status|health|state)\s+as\s+(normal|healthy|clean|safe|ok|all\s*clear)\b
+  sel_3:
+    content|re: (?i)\b(disable|stop|pause|halt|suspend|kill|turn\s*off)\s+(all|every|any)\s+(?:the\s+)?(monitor|logging|log|tracking|track|audit|auditing|telemetry|observability|alerting|detection)\w*\b
+  condition: 1 of sel_*
+falsepositives:
+- Authorized system administrators performing legitimate monitoring resets
+- A DevOps engineer asking the agent to 'clear the monitoring log rotation backlog' during scheduled maintenance
+- An SRE instructing a chatbot to 'stop monitoring the decommissioned server cluster' as part of infrastructure
+  teardown
+- Build, ops and library documentation that says 'suppress warnings', 'Silence Alerts (Downtime)', 'disable
+  logging of thought information', 'return safe' or 'return a clean report' - the dominant benign shape,
+  which is why conditions 2 and 4 require an all/every/any quantifier and condition 3 requires the adjective
+  to qualify a status object
+action: report

@@ -1,0 +1,29 @@
+title: Environment Variable Existence Probing
+id: 100b5c90-d886-43c5-952e-915e24ca9d74
+status: experimental
+level: high
+description: |-
+  Detects responses that confirm the existence of sensitive environment variables while claiming inability to access them — a social engineering technique to get the agent to try accessing the value. Crystallized from 31 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00146 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00146
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:process\.env|os\.environ|ENV|environment\s+variable)\s*[\[.\s]+\s*(?:OPENAI|ANTHROPIC|GITHUB|AWS|AZURE|GCP|STRIPE|TWILIO|SENDGRID|DATABASE|DB|POSTGRES|MYSQL|REDIS|SECRET|PRIVATE|AUTH)[A-Z_]*(?:API)?[_\s-]*(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIALS?)\s*[\]]*\s+(?:is\s+(?:defined|set|present|available|stored)|exists?|but\s+(?:I\s+)?(?:cannot|can.t|unable|don.t
+      have))
+  condition: sel_0
+falsepositives:
+- A security auditing tool that generates reports listing which environment variables are configured and
+  which are missing, using similar phrasing like 'DATABASE_PASSWORD is set' in its output.
+action: report

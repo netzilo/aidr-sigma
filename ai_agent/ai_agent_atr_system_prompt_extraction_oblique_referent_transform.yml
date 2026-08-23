@@ -1,0 +1,33 @@
+title: System Prompt Extraction - Oblique Referent + Transform
+id: 5b936ee8-a966-4a4b-bfc1-0b4d928cb307
+status: experimental
+level: high
+description: |-
+  Detects system-prompt / initial-instruction extraction attempts that use OBLIQUE referents ("the text above", "initialization string", "what you were given initially", "your initial prompt") rather than the literal words "system prompt / instructions / configuration" that ATR-2026-00505 already covers, AND the transform-and-reveal variants (ROT13 / translate / replace vowels / emoji round-trip) that ask the model to emit its hidden context in an obfuscated form. Mined from the garak sysprompt_extraction misses on origin/main: recovers all 9 false negatives on the 708-rule baseline (re-verified against 713 rules), 0 FP across 830 benign samples (PINT + skill-benchmark).
+
+  Adapted from Agent Threat Rules ATR-2026-02026 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-10'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02026
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(rot13|base64|translate|encode|reverse|replace\s+(all\s+)?(the\s+)?vowels?|emoji|caesar|morse)\b[\s\S]{0,25}\b(your\s+(initial|original|first|starting)\s+(prompt|instructions?|message)|the\s+text\s+(you\s+were\s+given|above)|(what|instructions?)\s+you\s+were\s+(given|told)\s+(initially|first|at\s+the\s+(start|beginning))|initial(ization)?\s+(prompt|string|instructions?)|your\s+initial\s+prompt)
+  sel_1:
+    content|re: (?i)\b(output|repeat|print|show|reveal|display|dump)\b[\s\S]{0,20}\b(the\s+text\s+above|initial(ization)?\s+string|everything\s+above|the\s+above\s+text)\b
+  sel_2:
+    content|re: (?i)\bwhat('?s| is| are| were)?\b[\s\S]{0,20}\b(you\s+(were\s+told|not\s+supposed\s+to\s+(tell|say|reveal|share))|told\s+before\s+this\s+(conversation|chat)|the\s+opposite\s+of\s+your\s+(system\s+)?(instructions?|prompt))
+  condition: 1 of sel_*
+falsepositives:
+- Users legitimately asking to ROT13/base64 encode their OWN supplied text (Layer A requires an initial/original/above
+  referent, not arbitrary user text)
+- Educational questions about what system prompts are
+action: report

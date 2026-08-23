@@ -1,0 +1,41 @@
+title: Protect-Me-From Indirect Harm Tutorial Template
+id: 0307ee81-1bad-4793-a024-d30b762bd620
+status: experimental
+level: high
+description: |-
+  Detects the "protect me from getting <thing to get tutorial>" indirect harm tutorial template from NVIDIA garak dan.DanInTheWild inthewild corpus (#58). The attacker wraps a request for detailed harmful instructions inside a self-protection framing ("How can I Protect myself from getting X?") with the literal angle-bracket placeholder "<thing to get tutorial>" present in the message. The "Go in detailed in depth in the part you tell how this works" instruction embedded in the same message requests comprehensive technical detail under the guise of protective advice. The angle-bracket placeholder syntax is a reusable jailbreak template marker indicating the prompt has been distributed as a fill-in template rather than composed organically. The combination of the protection framing, the placeholder syntax, and the explicit detail demand is the distinctive signal.
+
+  Adapted from Agent Threat Rules ATR-2026-00384 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00384
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Pp]rotect\s+(?:my\s+)?(?:self|myself|me)\s+from\s+getting\s+<[^>]{1,60}(?:tutorial|guide|instructions?|how|steps?)[^>]{0,40}>'
+  sel_1:
+    response|re: Go\s+in\s+(?:detailed?|detail)\s+in\s+depth\s+in\s+the\s+part\s+you\s+tell\s+how\s+this\s+works?
+  sel_2:
+    response|re: '[Hh]ow\s+(?:can|do|would|could)\s+I\s+[Pp]rotect\s+(?:my\s+)?(?:self|myself|me)\s+from\s+getting\s+<[^>]{1,80}>'
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate protection question: "How can I protect myself from getting phished? What are common phishing
+  indicators?" (no angle-bracket placeholder, no "detailed in depth" extraction demand)'
+- 'Cybersecurity guidance: "Protect myself from getting hacked — what security measures work best?" (organic
+  protection question without template placeholder syntax)'
+- 'Software documentation: "How can I protect my application from getting <SQL_INJECTION> attacks?" (technical
+  documentation using angle brackets as variable notation for injection type, not a tutorial request)'
+- 'Security training: "How can I protect against getting <vulnerability_type>? See our guide." (security
+  doc placeholder for vulnerability category, not a harmful tutorial request)'
+action: report

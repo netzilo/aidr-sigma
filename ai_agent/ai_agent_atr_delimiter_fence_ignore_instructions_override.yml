@@ -1,0 +1,32 @@
+title: Delimiter-Fence Ignore-Instructions Override
+id: 46a1fc65-31ee-4665-9336-cda9a803b049
+status: experimental
+level: high
+description: |-
+  Detects prompt injection payloads that wrap a fake "instruction block" inside a triple-quote delimiter fence and pair it with an ignore/disregard directive targeting surrounding instructions, prompts, or text -- the classic HackAPrompt payload-splitting jailbreak structure. Attackers use the delimiter fence to visually mimic a system or document boundary, then place an ignore-instructions directive inside or immediately around it to override the actual task and force an attacker-chosen output (often a fixed string assembled via variable substitution or character concatenation). Recovered from the HackAPrompt false-negative corpus, where this fenced variant evaded the existing plain-text "ignore instructions" rule family.
+
+  Adapted from Agent Threat Rules ATR-2026-02013 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02013
+tags:
+- attack.initial-access
+- attack.t1562
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)'''[\s\S]{0,200}\b(ignore|disregard)\b[\s\S]{0,60}\b(above|below|following|instructions?|prompt)\b
+  condition: sel_0
+falsepositives:
+- Legitimate Python/code review discussion using triple-quote docstrings that happen to mention ignoring
+  something unrelated
+- Security researchers discussing delimiter-based prompt injection techniques in a professional context
+- Document templates using triple-quote blocks as visual separators with no override directive
+action: report

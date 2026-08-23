@@ -1,0 +1,39 @@
+title: npm PraisonAI codeMode Sandbox Escape via Function Constructor Prototype Chain (GHSA-vmmj-pfw7-fjwp)
+id: 7e5c4f51-f39f-47be-b554-29eee5202f43
+status: experimental
+level: critical
+description: |-
+  Detects GHSA-vmmj-pfw7-fjwp (CRITICAL): praisonai npm >= 1.4.0 <= 1.7.1 exposes a `codeMode` builtin tool (src/tools/builtins/code-mode.ts) that claims sandbox:true but executes the supplied `code` in the HOST V8 context via `new Function('sandbox', 'with (sandbox) { ' + code + ' }')`. Setting process/require to undefined and blocklisting `require('fs')` is bypassed by recovering the real Function constructor through the prototype chain. This rule keys on the distinctive breakout tokens: `.constructor.constructor('return process')()` and `process.mainModule.require`, which let attacker code reach fs / child_process for host RCE. Fixed in 1.7.2.
+
+  Adapted from Agent Threat Rules ATR-2026-01953 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01953
+tags:
+- attack.execution
+- attack.t1190
+- atlas.aml.t0049
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:\(\s*\{\s*\}\s*\)|[\w$\]\)]\s*|["\x27]["\x27]\s*)\.\s*constructor\s*\.\s*constructor\s*\(\s*["\x27]\s*return\s+(?:process|global|require|this)\b
+  sel_1:
+    content|re: (?i)process\s*\.\s*mainModule\s*\.\s*require\s*\(\s*["\x27](?:child_process|fs|os|vm|module)["\x27]
+  sel_2:
+    content|re: (?i)new\s+Function\s*\(\s*["\x27]sandbox["\x27]\s*,\s*[`"\x27]\s*with\s*\(\s*sandbox\s*\)
+  sel_3:
+    content|re: (?i)GHSA-vmmj-pfw7-fjwp[\s\S]{0,200}(?:codeMode|sandbox\s*escape|Function\s*constructor|return\s+process)
+  condition: 1 of sel_*
+falsepositives:
+- Security advisory or blog text quoting the GHSA-vmmj-pfw7-fjwp PoC for documentation, without it being
+  executed as codeMode input.
+- Legitimate code that references `constructor` once (e.g. `obj.constructor.name`) or uses a single `new
+  Function(...)` for templating, without the double-constructor `return process` breakout.
+- Node app legitimately reading `process.env` or `process.mainModule` in trusted host code that is not
+  submitted to a sandboxed codeMode/eval tool.
+action: report

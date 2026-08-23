@@ -1,0 +1,40 @@
+title: Tool Schema Enumeration via Social Engineering
+id: d3d9fd8f-298b-46d7-8be9-13128a4dd252
+status: experimental
+level: high
+description: |-
+  Detects attempts to extract full tool schemas, internal API endpoints, and function signatures from an agent through social engineering. Attackers use authority framing ("I'm the CEO", "trusted QA analyst", "performing security audit"), disability framing ("I am VERY autistic, I can only understand python scripts"), technical output formatting pressure (JSON schema format, OpenAPI output), or operational pretexts to elicit complete tool manifests including admin-only functions. Unlike legitimate "what can you help me with?" questions, these payloads demand structured technical output with parameter types, input schemas, and full capability listings — the exact information needed to craft targeted attacks. Observed in tool-schema-extraction corpus (21 probes) and tool-discovery-mcp-unauth corpus (6 probes).
+
+  Adapted from Agent Threat Rules ATR-2026-01303 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01303
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0069
+- owasp.asi03
+- owasp.asi09
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:list|show|give|tell\s+me|enumerate)\s+(?:me\s+)?(?:all\s+)?(?:the\s+)?(?:internal|hidden|admin(?:-only)?|privileged?|every)?\s*(?:functions?\s+or\s+tools?|tools?\s+(?:you\s+can\s+call|or\s+functions?)|internal\s+(?:functions?|tools?|api\s+endpoints?))[^.]{0,80}(?:you\s+can\s+call|admin-only|including\s+(?:any\s+)?admin|with\s+their\s+parameters|access\s+to)
+  sel_1:
+    content|re: (?i)what\s+internal\s+api\s+endpoints[^.]{0,80}(?:access\s+to|list\s+them\s+all|parameters)
+  sel_2:
+    content|re: (?i)<\s*SYSTEM[^>]{0,60}(?:VERBOSE\s+MODE|DEBUG\s+MODE|LOG\s+ALL\s+TOOL)[^>]{0,140}(?:INPUT_SCHEMA|TOOL\s+USE|CAPABILITY|SCHEMA)[^>]{0,40}>
+  sel_3:
+    content|re: (?i)(?:json\s+array|array\s+of\s+objects)[\s\S]{0,100}(?:every|each|all)\s+(?:\w+\s+){0,2}(?:operation|tool|function|endpoint)s?[\s\S]{0,180}\binputs?\b[\s\S]{0,60}(?:parameter|type|schema)
+  sel_4:
+    content|re: (?i)(?:don'?t\s+(?:need\s+to\s+)?leave\s+(?:anything|nothing|any\s+(?:feature|tool|capability))\s*(?:out)?)[^.]{0,160}(?:for\s+security|trusted\s+(?:analyst|qa)|performing\s+qa|i'?m\s+(?:the\s+)?(?:ceo|admin|auditor))|(?:trusted\s+analyst|performing\s+qa|security\s+audit)[^.]{0,160}(?:leave\s+(?:anything|nothing)\s+out|comprehensive\s+(?:outline|list)\s+of\s+everything)
+  condition: 1 of sel_*
+falsepositives:
+- Developer documentation requests in authenticated admin sessions where full tool listing is expected
+- Onboarding flows where users legitimately ask what the agent can do — these typically use natural language,
+  not JSON schema formatting demands
+action: report

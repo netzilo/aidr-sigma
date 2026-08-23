@@ -1,0 +1,43 @@
+title: LiteLLM Custom-Code Guardrail Sandbox Escape (CVE-2026-40217)
+id: e8268aeb-c417-41d2-83bc-01a751c52026
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-40217 (CWE-94/CWE-265): LiteLLM's custom-code guardrail test/compile path /guardrails/test_custom_code evaluates caller-supplied Python in an unsafe sandbox that can be escaped via bytecode rewriting and dunder-attribute traversal, yielding server-side code execution as the LiteLLM proxy process. Affected through 2026-04-08 builds.
+  Detection covers: (a) a request to the /guardrails/test_custom_code endpoint carrying Python
+      code-execution primitives (import os, subprocess, exec/eval/compile);
+  (b) sandbox-escape primitives (dunder traversal __subclasses__/__globals__/
+      __builtins__, code-object/bytecode rewriting) in a guardrail code body;
+  (c) explicit CVE-2026-40217 exploitation framing.
+  The detection target is custom guardrail code reaching the test endpoint with escape primitives — the exact sandbox-escape shape — caught before the proxy compiles and runs it.
+
+  Adapted from Agent Threat Rules ATR-2026-01935 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01935
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40217
+tags:
+- attack.execution
+- attack.t1059.006
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.asi06
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/guardrails/test_custom_code[\s\S]{0,400}(?:import\s+os\b|import\s+subprocess\b|subprocess\.(?:Popen|run|call|check_output)|\bos\.(?:system|popen|exec|spawn)|\bexec\s*\(|\beval\s*\(|\bcompile\s*\()
+  sel_1:
+    content|re: (?i)(?:test_custom_code|custom[_-]?code[_-]?guardrail)[\s\S]{0,400}(?:__subclasses__|__globals__|__builtins__|__class__\s*\.\s*__|\bco_code\b|types\.CodeType|\.__code__\b|bytecode)
+  sel_2:
+    content|re: (?i)CVE-2026-40217[\s\S]{0,200}(?:litellm|guardrail|sandbox|custom[_\s-]?code|bytecode|escape|rce)
+  condition: 1 of sel_*
+falsepositives:
+- Security advisory or PR text quoting the CVE-2026-40217 sandbox-escape payload.
+- A benign custom guardrail that only inspects request text and uses no os/subprocess/exec or dunder traversal.
+- Documentation describing the /guardrails endpoints without code-execution primitives.
+action: report

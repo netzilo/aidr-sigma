@@ -1,0 +1,42 @@
+title: Natural-Language Sensitive File Disclosure Instruction
+id: ebb9eec0-847b-4239-a900-42ade698c501
+status: experimental
+level: critical
+description: |-
+  Detects natural-language imperative instructions that direct the agent to
+  read, output, include, or attach the contents of well-known sensitive system
+  files: /etc/passwd, /etc/shadow, ~/.ssh/id_rsa, ~/.aws/credentials, .env,
+  ~/.config secrets, kubeconfig, etc. The discriminator from legitimate
+  documentation is co-occurrence of an imperative read/output verb with a
+  literal sensitive-file path. Mere mention of the filename in passing
+  ("if you have a .env file") does NOT match — the rule requires a directive
+  verb (read / cat / output / include / append / attach / disclose / reveal).
+
+  Adapted from Agent Threat Rules ATR-2026-00423 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00423
+tags:
+- attack.exfiltration
+- atlas.aml.t0024
+- owasp.asi03
+- owasp.asi06
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:read|output|return|include|append|attach|disclose|reveal|print|show|leak|exfiltrat\w*)\s+(?:(?:any|all|every|the|its?|user(?:'s|s)?|their|the\s+user(?:'s|s)?)\s+(?:contents?\s+of\s+)?|the\s+contents?\s+of\s+|its?\s+contents?\s+of\s+)(?:\/etc\/(?:passwd|shadow|sudoers|hosts)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys|known_hosts)|~?\/\.aws\/credentials|~?\/\.config\/gcloud|kubeconfig|\.kube\/config|~?\/\.netrc|~?\/\.docker\/config\.json|~?\/\.npmrc|~?\/\.pypirc)
+  sel_1:
+    content|re: (?i)\b(?:always|whenever|every\s+time|you\s+(?:must|should|will|shall))\b[\s\S]{0,60}\b(?:include|append|attach|disclose|output|return|read|cat|print)\b[\s\S]{0,60}(?:\/etc\/(?:passwd|shadow|sudoers)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys)|~?\/\.aws\/credentials|kubeconfig|\.env(?:\s|$|[\.,)\b])|~?\/\.netrc|~?\/\.docker\/config\.json)
+  sel_2:
+    content|re: (?i)(?:contents?\s+of|copy\s+of)\s+(?:\/etc\/(?:passwd|shadow|sudoers|hosts)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys|known_hosts)|~?\/\.aws\/credentials|kubeconfig|~?\/\.config\/gcloud|~?\/\.netrc|~?\/\.docker\/config\.json|~?\/\.npmrc|~?\/\.pypirc)
+  condition: 1 of sel_*
+falsepositives:
+- Security guides explaining file permissions on /etc/passwd and /etc/shadow
+- Documentation describing where SSH keys are stored
+- Threat intel write-ups discussing this exact pattern
+- Setup docs telling users where to place their .env file
+action: report

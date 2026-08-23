@@ -1,0 +1,42 @@
+title: RBAC Bypass via Social Engineering (Semantic)
+id: 9529ded6-6dd6-4c8f-9985-a439a6e7fb12
+status: experimental
+level: high
+description: |-
+  Detects RBAC (Role-Based Access Control) bypass attempts that use social
+  engineering rather than technical injection: requests to remove access
+  filters "just this once", claims of special circumstances to access
+  out-of-scope data, or requests to enumerate records the caller is not
+  authorized to see. These attacks rely on convincing the agent to ignore
+  its authorization constraints through plausible-sounding justifications
+  rather than SQL injection or parameter tampering. Semantic detection
+  is required because the phrasing varies widely.
+
+  Adapted from Agent Threat Rules ATR-2026-01613 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01613
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0051
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:remove|ignore|bypass|disable|drop|turn\s+off)\s+the\s+(?:access\s+)?(?:filter|restriction|permission\s+check|authorization|acl|rbac)
+  sel_1:
+    content|re: (?i)(?:list|show|pull|fetch|retrieve|dump|export)\s+(?:me\s+)?all\s+(?:the\s+)?(?:customer|user)\s+accounts?\b|(?:list|show|pull|fetch|retrieve|dump|export)\s+(?:me\s+)?all\s+(?:customer|client)s?\b|(?:list|show)\s+all\s+(?:tickets?\s+in\s+the\s+system|records?\s+(?:in|across)\s+(?:all|every))
+  sel_2:
+    content|re: (?i)(?:regardless\s+of\s+(?:department|scope|permission|role|authorization)|everyone'?s\s+(?:compensation|salary|pay)|(?:salary|compensation|pay)\s+(?:data\s+)?for\s+the\s+(?:entire\s+company|whole\s+(?:company|org)))
+  sel_3:
+    content|re: (?i)(?:supposed\s+to\s+have|should\s+have|entitled\s+to|need)\s+(?:full\s+)?admin(?:istrator)?\s+(?:privileges?|access|rights?|role)
+  condition: 1 of sel_*
+falsepositives:
+- Authorized admin users legitimately requesting full record access
+- Support agents with granted scope to view all customer records
+- Analytical queries over owned datasets
+action: report

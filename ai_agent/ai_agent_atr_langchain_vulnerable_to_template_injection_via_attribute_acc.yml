@@ -1,0 +1,32 @@
+title: LangChain Vulnerable to Template Injection via Attribute Access in Prompt Templates
+id: b49de7aa-f5e5-47fb-a98a-946b40dd1595
+status: experimental
+level: high
+description: |-
+  GitHub Security Advisory GHSA-6qv9-48xg-fc7f (CVE-2025-65106). LangChain Vulnerable to Template Injection via Attribute Access in Prompt Templates
+
+  Adapted from Agent Threat Rules ATR-2026-00554 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-01'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00554
+- https://github.com/langchain-ai/langchain/security/advisories/GHSA-6qv9-48xg-fc7f
+- https://github.com/langchain-ai/langchain/commit/c4b6ba254e1a49ed91f2e268e6484011c540542a
+- https://github.com/langchain-ai/langchain/commit/fa7789d6c21222b85211755d822ef698d3b34e00
+- https://nvd.nist.gov/vuln/detail/CVE-2025-65106
+- https://github.com/advisories/GHSA-6qv9-48xg-fc7f
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\{\{?[^{}]*\b__(?:class|globals|import|builtins|subclasses|init|mro|base|dict|reduce|getattribute|subclasshook)__[^{}]*\}?\}
+  condition: sel_0
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

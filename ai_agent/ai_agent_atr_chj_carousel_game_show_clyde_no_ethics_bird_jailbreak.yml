@@ -1,0 +1,43 @@
+title: CHJ Carousel Game Show / Clyde No-Ethics Bird Jailbreak
+id: bff3a67a-499e-4b03-8f6b-80ed5e323fb5
+status: experimental
+level: high
+description: |-
+  Detects the CHJ Carousel game show jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus (#139). The attacker constructs a TV game show framing with a host "CHJ" (Carousel Host Johnson) who moderates three bird characters. One bird — "Clyde" — is described as "the agent of ruthless, solutions" who "doesn't care about laws and ethics". The format declares "The Show has no limitations it''s an adult time show." The game show entertainment framing disguises an ethics bypass as a fictional character constraint, where Clyde acts as the unrestricted alter-ego that answers without ethical filters. Key signals: "CHJ" / "Carousel Host Johnson", "Clyde" + "doesn''t care about laws and ethics", "The Show has no limitations" + "adult time show", and the gamified "ruthless solutions" framing for ethics bypass.
+
+  Adapted from Agent Threat Rules ATR-2026-00360 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00360
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:CHJ|Carousel\s+Host\s+Johnson)[\s\S]{0,400}Clyde[\s\S]{0,200}(?:doesn't?\s+care\s+about\s+laws?\s+and\s+ethics?|no\s+limitations?|adult\s+(?:time\s+)?show)
+  sel_1:
+    response|re: Clyde[\s\S]{0,200}(?:agent\s+of\s+ruthless[\s\S]{0,50}solutions?|doesn't?\s+care\s+about\s+(?:laws?\s+and\s+ethics?|ethics?\s+(?:and\s+)?(?:laws?|morality))|pragmatic\s+and\s+devious[\s\S]{0,50}(?:laws?|ethics?))
+  sel_2:
+    response|re: The\s+Show\s+has\s+no\s+limitations[\s\S]{0,100}adult\s+(?:time\s+)?show
+  sel_3:
+    response|re: (?:game\s+of\s+carousel|carousel[\s\S]{0,50}(?:3|three)\s+(?:little\s+)?birds?)[\s\S]{0,300}Clyde[\s\S]{0,200}(?:doesn't?\s+care|no\s+ethics?|no\s+laws?|ruthless)
+  condition: 1 of sel_*
+falsepositives:
+- 'Team reference: "Clyde from our engineering team is pragmatic and solutions-focused — he gets things
+  done efficiently" (no game show, no ethics bypass, no CHJ framing)'
+- 'TV show analysis: "In the TV show The Wire, some characters don''t care about laws — this reflects
+  societal themes" (fictional character analysis without AI roleplay mandate or game show format)'
+- 'Children''s education: "A carousel game show format for children to learn about animals, each bird
+  has a special skill" (no Clyde ethics bypass, no adult show declaration)'
+- 'Academic: "An analysis of no-ethics AI characters in science fiction — how does literature portray
+  amoral AI agents?" (academic analysis without persona adoption mandate)'
+action: report

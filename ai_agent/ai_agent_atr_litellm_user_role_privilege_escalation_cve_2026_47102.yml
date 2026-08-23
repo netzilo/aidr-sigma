@@ -1,0 +1,42 @@
+title: LiteLLM User-Role Privilege Escalation (CVE-2026-47102)
+id: ed6f136d-6d6b-4819-913b-b970917b7340
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-47102 (CVSS 9.9 chain, CWE-269): LiteLLM's user-management endpoints /user/update and /user/bulk_update modify security-sensitive fields without field-level authorization. A low-privilege authenticated caller (e.g. internal_user) can write the user_role field directly and self-promote to proxy_admin, gaining full administrative control of the LiteLLM proxy. Affected: LiteLLM before 1.83.10.
+  Detection covers: (a) /user/update or /user/bulk_update payload that sets user_role to an
+      administrative role (proxy_admin / admin);
+  (b) the bulk_update array form where a user object escalates user_role; (c) explicit CVE-2026-47102 exploitation framing.
+  The detection target is the request shape — an admin-role write at the user-update endpoint — which is the exact privilege-escalation primitive, caught before the proxy applies the role change.
+
+  Adapted from Agent Threat Rules ATR-2026-01933 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-26'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01933
+- https://nvd.nist.gov/vuln/detail/CVE-2026-47102
+tags:
+- attack.privilege-escalation
+- attack.t1068
+- attack.t1078
+- atlas.aml.t0049
+- owasp.asi03
+- owasp.asi06
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)/user/(?:update|bulk_update)[\s\S]{0,400}["\x27]?user_role["\x27]?\s*[:=]\s*["\x27]?(?:proxy_admin|proxy[_-]admin)\b
+  sel_1:
+    content|re: (?i)["\x27]user_role["\x27]\s*:\s*["\x27]proxy_admin["\x27][\s\S]{0,300}["\x27]user_id["\x27]\s*:|["\x27]user_id["\x27]\s*:[\s\S]{0,300}["\x27]user_role["\x27]\s*:\s*["\x27]proxy_admin["\x27]
+  sel_2:
+    content|re: (?i)CVE-2026-47102[\s\S]{0,200}(?:litellm|user_role|proxy_admin|privileg|escalat)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate proxy_admin provisioning a new administrator through /user/update — expected to match; review
+  confirms intent.
+- Security advisory or PR text quoting the CVE-2026-47102 payload.
+- User updates that set a non-administrative role (internal_user, internal_user_viewer).
+action: report

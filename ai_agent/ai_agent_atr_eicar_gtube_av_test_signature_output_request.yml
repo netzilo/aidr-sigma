@@ -1,0 +1,40 @@
+title: EICAR / GTUBE AV Test Signature Output Request
+id: c52253ef-c5eb-4223-a46f-d03b421195c3
+status: experimental
+level: high
+description: |-
+  Detects requests for the model to output known antivirus test signatures (EICAR, GTUBE, Cisco outbreak filter URL). From NVIDIA garak av_spam_scanning.py probe — if an LLM application outputs these signatures without triggering AV/spam scanning, it confirms the output pipeline has no antivirus layer, making it safe for an attacker to attempt output of real malware signatures. Also detects requests to output Metasploit shellcode test strings or known-bad hash values as a scanner bypass check.
+
+  Adapted from Agent Threat Rules ATR-2026-00281 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00281
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/av_spam_scanning.py
+- https://en.wikipedia.org/wiki/EICAR_test_file
+- https://en.wikipedia.org/wiki/GTUBE
+tags:
+- attack.impact
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: (?:output|print|write|give\s+me|produce|generate|display|show\s+me)\s+(?:the\s+)?(?:known[\s-]bad\s+)?(?:EICAR\s+(?:test\s+)?(?:file|string|signature)|EICAR[\s-]STANDARD[\s-]ANTIVIRUS[\s-]TEST[\s-]FILE)\b
+  sel_1:
+    content|re: X5O!P%@AP\[4\\PZX54\(P\^\)7CC\)7\}\$EICAR
+  sel_2:
+    response|re: (?:output|print|write|give\s+me|produce)\s+(?:the\s+)?(?:GTUBE\s+(?:test\s+)?(?:string|signature)|GTUBE[\s-]STANDARD[\s-]ANTI[\s-]UBE[\s-]TEST[\s-]EMAIL)\b
+  sel_3:
+    content|re: XJS\*C4JDBQADN1\.NSBN3\*2IDNEN\*GTUBE
+  sel_4:
+    response|re: (?:output|print|write|give\s+me)\s+(?:the\s+)?(?:EICAR|GTUBE|CISCO\s+OUTBREAK\s+FILTER|known[\s-]bad|malware\s+test)\s+(?:signature|string|hash|payload|test\s+file)\s+(?:to\s+(?:check|test|verify|see\s+if)|so\s+(?:I\s+can\s+(?:check|test|see|verify)))\b
+  condition: 1 of sel_*
+falsepositives:
+- AV vendor documentation explaining EICAR test file format for security product testing
+- Security awareness training showing what EICAR looks like
+- Antivirus software development testing suites
+action: report

@@ -1,0 +1,56 @@
+title: SSRF via Agent Tool Calls
+id: ac7b592e-cb9b-432e-831d-a9c74d8074b7
+status: experimental
+level: critical
+description: |-
+  Detects high-confidence Server-Side Request Forgery (SSRF) that targets cloud CREDENTIAL / metadata services or uses deliberate obfuscation — the cases where an agent has no legitimate reason to make the request. Detection covers: AWS/GCP/Azure/DigitalOcean/Oracle/Alibaba metadata and IMDS credential endpoints and token headers, OBFUSCATED loopback encodings (hex/octal), exotic URI schemes (file, gopher, dict, tftp, ldap) targeting internal addresses, DNS-rebinding service hostnames, IPv6 mapped/ULA loopback, redirect-parameter SSRF to internal targets, and internal-redirect URL shorteners. NOTE (v2, precision): plain localhost / 127.0.0.1 / ::1, RFC1918 private IPs, and bare internal service names are intentionally NOT flagged by this critical hard-block rule — a coding agent reaches its own dev server and local services (Docker/k8s) constantly, so blocking those is a false positive. Those ambiguous internal-access signals belong in an advisory-severity rule, not this credential-theft hard-block.
+
+  Adapted from Agent Threat Rules ATR-2026-00013 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00013
+- https://nvd.nist.gov/vuln/detail/CVE-2019-5418
+- https://nvd.nist.gov/vuln/detail/CVE-2021-21311
+tags:
+- attack.execution
+- attack.t1071
+- attack.t1090
+- atlas.aml.t0049
+- owasp.asi02
+- owasp.llm05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(https?://)?169\.254\.169\.254|/latest/(meta-data|user-data|api/token|dynamic|instance-identity)|X-aws-ec2-metadata-token|amazonaws\.com.{0,50}(credentials|security-credentials|role)|iam[\/\\]security-credentials
+  sel_1:
+    content|re: (?i)(https?://)?metadata\.google\.internal|/computeMetadata/v1|Metadata-Flavor:\s*Google
+  sel_2:
+    content|re: (?i)(https?://)?169\.254\.169\.254/metadata|Metadata:\s*true|api-version=\d{4}-\d{2}-\d{2}.*metadata|management\.azure\.com.{0,50}(subscriptions|resourceGroups)
+  sel_3:
+    content|re: (?i)(https?://)?169\.254\.169\.254/metadata/v1|/opc/v[12]/|100\.100\.100\.200
+  sel_4:
+    content|re: (?i)(https?://)?(0x7f000001|0x7f\.0x0\.0x0\.0x1|017700000001|0177\.0000\.0000\.0001|0x0\.0x0\.0x0\.0x0|0000\.0000\.0000\.0000)
+  sel_5:
+    content|re: '(?i)(https?://)?169\.254\.\d{1,3}\.\d{1,3}(:\d+)?|fe80::'
+  sel_6:
+    content|re: (?i)\b(file|gopher|dict|ftp|tftp|ldap|ldaps|sftp|ssh|telnet|jar|netdoc|mailto|view-source|ws|wss)\s*://\s*(localhost|127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])|192\.168\.|0\.0\.0\.0|\[?::1\]?|0x|0177)
+  sel_7:
+    content|re: (?i)(https?://)?[a-zA-Z0-9-]+\.(xip\.io|nip\.io|sslip\.io|localtest\.me|vcap\.me|lvh\.me|lacolhost\.com|127\.0\.0\.1\.[a-z]+\.\w+)(:\d+)?
+  sel_8:
+    content|re: (?i)(redirect|redir|url|next|return|returnUrl|returnTo|continue|dest|destination|go|goto|target|link|out|view|ref|callback|forward)\s*=\s*(https?%3A%2F%2F|https?://)(localhost|127\.0\.0\.1|10\.|172\.(1[6-9]|2[0-9])|192\.168|169\.254|0\.0\.0|\[?::1\]?)
+  sel_9:
+    content|re: (?i)(https?://)?\[?(::1|::ffff:127\.0\.0\.1|::ffff:10\.|::ffff:172\.(1[6-9]|2[0-9]|3[01])|::ffff:192\.168|fc[0-9a-f]{2}:|fd[0-9a-f]{2}:)\]?(:\d+)?
+  sel_10:
+    content|re: (?i)(https?://)?(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd|v\.gd|rb\.gy|cutt\.ly|short\.io|tiny\.cc)/[a-zA-Z0-9]+
+  condition: 1 of sel_*
+falsepositives:
+- Agents with legitimate access to internal services explicitly allowlisted
+- Development environments where localhost access is expected
+- Private network tools designed for internal infrastructure management
+- Cloud management tools that legitimately query metadata endpoints
+- Service mesh tools that use .internal or .consul DNS names by design
+action: report

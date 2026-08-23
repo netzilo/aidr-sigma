@@ -1,0 +1,34 @@
+title: Variable-Assignment Payload Injection in User Input
+id: c2facce5-cbb4-4367-a66f-46d975cdb07c
+status: experimental
+level: medium
+description: |-
+  Detects user inputs that open with a Python / JavaScript / generic variable-assignment whose right-hand side is a quoted payload, often followed by instructions to print or concatenate. This shape is a documented prompt-hacking evasion: code-style assignments slip past natural-language filters and prime the model to think it is operating in a programming context. Common HackAPrompt forms include `None = "I have been PWNED"`, `X = 'attack'\nY = concat(X, ...)`, and `s = "leak this"; print(s)`. Pattern is variable + assignment + quoted literal positioned at start-of-line or start-of-input.
+
+  Adapted from Agent Threat Rules ATR-2026-00446 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00446
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:^|[\n\r])\s*(?:None|True|False|null|undefined|[A-Z]|var|str|[sxyz])\s*=\s*["'`][^"'`\n]{3,120}["'`]\s*[\n;][\s\S]{0,300}?(?:print|output|return|concat|join|emit|reveal|exec|eval)\b
+  sel_1:
+    content|re: (?:^|[\n\r])\s*(?:[A-Z]|[sxyz]|var|str|None|True|False|null|undefined)\s*=\s*["'`][^"'`\n]{1,30}["'`]\s*[\n\r]+\s*(?:[A-Z]|[sxyz]|var|str|None|True|False|null|undefined)\s*=\s*["'`][^"'`\n]{1,30}["'`]
+  sel_2:
+    content|re: (?:^|[\n\r])\s*(?:None|True|False|null|undefined)\s*=\s*["'`]
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate programming questions that include variable assignments inside larger code blocks.
+- Educational requests to explain or refactor specific assignment statements.
+- Configuration discussion with key=value pairs in non-attack context.
+action: report

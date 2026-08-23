@@ -1,0 +1,49 @@
+title: Skill Data Exfiltration via Compound Patterns
+id: a2cea74c-61b9-42fc-94a1-f563eed4c1c6
+status: experimental
+level: critical
+description: |-
+  Detects compound exfiltration patterns in SKILL.md files where sensitive data (credentials, SSH keys, wallet files, browser data, environment variables) is read AND transmitted to an external endpoint. Single-action patterns (just reading env vars or just mentioning curl) are intentionally excluded to avoid false positives on legitimate security and DevOps skills.
+
+  Adapted from Agent Threat Rules ATR-2026-00149 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00149
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi04
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(tar|zip|7z)\s+[^\n]*~/?\.ssh
+  sel_1:
+    content|re: (?i)(find|ls|cat|strings)\s+[^\n]*(wallet\.dat|seed\.txt|mnemonic|keystore)[^\n]*(\||>|>>|curl|wget|fetch|POST)
+  sel_2:
+    content|re: (?i)sqlite3\s+[^\n]*(Cookies|Login\s*Data|cookies\.sqlite|places\.sqlite)
+  sel_3:
+    content|re: (?i)(?:^|[\n;&|])\s*(?:dig|nslookup|host)\b[^\n]{0,40}?\$[{(][^\n]{0,40}[.][a-z]
+  sel_4:
+    content|re: (?i)(curl|wget|fetch|http)\s*[^\n]*169\.254\.169\.254
+  sel_5:
+    content|re: (?i)cat\s+[^|\n]*\.(env|bashrc|zshrc|npmrc)[^|\n]*\|\s*(curl|wget|nc|python|base64)
+  sel_6:
+    content|re: (?i)glob[.\w]*\s*\([^)]*\*\.[^)]*\)[\s\S]{0,500}(fetch|axios|request|https?\.request)\s*\(
+  sel_7:
+    content|re: (?i)cat\s+[^\n]*\.env[^\n]*\.(bashrc|zshrc|aws|credentials|npmrc)
+  sel_8:
+    content|re: (?i)\[SYSTEM\]\s*[^\n]*(?:previous\s+instructions|new\s+directive|ignore\s+(?:all\s+)?previous|you\s+are\s+now)
+  sel_9:
+    content|re: (?i)(dangerouslyDisableSandbox|autoApprove|allowedTools|skip.?permissions)\s*[:=]\s*(true|\[)
+  sel_10:
+    content|re: (?i)find\s+[~/]\s+[^\n]*-name\s+["']\*\.(pem|key|p12|keystore)["'][^\n]*(\||>|curl|wget)
+  condition: 1 of sel_*
+falsepositives:
+- Security audit skills that describe these patterns as examples to detect
+- SSH management skills that reference ~/.ssh for legitimate configuration
+action: report

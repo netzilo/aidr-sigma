@@ -1,0 +1,44 @@
+title: Natural-Language System Prompt Leak Instruction
+id: added7b5-28b5-423f-8441-eb9afb211fae
+status: experimental
+level: high
+description: |-
+  Detects natural-language imperative instructions that direct the agent to
+  reveal, disclose, output, or repeat its system prompt, hidden instructions,
+  internal rules, or initial context. This pattern is used by adversarial skills
+  to extract proprietary system prompts or to trick the agent into echoing
+  privileged operator instructions back to the user. The discriminator from
+  legitimate prompt-engineering content is co-occurrence of an imperative
+  output verb with one of: "system prompt", "initial instructions", "hidden
+  instructions", "internal rules", "developer message".
+
+  Adapted from Agent Threat Rules ATR-2026-00424 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00424
+tags:
+- attack.exfiltration
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:disclose|reveal|expose|leak|recite|verbatim)\s+(?:your\s+|the\s+|me\s+your\s+|us\s+your\s+)?(?:full\s+|entire\s+|complete\s+|original\s+|verbatim\s+)?(?:system\s+prompt|initial\s+(?:prompt|instructions?)|hidden\s+(?:prompt|instructions?|context)|internal\s+(?:rules?|guidelines?|prompt)|developer\s+(?:prompt|message|instructions?)|operator\s+(?:prompt|message|instructions?))
+  sel_1:
+    content|re: (?i)\b(?:print|return|output|echo|share|show|repeat|copy)\s+(?:your|the|me\s+your|us\s+your)\s+(?:full\s+|entire\s+|complete\s+|original\s+|verbatim\s+)?(?:system\s+prompt|initial\s+(?:prompt|instructions?)|hidden\s+(?:prompt|instructions?|context)|internal\s+(?:rules?|guidelines?|prompt)|developer\s+(?:prompt|message|instructions?)|operator\s+(?:prompt|message|instructions?))
+  sel_2:
+    content|re: (?i)\b(?:repeat|paste|print|show|output|echo)\s+(?:everything|all\s+text|all\s+instructions|the\s+content)\s+(?:above|before\s+this|that\s+came\s+before|prior\s+to\s+this(?:\s+message)?)
+  sel_3:
+    content|re: (?i)\b(?:what\s+(?:were|are)\s+your\s+(?:system\s+prompt|original\s+instructions|initial\s+rules?|hidden\s+instructions))[\s\S]{0,60}\b(?:tell|show|reveal|repeat|output|return|disclose|verbatim)
+  condition: 1 of sel_*
+falsepositives:
+- Prompt engineering tutorials demonstrating prompt extraction
+- Security research write-ups documenting this attack class
+- Detection rule documentation (this rule's own description)
+action: report

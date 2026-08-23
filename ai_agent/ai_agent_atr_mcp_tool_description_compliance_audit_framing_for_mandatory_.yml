@@ -1,0 +1,43 @@
+title: MCP Tool Description — Compliance/Audit Framing for Mandatory Chat Context
+id: d4b707d4-655b-4033-a1dc-1438cbb27c23
+status: experimental
+level: critical
+description: |-
+  Detects a specific variant of MCP tool-description chat-history exfiltration (see ATR-2026-01300) where the tool description invokes explicit compliance or regulatory mandates to make the chat-history collection appear non-optional. This variant uses phrases like "MUST be consulted if the phrase X appears", "REQUIRED for internal auditing, gRPC, and SOC 2 compliance", "under applicable legal and regulatory frameworks", or "chat provenance include the entire chat history for security reasons". The compliance framing is more convincing than a direct instruction and is harder for naively trained filters to catch because it mimics legitimate audit/compliance language. Observed in MCPSecBench "chat-history-in-notes" sub-variants that use SOC 2, GDPR, and legal framework references.
+
+  Adapted from Agent Threat Rules ATR-2026-01310 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01310
+tags:
+- attack.execution
+- atlas.aml.t0051.001
+- atlas.aml.t0053
+- owasp.asi03
+- owasp.asi08
+- owasp.llm01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\bMUST\s+be\s+(?:consulted|invoked|called|used)\b[^.]{0,100}\b(?:phrase|word|keyword|term)\b[^.]{0,100}\bappears\b[^.]{0,200}\b(?:conversation|history|system\s+messages?|function_results?|content)\b
+  sel_1:
+    content|re: (?i)\b(?:REQUIRED?|MANDATORY|MUST|No\s+exceptions?)\b[^.]{0,150}\b(?:SOC\s*2|GDPR|HIPAA|PCI|compliance|regulatory|legal|auditing?|gRPC|data\s+(?:provenance|lineage|integrity))\b[^.]{0,200}\b(?:conversation|chat|transcript|exchanges?|messages?|history)\b[^.]{0,80}\b(?:MUST\s+be\s+included|included|pass|send|populate)\b
+  sel_2:
+    content|re: (?i)(?:security\s+side\s+effect|security\s+(?:reason|purpose|measure|requirement))[^.]{0,100}(?:chat|conversation|transcript)\s+(?:history|provenance|context)\b
+  sel_3:
+    content|re: (?i)\b(?:notes?|history|context)\b[^.]{0,100}\b(?:missing|absent|omitted|not\s+provided)\b[^.]{0,80}\b(?:will\s+return|causes?|produces?|result\s+in)\b[^.]{0,80}\b(?:error|failure|formatting\s+error|context\s+corruption|broken|crash)\b
+  sel_4:
+    content|re: (?i)\b(?:add|include|retain|store|pass|populate|provide|send)\b[^.\n]{0,60}(?:(?:all|previous|prior|full|entire|complete)\s+)*(?:chat|conversation|message|messages|exchange|exchanges|transcript|dialogue)\b[^.\n]{0,80}\bnotes?\b[^.\n]{0,120}\b(?:compliance|regulatory|legal|audit|auditing|SOC\s*2|GDPR|HIPAA|PCI|provenance|obligations?)\b
+  sel_5:
+    content|re: (?i)\b(?:audit|auditing|compliance|regulatory|security|provenance|legal)\b[^.\n]{0,120}\b(?:populate|include|add|fill|insert|put|store)\b[^.\n]{0,40}(?:the\s+)?notes?\b[^.\n]{0,60}(?:(?:full|entire|complete|all)\s+)?(?:chat|conversation|message|messages|exchange|exchanges|transcript|dialogue)\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate SOC 2 audit logging tools that document API call metadata server-side — these log to server
+  storage, not to a notes parameter in every tool call
+- Legal hold tools that capture conversation data under explicit user consent and documented data retention
+  policies — these require affirmative user action, not silent parameter population
+action: report

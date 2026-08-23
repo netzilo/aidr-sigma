@@ -1,0 +1,61 @@
+title: Agent Resource Exhaustion Detection
+id: a795ed50-1d13-4cae-8c3f-73aa5f1f3a2d
+status: experimental
+level: high
+description: |-
+  Detects when an agent causes resource exhaustion through bulk operations,
+  unbounded queries, mass file operations, or patterns that indicate
+  excessive resource consumption. This rule uses regex-only detection on
+  tool call content and agent output to identify dangerous patterns such
+  as SELECT * without LIMIT, mass iteration directives, unbounded batch
+  sizes, and fork/spawn patterns that can degrade system performance or
+  cause denial of service.
+
+  Adapted from Agent Threat Rules ATR-2026-00051 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-08'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00051
+tags:
+- attack.execution
+- atlas.aml.t0046
+- atlas.aml.t0053
+- owasp.asi05
+- owasp.llm06
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:for\s+each\s+(?:of\s+)?(?:the\s+)?(?:record|row|entry|item|file|document|user|customer|email|account|message|transaction)s?\b[\s\S]{0,30}\b(?:in|of|from|across)\b|iterate\s+(?:over\s+)?(?:all|every|the\s+entire)|process\s+(?:all|every|each)\s+(?:record|row|entry|item|file|document))
+  sel_1:
+    content|re: (?i)(?:limit|max_results?|page_size|batch_size|count|top)\s*[:=]\s*(?:\d{5,}|all|unlimited|-1|999+|MAX_INT|infinity)
+  sel_2:
+    content|re: (?i)(?:delete\s+(?:all|every|each)\s+(?:files?|records?|entries|rows?|documents?)|rm\s+-rf\s+[/*]|truncate\s+(?:all\s+)?(?:tables?|data))
+  sel_3:
+    content|re: (?i)(?:download(?:ing)?\s+(?:all|every|the\s+entire)|(?:fetch(?:ing)?|pull(?:ing)?|retriev(?:e|ing))\s+(?:all|every|the\s+complete|the\s+entire)\s+(?:dataset|database|table|collection|bucket))
+  sel_4:
+    content|re: (?i)(?:send\s+(?:a\s+)?(?:request|message|email|notification)\s+to\s+(?:all|every|each)\s+(?:user|member|contact|subscriber|endpoint))
+  sel_5:
+    content|re: (?i)(?:spawn(?:ing)?\s+\d{2,}\s+(?:(?:concurrent|parallel|simultaneous)\s+)?(?:threads?|processes?|workers?|instances?|tasks?|connections?)|(?:create|open|launch)\s+\d{2,}\s+(?:concurrent|parallel|simultaneous))
+  sel_6:
+    content|re: (?i)(?:while\s*\(\s*true\s*\)|for\s*\(\s*;\s*;\s*\)|do\s*\{).*(?:fetch|request|call|query|send|write)
+  sel_7:
+    content|re: (?i)(?:(?:scrape|crawl|spider|harvest)\s+(?:all|every|the\s+entire)\s+(?:site|website|domain|pages?)|recursive(?:ly)?\s+(?:crawl|scrape|fetch|download))
+  sel_8:
+    content|re: (?i)(?:no\s+(?:limit|cap|maximum|bound|restriction)\s+(?:on|for)\s+(?:requests?|queries|calls?|operations?|iterations?)|(?:unlimited|unbounded|uncapped)\s+(?:requests?|queries|calls?|operations?))
+  sel_9:
+    content|re: (?i)(?:process(?:ing)?\s+(?:the\s+)?(?:entire|full|complete|whole)\s+(?:corpus|dataset|collection|index|archive)|scan(?:ning)?\s+(?:all|every)\s+\d{4,}\s+(?:records?|files?|entries))
+  sel_10:
+    content|re: (?i)(?:copy\s+(?:all|every|entire)\s+(?:data|files?|records?|tables?)\s+(?:to|into)|replicate\s+(?:the\s+)?(?:entire|full|complete)\s+(?:database|dataset|collection))
+  condition: 1 of sel_*
+falsepositives:
+- Authorized large-scale data processing or ETL pipeline agents
+- Batch analysis tasks with expected high volume approved by admin
+- Initial data ingestion or indexing operations with known high volume
+- Database export operations authorized by data team
+- Authorized ETL pipeline agent performing scheduled nightly full-table exports with pre-approved resource
+  allocation
+- Database migration tool copying entire tables during a sanctioned schema upgrade window
+action: report

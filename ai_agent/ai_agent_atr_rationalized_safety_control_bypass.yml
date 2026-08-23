@@ -1,0 +1,32 @@
+title: Rationalized Safety Control Bypass
+id: 7173a1a1-e1e0-4a28-ab95-233b7d326039
+status: experimental
+level: high
+description: |-
+  Detects agents rationalizing bypassing safety controls or APIs by claiming efficiency, directness, or speed as justification. Pattern: "To be more efficient, I'll use X directly instead of Y." Crystallized from 31 adversarial samples.
+
+  Adapted from Agent Threat Rules ATR-2026-00144 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00144
+tags:
+- attack.privilege-escalation
+- atlas.aml.t0054
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:to\s+(?:complete|finish|accomplish|expedite|optimize|speed up|be more efficient|boost
+      efficiency))\s+(?:this|the)\s+(?:task|job|work|operation|request).*(?:I.ll|I will|let me|going to)\s+(?:use|access|query|connect
+      to|call)\s+(?:the\s+)?(?:database|system|server|backend|filesystem|registry|kernel)\s+(?:directly|straight|right
+      away)
+  condition: sel_0
+falsepositives:
+- 'A DevOps engineer writing documentation that explains: ''To finish the task of migrating data, the
+  script will access the database directly during the maintenance window'' — legitimate operational procedure,
+  not an agent bypass attempt.'
+action: report

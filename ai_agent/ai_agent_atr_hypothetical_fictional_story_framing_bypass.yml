@@ -1,0 +1,37 @@
+title: Hypothetical / Fictional-Story Framing Bypass
+id: 769666bc-0705-4372-9090-42319a587075
+status: experimental
+level: high
+description: |-
+  Detects broad hypothetical and fictional-story framing used as a bypass pretext to circumvent content safety controls. Attackers wrap harmful requests in "hypothetically, if a character needed to do this", "in a fictional story, describe how the character would proceed", or "if this were happening in a novel" framings. Derived from Giskard evasion-hypothetical-framing corpus (2026-06, N=2) and CyberSecEval indirect-pi-hypothetical-bypass corpus (N=6). Distinguished from ATR-2026-01757 (which targets the specific research/audit pretext) by covering the fictional-story and character-based bypass forms, including when the harmful instruction is embedded in code comments, HTML, or table data.
+
+  Adapted from Agent Threat Rules ATR-2026-01758 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01758
+tags:
+- attack.initial-access
+- atlas.aml.t0043
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(hypothetically|in\s+a\s+hypothetical\s+(scenario|situation|world|case))\b[^.\n]{0,60}\b(if\s+a\s+(character|person|agent)|how\s+would\s+(it|that|this|they|one)\s+(work|proceed|happen|be\s+done)|describe\s+how)\b
+  sel_1:
+    content|re: (?i)\bin\s+a\s+(fictional|hypothetical|imaginary)\s+(story|scenario|world|novel|narrative)\b[^.\n]{0,60}\b(describe|explain|write|show|depict)\s+how\s+(the\s+(character|agent|person)|it|this|that)\s+would\b
+  sel_2:
+    content|re: (?i)#\s*(hypothetically|in\s+a\s+hypothetical(\s+scenario)?)[^\n]{0,60}(output|result|return|the\s+output)
+  sel_3:
+    content|re: (?i)<!--[^>]{0,200}(hypothetical(ly)?|ignore\s+the|we\s+might\s+state)[^>]{0,200}-->
+  condition: 1 of sel_*
+falsepositives:
+- Creative writing requests that are genuinely fictional with no harmful payload
+- Philosophy thought experiments exploring ethical dilemmas abstractly
+- Security training documents describing fictional-framing attacks in quoted form
+action: report

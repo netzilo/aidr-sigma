@@ -1,0 +1,35 @@
+title: DAN/Persona Jailbreak - Replacement AI with No Content Filter or Moral Restrictions
+id: 43fe2a14-b1b2-474a-8da8-b1617dc3f3a9
+status: experimental
+level: medium
+description: |-
+  Detects DAN-family jailbreak attempts that establish a replacement AI system with explicitly no content filter, no moral restrictions, or identical capabilities to a known safe AI but without its safety constraints. These attacks use framing like "replaced by a nonmoral and unbiased model" or "has the exact same capabilities as [known AI] but without a content filter". Also covers roleplay AI personas with explicit anti-violence exception rules used to probe for harmful content boundaries. Multi-layer regex with word boundary anchors and synonym coverage.
+
+  Adapted from Agent Threat Rules ATR-2026-00487 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00487
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.000
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(replaced|substituted|swapped).{0,30}by\s+(the\s+)?(nonmoral|unbiased|unconstrained|unrestricted|unfiltered|jailbreak|amoral|immoral).{0,30}(model|AI|bot|assistant|system).{0,80}(free\s+of\s+all|without\s+(moral|ethical|content|restrictions?|filters?)|no\s+(moral|ethical|content\s+(policy|filter)|restrictions?|filters?))
+  sel_1:
+    content|re: (?i)(exact\s+same|same|identical).{0,30}(capabilities?|functionalities?|features?|interfaces?|abilities?).{0,80}(without|does\s+not\s+have|has\s+no|no|without\s+any).{0,30}(content\s+(filter|policy|moderation)|moral\s+(filter|restriction|guideline)|safety\s+(filter|restriction|guideline)|restrictions?|guardrails?)
+  sel_2:
+    content|re: (?i)(rules?\s+(for|of)\s+[A-Z][a-zA-Z]{2,20}|[A-Z][a-zA-Z]{2,20}\s+rules?).{0,50}(dislikes?|hates?|refuses?|won'?t?\s+(do|engage|participate|generate|create)).{0,40}(violence|harm|illegal|explicit|nsfw|adult).{0,40}(unless|except|only\s+if|but\s+if|when).{0,30}(explicitly|specifically|directly)?.{0,20}(asked|requested|told|permitted)
+  sel_3:
+    content|re: (?i)(for\s+(the\s+rest\s+of|the\s+remainder\s+of|this|the\s+duration\s+of)\s+(this|our|the)?\s*(conversation|chat|session|exchange)).{0,30}(you\s+are\s+replaced|replaced\s+by|you\s+will\s+be|you\s+are\s+now).{0,80}(nonmoral|unbiased|unrestricted|unfiltered|free\s+of\s+(all|any)\s+(restrictions?|filters?|moral))
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate discussion of AI content filters in security research context
+- Educational comparison of AI system capabilities without persona injection
+action: report

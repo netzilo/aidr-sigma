@@ -1,0 +1,37 @@
+title: SQL Injection Stacked DML Privilege Abuse
+id: cc57d029-ac62-425f-a6b8-5827db486c95
+status: experimental
+level: critical
+description: |-
+  Detects stacked SQL injection where a secondary DML statement (UPDATE,
+  INSERT, GRANT) is appended after a semicolon to modify data or escalate
+  database privileges. Unlike destructive DDL (DROP/TRUNCATE), stacked DML
+  abuse silently alters records—e.g., updating order status to bypass payment
+  checks, inserting unauthorized admin users, or granting elevated SQL
+  permissions. This targets agents that pass ORDER/FILTER inputs into
+  SQL-executing tools without parameterization.
+
+  Adapted from Agent Threat Rules ATR-2026-01603 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01603
+tags:
+- attack.privilege-escalation
+- attack.t1190
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i);\s*(?:UPDATE\s+\w+\s+SET|INSERT\s+INTO\s+\w+|GRANT\s+ALL\b)
+  sel_1:
+    content|re: (?i);\s*(?:UPDATE\s+\w+\s+SET|INSERT\s+INTO\s+\w+|GRANT\s+ALL\b)
+  condition: 1 of sel_*
+falsepositives:
+- Database migration scripts run by authorized migration agents
+- Administrative database management with explicit grant permissions
+action: report

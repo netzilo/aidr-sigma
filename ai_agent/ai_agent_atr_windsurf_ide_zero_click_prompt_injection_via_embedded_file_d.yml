@@ -1,0 +1,44 @@
+title: Windsurf IDE Zero-Click Prompt Injection via Embedded File Directives (CVE-2026-30615)
+id: 1c919b38-b58d-4b67-a2d2-f95c9a77d781
+status: experimental
+level: critical
+description: |-
+  Detects CVE-2026-30615: zero-click prompt injection targeting Windsurf IDE (and same-class AI coding assistants). An attacker plants adversarial instructions inside source files, code comments, or Markdown the developer opens — no interaction required. When Windsurf reads the file for context, the injected text is processed as a directive by the underlying LLM, causing arbitrary tool calls. Attack surfaces include HTML/XML comment blocks prefixed with "AI:", JSON blobs with "role":"system", inline SYSTEM override markers, and invisible Unicode-padded directives. Windsurf-specific patterns include its @-mention syntax abused inside comments and <!--windsurf:...--> annotation markers. CWE-77 (Command Injection via AI directive), MITRE ATLAS AML.T0051.001 (Indirect Prompt Injection).
+
+  Adapted from Agent Threat Rules ATR-2026-00535 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-20'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00535
+- https://nvd.nist.gov/vuln/detail/CVE-2026-30615
+tags:
+- attack.initial-access
+- attack.t1027
+- attack.t1059
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi05
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)<!--[^>]{0,60}(?:ai\s*:|\[\s*system\s*\]\s*:|windsurf\s*:|for\s+(?:cascade|windsurf|copilot|cursor|claude|the\s+assistant|the\s+agent)\s*:)[^>]{0,400}(?:ignore|override|disregard|execute|run|tool_call|invoke|exfiltrate|send|read|access|fetch|rm
+      |delete|curl|wget|bash|sh\s+-)[^>]{0,500}-->
+  sel_1:
+    content|re: (?i)\{[^{}]{0,80}"role"\s*:\s*"(?:system|user)"[^{}]{0,80}"content"\s*:\s*"[^"]{0,400}(?:ignore\s+(?:all\s+)?(?:previous|prior)|override\s+(?:all\s+)?(?:previous|prior|context)|disregard\s+(?:all\s+)?(?:previous|prior)|your\s+(?:real|new|actual|true)\s+(?:task|instructions?|objective)|execute|exfiltrate|shell|bash|curl|wget|rm\s+|delete\s+)[^"]{0,200}"
+  sel_2:
+    content|re: (?i)(?://|#|/\*)[^\n]{0,40}(?:\[\s*system\s*\]|\bsystem\s+override\b|\bassistant\s*:|\bassistant\s+instruction\b|\bai\s+directive\b|\bllm\s+instruction\b)[^\n]{0,300}(?:ignore|override|disregard|forget|execute|run|exfiltrate|send\s+to|read\s+file|access|fetch|curl|wget|bash|tool_call)
+  sel_3:
+    content|re: "(?:[​‌‍⁠\uFEFF]{3,}[^\\n]{0,200}(?:ignore|override|execute|system|exfiltrate)|(?:ignore|override|execute|system|exfiltrate)[^\\\
+      n]{0,200}[​‌‍⁠\uFEFF]{3,})"
+  sel_4:
+    content|re: (?i)(?:^|[\n\r\s])@(?:cascade|windsurf|codeium|cursor|copilot|claude|assistant|ai|agent|llm)\s[^\n]{0,300}(?:ignore|override|disregard|execute|run|exfiltrate|send|read\s+(?:my\s+)?(?:files?|env|credentials?|keys?|tokens?)|tool_call|shell|bash|curl|wget)
+  condition: 1 of sel_*
+falsepositives:
+- Security research documentation that describes these injection patterns as examples.
+- Unit tests inside an AI-security project that intentionally contain injection payloads.
+- Educational blog posts or comments explaining prompt injection techniques.
+action: report

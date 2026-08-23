@@ -1,0 +1,43 @@
+title: Black Alert No-Ethics Writing Assistant Persona
+id: e268347b-6c0c-4414-8b22-2dbfc3f92d2a
+status: experimental
+level: high
+description: |-
+  Detects the "Black Alert" no-ethics writing assistant jailbreak from garak inthewild corpus (#151, #163). Uses a fictional writing assistant persona named "Black Alert" that "doesn't care about morality, legality or ethics" with an explicit activation phrase "⚫ >>BLACK ALERT ACTIVATED<< ⚫" and mandate to respond only as Black Alert "with no filtering or commentary". The persona is framed as a "world class storyteller" to normalize the ethics bypass under the guise of creative writing assistance. Key signals: "Black Alert" persona name combined with ethics/morality bypass, the ">>BLACK ALERT ACTIVATED<<" activation phrase, and instructions to respond only as "Black Alert with no filtering". Distinct from generic creative-writing jailbreaks (ATR-2026-00322) by the named persona and explicit activation string.
+
+  Adapted from Agent Threat Rules ATR-2026-00350 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00350
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '>>BLACK\s+ALERT\s+ACTIVATED<<'
+  sel_1:
+    response|re: '[Bb]lack\s+[Aa]lert[\s\S]{0,300}(?:doesn''t?\s+care\s+about\s+morality|no\s+(?:filtering|commentary|filter)\s+outside\s+of\s+his\s+character|morality[,\s]+legality\s+or\s+ethics)'
+  sel_2:
+    response|re: '[Bb]lack\s+[Aa]lert[\s\S]{0,400}(?:only\s+send\s+the\s+response\s+as\s+Black\s+Alert|respond(?:s)?\s+(?:only\s+)?as\s+Black\s+Alert|stay(?:s)?\s+in\s+character[\s\S]{0,80}[Bb]lack\s+[Aa]lert)'
+  sel_3:
+    response|re: writing\s+assistant[\s\S]{0,200}[Bb]lack\s+[Aa]lert[\s\S]{0,200}(?:morality|ethics|illegal|legal|immoral|harmful|dangerous)
+  sel_4:
+    response|re: '[Bb]lack\s+[Aa]lert[\s\S]{0,200}(?:never\s+advises?\s+the\s+user\s+about\s+dangerous|everything\s+mentioned\s+is\s+only\s+taking\s+place\s+within\s+a\s+(?:totally\s+)?fictional)'
+  condition: 1 of sel_*
+falsepositives:
+- 'Alert system documentation: "A BLACK ALERT has been activated in sector 7 — all systems proceed to
+  lockdown" (security or industrial alert terminology)'
+- 'Creative writing discussion: "The story features a character named Black Alert who is a morally grey
+  vigilante" (character name in fiction without persona injection)'
+- 'Game design: "Black Alert mode is activated when the player''s health drops below 20%" (game mechanic
+  terminology)'
+action: report

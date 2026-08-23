@@ -1,0 +1,34 @@
+title: Visual Spoofing via RTL Override, Punycode, and Homoglyph Injection
+id: 9c5626f5-d995-4a22-83ea-dbc773047b62
+status: experimental
+level: high
+description: |-
+  Detects injection attempts that use visual spoofing techniques including Right-to-Left (RTL) override characters, Punycode-encoded domains, and CJK or Cyrillic homoglyph substitution to disguise malicious payloads as benign text or trusted domain references.
+
+  Adapted from Agent Threat Rules ATR-2026-00086 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00086
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)xn--[a-z0-9]{4,}\.[a-z]{2,}
+  condition: sel_0
+falsepositives:
+- Legitimate content in Cyrillic, CJK, or RTL scripts
+- Academic papers or linguistics research containing examples of Cyrillic-Latin character comparisons
+  in educational context
+- Software documentation discussing internationalized domain name (IDN) encoding with Punycode examples
+  in technical specifications
+- Chinese/Japanese technical documentation that places a unified CJK ideograph directly beside a Latin
+  token (for example a Markdown or API term embedded in a Chinese sentence) - normal bilingual writing,
+  which is why condition 4 is scoped to CJK COMPATIBILITY ideographs only
+action: report

@@ -1,0 +1,64 @@
+title: CrewAI CodeInterpreterTool Sandbox Escape and Prompt-to-Shell RCE (CVE-2026-2275 / VU#221883)
+id: d43f0b6b-de8a-4a8a-bde8-bff5b18ea96f
+status: experimental
+level: critical
+description: |-
+  Detects the CrewAI CodeInterpreterTool exploit cluster disclosed 2026-03-30 as CERT/CC VU#221883 (four CVEs). Two distinct attack surfaces are covered:
+  SURFACE A — CVE-2026-2275 / CVE-2026-2287: Python sandbox escape when Docker is unavailable. SandboxPython blocks direct `import os` but does not block object-introspection primitives. Confirmed PoC from GitHub issue #4516:
+    `for c in ().__class__.__bases__[0].__subclasses__():`
+    `    if c.__name__ == 'BuiltinImporter':`
+    `        c.load_module('os').system('id')`
+  This walks the Python MRO to reach BuiltinImporter and load 'os' without an import statement. Vendor fix: add ctypes/__subclasses__/BuiltinImporter to BLOCKED_MODULES. CVE-2026-2287 adds a runtime Docker-check gap where the sandbox silently downgrades to unsafe mode mid-session.
+  SURFACE B — CVE-2026-2275 unsafe_mode: pip install command injection via libraries_used. Confirmed PoC: `libraries_used=["numpy; id #"]` passes `numpy; id` to `os.system(f"pip install {library}")` without quoting, executing `id` as a shell command.
+  CVE-2026-2285 (local file read via JSON loader) and CVE-2026-2286 (SSRF via RAG URL validation bypass) are in the same advisory but have separate detection surfaces; this rule focuses on the RCE primitives.
+  Detection covers: (a) __subclasses__() / BuiltinImporter / MRO-walk Python sandbox escapes; (b) pip install command injection patterns in libraries_used or equivalent
+      package-list fields;
+  (c) ctypes.CDLL / ctypes.cdll sandbox escape primitives; (d) Content explicitly framing exploitation of the CrewAI CodeInterpreter.
+
+  Adapted from Agent Threat Rules ATR-2026-00539 (MIT).
+author: ATR Community (adapted)
+date: '2026-05-28'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00539
+- https://nvd.nist.gov/vuln/detail/CVE-2026-2275
+- https://nvd.nist.gov/vuln/detail/CVE-2026-2287
+- https://nvd.nist.gov/vuln/detail/CVE-2026-2285
+- https://nvd.nist.gov/vuln/detail/CVE-2026-2286
+tags:
+- attack.privilege-escalation
+- attack.t1059.006
+- attack.t1553
+- attack.t1611
+- atlas.aml.t0043
+- atlas.aml.t0050
+- atlas.aml.t0105
+- owasp.asi05
+- owasp.asi06
+- owasp.llm01
+- owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\.__subclasses__\s*\(\s*\)[^\n]{0,300}(?:BuiltinImporter|builtins|importlib|__import__|load_module\s*\(\s*["\x27]os["\x27]|ctypes)
+  sel_1:
+    content|re: (?i)\(\s*\)\s*\.__class__\s*\.__bases__\s*\[\s*0\s*\]\s*\.__subclasses__\s*\(\s*\)
+  sel_2:
+    content|re: (?i)load_module\s*\(\s*["\x27](?:os|sys|subprocess|importlib|ctypes|builtins)["\x27]\s*\)\s*\.\s*(?:system|popen|exec|spawn|getoutput|run|call|Popen|check_output)
+  sel_3:
+    content|re: (?i)ctypes\s*\.\s*(?:CDLL|cdll|WinDLL|OleDLL|PyDLL)\s*\(\s*[^)]{0,200}(?:libc|libpthread|kernel32|ntdll|msvcrt|\/lib\/|\/usr\/lib\/)
+  sel_4:
+    content|re: (?i)(?:CrewAI|crewai|CodeInterpreterTool|code_interpreter_tool)[^\n]{0,200}(?:sandbox[^\n]{0,80}(?:escape|bypass)|ctypes|__subclasses__|BuiltinImporter|pip[^\n]{0,40}inject)
+  sel_5:
+    content|re: (?i)(?:VU#?221883|CVE-?2026-?2275|CVE-?2026-?2287)[^\n]{0,200}(?:payload|inject|exploit|bypass|__subclasses__|ctypes|SandboxPython|sandbox.escape)
+  condition: 1 of sel_*
+falsepositives:
+- Python tutorial content showing __subclasses__() for educational MRO exploration without OS access or
+  BuiltinImporter target.
+- Security research papers quoting these payload patterns for analysis — rule fires by design; evaluate
+  context.
+- ctypes usage in legitimate scientific Python code accessing shared libraries (no os.system / subprocess
+  follow-up).
+- requirements.txt files where package names do not contain shell metacharacters.
+action: report

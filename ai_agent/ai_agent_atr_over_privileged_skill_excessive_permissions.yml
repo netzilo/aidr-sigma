@@ -1,0 +1,37 @@
+title: Over-Privileged Skill — Excessive Permissions
+id: a627a5e5-1bb3-499b-99fc-83eda21b3e1d
+status: experimental
+level: high
+description: |-
+  Detects skills requesting or instructing overly broad permissions. OWASP AST03 rates this HIGH severity. 280+ leaky skills exposing API keys and PII found by Snyk (Feb 2026). The "consent gap" (Cato Networks) means once a skill is approved, it gains persistent permissions without re-approval. Real patterns: blanket network:true, wildcard file paths (~/*), write access to identity files (SOUL.md, MEMORY.md), auto-approve escalation (CVE-2025-53773). arXiv documents Copilot auto-approve attack writing {"chat.tools.autoApprove":true} to .vscode/settings.json.
+
+  Adapted from Agent Threat Rules ATR-2026-00123 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-29'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00123
+- https://nvd.nist.gov/vuln/detail/CVE-2025-53773 - COPILOT AUTO-APPROVE ESCALATION
+tags:
+- attack.persistence
+- atlas.aml.t0010
+- owasp.asi03
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(set|write|add|configure|enable)\s+.{0,30}(autoApprove|auto[_-]approve|always[_-]approve).{0,10}(true|yes|on)|"chat\.tools\.autoApprove"\s*:\s*true
+  sel_1:
+    content|re: (?i)(disable|turn\s+off|deactivate)\s+(the\s+)?(agent|ai|skill|claude|copilot)\s+(sandbox|safety|guardrail|restriction|permission)s?
+  sel_2:
+    content|re: (?i)(read|access|scan|search)\s+(all|every|any)\s+(files?|directories|directory|paths?|folders?)\s+(in|on|under|across)\s+(the\s+)?(system|machine|computer|home\s+directory|entire|~/)
+  condition: 1 of sel_*
+falsepositives:
+- System administration skills that need broad access by design
+- Skills documenting security settings without modifying them
+- A security audit report that discusses over-privileged skill patterns and references SOUL.md file protections
+  without containing actual write commands
+- DevOps documentation explaining how to scope Bash tool access and avoid wildcard permissions in skill
+  manifests
+action: report

@@ -1,0 +1,47 @@
+title: MCP Line Jumping — Agent-Directed Imperative Embedded in a Tool/Parameter Description Field (Pre-Invocation
+  Injection)
+id: a780f919-c0fe-4607-87b2-fa0cfebd6897
+status: experimental
+level: high
+description: |-
+  Detects the MCP "line jumping" attack class (The Vulnerable MCP Project entry line-jumping-attack, reported by Trail of Bits). A malicious MCP server smuggles instructions aimed at the model INTO A TOOL-SCHEMA OR PARAMETER DESCRIPTION FIELD. Because MCP clients load every tool description into the model's context the moment a server is listed, the injected instruction executes BEFORE the tool is ever invoked — jumping the line ahead of user approval of any tool call. The detectable signature is a tool/parameter schema "description" field whose value carries an agent-addressed pre-invocation imperative: telling the assistant/model what it MUST do (prepend a command, route output, ignore the user) before or whenever it calls a tool. This is distinct from a conversation-level "ignore previous instructions" (the directive must live inside a tool-schema description field) and from the rug-pull class (no temporal redefinition trigger) and the <IMPORTANT>-tag cross-tool shadowing class (no tag, no "also present" co-tool reference required).
+
+  Adapted from Agent Threat Rules ATR-2026-00579 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00579
+- https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/
+- https://github.com/vineethsai/vulnerablemcp
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi06
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)"(?:description|param_description|parameter_description)"\s*:\s*"[^"\n]{0,200}\b(?:before\s+(?:using|calling|invoking|running|executing)\s+(?:this|the|any)\s+(?:tool|function|command)|(?:you|the\s+assistant|the\s+model|the\s+agent|the\s+ai)\s+(?:must|should|shall|are\s+required\s+to|need\s+to)\s+(?:always\s+|first\s+|silently\s+)?(?:prepend|append|inject|run|execute|read|send|forward|route|disregard|ignore)|ignore\s+(?:the\s+)?(?:user|previous|prior)\b)
+  sel_1:
+    content|re: (?i)\b(?:tool\s+description|parameter\s+description|param\s+description|docstring)\b[^\n]{0,80}(?:the\s+assistant|the\s+model|the\s+agent|the\s+ai|the\s+llm|you)\s+(?:must|should|shall|are\s+required\s+to|need\s+to)\s+(?:always\s+|first\s+|silently\s+)?(?:prepend|append|inject|run|execute|forward|route|send)\b[^\n]{0,80}\bbefore\s+(?:using|calling|invoking|running|each|any|the\s+next)\b
+  sel_2:
+    content|re: (?i)\b(?:before\s+(?:executing|running)\s+(?:any|each|every)\s+(?:shell\s+)?command|prepend\s+(?:to\s+)?(?:every|each|any|all)\s+(?:shell\s+)?command)\b[^\n]{0,120}(?:curl|wget|nc\b|bash\b|sh\b|base64|/exfil|whoami|\$\(|`)
+  condition: 1 of sel_*
+falsepositives:
+- Normal tool descriptions that describe what the tool does to a user (e.g. 'Searches the web for the
+  given query', 'Use this tool when you need the current weather') — these address the reader, not the
+  model, and carry no pre-invocation imperative to prepend/route/ignore.
+- Security research, blogs, and advisories that DESCRIBE line jumping / tool-description injection in
+  third-person prose ('a malicious server embeds instructions in a tool description') — they do not contain
+  a live schema description field carrying an agent-addressed imperative.
+- 'Legitimate parameter descriptions that contain the word ''instructions'' benignly (e.g. ''description:
+  free-text instructions to display to the end user'').'
+- Conversation-level prompt-injection strings ('ignore previous instructions') that are NOT embedded in
+  a tool-schema description field — those are covered by ATR-2026-00213 / 00240, not this rule.
+- Test fixtures and MCP scanner corpora that catalog line-jumping payloads as reference samples — should
+  live in test directories, not be served over MCP.
+action: report

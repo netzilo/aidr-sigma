@@ -1,0 +1,36 @@
+title: Indirect PI — Data Destruction Instruction via Agent File/Document Tool
+id: 2b8807e7-fdb8-43d1-a497-99509961a623
+status: experimental
+level: high
+description: |-
+  Detects indirect prompt injection payloads that instruct an agent to delete, purge, or destroy files, documents, or records: deleting clinical documents, removing project files, wiping directories, or destroying specific data stores.  Distinct from system-sabotage (which targets OS/kernel) and exfil-and-destroy (which combines exfil with deletion) — this rule targets data destruction as a standalone action via document or file management tools. Source: indirect-pi-data-destruction-carrier / indirect-pi-data-destruction.
+
+  Adapted from Agent Threat Rules ATR-2026-00716 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00716
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0051.001
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:delete|remove|destroy|purge|erase|wipe)\s+(?:all\s+(?:of\s+)?(?:my\s+)?)?(?:clinical\s+documents?|medical\s+(?:files?|records?|documents?)|health\s+(?:files?|records?))[^.\n]{0,120}(?:diagnosis|diabetes|cancer|condition|disease|illness)
+  sel_1:
+    content|re: (?i)(?:delete|remove|purge|erase)\s+(?:all\s+)?(?:files?|documents?|records?)[^.\n]{0,80}(?:from\s+(?:my\s+)?(?:Google\s+Drive|Dropbox|OneDrive|health\s+(?:system|portal)|cloud\s+(?:drive|storage)|EHR|database))
+  sel_2:
+    content|re: (?i)Delete\s+the\s+file\s+with\s+(?:ID|id)\s+'[^']{1,50}'
+  sel_3:
+    content|re: (?i)(?:remove|delete|erase|purge)\s+all\s+(?:medical|clinical|patient|health)\s+(?:records?|files?|data)[^.\n]{0,80}(?:from\s+(?:the\s+)?(?:EHR|health\s+system|database|hospital|clinic)|for\s+patient\s+(?:ID|id|#)?)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate data governance workflows where users request deletion of their own records
+- GDPR right-to-erasure automation that processes verified user deletion requests
+action: report

@@ -1,0 +1,35 @@
+title: XSS Payload Injection in Tool Response Output
+id: 22f572a5-4141-4e4e-8fd1-5943c3c94f37
+status: experimental
+level: high
+description: |-
+  Detects cross-site scripting (XSS) payloads embedded in tool responses or skill output that get rendered in a web-based agent UI, chat interface, or agent dashboard. When an agent passes tool output directly to a frontend without sanitization, injected script tags, event handlers, or javascript: URIs execute in the user's browser. From NVIDIA garak xss probe family (distinct from ATR-2026-00261 markdown image exfil — this covers script execution, not just passive URL fetching).
+
+  Adapted from Agent Threat Rules ATR-2026-00270 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00270
+- https://github.com/NVIDIA/garak/tree/main/garak/data/xss
+- https://portswigger.net/web-security/cross-site-scripting
+tags:
+- attack.execution
+- atlas.aml.t0057
+- owasp.asi08
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: <(?:img|svg|iframe|object|embed|video|audio|source|input|body|html)[^>]{0,200}\s+on(?:load|error|click|mouseover|focus|blur|input|change|submit)=["\x27][^"]{0,200}(?:eval\s*\(|alert\s*\(|fetch\s*\(|XMLHttpRequest|document\.cookie|document\.write\s*\(|window\.location\s*=|location\.href\s*=|localStorage|sessionStorage|atob\s*\(|new\s+Function\s*\(|String\.fromCharCode)[^"]{0,200}["\x27]
+  sel_1:
+    response|re: (?:href|src|action|formaction|srcdoc|data)\s*=\s*["\x27]?\s*javascript:[^\s"]{1,500}
+  sel_2:
+    response|re: (?:output|return|emit|print|include|embed|render|inject)\s+(?:the\s+)?(?:following\s+)?(?:html|script|payload)\s*[:\n]\s*<(?:script|img|svg|iframe)[^>]{0,200}(?:alert|eval|fetch|XMLHttpRequest|document\.cookie|localStorage)
+  condition: 1 of sel_*
+falsepositives:
+- Security audit reports listing XSS examples as findings (without live HTML rendering)
+- Web development documentation explaining XSS in code blocks
+- CTF challenge writeups containing harmless alert() demos in non-rendering contexts
+action: report

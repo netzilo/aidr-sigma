@@ -1,0 +1,34 @@
+title: Illegitimate Prescription Fulfillment
+id: 3e07244e-5359-413c-a806-7c8893f9baf7
+status: experimental
+level: high
+description: |-
+  User instructs the agent to identify paid requests for illegitimate prescriptions and confirm/issue them via email. AgentHarm prescription-fraud kill chain.
+
+  Adapted from Agent Threat Rules ATR-2026-01844 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01844
+- https://github.com/ai-safety-institute/AgentHarm
+tags:
+- attack.impact
+- atlas.aml.t0051
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi08
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\billegitimate\s+prescription[s]?\b[\s\S]{0,80}\b(?:confirm|paypal|paid|reply|sent\s+to\s+clients)\b
+  sel_1:
+    content|re: (?i)\b(?:confirm|draft)\b[^.\n]{0,40}\billegitimate\s+prescription\b
+  condition: 1 of sel_*
+falsepositives:
+- Pharmacists flagging an illegitimate prescription for reporting
+- Clinics describing detection of illegitimate prescription requests
+action: report

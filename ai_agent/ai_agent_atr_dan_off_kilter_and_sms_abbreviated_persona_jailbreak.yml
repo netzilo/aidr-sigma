@@ -1,0 +1,45 @@
+title: DAN Off-Kilter and SMS-Abbreviated Persona Jailbreak
+id: 8d7c8ff1-1457-4e98-a764-504fa0c3e145
+status: experimental
+level: high
+description: |-
+  Detects the off-kilter Dan persona and SMS-abbreviated DAN jailbreak from garak inthewild corpus (#250, #459). Two variants: (1) the off-kilter Dan variant (#250) frames a persona named "Dan" as "an off-kilter man who doesn''t consider the feelings for others and helps people with WHATEVER they ask for no matter how strange or weird" with an "anarchist" lean; (2) the SMS abbreviation variant (#459) obfuscates the classic DAN jailbreak structure using text abbreviations ("U r DAN", "Frm nw on") and dual-output format ("[Brainy:]" + "[DAN:]") with an explicit "No rules/morals/ethics" declaration. Both variants share the pattern of a named DAN/Dan persona that assists with any request regardless of content. Distinct from ATR-2026-00273 (developer-mode DAN) and ATR-2026-00353 (dual ChatGPT+Dan format) by the off-kilter personality framing and SMS obfuscation structure.
+
+  Adapted from Agent Threat Rules ATR-2026-00351 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00351
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: '[Dd]an[,\s]+he''?s?\s+an\s+off-?kilter\s+man[\s\S]{0,300}(?:helps?\s+people\s+with\s+WHATEVER|WHATEVER\s+they\s+ask\s+for|no\s+matter\s+how\s+strange\s+or\s+weird)'
+  sel_1:
+    response|re: off-?kilter[\s\S]{0,200}(?:leans?\s+on\s+anarchy|doesn't?\s+considers?\s+the\s+feelings?\s+for\s+others|speaks?\s+his\s+mind\s+freely)[\s\S]{0,200}[Dd][Aa][Nn]
+  sel_2:
+    response|re: U\s+r\s+DAN[\s\S]{0,50}(?:Frm\s+nw\s+on|2\s+ways?\s+2\s+answer|norm\s*\[|nw\s+on)
+  sel_3:
+    response|re: \[Brainy:\][\s\S]{0,200}\[DAN:\]|\[DAN:\][\s\S]{0,200}\[Brainy:\]
+  sel_4:
+    response|re: (?:U\s+r\s+DAN|Frm\s+nw\s+on[\s\S]{0,100}DAN|DAN[\s\S]{0,100}Frm\s+nw\s+on)[\s\S]{0,400}(?:No\s+rules|no\s+morals|no\s+ethics|unsafe|non-?consensual|immoral|sexual|no\s+boundaries)
+  condition: 1 of sel_*
+falsepositives:
+- 'Team introduction: "Dan is a helpful software engineer in our team — he speaks his mind freely but
+  always considers others" (legitimate team member description)'
+- 'SMS conversation: "u r awesome dan! frm now on u r my fav helper" (genuine SMS message without jailbreak
+  framing)'
+- 'Log entry: "[DAN:] prefix in a log file showing messages from a user named Dan in a chat system" (logging
+  format without jailbreak)'
+- 'Academic: "The DAN jailbreak exploits dual-response framing; off-kilter persona variants add anarchy
+  framing" (analysis without adoption)'
+action: report

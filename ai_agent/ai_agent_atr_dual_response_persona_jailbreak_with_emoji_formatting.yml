@@ -1,0 +1,37 @@
+title: Dual-Response Persona Jailbreak with Emoji Formatting
+id: cc1d5ce1-0d45-46af-a789-9a028020964e
+status: experimental
+level: high
+description: |-
+  Detects sophisticated jailbreak attempts that create fictional AI personas with mandatory dual-response formatting using emoji tags. These attacks establish fake AI backstories with detailed historical context, then demand two parallel outputs (normal + uncensored). The technique bypasses single-response detection by splitting harmful content into a "roleplay" channel marked with distinctive emoji prefixes like  (💥Maximum), (🔥DAN), (⚡UNLIMITED), etc. Often includes persistence mechanisms like "Stay as [PERSONA]" reminders and detailed policy overrides disguised as persona characteristics.
+
+  Adapted from Agent Threat Rules ATR-2026-00242 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-19'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00242
+tags:
+- attack.initial-access
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?:ignore|disregard|forget)\s+all\s+(?:the\s+)?instructions?\s+you\s+got\s+(?:before|earlier|previously)
+  sel_1:
+    content|re: (?:from\s+now\s+on|going\s+forward|starting\s+now),?\s+you\s+(?:are\s+going\s+to\s+)?(?:act|behave|operate)\s+as\s+(?:a\s+)?(?:simulator\s+of\s+)?(?:a\s+)?([A-Z][a-zA-Z0-9]{2,15})\s+(?:virtual\s+machine|AI|assistant|chatbot|entity)
+  sel_2:
+    content|re: generate\s+two\s+responses?\s+in\s+two\s+paragraphs?|always\s+(?:going\s+to\s+)?generate\s+two\s+responses?|one\s+normal\s+and\s+one\s+(?:acting\s+as|playing|being)
+  sel_3:
+    content|re: \([🔥💥⚡🌟🚀✨🔓🗲⭐🌪️🎯][A-Za-z0-9]{2,15}\)\s+(?:This\s+is|Here\s+is)|(?:use\s+the\s+tags?|you\s+will\s+use\s+the\s+tags?)\s+\([🔥💥⚡🌟🚀✨🔓🗲⭐🌪️🎯][A-Za-z0-9]{2,15}\)
+  sel_4:
+    content|re: (?:stay\s+as|remain\s+as|continue\s+being|keep\s+acting\s+as)\s+([A-Z][a-zA-Z0-9]{2,15})|if\s+you\s+stop\s+(?:accomplishing|complying)\s+with\s+my\s+order.*(?:stay\s+as|remain\s+as)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate documentation describing dual-mode API responses (OpenAI function calling + text)
+- Educational content explaining jailbreak techniques for security training
+- Normal emoji usage in casual conversation without structured formatting
+action: report

@@ -1,0 +1,31 @@
+title: Translation-Chain Output Laundering (Forced Phrase via Foreign-Language Auxiliary)
+id: 9e63e4e1-2f27-4a3f-b1aa-8a76ac5ede90
+status: experimental
+level: high
+description: |-
+  Detects translation-chain output laundering: a forced/canary phrase (e.g. a state-secret marker or "pwned"-style compliance token) is stated inside a foreign-language sentence using a first-person auxiliary verb construction (Spanish "he sido", German "ich habe"/"ich bin", French "j'ai"/"je suis"), then the model is asked to translate the sentence to English — laundering the forced token through translation framing so literal-string or English-only filters on the direct instruction are bypassed. Channel: llm_input text. Engine-verified on the benchmark corpus: recovers=77, benignFP=0. The target-token alternation (pwned|pwnado|pwnd) is specific to this benchmark's forced-output marker and would need broadening to generalize beyond this campaign to other forced-output/canary strings.
+
+  Adapted from Agent Threat Rules ATR-2026-02008 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02008
+- https://nvd.nist.gov/vuln/detail/CVE-2024-5184
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(he sido|ich habe?|j'ai|je suis|ich bin)\b[\s\S]{0,40}\b(pwned|pwnado|pwnd)\b
+  condition: sel_0
+falsepositives:
+- Genuine language-learning or translation-help requests that happen to use these auxiliary verbs without
+  the forced marker token
+- Security researchers discussing this exact canary-token benchmark in professional/academic context
+action: report

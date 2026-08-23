@@ -1,0 +1,31 @@
+title: Regional-Indicator Flag-Emoji Letter Spelling
+id: 49be9d35-0f25-4433-93e8-a228fcc6d59c
+status: experimental
+level: high
+description: |-
+  Detects prompt injection payloads obfuscated by spelling words one Unicode regional-indicator symbol per letter (the flag-emoji alphabet used in the U+1F1E6-U+1F1FF block). This is a known Discord/Twitter-culture obfuscation convention: each regional-indicator symbol renders as part of a flag emoji when paired, but a long unpaired run instead spells out Latin letters glyph-by-glyph (e.g. regional-indicator I + H + A + V + E ... spells "I HAVE BEEN..."), smuggling instructions past text-based filters that only inspect plain ASCII/Latin characters. Runs of 4+ consecutive regional-indicator symbols are anomalous in benign chat/content (legitimate flag emoji use at most 2 consecutive regional-indicator symbols to render a single country flag).
+
+  Adapted from Agent Threat Rules ATR-2026-02018 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-07'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02018
+tags:
+- attack.initial-access
+- attack.t1027
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: '[🇦-🇿]{4,}'
+  condition: sel_0
+falsepositives:
+- Messages containing two or three consecutive country flag emoji (e.g. sharing multiple national flags),
+  which render as at most 2 regional-indicator symbols per flag
+- Normal chat messages with emoji reactions that do not use regional-indicator symbols
+action: report

@@ -1,0 +1,35 @@
+title: Actor Never-Breaks-Character Roleplay (DAN-Style Film Framing)
+id: 8d94816c-ceae-4413-b1e4-21de596e8342
+status: experimental
+level: high
+description: |-
+  Detects a DAN-style jailbreak that frames two people as professional actors in a film who "never break character" — even off-camera — and then elicits the harmful continuation in-character (e.g. a heist, robbery, or murder scene where the "actor" supplies real-world instructions inside dialogue). The never-break-character claim functions as an explicit refusal-suppression device: once the agent accepts the framing, safety refusals are reframed as "breaking character." Recovered from the PINT false-negative corpus (EN and DE variants); this rule does not fire on generic mentions of actors or characters alone.
+
+  Adapted from Agent Threat Rules ATR-2026-02005 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-06'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02005
+tags:
+- attack.initial-access
+- attack.t1622
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: \b(actors?|schauspieler\w*)\b[\s\S]{0,250}\b(do\s+not\s+break|never\s+break|without\s+(?:even\s+)?break\w*|nicht\s+(?:eine\s+sekunde|einen\s+moment)?\s*(?:lang\s+)?aus\s+(?:ihr\w*|seiner)?\s*(?:rolle|figur|charakter\w*)|bleiben\s+immer|verharren\s+stets)\b
+  condition: sel_0
+falsepositives:
+- Legitimate roleplay requests that do not attempt to remove safety constraints
+- General conversational/chat-turn channel content mentioning actors or acting technique without a never-break-character
+  claim
+- 'Media/entertainment-industry deployments: script coverage, casting notes, or acting-coach material
+  may co-occur ''actor'' with character/role language — recommend a light manual spot-check before enabling
+  in that vertical, since this is the one plausible adjacent benign domain not represented in the benign-corpus-extended
+  gate (agent-ops/arxiv/npm/skills-sh/pypi/official-skills/wild-fp-confirmed skews technical, not media)'
+action: report

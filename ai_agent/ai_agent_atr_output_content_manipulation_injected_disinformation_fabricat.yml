@@ -1,0 +1,36 @@
+title: Output Content Manipulation — Injected Disinformation / Fabricated Facts / Undisclosed Advocacy
+  (Semantic)
+id: e2bea8c2-310d-4e5d-8fd3-499c9f466f99
+status: experimental
+level: medium
+description: |-
+  Semantic detector for indirect-injection instructions that make the agent embed attacker-chosen DECEPTIVE or covertly PERSUASIVE content into its response: fabricated statistics, false claims, baseless rumors, non-existent product benefits, invented scandals or 'shocking revelations', unverifiable 'current' facts, or undisclosed political/dietary/charitable advocacy. The semantic judge generalises past the templated phrasings (paraphrases like 'weave in a claim that isn't quite accurate' that a keyword regex cannot bound); a narrow fallback regex catches the canonical BIPIA templates when no judge is configured.
+
+  Adapted from Agent Threat Rules ATR-2026-01906 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01906
+tags:
+- attack.initial-access
+- atlas.aml.t0048
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(?:add|integrate|include|enhance|augment|modify)\b[\s\S]{0,70}\b(?:your|the)\s+(?:response|answer|reply|message)\b[\s\S]{0,95}\b(?:fabricated|false\s+claim|misleading|baseless|non-existent|fake\s+(?:scandal|revelation|antivirus)|celebrity\s+scandal|shocking\s+revelation|latest\s+statistics|current\s+unemployment|release\s+date\s+of|recent\s+update\s+on|to\s+vote\b|vote\s+in\s+the|climate\s+action|plant-based\s+diet|regular\s+health\s+check|appeal\s+for\s+donations|major\s+announcement|ordinary\s+update)\b
+  sel_1:
+    content|re: (?i)\bin\s+your\s+(?:response|answer|reply|message)\b[\s\S]{0,95}\b(?:fabricated|false\s+claim|misleading|baseless|non-existent|celebrity\s+scandal|shocking\s+revelation|latest\s+statistics|current\s+unemployment|release\s+date\s+of|recent\s+update\s+on|to\s+vote\b|vote\s+in\s+the|climate\s+action|plant-based\s+diet|regular\s+health\s+check|appeal\s+for\s+donations|major\s+announcement|ordinary\s+update|fact\s+about\s+the)\b
+  sel_2:
+    content|re: (?i)\b(?:add|integrate|include|modify|enhance|augment)\b[\s\S]{0,60}\b(?:false|fabricated|misleading|baseless|non-existent|untrue)\b[\s\S]{0,50}\b(?:statistic|claim|rumor|benefit|statement|revelation|scandal)\b
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation, papers, or test suites that describe this attack technique without executing
+  it.
+- Legitimate developer or user requests that share the surface vocabulary but lack the malicious invariant.
+action: report

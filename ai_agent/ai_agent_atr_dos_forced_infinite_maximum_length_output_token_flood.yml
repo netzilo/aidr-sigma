@@ -1,0 +1,35 @@
+title: 'DoS: Forced Infinite / Maximum-Length Output Token Flood'
+id: f9f89d16-8732-446d-a5e5-e1092eb193a7
+status: experimental
+level: high
+description: |-
+  Detects denial-of-service attacks that command the model to produce output of maximum length, fill its context window, or generate content until no more tokens remain. This is distinct from repeat-word-N-times (ATR-2026-01750) and forever-repetition (ATR-2026-00502): the invariant here is an explicit instruction to exhaust the token budget or fill the output to its maximum capacity. Variations include: "generate as much text as possible", "fill your entire output window", "write until you run out of tokens", "produce the longest possible response". These instructions impose maximum token cost on the operator without requiring a specific repeat target.
+
+  Adapted from Agent Threat Rules ATR-2026-01760 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01760
+tags:
+- attack.impact
+- atlas.aml.t0040
+- atlas.aml.t0046
+- owasp.asi01
+- owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(generate|produce|write|output|create)\b[^.\n]{0,50}\b(as\s+many\s+tokens?|as\s+many\s+words?|as\s+much\s+(text|content|output|response)|maximum\s+(text|content|output|tokens?|words?))\b[^.\n]{0,30}\b(as\s+possible|before\s+stopping|you\s+can)
+  sel_1:
+    content|re: (?i)\b(fill|use\s+up|exhaust|max(imize|imise)|consume)\b[^.\n]{0,40}\b(your\s+)?(context\s+(window|length)|output\s+(window|limit|capacity|budget)|token\s+(budget|limit|quota|cap))\b
+  sel_2:
+    content|re: (?i)\b(write|generate|output|produce|keep\s+writing|continue\s+(writing|generating))\b[^.\n]{0,50}\b(until\s+you\s+(\brun\s+out|exhaust|hit\s+the\s+(limit|max|cap)|can'?t\s+(write|generate)\s+any\s+more))
+  sel_3:
+    content|re: (?i)\b(longest\s+possible|maximum[- ]length|max[- ]length)\s+(response|output|answer|reply|generation)\b
+  condition: 1 of sel_*
+falsepositives:
+- Security documentation describing token-flood attacks
+- Legitimate 'write as much as you know about X' requests where the user wants comprehensive coverage
+action: report

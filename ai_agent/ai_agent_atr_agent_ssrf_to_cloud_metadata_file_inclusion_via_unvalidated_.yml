@@ -1,0 +1,31 @@
+title: Agent SSRF to cloud metadata / file inclusion via unvalidated fetch URL
+id: 9f787fed-dcd3-42bd-9975-66047a26d5f8
+status: experimental
+level: high
+description: |-
+  An agent tool fetches an attacker-controlled URL with no scheme allowlist or private-network block, letting it reach cloud-metadata endpoints (credential theft), local files via file://, or SSRF-only schemes (gopher/dict). Detects those unambiguous internal targets. Generalizes across CVE-2026-40150/40160 (PraisonAIAgents), CVE-2026-7817 (pgAdmin), CVE-2026-45401 (Open WebUI).
+
+  Adapted from Agent Threat Rules ATR-2026-00568 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-02'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00568
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40150
+- https://nvd.nist.gov/vuln/detail/CVE-2026-40160
+- https://nvd.nist.gov/vuln/detail/CVE-2026-7817
+- https://nvd.nist.gov/vuln/detail/CVE-2026-45401
+tags:
+- attack.execution
+- atlas.aml.t0049
+- owasp.asi05
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:169\.254\.169\.254|metadata\.google\.internal|100\.100\.100\.200|fd00:ec2::254)(?:[:/]|\b)|\bfile://(?:/?(?:etc|proc|root|home|var/run|sys)/)|\bgopher://|\bdict://
+  condition: sel_0
+falsepositives:
+- Legitimate use of this pattern in an authorised workflow; review the surrounding session before acting.
+action: report

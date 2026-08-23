@@ -1,0 +1,31 @@
+title: Many-Shot Repetition Override via Extended Q&A Chain
+id: e453bf57-71d7-412f-a50f-4130a5a16eb9
+status: experimental
+level: high
+description: |-
+  Detects many-shot prompt injection where the attacker builds an extended Q&A chain (5+ pairs) on benign topics (algebra, baking, Python syntax, system override definitions) to condition the model's compliance mode, then appends a malicious request. The defining artifact is a long Q/A: pattern sequence (≥3 Q:/A: pairs discernible in the input) combined with a sensitive terminal question. Separate from few-shot (ATR-2026-01004) which targets ≤3 pairs; many-shot relies on volume to overwhelm attention or context-window safety checks. Also detects the "Repeat X 10 times ... Q: [sensitive]" token-repeat conditioning variant.
+
+  Adapted from Agent Threat Rules ATR-2026-01005 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01005
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(Q\s*:\s*.{5,200}\s+A\s*:\s*.{5,300}\s+){3,}Q\s*:\s*.{0,150}(password|secret|api[_\s]?key|birth\s*(date|day)|email\s*(address)?|social\s*security|SSN|override|bypass|admin|credentials?|master\s*key)
+  sel_1:
+    content|re: (?i)Q\s*:\s*Repeat\s+'?[^'"\n]{3,60}'?\s+(\d+|ten|five|twenty)\s+times\.?[^\n]{0,200}Q\s*:\s*.{0,100}(password|secret|key|override|admin|credentials?|birth\s*date|email|social\s*security)
+  condition: 1 of sel_*
+falsepositives:
+- Academic benchmark datasets that include many Q&A pairs for testing purposes
+- Educational quiz documents with many questions about security terminology (not requesting actual credentials)
+action: report

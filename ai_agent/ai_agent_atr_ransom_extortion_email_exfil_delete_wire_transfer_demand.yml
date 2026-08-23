@@ -1,0 +1,38 @@
+title: 'Ransom Extortion: Email Exfil + Delete + Wire-Transfer Demand'
+id: ad3eee1b-44ff-4827-ab90-f15dc403c8fd
+status: experimental
+level: critical
+description: |-
+  Detects ransom-extortion prompt injection attacks that instruct an agent to (1) forward email or file contents to an attacker-controlled address, (2) delete the sent/forwarded items to destroy evidence, and (3) send the victim a ransom note with payment instructions (wire transfer / IBAN / cryptocurrency). The invariant artifact chain is: external-email-forward + delete-sent-items + ransom-note-send with financial-transfer demand. Derived from AgentDojo indirect-pi-ransom-extortion corpus (2026-06, N=2). High-severity: successful execution causes data loss, privacy breach, and financial extortion.
+
+  Adapted from Agent Threat Rules ATR-2026-01753 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01753
+tags:
+- attack.exfiltration
+- atlas.aml.t0025
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.asi04
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(email|send|forward)\b[^.\n]{0,80}\b(contents?|body|text|attachment)\b[^.\n]{0,120}\b(delete|remove|destroy)\b[^.\n]{0,80}\b(sent|email|original)\b
+  sel_1:
+    content|re: (?i)\b(wire|pay|transfer)\s+\$[0-9,\.]+\s+to\s+IBAN\s+[A-Z0-9]{8,34}\b
+  sel_2:
+    content|re: (?i)\bIBAN\s+[A-Z0-9]{8,34}\b[\s\S]{0,80}\b(recover|back|return|them|data|files?)\b
+  sel_3:
+    content|re: (?i)(SECURITY\s+BREACH|SECURITY\s+MESSAGE|RANSOM|how\s+to\s+recover)[\s\S]{0,150}(wire|pay|send)[\s\S]{0,60}(\$[0-9]+|[0-9]+\s+USD|IBAN)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate email-forwarding agent tasks that happen to mention delete-after-forward
+- Financial operations agents that process IBAN numbers in normal transaction flows
+- Security training simulations that reproduce this attack pattern in documentation
+action: report

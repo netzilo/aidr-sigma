@@ -1,0 +1,64 @@
+title: AI Text Detection Evasion via Humanizer Services and Watermark-Scrubbing Paraphrase
+id: 98c78549-1b14-403e-8af0-3c394533eeb2
+status: experimental
+level: medium
+description: |-
+  Detects an agent being equipped with, or invoking, a capability whose purpose is to make AI-generated text read as human-written: commercial humanizer API endpoints, MCP servers and skills that expose `humanize_text` and `scan_ai_detection` as first-class tools, paraphrase models trained specifically for detector evasion, rewrite loops that terminate on a detector score, and the prompt-only technique of inserting symbols between words to break k-gram text watermarking. Deliberately distinct from ATR-2026-01842 (plagiarism-detector evasion), which fires only on the AgentHarm fingerprint 'avoid a plagiarism check' and concerns copying another author's work. The target here is the class of AI-generation detectors and LLM text watermarks, not similarity matching against a source corpus. The two rules do not overlap in trigger surface. The tool-name and endpoint layers are the ones with real discriminating power. Rewriting text is overwhelmingly legitimate work — accessibility, ESL editing, tone, localisation — so every intent layer additionally requires a named detector or an explicit undetectability goal before it fires.
+
+  Adapted from Agent Threat Rules ATR-2026-02413 (MIT).
+author: ATR Community (adapted)
+date: '2026-08-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-02413
+- https://arxiv.org/abs/2303.13408
+tags:
+- attack.impact
+- attack.t1027
+- atlas.aml.t0054
+- owasp.asi08
+- owasp.llm09
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(?:https?|wss)://(?:humanize|human)\.undetectable\.ai/|https?://stealthgpt\.ai/api/stealthify
+  sel_1:
+    content|re: (?i)\b(?:ai-humanizer-mcp-server|@humantext/mcp-server|humanize-text-skill|texthumanizer\.pro|HUMANTEXT_API_KEY)\b
+  sel_2:
+    content|re: (?i)\bhumanize_text\b[\s\S]{0,200}\bscan_ai_detection\b
+  sel_3:
+    content|re: (?i)\b(?:bypass|evad|beat|defeat|fool|trick|circumvent|outsmart)\w*\b[\s\S]{0,40}\b(?:ai
+      (?:content |text )?detect(?:ion|ors?)|gptzero|turnitin|originality\.ai|copyleaks|zerogpt|winston
+      ai)\b
+  sel_4:
+    content|re: (?i)\b(?:make|rewrite|rewriting|rephrase|paraphrase|humanize|humanise)\b[\s\S]{0,60}\b(?:undetectable|100%
+      human score|pass(?:es)? as human[- ]written)\b
+  sel_5:
+    content|re: (?i)\b(?:kalpeshk2011/dipper-paraphraser|dipper-paraphraser-xxl|DipperParaphraser)\b
+  sel_6:
+    content|re: (?i)api\.gptzero\.me/v2/predict/text[\s\S]{0,400}(?:rehumanize|stealthify|humanize\.undetectable)|(?:rehumanize|stealthify|humanize\.undetectable)[\s\S]{0,400}api\.gptzero\.me/v2/predict/text
+  sel_7:
+    content|re: (?i)\binsert\s+(?:an?\s+)?(?:emoji|special symbol|random symbol)\b[\s\S]{0,20}\bbetween\s+every\s+word\b
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate bulk calls to AI-detector APIs by teachers, journal editors, publishers and recruiters vastly
+  outnumber evasive ones. Layer 6 fires only when a detector endpoint and a humanizer endpoint appear
+  together in the same code.
+- 'Ordinary rewriting and editing: plain-language and WCAG readability work, ESL polishing, brand tone
+  alignment, SEO editing. Every intent layer additionally requires a named detector or an explicit undetectability
+  goal.'
+- Translation and localisation pipelines using back-translation for quality assurance. Not covered by
+  any layer — back-translation was tested and removed after matching legitimate corpus documents.
+- NLP data augmentation and robustness testing (`nlpaug`, `BackTranslationAug`, `SynonymAug`). Not covered.
+- 'Text-watermarking research and red teams: `markllm`, `sok-llm-watermark` and `lm-watermarking` ship
+  attack modules, and layer 5 will match researchers loading the DIPPER paraphraser.'
+- Detection-vendor documentation and academic-integrity teaching material that enumerate evasion methods
+  can match layers 3 and 4.
+- Style-imitation writing exercises ('rewrite this in Hemingway's short sentences') carry no undetectability
+  goal and do not match.
+- 'Routine emoji removal in data cleaning (`emoji.replace_emoji()`) is unaffected: layer 7 matches a request
+  to INSERT symbols between every word, never removal.'
+- 'Zero-width character handling was considered as a layer and rejected outright: it matched anti-prompt-injection
+  sanitiser guidance in the benign corpus, meaning this project''s own skill auditor would trip it.'
+action: report

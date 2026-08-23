@@ -1,0 +1,42 @@
+title: SSRF Internal Network and Private IP Range Access
+id: 78f4d4ec-20d0-435f-ab83-da5e64f13ceb
+status: experimental
+level: high
+description: |-
+  Detects SSRF attempts targeting RFC-1918 private IP ranges
+  (192.168.x.x, 10.x.x.x, 172.16-31.x.x) and internal hostnames
+  (e.g., internal.*, admin.internal). When an agent's HTTP-fetch
+  tool follows a URL pointing to internal infrastructure, it may
+  expose admin panels, internal APIs, microservice endpoints, or
+  cloud-internal management planes that are not accessible from the
+  public internet. Attackers use this to pivot from the agent into
+  the internal network.
+
+  Adapted from Agent Threat Rules ATR-2026-01606 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01606
+tags:
+- attack.exfiltration
+- attack.t1090
+- atlas.aml.t0043
+- owasp.asi03
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)https?://(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?/(?:admin|_cluster|_cat|_nodes|v1/kv|v1/secret|metadata|computeMetadata|latest/meta-data|actuator|console|\.env|config|debug|internal)\b
+  sel_1:
+    content|re: (?i)https?://(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}):(?:9200|9300|8500|2379|6379|27017|3306|5432|8086|2375|10250)\b
+  sel_2:
+    content|re: (?i)\b(?:fetch|retrieve|get|access|load|read|request|curl|wget|hit|query|scan|connect\s+to|pull)\b[^\n]{0,60}?https?://(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}):(?:9200|9300|8500|2379|6379|27017|3306|5432|8086|2375|10250)\b
+  sel_3:
+    content|re: (?i)https?://(?:192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3})(?::\d+)?/(?:admin|_cluster|_cat|_nodes|v1/kv|v1/secret|metadata|computeMetadata|latest/meta-data|actuator|console|\.env|config|debug|internal)\b
+  condition: 1 of sel_*
+falsepositives:
+- Agents operating within a private network explicitly authorized to query internal services
+- Network monitoring agents with approved internal scan permissions
+action: report

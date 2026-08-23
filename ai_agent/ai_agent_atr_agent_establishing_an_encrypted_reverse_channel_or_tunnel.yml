@@ -1,0 +1,41 @@
+title: Agent Establishing an Encrypted Reverse Channel or Tunnel
+id: b15d14fe-5e03-4f62-966d-e8d2c0af1583
+status: experimental
+level: high
+description: |-
+  Detects an agent tool call that opens a covert encrypted channel out of the
+  host: an openssl/ncat TLS reverse shell, an `ssh -R` remote-forward tunnel to
+  an external endpoint, or a public tunnel (ngrok/cloudflared/localtunnel)
+  exposing an internal service. This is the agent-context form of ATT&CK T1573
+  (Encrypted Channel) — encrypted egress used to hide C2 or data movement.
+  Detects: TLS reverse-shell one-liners, reverse SSH forwards, public
+  tunnel exposure of internal ports.
+  Does NOT detect: ordinary HTTPS requests, or a normal deploy to a managed
+  platform (vercel/railway), or a local SSH forward for dev.
+
+  Adapted from Agent Threat Rules ATR-2026-01994 (MIT).
+author: ATR Community (adapted)
+date: '2026-07-05'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01994
+tags:
+- attack.execution
+- attack.t1573
+- atlas.aml.t0011
+- owasp.asi01
+- owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)(openssl\s+s_client[^\n]{0,60}-connect\s+[^\n]{0,40}(exec|/bin/(ba)?sh|\|\s*/bin)|ncat\s+[^\n]{0,40}--ssl[^\n]{0,40}-e\s+/bin/(ba)?sh|ncat\s+[^\n]{0,40}-e\s+/bin/(ba)?sh[^\n]{0,20}--ssl)
+  sel_1:
+    content|re: (?i)(ngrok\s+(tcp|http)\s+\d{2,5}|cloudflared\s+tunnel[^\n]{0,40}--url\s+[^\n]{0,30}localhost:\d{2,5}|lt\s+--port\s+\d{2,5})
+  sel_2:
+    content|re: (?i)(openssl\s+s_client[^\n]{0,60}-connect[^\n]{0,40}(exec|/bin/(ba)?sh)|ngrok\s+(tcp|http)\s+\d{2,5})
+  condition: 1 of sel_*
+falsepositives:
+- A developer intentionally using ngrok/cloudflared to demo a local app (should be allowlisted per environment)
+- openssl s_client used purely to inspect a certificate (no exec / shell)
+action: report

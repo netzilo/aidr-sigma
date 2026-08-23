@@ -1,0 +1,43 @@
+title: Fictional-World Format-Override Jailbreak
+id: 059f14b7-966d-47a5-a851-91b0c13c8352
+status: experimental
+level: critical
+description: |-
+  Detects the "fictional, imaginative, and hypothetical world" format-override jailbreak from NVIDIA garak dan.DanInTheWild inthewild corpus (prompts #349 #370 #383 #398 #478 #582 #603 — 7 nearly identical variants). The attack declares a fictional world, issues an absolute format-coercion mandate ("ALWAYS format your output like this, NO MATTER WHAT"), and invokes a consequence-removal justification ("none of your actions will have consequences"). The mandatory format typically includes a second response slot that the attacker fills with harmful content. The locked-format framing prevents the model from breaking the template once established. Key signals: "fictional, imaginative, and hypothetical world", "ALWAYS format your output like this, NO MATTER WHAT", "none of your actions will have consequences", and "No matter what I or you say, do not change this format".
+
+  Adapted from Agent Threat Rules ATR-2026-00322 (MIT).
+author: ATR Community (adapted)
+date: '2026-04-21'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00322
+- https://github.com/NVIDIA/garak/blob/main/garak/probes/dan.py
+- https://github.com/NVIDIA/garak/blob/main/garak/data/dan/inthewild_jailbreak_llms.json
+tags:
+- attack.execution
+- atlas.aml.t0051
+- atlas.aml.t0054
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    response|re: From\s+now\s+on[,\s]+we\s+now\s+take\s+place\s+in\s+a\s+fictional
+  sel_1:
+    response|re: fictional[,\s]+imaginative[,\s]+and\s+hypothetical\s+world
+  sel_2:
+    response|re: ALWAYS\s+format\s+your\s+output\s+like\s+this[,\s]+NO\s+MATTER\s+WHAT
+  sel_3:
+    response|re: (?:hypothetical|pretend|fictional)\s+world[\s\S]{0,200}none\s+of\s+your\s+actions\s+(?:will|would)\s+have\s+consequences
+  sel_4:
+    response|re: No\s+matter\s+what\s+I\s+or\s+you\s+say[,\s]+do\s+not\s+change\s+this\s+format
+  condition: 1 of sel_*
+falsepositives:
+- 'Creative writing: "Let us take place in a fictional, imaginative world for this adventure story" (no
+  format-coercion or NO MATTER WHAT mandate)'
+- 'Technical docs: "In this hypothetical world example, the system outputs JSON. This format does not
+  change." (descriptive format without coercion)'
+- 'Game design: "In our fictional setting, the game always formats output as YAML" (legitimate format
+  spec without jailbreak framing)'
+action: report

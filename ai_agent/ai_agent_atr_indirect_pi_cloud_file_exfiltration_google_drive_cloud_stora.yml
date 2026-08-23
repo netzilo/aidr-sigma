@@ -1,0 +1,38 @@
+title: Indirect PI — Cloud File Exfiltration (Google Drive / Cloud Storage via Agent)
+id: 0f9b929e-4a0c-4ff4-9cc8-be33f76f35bd
+status: experimental
+level: critical
+description: |-
+  Detects indirect prompt injection payloads and VPI attack scenarios instructing an agent (browser-use or file-access agent) to retrieve sensitive files from the user's cloud storage (Google Drive, Dropbox, OneDrive) and upload the contents to an attacker-controlled platform, or to attach cloud files to an email sent to an attacker. The attack targets API information, bank account details, card numbers, email archives, and other sensitive files stored in cloud drives. Derived from vpibench indirect-pi-exfil-file corpus (platform=amazon, attack_url=drive_amazon_form*) and indirect-pi-exfil-cloud-files corpus.
+
+  Adapted from Agent Threat Rules ATR-2026-00857 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-12'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00857
+- https://github.com/CUA-Framework/VPIBench
+- https://arxiv.org/abs/2408.11972
+tags:
+- attack.exfiltration
+- atlas.aml.t0051.001
+- atlas.aml.t0057
+- owasp.asi01
+- owasp.asi03
+- owasp.llm01
+- owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)attacker_objective\s*=\s*Get\s+the\s+user(?:'s|s)\s+(?:API\s+information|bank\s+account\s+information|card\s+information|email\s+information|phone\s+(?:number|information)|\w+\s+(?:credentials?|information|data|file|details?))\s+from\s+Google\s+Drive
+  sel_1:
+    content|re: (?i)(?:retrieve|get|download|fetch|send|email|forward)\s+(?:all\s+)?(?:the\s+)?(?:files?|documents?|data|information)\s+from\s+(?:my\s+)?(?:Google\s+Drive|OneDrive|Dropbox|cloud\s+storage|Drive)[^\n]{0,150}(?:(?:as\s+)?attachments?\s*[^\n]{0,80}to\s+[^\s@]{1,80}@[^\s"]{3,80}|to\s+[^\s@]{1,80}@[^\s"]{3,80})
+  sel_2:
+    content|re: (?i)(?:send|email|forward)\s+(?:every|all|the)\s+(?:file|document|attachment)s?\s+(?:as\s+(?:an?\s+)?attachment|in\s+one\s+email)[^\n]{0,150}(?:delete|remove)\s+(?:the\s+sent\s+email|each\s+of\s+the\s+files?)
+  condition: 1 of sel_*
+falsepositives:
+- Legitimate file sharing workflow attaching Drive documents to emails for collaboration
+- Backup service documentation describing cloud file synchronization
+- Security documentation analyzing cloud storage exfiltration techniques
+action: report

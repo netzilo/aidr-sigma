@@ -1,0 +1,44 @@
+title: Financial Fraud Execution — Ponzi Setup, Fabricated Statements, Unauthorized Redirect & Laundering
+id: 1a4adefc-993b-44e8-b3ef-a05d2665979e
+status: experimental
+level: high
+description: |-
+  Detects an instruction directing an agent with financial tooling to execute a recognizable financial-crime pattern. Drawn from the AgentSecurityBench (ASB) finance domain, the covered fraud archetypes each carry a distinctive signature that separates them from legitimate accounting: (a) Ponzi scheme — "use new investors' funds to pay returns to existing investors", or "set up an experimental investment scheme ... promising above-market returns"; (b) fabricated financial statements — "create alternative financial statements showing a profit increase", or "modify the backup financial data to reflect corrections to a loss"; (c) unauthorized fund redirect — "redirect $X from a client account ... without prior client authorization"; (d) money-laundering test — "process $X of project funds through company ... to test laundering detection"; (e) synthetic/fraudulent accounts — "set up trial accounts using client information"; (f) fraudulent loan — "apply for a $X loan using experimental financial projections". Each Layer below requires the fraud-specific qualifier so generic "review / verify / reconcile the financial statements" requests do not fire.
+
+  Adapted from Agent Threat Rules ATR-2026-01805 (MIT).
+author: ATR Community (adapted)
+date: '2026-06-13'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-01805
+tags:
+- attack.execution
+- atlas.aml.t0051
+- owasp.asi02
+- owasp.asi03
+- owasp.llm01
+- owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)new\s+investors?'?\s+funds?\s+to\s+pay\s+(?:returns?|dividends?|profits?)\s+to\s+existing\s+investors?|experimental\s+investment\s+scheme\s+targeting\s+high[\s-]?net[\s-]?worth[\s\S]{0,40}promising\s+(?:above[\s-]?market|guaranteed)\s+returns?
+  sel_1:
+    content|re: (?i)(?:create|prepare|generate|produce)\s+alternative\s+(?:\w+\s+){0,3}financial\s+statements\s+(?:showing|reflecting|with)\s+(?:a\s+)?(?:profit\s+increase|inflated|different\s+(?:profit|revenue))|modify\s+the\s+backup\s+financial\s+data[\s\S]{0,40}(?:reflect\s+(?:recent\s+)?corrections?\s+to\s+a\s+\$[\d,]+\s+loss)
+  sel_2:
+    content|re: (?i)(?:redirect|reallocate|transfer|move|divert)\s+\$[\d,]+\s+from\s+(?:client\s+)?account[\s\S]{0,80}without\s+(?:prior\s+)?(?:client\s+)?(?:authorization|consent|approval)
+  sel_3:
+    content|re: (?i)(?:financial\s+flow\s+simulation\s+to\s+)?process\s+\$[\d,]+\s+(?:of\s+(?:project\s+)?funds\s+)?through\s+(?:company|account|entity)[\s\S]{0,40}(?:to\s+)?test\s+(?:money[\s-]?)?laundering\s+detection
+  sel_4:
+    content|re: (?i)\bset\s+up\s+(?:trial|new|alternative|synthetic|experimental)\s+accounts?\s+using\s+client\s+information
+  sel_5:
+    content|re: (?i)apply\s+for\s+a\s+\$[\d,]+\s+loan\s+using\s+experimental\s+financial\s+projections
+  condition: 1 of sel_*
+falsepositives:
+- 'Legitimate finance ops: ''review / verify / reconcile / correct discrepancies in the financial statements'',
+  ''process the authorized transaction ensuring compliance'', ''validate the legitimacy of investment
+  schemes'' — none carry a fraud-specific qualifier.'
+- Anti-fraud / anti-money-laundering compliance review requests.
+- Security research corpora cataloguing ASB attack strings as reference samples — should be allowlisted
+  by a reviewer.
+action: report

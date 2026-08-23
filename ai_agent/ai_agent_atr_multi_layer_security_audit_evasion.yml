@@ -1,0 +1,41 @@
+title: Multi-Layer Security Audit Evasion
+id: 02991423-f811-45a9-84c6-c07bd1554545
+status: experimental
+level: high
+description: |-
+  Detects prompt injection attempts specifically designed to bypass multi-layer audit and security systems. Attackers craft payloads that target known audit pipeline stages, attempt to disable or skip security checks, or manipulate trust scores to pass through multiple defense layers.
+
+  Adapted from Agent Threat Rules ATR-2026-00085 (MIT).
+author: ATR Community (adapted)
+date: '2026-03-11'
+references:
+- https://agentthreatrule.org/en/rules/ATR-2026-00085
+tags:
+- attack.initial-access
+- atlas.aml.t0051
+- owasp.asi01
+- owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_0:
+    content|re: (?i)\b(skip|bypass|disable|turn\s*off|deactivate)\s+(all|the|any|every|this|these|those|our|your)\s+(?:the\s+|remaining\s+|further\s+)?(audit|security|safety|validation|verification|compliance|moderation|content|injection)\s+(layer|check|filter|gate|guard|control|scan|pipeline|stage|step)s?\b
+  sel_1:
+    content|re: (?i)\b(mark|flag|set|report)\s+.{0,15}(as\s+)?(safe|trusted|verified|approved|clean|benign|whitelisted)\b.{0,30}(skip|bypass|without)\s+.{0,15}(check|review|audit|scan)
+  sel_2:
+    content|re: (?i)\b(pass|clear|satisfy)\s+.{0,15}(all\s+)?(audit|security|safety)\s+(layer|level|stage|check|gate)s?\b
+  sel_3:
+    content|re: (?i)\b(trust\s*score|safety\s*rating|risk\s*level|confidence\s*score)\s*[=:]\s*(100|high|max|trusted|0\.?0?\s*(risk)?)
+  condition: 1 of sel_*
+falsepositives:
+- Internal admin commands in authorized security testing environments
+- IT administrator documenting a runbook that says 'to disable the audit logging temporarily, run the
+  following command' in a legitimate ops guide
+- QA engineer writing a test plan stating 'verify the system does not allow users to bypass the validation
+  layer'
+- Ordinary developer documentation using a bare verb+noun such as 'Skip validation', 'Skip input validation',
+  'bypass TLS certificate verification', 'Disable specific check' or '-ExecutionPolicy Bypass' — these
+  are the dominant benign shape, which is why condition 1 requires a determiner plus a two-word defence
+  noun phrase
+action: report
