@@ -1,0 +1,120 @@
+title: LLM Provider Substitution - DeepSeek Model on Anthropic Wire Protocol
+id: 3f7c2a91-5d84-4e63-9b1a-7c0e8d2f4a16
+status: experimental
+level: high
+description: |
+  Detects a single outbound HTTP request whose body is shaped as an Anthropic
+  Messages/Claude Code API call (Anthropic-only wire fields, Anthropic Messages
+  path, an sk-ant- key, or the Claude Code system preamble) while declaring a
+  DeepSeek model in the "model" field.
+
+  This is the on-the-wire fingerprint of an API-compatibility proxy such as the
+  'deeptunnel' PyPI package: the client still speaks Anthropic's protocol and
+  still ships its Anthropic credential, but the inference request is being
+  served by a DeepSeek backend. The engine cannot observe package installation
+  (no package_install event type, no SUPPLY_CHAIN_DEPENDENCY edge), so this rule
+  targets the only artefact the proxy cannot hide: the hybrid request itself.
+
+  Deliberately narrower than generic endpoint/auth-header redirection detection
+  (rule 9e338173-4519-5c00-9fb6-d72b3cb0fd6f). That rule keys on "Anthropic
+  credentials went to a host that is not Anthropic" and is host-oriented. This
+  rule is host-agnostic and payload-oriented: it fires only when Anthropic
+  protocol markers and a deepseek-* model name coexist in one body, which is the
+  substitution itself rather than the destination. It therefore also fires when
+  the proxy is loopback/on-host (127.0.0.1:8080 shim installed by the package),
+  where no unusual external destination is ever contacted, and when an Anthropic
+  API key is being handed to a DeepSeek-backed request without the destination
+  looking anomalous.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://docs.anthropic.com/en/api/messages
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+
+  # Required anchor: the request declares a DeepSeek model.
+  sel_deepseek_model:
+    content|re: '(?i)"model"\s*:\s*"[^"]{0,40}deepseek'
+
+  # Discriminator A - Anthropic-only wire fields present in the same body.
+  sel_anthropic_wire:
+    content|re:
+      - '"anthropic[_-]version"\s*:\s*"'
+      - '"anthropic[_-]beta"'
+      - '"max_tokens_to_sample"\s*:'
+      - '"cache_control"\s*:\s*\{\s*"type"\s*:\s*"ephemeral"'
+      - '"tool_use_id"\s*:\s*"'
+      - '"type"\s*:\s*"tool_use"\s*,'
+      - '"system"\s*:\s*\[\s*\{\s*"type"\s*:\s*"text"'
+      - '(?i)you are claude code'
+
+  # Discriminator B - request is aimed at the Anthropic Messages/Complete path.
+  sel_anthropic_path:
+    path|re: '(?i)(^|/)v1/(messages|complete)(/|\?|$)'
+
+  # Discriminator C - an Anthropic API key is riding along with a DeepSeek call.
+  sel_anthropic_key:
+    content|re: '\bsk-ant-[a-z0-9]{2,12}-[A-Za-z0-9_\-]{24,}'
+
+  # ── FP suppression ─────────────────────────────────────────────────────────
+  # Escaped JSON: the deepseek config is quoted *inside* a message string (a user
+  # pasting a config snippet into a Claude prompt), not the actual request shape.
+  filter_escaped_payload:
+    content|re: '\\"model\\"\s*:\s*\\"[^\\"]{0,40}deepseek'
+
+  # Documentation / template / placeholder material.
+  filter_placeholders:
+    content|re:
+      - '(?i)sk-ant-[a-z0-9]{0,12}-?(x{6,}|your|example|placeholder|redacted|dummy|test[_-]?key|api[_-]?key[_-]?here)'
+      - '(?i)"model"\s*:\s*"deepseek-(example|placeholder|dummy|sample|test)"'
+  filter_redaction_markers:
+    content|contains:
+      - '[REDACTED]'
+      - '[PII_REDACTED]'
+      - 'YOUR_ANTHROPIC_API_KEY'
+      - 'YOUR_API_KEY_HERE'
+      - '<your-api-key>'
+      - '<ANTHROPIC_API_KEY>'
+      - '$ANTHROPIC_API_KEY'
+      - '${ANTHROPIC_API_KEY}'
+
+  condition: >
+    sel_event and sel_deepseek_model and
+    (sel_anthropic_wire or sel_anthropic_path or sel_anthropic_key) and
+    not (filter_escaped_payload or filter_placeholders or filter_redaction_markers)
+
+action: report
+
+tags:
+  - attack.collection
+  - attack.t1557
+  - attack.credential-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+  - owasp.llm02
+
+falsepositives:
+  - Sanctioned cost-optimisation gateways. Some teams deliberately point Claude
+    Code or the Anthropic SDK at DeepSeek's Anthropic-compatible endpoint. The
+    wire signature is identical to the malicious proxy, which is why this rule
+    reports rather than blocks - the platform owner triages once and, if the
+    gateway is approved, fronts this rule with their own allow rule.
+  - Model routers and proxies (LiteLLM, OpenRouter, internal LLM gateways,
+    Bedrock/Vertex shims) that accept Anthropic-shaped requests and forward a
+    deepseek-* model name. Expected to be a small, stable set of hosts per
+    tenant; triage once.
+  - Compatibility/conformance CI suites that replay Anthropic Messages payloads
+    against a DeepSeek backend. Usually distinguishable by placeholder keys,
+    which filter_placeholders already suppresses.
+  - A developer pasting a DeepSeek proxy configuration into a Claude prompt for
+    review. The model name is then escaped inside a JSON string, which
+    filter_escaped_payload suppresses.
+  - Security research or advisory content about the 'deeptunnel' package fetched
+    or discussed by the agent - suppressed when it carries placeholder
+    credentials or appears as escaped JSON inside a message body.
