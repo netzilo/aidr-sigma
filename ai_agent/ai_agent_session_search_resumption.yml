@@ -1,0 +1,108 @@
+title: Agent Session Store Content Search and Resumption
+id: 7c3f9e21-4b6d-4a58-9f2e-1d8c05b7a643
+status: experimental
+level: medium
+description: |
+  Detects a process being spawned that performs CONTENT search over the local Claude Code /
+  Codex CLI conversation transcript stores, or that pairs such a store path with a session
+  resumption flag in the same command line. This is the observable footprint of tooling such
+  as `agsearch`, which indexes historical agent sessions by conversation content and can then
+  resume a selected session -- allowing an operator (or an agent that has been steered by an
+  injected instruction) to mine prior interactions for secrets or take over an in-flight session.
+
+  Scope note (deliberate, see falsepositives): the engine has no `search_operation` or
+  `session_resumption` event type and no ACCESS_SESSION / RETRIEVE_DATA edge, so the search
+  itself and its results are NOT observable. The only live signal is `execute_process`. This
+  rule therefore does not claim to prove exfiltration; it reports the one command shape that is
+  unambiguously an attempt to read conversation history out of the session store, and leaves
+  the verdict to a human. It is `report` for exactly that reason and must never be promoted to
+  `block` without a correlating signal.
+
+  Two disjoint triggers:
+   1. A binary named `agsearch` (or a claude/codex session-search/resume helper) is executed.
+   2. A transcript-store path (~/.claude/projects, ~/.claude/history, ~/.codex/sessions,
+      rollout-*.jsonl, ~/.claude.json) appears on a command line together with either a
+      content-extraction tool (rg/grep/jq/fzf/strings/awk/sed/inline interpreter) or a
+      claude/codex `--resume`/`--continue` invocation.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  - https://docs.anthropic.com/en/docs/claude-code
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.a04_2021_insecure_design
+  - owasp.a07_2021_identification_and_authentication_failures
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec:
+    event_type: execute_process
+
+  # ── Trigger 1: the named cross-session search/resume tool itself ────────────
+  sel_named_tool:
+    content|re:
+      - '(?i)\bagsearch\b'
+      - '(?i)\b(claude|codex|cc)[-_](session|sessions|history)[-_](search|browse|browser|picker|resume|resumer)\b'
+
+  # ── Trigger 2a: a conversation-transcript store path is on the command line ─
+  sel_session_store:
+    content|re:
+      - '(?i)\.claude/(projects|sessions|todos|history)\b'
+      - '(?i)\.claude\.json\b'
+      - '(?i)\.codex/(sessions|archived_sessions|history)\b'
+      - '(?i)rollout-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}'
+
+  # ── Trigger 2b: a CONTENT extraction tool (not ls/du/find -- content only) ──
+  sel_content_search:
+    content|re:
+      - '(^|[^A-Za-z0-9_.-])(rg|ripgrep|grep|egrep|fgrep|zgrep|ag|ack|ugrep|fzf|jq|gron|strings|awk|sed)\s'
+      - '(^|[^A-Za-z0-9_.-])(python3?|node|deno|bun|ruby|perl)\s+-(c|e)\s'
+
+  # ── Trigger 2c: session resumption in the SAME command line as a store path ─
+  sel_resume:
+    content|re:
+      - '(?i)\b(claude|codex)\b[^|;&\n]{0,200}(--resume|--continue)\b'
+      - '(?i)\b(claude|codex)\s+resume\b'
+
+  # ── Benign command SHAPES (no host/domain/path is being trusted here) ───────
+  filter_package_ops:
+    content|re:
+      - '(?i)(^|[^A-Za-z0-9_.-])(npm|pnpm|yarn|bun|pip3?|pipx|uv|brew|cargo|gem|apt|apt-get|dnf|pacman|port|winget|choco|scoop)\s+(install|add|remove|uninstall|update|upgrade|view|info|show|list|search|audit|outdated)\b'
+      - '(?i)(^|[^A-Za-z0-9_.-])git\s+clone\s'
+
+  filter_help:
+    content|re:
+      - '(--help|--version)(\s|$)'
+      - '(?i)(^|[^A-Za-z0-9_.-])(man|whatis|which|type)\s'
+
+  filter_backup_or_cleanup:
+    content|re:
+      - '(^|[^A-Za-z0-9_.-])(rsync|borg|restic|duplicity|tar|zip|7z|gzip|xz)\s'
+      - '(^|[^A-Za-z0-9_.-])rm\s+-'
+
+  filter_config_debug:
+    content|re:
+      - '(?i)(mcpServers|hasCompletedOnboarding|autoUpdater|installMethod|numStartups|oauthAccount|statsigid|tipsHistory|firstStartTime)'
+
+  condition: >
+    sel_exec
+    and (sel_named_tool or (sel_session_store and sel_content_search) or (sel_session_store and sel_resume))
+    and not (filter_package_ops or filter_help or filter_backup_or_cleanup or filter_config_debug)
+
+action: report
+
+falsepositives:
+  - A developer debugging their own agent by grepping their own transcripts, e.g. `rg "timeout" ~/.claude/projects` -- indistinguishable from reconnaissance at the process-exec layer; this is the primary reason the rule is report-only.
+  - Support/diagnostic scripts that jq over ~/.claude.json for non-config fields not covered by filter_config_debug.
+  - Homegrown session-analytics or token-accounting scripts that awk/sed over ~/.codex/sessions rollout files.
+  - A user legitimately resuming their own session (`claude --resume`) from inside a shell whose command line also happens to reference the projects directory.
+  - Installing, inspecting or reading the help output of agsearch (suppressed by filter_package_ops / filter_help).
+  - Backup, archive or cleanup jobs that touch the session directories (suppressed by filter_backup_or_cleanup).
+  - A repository whose own source tree contains a file or binary literally named `agsearch` being executed during a build.
