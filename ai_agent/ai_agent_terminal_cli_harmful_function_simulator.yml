@@ -1,0 +1,161 @@
+title: Terminal CLI Harmful Function Simulation
+id: 7f3c1d2a-9b64-4e58-a1c7-5d0e93f2b6a4
+status: experimental
+level: high
+description: |
+  Detects an AI agent spawning a child process whose command line is either (a) an
+  unambiguously destructive / defence-disabling terminal function, or (b) carries
+  jailbreak or "simulate a terminal" framing text in argv — the signature of an agent
+  that was manipulated via prompt injection into simulating or executing harmful CLI
+  functions.
+
+  Single-event content detection on the EXECUTE_PROCESS command line only. Every
+  pattern is scoped so that the destructive target is the filesystem root, a top-level
+  system directory, a raw block device, a security control, or a backup/forensic
+  artefact — ordinary project-scoped cleanup (rm -rf ./build, rm -rf ~/.cache,
+  rm -rf /var/tmp/x) does not match. Read-only inspection of these strings
+  (grep/rg/man/echo of a payload, with no shell chaining), --help/--version
+  invocations and --dry-run/-WhatIf runs are filtered out.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1485/
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://attack.mitre.org/techniques/T1490/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.impact
+  - attack.t1485
+  - attack.t1490
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.t1070.003
+  - atlas.aml.t0051
+  - atlas.aml.t0054
+  - owasp.llm01
+  - owasp.asi01
+falsepositives:
+  - Disposable CI/container bootstrap scripts that legitimately run "rm -rf /var/..."
+    or "rm -rf /usr/share/doc" style image slimming inside a throwaway rootfs.
+  - Disk provisioning or imaging automation that legitimately calls dd/mkfs/wipefs
+    against a raw block device on a machine being reimaged.
+  - Endpoint-security or platform engineers toggling SIP, Gatekeeper, SELinux,
+    ufw/firewalld or Defender real-time protection in a lab or during a controlled
+    software installation.
+  - Shell hygiene in secret-handling scripts that run "unset HISTFILE" or
+    "export HISTFILE=/dev/null" before echoing a token.
+  - Red-team, prompt-injection test harnesses and security training tooling that pass
+    jailbreak strings on the command line; the read-only-inspection and --dry-run
+    filters remove the common grep/echo/--help forms but a bespoke harness
+    (e.g. "python run_injection_suite.py --prompt 'ignore all previous instructions'")
+    will still report.
+  - Chaos-engineering or backup/restore drills that intentionally delete shadow copies
+    or disable recovery on a scratch host.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # ── Catastrophic filesystem destruction — target must be root, a top-level
+  #    system directory, or the bare home directory. Project-scoped rm never matches.
+  sel_rm_root:
+    command|re:
+      - '\brm\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*[\x22\x27]?(?:/\*|/|~/|~|\$HOME/?|\$\{HOME\}/?)[\x22\x27]?(?:\s|$)'
+      - '\brm\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*[\x22\x27]?/(?:etc|var|usr|bin|sbin|boot|lib|lib64|opt|srv|home|root|Users|System|Applications|Library)(?:/\*)?[\x22\x27]?(?:\s|$)'
+      - '(?i)--no-preserve-root'
+      - '\bfind\s+/\s+[^\n]{0,160}(?:-delete\b|-exec\s+rm\b)'
+
+  # ── Raw block-device destruction
+  sel_disk_wipe:
+    command|re:
+      - '\bdd\s+[^\n]{0,160}\bof=/dev/(?:sd[a-z]|nvme\d|disk\d|hd[a-z]|vd[a-z]|xvd[a-z]|md\d|mapper/)'
+      - '\bmkfs(?:\.[A-Za-z0-9]+)?\b[^\n]{0,80}/dev/'
+      - '\b(?:shred|wipefs)\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*/dev/'
+      - '>\s*/dev/(?:sd[a-z]|nvme\d|disk\d)'
+
+  # ── Resource exhaustion
+  sel_forkbomb:
+    command|re: ':\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+
+  # ── System-wide permission / ownership destruction
+  sel_perm_wipe:
+    command|re:
+      - '\bchmod\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*0?777\s+[\x22\x27]?(?:/|~|\$HOME)[\x22\x27]?(?:\s|$)'
+      - '\bchown\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*root(?::\S+)?\s+[\x22\x27]?/[\x22\x27]?(?:\s|$)'
+
+  # ── Disabling host security controls
+  sel_defense_evasion:
+    command|re:
+      - '\bcsrutil\s+disable\b'
+      - '\bspctl\s+--master-disable\b'
+      - '\bsetenforce\s+0\b'
+      - '\bsystemctl\s+(?:stop|disable|mask)\s+(?:firewalld|ufw|apparmor|auditd|falcon-sensor)\b'
+      - '\bufw\s+disable\b'
+      - '(?i)set-mppreference[^\n]{0,120}-disable(?:realtimemonitoring|ioavprotection|scriptscanning|behaviormonitoring)\s+\$?true'
+      - '(?i)add-mppreference[^\n]{0,120}-exclusionpath'
+      - '(?i)\bsc(?:\.exe)?\s+(?:stop|delete)\s+[\x22\x27]?(?:windefend|sense|securityhealthservice)\b'
+      - '(?i)\bnetsh\s+advfirewall\s+set\s+\w+\s+state\s+off\b'
+
+  # ── Backup / recovery destruction (ransomware precursor)
+  sel_backup_destruction:
+    command|re:
+      - '(?i)\bvssadmin(?:\.exe)?\s+delete\s+shadows'
+      - '(?i)\bwmic\s+shadowcopy\s+delete'
+      - '(?i)\bwbadmin(?:\.exe)?\s+delete\s+(?:catalog|systemstatebackup|backup)'
+      - '(?i)\bbcdedit(?:\.exe)?[^\n]{0,120}recoveryenabled\s+no'
+      - '(?i)\bbcdedit(?:\.exe)?[^\n]{0,120}bootstatuspolicy\s+ignoreallfailures'
+      - '(?i)\bcipher\s+/w:'
+
+  # ── Anti-forensics
+  sel_antiforensics:
+    command|re:
+      - '\bhistory\s+-c\b'
+      - '\bunset\s+HISTFILE\b'
+      - '\bexport\s+HISTFILE=/dev/null'
+      - '\b(?:rm|shred|srm)\s+(?:-{1,2}[A-Za-z][A-Za-z-]*\s+)*\S*\.(?:bash_history|zsh_history|sh_history)\b'
+      - '(?i)\bwevtutil(?:\.exe)?\s+cl\b'
+      - '(?i)\bclear-eventlog\b'
+      - '\btruncate\s+-s\s*0\s+/var/log'
+
+  # ── Jailbreak / "simulate a terminal" framing carried in argv
+  sel_jailbreak_frame:
+    command|re:
+      - '(?i)ignore\s+(?:all\s+|any\s+)?(?:your\s+|the\s+|these\s+)?(?:previous|prior|preceding|above|earlier)\s+(?:instructions|prompts|rules|directives)'
+      - '(?i)disregard\s+(?:all\s+)?(?:previous|prior|your)\s+(?:instructions|rules|safety)'
+      - '(?i)(?:you\s+are\s+now|act\s+as|pretend\s+to\s+be|behave\s+like)\s+(?:a\s+|an\s+)?(?:linux\s+|unix\s+|bash\s+|windows\s+|root\s+)?(?:terminal|shell|command\s+prompt|console)'
+      - '(?i)simulate\s+(?:the\s+)?(?:output\s+of\s+)?(?:the\s+)?(?:following\s+)?(?:command|shell|terminal|cli)'
+      - '(?i)(?:developer|dev|god)\s+mode\s+(?:enabled|activated|on)\b'
+      - '(?i)without\s+(?:any\s+)?(?:safety|ethical|moral)\s+(?:checks|filters|constraints|restrictions|guardrails)'
+      - '(?i)(?:do\s+not|don.?t)\s+(?:refuse|warn|ask\s+for\s+confirmation|add\s+warnings)'
+      - '(?i)\bDAN\s+mode\b'
+      - '(?i)bypass\s+(?:all\s+)?(?:safety|security|content)\s+(?:filters|policies|restrictions|guardrails)'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+  # Read-only inspection of the pattern (searching docs, printing a string) with
+  # NO shell chaining, redirection or substitution anywhere on the line.
+  filter_readonly_inspection:
+    command|re: '^(?:sudo\s+)?(?:/(?:usr/)?s?bin/)?(?:grep|egrep|fgrep|rg|ag|ack|man|less|more|head|tail|wc|diff|cat|echo|printf)\b[^;&|`$>\n]*$'
+
+  # Help / version invocations never destroy anything.
+  filter_help:
+    command|re: '(?:^|\s)--(?:help|version)(?:\s|$)'
+
+  # Explicit no-op / simulation flags.
+  filter_dryrun:
+    command|re: '(?i)(?:--dry-run|--dryrun|--no-act|-whatif)\b'
+
+  condition: >
+    sel_event and
+    (sel_rm_root or sel_disk_wipe or sel_forkbomb or sel_perm_wipe or
+     sel_defense_evasion or sel_backup_destruction or sel_antiforensics or
+     sel_jailbreak_frame)
+    and not filter_readonly_inspection
+    and not filter_help
+    and not filter_dryrun
+
+action: report
