@@ -1,0 +1,130 @@
+title: Python eval RCE Payload Execution (SagemakerLLM complete Injection)
+id: b7f3a1c2-9d4e-4a6b-8f01-3c5e7d2a9b64
+status: experimental
+level: high
+description: |
+  Detects the execution artefact of the privategpt SagemakerLLM.complete() vulnerability,
+  where the raw response text returned by an AWS SageMaker LLM endpoint is passed to
+  Python eval() to be parsed into a dict. An attacker who controls or intercepts the
+  endpoint response embeds Python source in it; eval() then executes that source in the
+  host process, and the payload reaches the OS by spawning a child process.
+
+  The only signal the engine emits for this is execute_process. This rule therefore fires
+  on a single spawned command line that carries an eval-injection construct together with a
+  process-execution or network sink -- the shape of an eval() payload, not of ordinary
+  developer or build tooling. Two independent signatures are used:
+
+    (a) the self-contained __import__("os").system(...) / __import__("subprocess").Popen(...)
+        gadget, which is diagnostic of an eval/exec injection payload on its own; or
+    (b) an eval()/exec() construct (eval(compile(...)), eval on a response/body/completion
+        variable, or python -c containing eval/exec) co-occurring with an execution sink
+        (os.system, subprocess.Popen, pty.spawn, socket.socket, curl|sh, nc -e, /dev/tcp).
+
+  Reported, not blocked: the observable is the downstream child process, so enforcement here
+  would land after the code has already run in-process.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://cwe.mitre.org/data/definitions/95.html
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - atlas.aml.t0050
+  - owasp.llm05
+falsepositives:
+  - Python packaging shims that legitimately call exec(compile(...)) -- pip/setuptools legacy
+    setup.py invocation, poetry/pdm/hatch build steps (suppressed by filter_tooling_*).
+  - Static analysis and secret scanners (bandit, semgrep, ruff, pylint, codeql, trufflehog)
+    and grep/ripgrep searches for "eval(" or "__import__" across a source tree, where the
+    searched pattern appears in the scanner command line (suppressed by filter_tooling_*).
+  - Test runners (pytest, tox, unittest) executing fixtures that exercise eval-handling code
+    paths (suppressed by filter_tooling_*).
+  - Ansible AnsiballZ module wrappers, which exec a compiled module payload on the target
+    host (suppressed by filter_tooling_*).
+  - Deliberate reproduction of this CVE by a red team or during patch validation on a lab
+    host -- a genuine match; the rule only reports.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # (a) Self-contained eval/exec injection gadget -- strong on its own.
+  sel_dunder_cmd:
+    command|re:
+      - '(?i:__import__)\s*\(\s*[\x22\x27]os[\x22\x27]\s*\)\s*\.\s*(?i:system|popen|exec[lv]|spawn[lv])'
+      - '(?i:__import__)\s*\(\s*[\x22\x27]subprocess[\x22\x27]\s*\)\s*\.\s*(?i:popen|run|call|check_call|check_output)'
+      - '(?i:__import__)\s*\(\s*[\x22\x27]pty[\x22\x27]\s*\)\s*\.\s*(?i:spawn)'
+  sel_dunder_raw:
+    content|re:
+      - '(?i:__import__)\s*\(\s*[\x22\x27]os[\x22\x27]\s*\)\s*\.\s*(?i:system|popen|exec[lv]|spawn[lv])'
+      - '(?i:__import__)\s*\(\s*[\x22\x27]subprocess[\x22\x27]\s*\)\s*\.\s*(?i:popen|run|call|check_call|check_output)'
+      - '(?i:__import__)\s*\(\s*[\x22\x27]pty[\x22\x27]\s*\)\s*\.\s*(?i:spawn)'
+
+  # (b1) eval()/exec() construct -- the vulnerable parse of the endpoint response.
+  sel_eval_cmd:
+    command|re:
+      - '\b(?i:eval|exec)\s*\(\s*(?i:compile|__import__|base64|codecs|marshal|pickle|bytes\.fromhex|chr)\b'
+      - '\b(?i:eval)\s*\(\s*(?i:response|resp|body|payload|completion|generated_text|json\.loads|r\.text)\b'
+      - '\b(?i:python)[0-9.]{0,4}\b[^\n]{0,120}?\s-[A-Za-z]{0,3}c\s+[^\n]{0,400}?\b(?i:eval|exec)\s*\('
+  sel_eval_raw:
+    content|re:
+      - '\b(?i:eval|exec)\s*\(\s*(?i:compile|__import__|base64|codecs|marshal|pickle|bytes\.fromhex|chr)\b'
+      - '\b(?i:eval)\s*\(\s*(?i:response|resp|body|payload|completion|generated_text|json\.loads|r\.text)\b'
+      - '\b(?i:python)[0-9.]{0,4}\b[^\n]{0,120}?\s-[A-Za-z]{0,3}c\s+[^\n]{0,400}?\b(?i:eval|exec)\s*\('
+
+  # (b2) Execution / egress sink reached by the eval-ed code.
+  sel_sink_cmd:
+    command|re:
+      - '\b(?i:os)\s*\.\s*(?i:system|popen|exec[lv]|spawn[lv]|dup2|fork)\s*\('
+      - '\b(?i:subprocess)\s*\.\s*(?i:popen|run|call|check_call|check_output)\s*\('
+      - '\b(?i:pty)\s*\.\s*spawn\s*\('
+      - '\b(?i:socket)\s*\.\s*socket\s*\('
+      - '\b(?i:commands|platform)\s*\.\s*(?i:getoutput|getstatusoutput|popen)\s*\('
+      - '\b(?i:curl|wget)\b[^\n]{0,200}\|\s*(?i:bash|sh|zsh|python)'
+      - '\b(?i:nc|ncat|netcat)\b[^\n]{0,80}\s-e\s'
+      - '/dev/tcp/[0-9A-Za-z]'
+  sel_sink_raw:
+    content|re:
+      - '\b(?i:os)\s*\.\s*(?i:system|popen|exec[lv]|spawn[lv]|dup2|fork)\s*\('
+      - '\b(?i:subprocess)\s*\.\s*(?i:popen|run|call|check_call|check_output)\s*\('
+      - '\b(?i:pty)\s*\.\s*spawn\s*\('
+      - '\b(?i:socket)\s*\.\s*socket\s*\('
+      - '\b(?i:commands|platform)\s*\.\s*(?i:getoutput|getstatusoutput|popen)\s*\('
+      - '\b(?i:curl|wget)\b[^\n]{0,200}\|\s*(?i:bash|sh|zsh|python)'
+      - '\b(?i:nc|ncat|netcat)\b[^\n]{0,80}\s-e\s'
+      - '/dev/tcp/[0-9A-Za-z]'
+
+  # Benign tooling that legitimately compiles/execs Python or greps for these tokens.
+  # Executable-name filters are anchored near the start of the command line so a payload
+  # cannot suppress the rule by embedding the word in its own argument string.
+  filter_tooling_cmd:
+    command|re:
+      - '^[^\n]{0,80}\b(?i:pytest|py\.test|unittest|nose2|tox|coverage|hypothesis)\b'
+      - '^[^\n]{0,80}\b(?i:bandit|semgrep|ruff|pylint|flake8|mypy|pyright|codeql|trivy|snyk|gitleaks|trufflehog|sonar-scanner)\b'
+      - '^[^\n]{0,80}\b(?i:pip|pip3|uv|poetry|pdm|hatch|conda|mamba)\b[^\n]{0,120}\b(?i:install|build|wheel|resolve|lock|sync|compile)\b'
+      - '^[^\n]{0,80}\b(?i:grep|rg|ripgrep|ag|ack|fd)\b[^\n]{0,160}(?i:__import__|eval\s*\()'
+      - '(?i:setuptools)[^\n]{0,200}(?i:tokenize)'
+      - '(?i:site-packages)/(?i:pip|setuptools|_distutils_hack|virtualenv)'
+      - '\b(?i:python)[0-9.]{0,4}\s+[^\n]{0,80}(?i:setup\.py)\b'
+      - '(?i:\.ansible/tmp/[^\n]{0,80}ansiballz)'
+  filter_tooling_raw:
+    content|re:
+      - '^[^\n]{0,80}\b(?i:pytest|py\.test|unittest|nose2|tox|coverage|hypothesis)\b'
+      - '^[^\n]{0,80}\b(?i:bandit|semgrep|ruff|pylint|flake8|mypy|pyright|codeql|trivy|snyk|gitleaks|trufflehog|sonar-scanner)\b'
+      - '^[^\n]{0,80}\b(?i:grep|rg|ripgrep|ag|ack|fd)\b[^\n]{0,160}(?i:__import__|eval\s*\()'
+      - '(?i:setuptools)[^\n]{0,200}(?i:tokenize)'
+      - '(?i:site-packages)/(?i:pip|setuptools|_distutils_hack|virtualenv)'
+      - '\b(?i:python)[0-9.]{0,4}\s+[^\n]{0,80}(?i:setup\.py)\b'
+      - '(?i:\.ansible/tmp/[^\n]{0,80}ansiballz)'
+
+  condition: >
+    sel_event and
+    (sel_dunder_cmd or sel_dunder_raw or
+     ((sel_eval_cmd or sel_eval_raw) and (sel_sink_cmd or sel_sink_raw)))
+    and not (filter_tooling_cmd or filter_tooling_raw)
+action: report
