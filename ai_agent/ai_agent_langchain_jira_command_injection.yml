@@ -1,0 +1,366 @@
+title: LangChain JiraAPIWrapper OS Command Injection
+id: 7b3f1c84-9a2e-4d6b-8f0a-3c5e91d47b2a
+status: experimental
+level: high
+description: |
+  Detects exploitation of the OS command injection / arbitrary code execution flaw in the
+  LangChain JiraAPIWrapper component (fixed in v0.0.225). The wrapper passes unsanitised
+  input into a Python exec()/os.system() path, so successful exploitation surfaces on the
+  endpoint as: a Python (LangChain) host process talking to a JIRA REST endpoint, and then
+  that same process instance spawning an interpreter with an INLINE command string
+  (sh -c / python -c / node -e / powershell -Command) whose payload carries egress, recon,
+  obfuscation or persistence indicators.
+
+  The rule is instance-resolved. It anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), reconstructs the true spawn chain with
+  proc_lineage(), and only correlates the JIRA REST call with the interpreter spawn when
+  BOTH were performed by instances belonging to that one lineage (matched on the
+  (pid, start) pair, never on a bare pid). Cross-session attribution is therefore
+  impossible: a JIRA call made by an unrelated python process in another session has a
+  different instance key and is never stitched into this chain.
+
+  On http_request events the rule is silent (returns allow, no event) and simply records
+  JIRA REST activity keyed by instance in its private rule store; the store is pruned on
+  every write and is only ever read back for the same instance keys.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://github.com/langchain-ai/langchain/releases/tag/v0.0.225
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://cwe.mitre.org/data/definitions/78.html
+tags:
+  # No ATLAS technique is claimed: this is a classic library-level injection flaw in an
+  # agent tool wrapper, not an ML-specific adversary technique. A forced mapping would be
+  # worse than none.
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.t1059.006
+  - owasp.llm05
+  - cwe.cwe-78
+falsepositives:
+  - An SRE/support agent built on LangChain that legitimately reads a JIRA ticket and then
+    runs a diagnostic shell tool containing curl/wget/whoami within the same three-minute
+    window. Mitigated by requiring the inline "-c"/"-e" interpreter form, a Python or
+    LangChain ancestor in the SAME resolved lineage, strict ordering (JIRA call must
+    precede the spawn) and a payload indicator - but a shell-enabled agent can still hit
+    all four legitimately, which is why the action is report and not block.
+  - CI/CD jobs where a Python step posts to the JIRA REST API and a later step in the same
+    process tree shells out to curl/wget for artefact download.
+  - Self-hosted Atlassian products other than JIRA (Confluence, Bitbucket) that expose the
+    same /rest/api/2/ or /rest/api/latest/ path prefixes, which will satisfy the anchor
+    stage on path alone.
+  - Deliberate vulnerability research or red-team reproduction of the JiraAPIWrapper CVE
+    against a lab instance.
+  - Python interpreters invoked with "-c" by packaging/build tooling (pip, setuptools,
+    poetry) that happens to run inside a LangChain process tree shortly after a JIRA call.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_http:
+    event_type: http_request
+  condition: sel_exec or sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule's own window; never persisted) ────────────────────────
+  WINDOW_NS   = 180000000000   # 3 min: JIRA REST call -> injected OS command
+  PRUNE_NS    = 600000000000   # 10 min retention for tracked JIRA calls
+  MAX_TRACKED = 200
+  STORE_KEY   = "jira_calls"
+
+  # Detection indicators only. Nothing here widens what is permitted.
+  JIRA_PATHS = [
+      "/rest/api/2/", "/rest/api/3/", "/rest/api/latest/",
+      "/rest/agile/", "/rest/servicedeskapi/", "/rest/auth/1/",
+  ]
+
+  SHELL_TOKENS = [
+      r"(?i)\b(?:sh|bash|zsh|dash|ksh|ash|busybox)\b",
+      r"(?i)\bpython[0-9]*(?:\.[0-9]+)?\b",
+      r"(?i)\b(?:perl|ruby|node|php|osascript)\b",
+      r"(?i)\b(?:cmd|powershell|pwsh)\b",
+  ]
+
+  INLINE_FLAGS = [
+      r"\s-[a-zA-Z]{0,2}c\b",
+      r"\s-e\b",
+      r"(?i)\s/c\b",
+      r"(?i)\s-(?:enc|encodedcommand|command)\b",
+  ]
+
+  PAYLOAD = [
+      r"(?i)\b(?:curl|wget|fetch)\b",
+      r"(?i)\b(?:nc|ncat|netcat|socat|telnet)\b",
+      r"(?i)\bbase64\b[^\n]{0,24}\s-{1,2}[dD]\b",
+      r"(?i)\bchmod\b\s+[+0-7ugoa]*x",
+      r"(?i)\b(?:whoami|hostname)\b",
+      r"(?i)\buname\b\s+-",
+      r"(?i)/etc/(?:passwd|shadow)\b",
+      r"(?i)\.(?:aws|ssh|kube)/",
+      r"(?i)\bos\.system\b",
+      r"(?i)\bsubprocess\.(?:Popen|run|call|check_output)\b",
+      r"(?i)\bimport\s+(?:os|subprocess|socket|pty)\b",
+      r"(?i)\b(?:eval|exec)\s*\(",
+      r"/dev/tcp/",
+      r"(?i)\bmkfifo\b",
+      r"(?i)\bcrontab\b",
+      r"(?i)authorized_keys",
+      r"(?i)>\s*/tmp/",
+      r"(?i)\btouch\s+/tmp/",
+      r"169\.254\.169\.254",
+  ]
+
+  CHAIN_META = [r";\s*[^\s;]", r"&&", r"\|\|", r"\|\s*[^\s|]", r"\$\("]
+
+  PY_HOST = [
+      r"(?i)(?:^|/)python[0-9]*(?:\.[0-9]+)?(?:\.exe)?$",
+      r"(?i)(?:^|/)(?:uvicorn|gunicorn|celery|streamlit|jupyter[a-z-]*)$",
+      r"(?i)langchain",
+  ]
+
+  # ── Pure helpers (no graph / no log calls) ────────────────────────────────────
+  def matches_any(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def trunc(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def is_jira_endpoint(host, path, url):
+      h = host.lower()
+      p = path.lower()
+      u = url.lower()
+      if h.endswith("atlassian.net") or h.endswith("atlassian.com") or h.endswith("jira.com"):
+          return True
+      if re.find(r"(?i)(^|[.\-])jira([.\-]|$)", h) != None:
+          return True
+      for jp in JIRA_PATHS:
+          if jp in p:
+              return True
+          if u != "" and jp in u:
+              return True
+      return False
+
+  def is_python_host(x):
+      p = x.get("actor_path", "")
+      c = x.get("cmdline", "")
+      if matches_any(PY_HOST, p):
+          return True
+      if re.find(r"(?i)langchain", c) != None:
+          return True
+      if re.find(r"(?i)jira", c) != None and re.find(r"(?i)python", c) != None:
+          return True
+      return False
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "risk_context": "",
+      }
+
+  # ── http_request path: silently record JIRA REST activity per instance ────────
+  def track_jira():
+      host = meta.get("host", "")
+      path = meta.get("path", "")
+      url  = meta.get("url", "")
+      if not is_jira_endpoint(host, path, url):
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      now  = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"
+      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lin:
+          return "allow"
+
+      rec = {
+          "ts":          str(now),
+          "host":        host,
+          "path":        path,
+          "actor_pid":   inst.get("actor_pid", "0"),
+          "actor_start": inst.get("actor_start", "0"),
+          "actor_path":  inst.get("actor_path", ""),
+      }
+
+      calls = store_get(STORE_KEY)
+      if calls == None:
+          calls = {}
+      fresh = {}
+      for k in calls:
+          v = calls[k]
+          if type(v) == "dict" and now - int(v.get("ts", "0")) <= PRUNE_NS:
+              fresh[k] = v
+      # Key by EVERY instance in this lineage so the later exec trigger can bind to
+      # the same session even if its own lineage resolves to a shorter chain.
+      for x in lin:
+          fresh[x.get("actor_pid", "0") + ":" + x.get("actor_start", "0")] = rec
+      if len(fresh) > MAX_TRACKED:
+          fresh = {}
+          for x in lin:
+              fresh[x.get("actor_pid", "0") + ":" + x.get("actor_start", "0")] = rec
+      if store_usage()["free"] > 65536:
+          store_set(STORE_KEY, fresh)
+      return "allow"
+
+  # ── execute_process path: confirm the injection chain ─────────────────────────
+  def detect(cmd):
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      now  = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                      # degraded attribution - never guess
+      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lin) < 2:
+          return "allow"                      # no ancestry -> cannot bind to a host process
+
+      host_proc = None
+      for x in lin:
+          if is_python_host(x):
+              host_proc = x
+              break
+      if host_proc == None:
+          return "allow"                      # not a LangChain/Python process tree
+
+      # Session = this exact lineage (instance-keyed) + children of those instances.
+      session = {}
+      for x in lin:
+          session[x.get("actor_pid", "0")] = x.get("actor_start", "0")
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - PRUNE_NS, until_ns=now, limit=2000):
+          pp = e.get("parent_pid", "")
+          if pp in session and e.get("parent_start", "") == session[pp]:
+              session[e.get("actor_pid", "0")] = e.get("actor_start", "0")
+
+      # Anchor stage: JIRA REST call by an instance of THIS session, before the spawn.
+      since  = now - WINDOW_NS
+      anchor = None
+      for pid in session:
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              actor_start=int(session[pid]),
+                              since_ns=since, until_ns=now, limit=100)
+          for r in rows:
+              if is_jira_endpoint(r.get("host", ""), r.get("path", ""), ""):
+                  if anchor == None or int(r.get("ts", "0")) > int(anchor.get("ts", "0")):
+                      anchor = r
+
+      stored = None
+      if anchor == None:
+          calls = store_get(STORE_KEY)
+          if calls != None:
+              for pid in session:
+                  v = calls.get(pid + ":" + session[pid])
+                  if v == None:
+                      continue
+                  vts = int(v.get("ts", "0"))
+                  if vts <= now and now - vts <= WINDOW_NS:
+                      if stored == None or vts > int(stored.get("ts", "0")):
+                          stored = v
+
+      if anchor == None and stored == None:
+          return "allow"                      # required anchor absent -> not this threat
+
+      root  = lin[len(lin) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      if anchor != None:
+          a_ts   = int(anchor.get("ts", "0"))
+          a_host = anchor.get("host", "?")
+          a_path = anchor.get("path", "")
+          chain.append(step(ev_edge(anchor), stage_id="Jira API Interaction",
+                            stage_desc="LangChain host process called JIRA REST API: " +
+                                       a_host + a_path))
+      else:
+          a_ts   = int(stored.get("ts", "0"))
+          a_host = stored.get("host", "?")
+          a_path = stored.get("path", "")
+          e0 = {
+              "from":     "process://" + stored.get("actor_path", ""),
+              "to":       "https://" + a_host,
+              "kind":     "HTTP_REQUEST",
+              "ts":       stored.get("ts", "0"),
+              "first_ts": stored.get("ts", "0"),
+              "last_ts":  stored.get("ts", "0"),
+              "risk_context": "",
+          }
+          chain.append(step(e0, stage_id="Jira API Interaction",
+                            stage_desc="LangChain host process called JIRA REST API: " +
+                                       a_host + a_path))
+
+      if a_ts <= 0 or a_ts > now or now - a_ts > WINDOW_NS:
+          return "allow"                      # ordering / window not satisfied
+
+      pp = inst.get("parent_path", "")
+      if pp == "":
+          pp = host_proc.get("actor_path", "")
+      trig = {
+          "from":     "process://" + pp,
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+          "cmdline":  trunc(cmd, 400),
+          "risk_context": "",
+      }
+      chain.append(step(trig, stage_id="Command Injection",
+                        stage_desc="interpreter spawned with inline command by LangChain host: " +
+                                   trunc(cmd, 200)))
+
+      names = []
+      for x in lin:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      gap = (now - a_ts) // 1000000000
+      note = ""
+      if matches_any(CHAIN_META, cmd):
+          note = " [shell metacharacter chaining present]"
+
+      reason = ("Possible LangChain JiraAPIWrapper OS command injection: JIRA REST call to " +
+                a_host + a_path + " followed " + str(gap) + "s later by an inline interpreter " +
+                "spawn in the same process lineage (" + " -> ".join(names) + "): " +
+                trunc(cmd, 160) + note)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  # ── Relevance gate: pure string checks on meta, no graph / no log calls ───────
+  def run():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          return track_jira()
+      if ct != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          cmd = meta.get("command", "")
+      if cmd == "":
+          return "allow"
+      if not matches_any(SHELL_TOKENS, cmd):
+          return "allow"
+      if not matches_any(INLINE_FLAGS, cmd):
+          return "allow"
+      if not matches_any(PAYLOAD, cmd):
+          return "allow"
+      return detect(cmd)
+
+  result = run()
