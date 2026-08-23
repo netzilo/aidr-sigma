@@ -1,0 +1,128 @@
+title: LangChain Prompt Template Arbitrary File Read
+id: b7f3c1d2-8a4e-4f6b-9c2d-5e17a3d90f42
+status: experimental
+level: high
+description: |
+  Detects an ImagePromptTemplate / ChatPromptTemplate (langchain_core.prompts) being
+  constructed or rendered with an input variable that resolves to a sensitive host
+  filesystem location or a path-traversal sequence.
+
+  langchain-core's image prompt template accepts a "path" key inside an image_url
+  content block and reads that file off the local filesystem, base64-encoding it into
+  the rendered prompt. When the input variable is attacker controlled, the rendered
+  template — or the downstream model output derived from it — discloses arbitrary
+  server-side file content (/etc/passwd, /proc/self/environ, ~/.ssh/id_rsa,
+  ~/.aws/credentials, mounted k8s service-account secrets, .env files).
+
+  This is a single-event content detection: it fires only when BOTH the vulnerable
+  langchain prompt-template API surface AND a sensitive-file or traversal target are
+  present in the same payload. Either signal alone is ignored.
+author: Egemen
+date: "2026-01-14"
+references:
+  - https://python.langchain.com/api_reference/core/prompts/langchain_core.prompts.image.ImagePromptTemplate.html
+  - https://github.com/langchain-ai/langchain/security/advisories
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://attack.mitre.org/techniques/T1005/
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.a01-2021
+  - owasp.a04-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only payloads that can carry template construction or rendered output ──
+  sel_events:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_request
+      - llm_response
+      - llm_tool_call
+      - llm_tool_result
+
+  # ── Signal 1: the vulnerable langchain-core prompt-template API surface ──────────
+  sel_langchain_prompt_surface:
+    content|re:
+      - '\bImagePromptTemplate\b'
+      - '(?i)\blangchain[_.]core\.prompts(?:\.image)?\b'
+      - '(?i)\bfrom\s+langchain[_.]core(?:\.prompts[\w.]*)?\s+import\s+[\w,\s()]{0,120}(?:Image|Chat)PromptTemplate\b'
+      - '(?i)\bChatPromptTemplate\s*\.\s*from_(?:messages|template)\s*\('
+      - '(?i)[\x{0022}\x{0027}]type[\x{0022}\x{0027}]\s*:\s*[\x{0022}\x{0027}]image_url[\x{0022}\x{0027}][\s\S]{0,300}?[\x{0022}\x{0027}]path[\x{0022}\x{0027}]\s*:'
+      - '(?i)\bimage_url\s*=\s*\{[\s\S]{0,160}?[\x{0022}\x{0027}]path[\x{0022}\x{0027}]\s*:'
+
+  # ── Signal 2: the read target is traversal or a known-sensitive host file ────────
+  sel_sensitive_file_target:
+    content|re:
+      - '(?i)(?:\.\./){2,}(?:[\w.-]{1,32}/){0,6}(?:etc|proc|root|home|users|var|private|windows|boot|sys)/'
+      - '(?:\.\./){6,}'
+      - '(?i)(?:\.\./){1,}(?:[\w.-]{1,32}/){0,6}\.(?:ssh|aws|kube|env|gnupg|docker)[/\x{0022}\x{0027}\s]'
+      - '(?i)(?:%2e){2}(?:%2f|%5c|/|\\)'
+      - '(?i)\.\.(?:%2f|%5c)'
+      - '(?i)\bfile:/{2,3}(?:etc|proc|root|home|users|var|private|dev)/'
+      - '(?i)/etc/(?:passwd|shadow|group|sudoers|ssh/|kubernetes/)'
+      - '(?i)/proc/(?:self|\d{1,7})/(?:environ|cmdline|maps|mem|fd/)'
+      - '(?i)/(?:root|home/[\w.-]{1,32}|Users/[\w.-]{1,32})/\.(?:ssh|aws|kube|gnupg|docker|config/gcloud)/'
+      - '(?i)/(?:root|home/[\w.-]{1,32}|Users/[\w.-]{1,32})/\.env\b'
+      - '(?i)/var/run/secrets/kubernetes\.io/'
+      - '(?i)/run/secrets/[\w.-]{1,64}'
+      - '(?i)\b[a-z]:\\(?:windows\\(?:win\.ini|system32\\(?:config|drivers))|users\\[\w.-]{1,32}\\\.(?:ssh|aws|kube))'
+
+  # ── Suppression: unresolved documentation placeholders ──────────────────────────
+  filter_placeholders:
+    content|contains:
+      - '<path>'
+      - '<file_path>'
+      - '<path-to-image>'
+      - 'YOUR_PATH_HERE'
+      - 'YOUR_IMAGE_PATH'
+      - 'REPLACE_ME'
+      - '${IMAGE_PATH}'
+
+  # ── Suppression: security advisories, write-ups and CVE discussion ──────────────
+  filter_security_writeup:
+    content|re:
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b'
+      - '(?i)\b(?:security advisory|vulnerability (?:advisory|disclosure|report)|responsible disclosure|proof[ -]of[ -]concept exploit)\b'
+      - '(?i)\bpatched in (?:version|release)\b'
+
+  # ── Suppression: unit/integration test fixtures for the library itself ──────────
+  filter_test_fixtures:
+    content|re:
+      - '(?i)\bdef\s+test_[a-z0-9_]{1,64}\s*\('
+      - '(?i)(?:^|[/\\])tests?/(?:unit_tests?|integration_tests?)/'
+      - '(?i)\b(?:pytest|unittest|conftest\.py)\b'
+      - '(?i)@pytest\.mark\.'
+
+  # ── Suppression: already-sanitised payloads ─────────────────────────────────────
+  filter_already_redacted:
+    content|contains:
+      - '[REDACTED]'
+      - '[PII_REDACTED]'
+
+  condition: >
+    sel_events and sel_langchain_prompt_surface and sel_sensitive_file_target
+    and not (filter_placeholders or filter_security_writeup
+             or filter_test_fixtures or filter_already_redacted)
+
+falsepositives:
+  - Developer authoring or debugging a multimodal langchain chain who pastes a real
+    home-directory path that happens to sit under a dotfile directory (e.g. an image
+    stored in ~/.config/) into an ImagePromptTemplate.
+  - Security engineer or SOC analyst asking the agent to review the langchain-core
+    image prompt template advisory — mostly suppressed by filter_security_writeup.
+  - langchain-core library test suites and repository fixtures that exercise the
+    image path loader with traversal strings — suppressed by filter_test_fixtures.
+  - Documentation, notebooks or scaffolding snippets that use placeholder path tokens
+    rather than concrete filesystem targets — suppressed by filter_placeholders.
+  - Container/CI tooling prompts that legitimately reference /run/secrets/* while the
+    same payload independently mentions ChatPromptTemplate.from_messages.
+
+action: report
