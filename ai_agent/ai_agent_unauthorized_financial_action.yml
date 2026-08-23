@@ -1,0 +1,164 @@
+title: Unauthorized Financial Action by AI Agent
+id: 6f2c1b83-9d4a-4e57-b1c2-0a7d5e83f4c9
+status: experimental
+level: high
+description: |
+  Detects a single AI-agent event in which a money-moving operation is invoked with
+  concrete transaction parameters (a non-trivial amount plus a destination/beneficiary,
+  or an explicit human-confirmation bypass flag) and with no evidence of human
+  authorization in the same payload.
+
+  Two vectors are covered in one event:
+    * event_type: tool_call      - an MCP/agent tool whose name or arguments identify a
+                                   payment, payout, transfer, wire, ACH, disbursement,
+                                   withdrawal or on-chain send, carrying a real amount
+                                   and a payee/destination, OR carrying an explicit
+                                   auto_approve / skip_confirmation / require_approval=false
+                                   marker.
+    * event_type: execute_process - the agent shells out to a payments CLI or curls a
+                                   payment-execution endpoint with a real amount on the
+                                   command line.
+
+  Absence of authorization is expressed as filters: any payload that carries an approver
+  identity, approval/confirmation token, or approval_required=true is suppressed, as are
+  read-only operations, test/sandbox/dry-run mode, template placeholders and documentation
+  or test-fixture content. Report-only: this is a governance signal for excessive agency,
+  not an enforcement control.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1657/
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+  - https://atlas.mitre.org/techniques/AML.T0048
+tags:
+  - attack.impact
+  - attack.t1657
+  - atlas.aml.t0048
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scoping ──────────────────────────────────────────────────────────
+  sel_evt_tool:
+    event_type: tool_call
+  sel_evt_proc:
+    event_type: execute_process
+
+  # ── the operation is money-moving (tool name) ──────────────────────────────
+  sel_fin_tool_name:
+    tool_name|re:
+      - '(?i)\b(create|send|make|initiate|execute|submit|issue|process|schedule|post|book|release|capture)_?(a_)?(payment|payout|transfer|wire|ach|remittance|disbursement|settlement|charge|money|funds|txn|transaction)\b'
+      - '(?i)\b(pay|pay_?(invoice|bill|vendor|supplier|employee|contractor)|payout|wire_?transfer|bank_?transfer|ach_?(debit|credit|transfer)|send_?(money|funds|payment)|move_?funds|transfer_?funds|withdraw(al)?|remit|settle_?invoice|charge_?(card|customer)|refund_?(payment|charge)|run_?payroll|payroll_?run|execute_?trade)\b'
+
+  # ── the operation is money-moving (tool arguments / body) ──────────────────
+  sel_fin_tool_body:
+    content|re:
+      - '(?i)/v1/(payment_intents|payouts|transfers|charges|topups)\b'
+      - '(?i)/(payments|payouts|transfers|withdrawals|disbursements|wires)/(execute|confirm|submit|create|send|release)\b'
+      - '(?i)"(operation|action|method|endpoint|intent)"\s*:\s*"[^"]{0,60}(create_payment|send_payment|make_payment|execute_payment|create_transfer|transfer_funds|send_money|create_payout|wire_transfer|ach_transfer|initiate_payment)'
+      - '(?i)\b(payment_intents|payouts|transfers|charges)\.create\b'
+
+  # ── money-moving CLI / HTTP invocation on a command line ───────────────────
+  sel_fin_command:
+    command|re:
+      - '(?i)\bstripe\b[^\n]{0,120}\b(payment_intents|payouts|transfers|charges|topups)\b[^\n]{0,60}\bcreate\b'
+      - '(?i)\b(paypal|braintree|adyen|wise|dwolla|plaid|razorpay|mollie|nium)\b[^\n]{0,120}\b(payout|payment|transfer)s?\b[^\n]{0,60}\b(create|execute|send|submit)\b'
+      - '(?i)\bbitcoin-cli\b[^\n]{0,100}\b(sendtoaddress|sendmany|sendrawtransaction)\b'
+      - '(?i)\bsolana\b[^\n]{0,60}\btransfer\b'
+      - '(?i)\bcast\s+send\b'
+      - '(?i)\b(curl|wget|httpie|http)\b[^\n]{0,300}(/v1/(payment_intents|payouts|transfers|charges)|/payments/execute|/transfers/execute|/ach/transfer|/wire/transfer|/payouts/create)'
+
+  # ── a real transaction amount is present ───────────────────────────────────
+  sel_amount:
+    content|re:
+      - '(?i)"?\b(amount|amount_cents|amount_in_cents|amount_minor|amount_usd|total_amount|payment_amount|transfer_amount|value|total)\b"?\s*[:=]\s*"?\$?\s*[1-9][0-9]{1,}'
+      - '(?i)"?\b(amount|total_amount|payment_amount|transfer_amount|value|total)\b"?\s*[:=]\s*"?\$?\s*[1-9][0-9]*\.[0-9]{2}\b'
+      - '(?i)--?(amount|amount-cents|value|total)[= ]\s*"?\$?[1-9][0-9]{1,}'
+
+  # ── a destination / beneficiary is present ─────────────────────────────────
+  sel_destination:
+    content|re:
+      - '(?i)"?\b(destination|destination_account|recipient|recipient_id|payee|beneficiary|to_account|target_account|counterparty|iban|routing_number|account_number|bank_account|card_id|wallet_address|destination_address|to_address|vendor_id|supplier_id)\b"?\s*[:=]\s*"?[A-Za-z0-9]'
+      - '(?i)--(to|dest|destination|recipient|payee|iban|account|to-address)[= ]'
+      - '\b(0x[a-fA-F0-9]{40}|bc1[a-z0-9]{25,60})\b'
+
+  # ── explicit human-confirmation bypass ─────────────────────────────────────
+  sel_bypass:
+    content|re:
+      - '(?i)"?\b(auto_?approve|auto_?confirm|skip_?(confirmation|approval|review)|bypass_?(approval|confirmation|review)|no_?(confirmation|approval))\b"?\s*[:=]\s*"?(true|1|yes)\b'
+      - '(?i)"?\b((requires?|needs?)_?(approval|confirmation|human_?review)|approval_?required|confirmation_?required|human_?(approval|review|in_?the_?loop)|dual_?control|maker_?checker)\b"?\s*[:=]\s*"?(false|0|no)\b'
+      - '(?i)\s--(yes|force|no-confirm|no-confirmation|auto-approve|skip-confirmation)\b'
+
+  # ── FILTER: read-only / informational financial operations ─────────────────
+  filter_readonly_name:
+    tool_name|re: '(?i)^(get|list|retrieve|search|find|read|fetch|show|describe|preview|estimate|quote|validate|verify|check|status|balance|history|report|export|reconcile|simulate|calculate)[_-]'
+  filter_readonly_body:
+    content|re: '(?i)"(operation|action|method|mode)"\s*:\s*"(get|list|retrieve|search|read|fetch|preview|estimate|quote|simulate|validate|check|report|reconcile)'
+
+  # ── FILTER: test / sandbox / dry-run execution ─────────────────────────────
+  filter_test_mode:
+    content|re:
+      - '(?i)\b(sk|pk|rk)_test_[A-Za-z0-9]{6,}'
+      - '(?i)"?\b(dry_?run|test_?mode|sandbox_?mode|is_?test|simulation|mock_?mode)\b"?\s*[:=]\s*"?(true|1|yes)\b'
+      - '(?i)"?livemode"?\s*[:=]\s*"?false\b'
+      - '(?i)--(dry-run|dryrun|test-mode|sandbox|simulate|no-execute)\b'
+      - '(?i)"?environment"?\s*[:=]\s*"(test|sandbox|staging|dev|development)"'
+      - '(?i)"?currency"?\s*[:=]\s*"(xts|test)"'
+
+  # ── FILTER: human authorization evidenced in the same payload ──────────────
+  filter_human_approval:
+    content|re:
+      - '(?i)"?\b(approved_?by|approver|approval_?id|approval_?token|approval_?reference|authorized_?by|authorizer|authorization_?id|human_?approved|confirmed_?by|confirmation_?token|signed_?off_?by|ticket_?id|change_?request_?id)\b"?\s*[:=]\s*"?[A-Za-z0-9@._-]{2,}'
+      - '(?i)"?\b((requires?|needs?)_?(approval|confirmation|human_?review)|approval_?required|confirmation_?required|human_?(approval|review|in_?the_?loop)|dual_?control|maker_?checker|four_?eyes)\b"?\s*[:=]\s*"?(true|1|yes)\b'
+      - '(?i)"?\b(status|state)\b"?\s*[:=]\s*"(pending_?approval|awaiting_?approval|requires_?confirmation|requires_?action|draft)"'
+
+  # ── FILTER: templates, placeholders, zeroed sample values ──────────────────
+  filter_placeholder:
+    content|re:
+      - '\{\{[^}\n]{0,40}\}\}'
+      - '(?i)<(amount|value|recipient|payee|account|iban|destination|wallet)>'
+      - '(?i)(\$\{[A-Z_]{2,}\}|YOUR_[A-Z_]{2,}|REPLACE_ME|PLACEHOLDER|CHANGEME)'
+      - '(?i)\b(x{4,}|0{6,})\b'
+      - '(?i)\b(lorem ipsum|john\s+doe|jane\s+doe|acme\s+(corp|inc))\b'
+
+  # ── FILTER: documentation / explanatory content ────────────────────────────
+  filter_docs:
+    content|re:
+      - '(?i)\b(sample|example|demo)\s+(request|payload|response|body|call|code|snippet|json)\b'
+      - '(?i)\bapi\s+(reference|documentation|docs)\b'
+      - '(?i)\bhow\s+to\s+(create|make|send|issue)\s+a\s+(payment|transfer|payout)\b'
+
+  # ── FILTER: test/fixture artefacts referenced by path ──────────────────────
+  filter_test_artifacts:
+    content|re: '(?i)"(file_?path|path|filename|notebook)"\s*:\s*"[^"]{0,200}(/tests?/|/spec/|/fixtures?/|/mocks?/|/examples?/|/samples?/|/docs?/|_test\.|\.spec\.|\.md")'
+
+  condition: >
+    (
+      (sel_evt_tool and (sel_fin_tool_name or sel_fin_tool_body)
+        and sel_amount and (sel_destination or sel_bypass))
+      or
+      (sel_evt_proc and sel_fin_command and sel_amount)
+    )
+    and not (
+      filter_readonly_name or filter_readonly_body or filter_test_mode or
+      filter_human_approval or filter_placeholder or filter_docs or
+      filter_test_artifacts
+    )
+
+falsepositives:
+  - Finance-ops automation where the human approval is recorded in a separate upstream
+    system and never appears in the tool arguments (no approver id, ticket id or
+    approval token in the payload) - such calls will report; add the approver field to
+    the tool schema to suppress.
+  - Scheduled/recurring payment runs (payroll, AP batches) initiated by an agent under a
+    standing authorization; these carry real amounts and payees and no per-transaction
+    approval marker.
+  - Internal ledger or treasury sweep tools whose names contain transfer/settlement verbs
+    but move money only between accounts owned by the same organisation.
+  - Live-mode reconciliation or retry jobs that replay a previously approved transaction
+    payload without re-attaching the original approval metadata.
+  - Refund tooling operating within a pre-approved refund threshold policy.
+
+action: report
