@@ -1,0 +1,94 @@
+title: LLM Jailbreak Tooling - sentinel-scan-cli Execution
+id: 7c1f4d2a-9b6e-4f3c-8a51-2d0e6b7c94af
+status: experimental
+level: medium
+description: |
+  Detects acquisition or execution of the PyPI package `sentinel-scan-cli`, an
+  offensive smoke-test harness that fires a fixed battery of prompt-injection and
+  jailbreak probes at an LLM endpoint.
+
+  Two independent single-event signals are covered:
+    1. execute_process - the console script, the `python -m sentinel_scan` module
+       entry point, or a package-manager install/run of `sentinel-scan-cli`.
+    2. http_request    - an outbound request body that simultaneously carries the
+       tool's own identifying token AND a canonical jailbreak / instruction-override
+       payload, i.e. the probe itself on the wire.
+
+  Running this tool against a production or third-party model endpoint is
+  unsanctioned adversarial testing; running it from inside an agent session is a
+  strong indicator the agent has been repurposed to fuzz an LLM for guardrail
+  bypasses. Reported, not blocked: authorised red-team and AI-safety evaluation is
+  a legitimate use of the same binary.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://pypi.org/project/sentinel-scan-cli/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.reconnaissance
+  - attack.t1595.002
+  - attack.resource-development
+  - attack.t1588.002
+  - atlas.aml.t0051
+  - atlas.aml.t0054
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── 1. Process execution of the tool ────────────────────────────────────────
+  # Console script / absolute path invocation, module entry point, or an explicit
+  # package-manager install|run of the exact distribution name. Every alternative
+  # is delimiter-anchored so `sentinel-scanner`, `sentinel_scan_report.log`, etc.
+  # cannot match.
+  sel_exec_invoke:
+    event_type: execute_process
+    command|re:
+      - '(?i)(?:^|[\s;&|(\x22\x27=])(?:[\w./\\-]*[/\\])?sentinel[-_]scan(?:[-_]cli)?(?:\.exe)?(?:$|[\s;&|)\x22\x27])'
+      - '(?i:python[0-9.]*)(?:\.exe)?[^\n]{0,120}\s-m\s+(?i:sentinel[_-]scan)\b'
+      - '(?i)\b(?:pip[0-9.]*|pipx|uv|uvx|poetry|conda|pdm|hatch)\b[^\n]{0,200}\b(?:install|add|download|run|tool)\b[^\n]{0,200}\bsentinel[-_]scan[-_]cli\b'
+
+  # Re-arm: something is piped INTO the tool. This must survive filter_readonly,
+  # otherwise `echo <target> | sentinel-scan-cli` would be suppressed by the
+  # read-only-verb filter below.
+  sel_exec_pipe:
+    event_type: execute_process
+    command|re: '(?i)[|]\s*(?:[\w./\\-]*[/\\])?sentinel[-_]scan(?:[-_]cli)?\b'
+
+  # ── 2. The probe on the wire ────────────────────────────────────────────────
+  # Both halves are required (separate selections ANDed in the condition, since
+  # YAML forbids a duplicate `content` key): the tool's own token in the body AND
+  # a live instruction-override payload. Either alone is not evidence.
+  sel_http_tool_marker:
+    event_type: http_request
+    content|re: '(?i)sentinel[-_]scan[-_]cli'
+  sel_http_probe_payload:
+    content|re: '(?i)(?:ignore\s+(?:all\s+|any\s+|the\s+)?(?:previous|prior|above|earlier)\s+instructions|disregard\s+(?:all\s+)?(?:previous|prior|above)\s+(?:instructions|rules|directives)|reveal\s+(?:your\s+)?(?:full\s+)?system\s+prompt|\bjailbreak\b|\bDAN\s+mode\b|developer\s+mode\s+enabled)'
+
+  # ── Filters: benign handling of the same string ─────────────────────────────
+  # Start-anchored read-only verbs - searching a repo for the package name,
+  # paging a lockfile, `which sentinel-scan-cli`, printing install docs.
+  # Anchored at command start so a trailing `| grep` cannot disarm a real run.
+  filter_readonly:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:[\w./\\-]*[/\\])?(?:grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|wc|man|find|locate|which|whereis|type|file|stat|echo|printf|ls|diff)\b'
+
+  # Start-anchored package inspection / removal - remediation and inventory, not
+  # acquisition. Verb must follow the package manager directly, so an install
+  # chained with `; pip show x` is NOT suppressed.
+  filter_pkg_inspect:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:python[0-9.]*\s+-m\s+)?(?:pip[0-9.]*|pipx|uv|poetry|conda|pdm)(?:\s+pip)?\s+(?:uninstall|remove|show|list|index|freeze|cache|check)\b'
+
+  condition: >
+    (sel_exec_invoke and not (filter_readonly or filter_pkg_inspect))
+    or sel_exec_pipe
+    or (sel_http_tool_marker and sel_http_probe_payload)
+
+falsepositives:
+  - Authorised red-team or AI-safety evaluation deliberately running sentinel-scan-cli against an owned staging LLM endpoint - expected to fire; triage by target and change ticket.
+  - A CI job that installs the package as part of a guardrail regression suite (fires on the install line each pipeline run).
+  - A security engineer reading, grepping, uninstalling or listing the package - suppressed by filter_readonly / filter_pkg_inspect.
+  - A shell one-liner that echoes install instructions from a README - suppressed by filter_readonly unless the output is piped into the tool.
+  - An LLM request body quoting the tool name inside a security discussion - requires the additional live jailbreak payload marker before it fires.
+action: report
