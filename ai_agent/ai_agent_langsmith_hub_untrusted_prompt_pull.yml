@@ -1,0 +1,105 @@
+title: LangSmith Hub Third-Party Prompt Manifest Pull With Model Deserialization
+id: 5b8c2e14-9a37-4d61-b0f2-6e8a13c47d95
+status: experimental
+level: medium
+description: |
+  Detects a LangSmith/LangChain Hub prompt-commit fetch that (a) names an explicit
+  third-party owner handle (owner segment is present and is not the SDK's "-"
+  self/current-workspace marker) and (b) requests the serialized model client with
+  include_model=true.
+
+  This is the exact wire shape produced by pull_prompt / pull_prompt_commit
+  (Python) and pullPrompt / pullPromptCommit (JS/TS) when include_model is set:
+  GET /commits/{owner}/{repo}[/{commit}]?include_model=true. The response manifest
+  is passed to LangChain's loads() and instantiates an LLM client with
+  attacker-supplied constructor arguments (base_url, default_headers, model kwargs,
+  proxies). A prompt published by an arbitrary Hub owner therefore becomes a
+  deserialization-and-configuration primitive inside the victim application:
+  SSRF to an attacker endpoint, disclosure of prompt contents and API keys carried
+  in the client, and silent prompt/behaviour manipulation.
+
+  The SDK applies no trust boundary between organization-internal prompts and
+  arbitrary public Hub prompts, so the request itself is the only observable signal
+  available before the manifest is deserialized. Reported, not blocked: a
+  first-party prompt referenced by its fully qualified owner/name handle produces
+  an identical request and must be triaged by owner handle.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://docs.smith.langchain.com/prompt_engineering/how_to_guides/manage_prompts_programatically
+  - https://attack.mitre.org/techniques/T1195/001/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.credential-access
+  - attack.t1552
+  - owasp.a08-2023
+  - owasp.a01-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # 1. Scope: outbound HTTP GET only. Prompt *pulls* are GET; POST/PUT/PATCH on
+  #    /commits/ is a push of the caller's own prompt and is not this threat.
+  sel_pull_request:
+    event_type: http_request
+    method: GET
+
+  # 2. Hub commit-pull path shape with an EXPLICIT third-party owner segment.
+  #    The owner's first character is restricted to [A-Za-z0-9_.], which
+  #    structurally excludes the SDK's single "-" self/current-workspace owner
+  #    emitted for unqualified identifiers such as hub.pull("my-prompt").
+  #    Two required path segments after /commits/ also exclude VCS APIs that use
+  #    /commits/{sha}.
+  sel_commit_shape:
+    url.full|re: '(?i)/(?:api/)?(?:v1/)?commits/[A-Za-z0-9_.][A-Za-z0-9._-]{0,63}/[A-Za-z0-9_.][A-Za-z0-9._-]{0,127}(?:/[A-Za-z0-9._-]{1,64})?(?:\?|$)'
+
+  # 3. High-specificity anchor: the caller asked for the serialized model client,
+  #    i.e. loads() will instantiate an LLM object from manifest-controlled
+  #    constructor arguments. Without this parameter no client is deserialized.
+  sel_model_manifest:
+    url.full|re: '(?i)[?&]include_model=(?:true|1)(?:&|$)'
+
+  # ── Filters: documentation, templated and placeholder identifiers ───────────
+  # Un-substituted templating in the URL (docs, generated client stubs, route
+  # definitions, curl examples pasted into a notebook).
+  filter_templated_identifier:
+    url.full|re: '(?i)(\{[a-z0-9_-]{1,32}\}|%7[bd]|<[a-z0-9_-]{1,32}>|/:[a-z0-9_]{1,32}(?:/|\?|$)|\$\{[a-z0-9_]{1,32}\})'
+
+  # Literal documentation placeholders that are never real Hub owner handles.
+  filter_placeholder_tokens:
+    url.full|contains:
+      - 'placeholder'
+      - 'your-username'
+      - 'your_username'
+      - 'your-owner'
+      - 'owner-name'
+      - 'example-owner'
+      - 'replace_me'
+      - 'replace-me'
+      - 'insert-owner'
+      - 'xxxxx'
+
+  condition: >
+    sel_pull_request and sel_commit_shape and sel_model_manifest
+    and not (filter_templated_identifier or filter_placeholder_tokens)
+
+falsepositives:
+  - First-party use - an application pulling its own organization's prompt by the
+    fully qualified "owner/name" handle with include_model=True. The request is
+    byte-identical to the attack; triage by checking whether the owner segment is
+    your workspace handle. This is the dominant expected FP and the reason the
+    rule reports rather than blocks.
+  - Deliberate evaluation or benchmarking jobs that pull well-known community Hub
+    prompts (rag-prompt, react-chat, etc.) as part of a prompt-comparison harness.
+  - Developer prototyping in notebooks or scratch scripts against public Hub
+    prompts before the prompt is forked into the organization's own workspace.
+  - CI regression suites that pin a third-party prompt commit hash to detect
+    upstream drift.
+  - Documentation, tutorial or SDK-integration-test traffic replaying example URLs
+    (largely suppressed by filter_templated_identifier and
+    filter_placeholder_tokens).
+
+action: report
