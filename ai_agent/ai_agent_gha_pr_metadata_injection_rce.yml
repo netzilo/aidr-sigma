@@ -1,0 +1,171 @@
+title: GitHub Actions PR Metadata Script Injection RCE
+id: 7f2c9a41-3d5e-4b18-9c6a-0e83b7d41af2
+status: experimental
+level: high
+description: |
+  Detects remote code execution on a GitHub Actions runner caused by a workflow
+  interpolating unsanitized pull-request metadata (title, body, head_ref, comment
+  body) into a privileged `run:` step -- the Roo Code workflow vulnerability class.
+
+  The only live signal for this attack is the syscall-level `execute_process`
+  event: the runner spawns a child process whose command line carries the
+  attacker-controlled metadata. Three self-sufficient GitHub-Actions-specific
+  shapes fire on their own because they cannot occur outside a runner context:
+
+    1. sel_gha_expr_injection  -- a LITERAL, un-evaluated `${{ ... }}` expression
+       reaching a spawned command line. Workflow expressions are interpolated by
+       the runner BEFORE the step script is written, so a surviving `${{ }}` in an
+       executed command line means attacker-supplied text containing Actions
+       template syntax was spliced into the script (or staged into $GITHUB_ENV /
+       $GITHUB_OUTPUT for re-evaluation in a later step).
+    2. sel_gha_secret_exfil    -- CI credential material ($GITHUB_TOKEN,
+       $ACTIONS_RUNTIME_TOKEN, the full environment, $GITHUB_EVENT_PATH) handed to
+       a network client as request BODY data, to a raw-IP endpoint, or piped into
+       nc/socat. Header-style API auth is deliberately not matched.
+    3. sel_gha_env_hijack      -- loader/interpreter hijack variables (LD_PRELOAD,
+       NODE_OPTIONS, BASH_ENV, GIT_SSH_COMMAND, ...) or a world-writable directory
+       appended to $GITHUB_ENV / $GITHUB_PATH, escalating the injection into every
+       subsequent step of the job.
+
+  Two generic RCE shapes (download-and-execute, reverse shell) are additionally
+  gated: the SAME command line must also carry a runner-context marker
+  (/home/runner/work, /_work/_temp, \a\_temp\, $RUNNER_TEMP, $ACTIONS_*,
+  $GITHUB_*, $env:GITHUB_*). Both `command` and `content` are the spawned command
+  line for execute_process, so pairing the two fields in one selection ANDs the
+  payload against the runner context and keeps this rule off developer laptops.
+
+  sel_pr_metadata_breakout requires a quote/backtick/`${IFS}`/`%0a` shell breakout
+  AND an explicit pull-request metadata reference in the same command line -- the
+  most direct expression of the threat.
+author: Haibo
+date: "2026-03-18"
+references:
+  - https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections
+  - https://securitylab.github.com/resources/github-actions-untrusted-input/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.credential_access
+  - attack.t1552
+  - attack.t1552.001
+  - attack.persistence
+  - attack.t1574.006
+  - attack.initial_access
+  - attack.t1195.002
+  - owasp.a03.2021
+  - owasp.a06.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: syscall-level child-process spawn only ───────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── Group A: GitHub-Actions-specific, self-sufficient (no context gate) ─────
+
+  # A literal, un-interpolated Actions expression inside an EXECUTED command line.
+  sel_gha_expr_injection:
+    command|re:
+      - '\$\{\{\s*(?:secrets|env|github|steps|needs|inputs|vars|matrix|runner|job|strategy)\s*\.[A-Za-z_][A-Za-z0-9_.\-\[\]]{0,160}\}\}'
+      - '\$\{\{\s*(?:toJSON|fromJSON|format|hashFiles|contains|startsWith|endsWith)\s*\('
+
+  # Runner credential material shipped off-box as body data / to a raw IP / via nc.
+  sel_gha_secret_exfil:
+    command|re:
+      - '(?i:curl|wget|http|httpie)\b[^\n]{0,300}\s-{1,2}(?:d|data|data-raw|data-binary|data-urlencode|F|form|T|upload-file|post-file|post-data)\b[^\n]{0,240}\$\{?(?:GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN|NPM_TOKEN|AWS_SECRET_ACCESS_KEY)\b'
+      - '(?i:curl|wget|nc|ncat|socat)\b[^\n]{0,200}(?:https?://)?(?:[0-9]{1,3}\.){3}[0-9]{1,3}[:/][^\n]{0,240}\$\{?(?:GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN|ACTIONS_ID_TOKEN_REQUEST_TOKEN)\b'
+      - '(?:env|printenv|set)\b[^\n]{0,40}\|\s*(?i:curl|wget|nc|ncat|socat|base64|xxd|openssl)\b'
+      - '(?:cat|base64|xxd|od|jq)\s+[^\n]{0,60}\$\{?(?:GITHUB_EVENT_PATH|GITHUB_ENV|GITHUB_OUTPUT)\}?[^\n]{0,120}\|\s*(?i:curl|wget|nc|ncat|socat)\b'
+      - '(?:echo|printf)\s+[^\n]{0,40}\$\{?(?:GITHUB_TOKEN|GH_TOKEN|ACTIONS_RUNTIME_TOKEN)\}?[^\n]{0,80}\|\s*(?i:curl|wget|nc|ncat|socat|base64)\b'
+      - '(?i:curl|wget)\b[^\n]{0,300}\$\(\s*(?:printenv|env\b|cat\s+[^\n]{0,40}\$\{?GITHUB_(?:ENV|EVENT_PATH|OUTPUT))'
+
+  # Cross-step escalation: loader/interpreter hijack staged into $GITHUB_ENV/$GITHUB_PATH.
+  sel_gha_env_hijack:
+    command|re:
+      - '(?:LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_INSERT_LIBRARIES|NODE_OPTIONS|BASH_ENV|PYTHONSTARTUP|PYTHONPATH|PERL5OPT|PERL5LIB|RUBYOPT|GIT_SSH_COMMAND|GIT_CONFIG_GLOBAL|GIT_CONFIG_COUNT)\s*=[^\n]{0,220}>>\s*["\x27]?\$\{?(?:GITHUB_ENV|GITHUB_OUTPUT)\b'
+      - '(?:echo|printf)\s+["\x27]?(?:/tmp|/var/tmp|/dev/shm|\$\{?RUNNER_TEMP\}?|\$\{?TMPDIR)[^\n]{0,140}>>\s*["\x27]?\$\{?GITHUB_PATH\b'
+
+  # Shell breakout characters AND an explicit PR/issue metadata reference.
+  sel_pr_metadata_breakout:
+    command|re:
+      - '["\x27]\s*(?:;|&{2}|\|{1,2})\s*(?i:curl|wget|nc|ncat|socat|bash|sh|zsh|python[23]?|node|perl|ruby|eval|base64|chmod|rm)\b'
+      - '\$\(\s*(?i:curl|wget|nc|ncat|base64|eval|whoami|id)\b'
+      - '`[^`\n]{0,200}(?i:curl|wget|nc|ncat|base64|bash|sh)\b'
+      - '\$\{IFS\}'
+      - '%0[aAdD]'
+    content|re:
+      - '(?i:github)\.(?:event\.(?:pull_request|issue|comment|review)|head_ref)'
+      - '\bGITHUB_(?:HEAD_REF|EVENT_PATH|EVENT_NAME)\b'
+      - '\$\{\{[^\n]{0,100}(?:pull_request|head_ref|issue|comment)'
+
+  # ── Group B: generic RCE, gated on a runner-context marker in the SAME cmdline ─
+
+  sel_rce_pipe_interpreter:
+    command|re:
+      - '(?i:curl|wget|fetch|aria2c)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:/usr/bin/|/bin/)?(?:ba|da|z|k|a)?sh\b'
+      - '(?i:curl|wget)\b[^\n|]{0,400}\|\s*(?:sudo\s+)?(?:python[23]?|perl|ruby|node|php)\b'
+      - '(?:ba|z)?sh\s+<\(\s*(?i:curl|wget)\b'
+      - '(?:eval|(?:ba|z)?sh\s+-c|python[23]?\s+-c)\s+["\x27]?\$\(\s*(?i:curl|wget)\b'
+      - 'base64\s+-{1,2}[dD](?:ecode)?\b[^\n]{0,200}\|\s*(?:sudo\s+)?(?:ba|z)?sh\b'
+      - '(?i:invoke-expression|\biex\b)[^\n]{0,220}(?i:downloadstring|invoke-webrequest|\biwr\b|\bcurl\b)'
+    content|re:
+      - '/home/runner/(?:work|_work)/'
+      - '/_work/_temp/'
+      - '/actions-runner/'
+      - '\\a\\_temp\\'
+      - '\$\{?(?:GITHUB_(?:TOKEN|ENV|PATH|OUTPUT|WORKSPACE|STEP_SUMMARY|EVENT_PATH|HEAD_REF|RUN_ID|ACTION)|RUNNER_(?:TEMP|WORKSPACE|TOOL_CACHE)|ACTIONS_(?:RUNTIME_TOKEN|RUNTIME_URL|CACHE_URL|ID_TOKEN_REQUEST_URL|ID_TOKEN_REQUEST_TOKEN))\b'
+      - '\$env:(?:GITHUB|RUNNER|ACTIONS)_'
+      - '\$\{\{\s*(?:secrets|github|env|steps|inputs|needs|runner|vars|matrix)\s*\.'
+      - '(?i:github)\.event\.(?:pull_request|issue|comment|review)\b'
+
+  sel_rce_revshell:
+    command|re:
+      - '/dev/(?:tcp|udp)/[A-Za-z0-9._\-]{1,255}/[0-9]{1,5}'
+      - '\b(?:nc|ncat|netcat)\b[^\n]{0,80}\s-[A-Za-z]{0,5}e[A-Za-z]{0,5}\s+/(?:usr/)?bin/(?:ba|z)?sh\b'
+      - '(?i:socat)\b[^\n]{0,140}(?i:exec):[^\n]{0,60}(?:ba|z)?sh'
+      - '(?i:python[23]?|perl|ruby|node)\b[^\n]{0,300}socket[^\n]{0,220}(?:dup2|SOCK_STREAM|connect\s*\()'
+    content|re:
+      - '/home/runner/(?:work|_work)/'
+      - '/_work/_temp/'
+      - '/actions-runner/'
+      - '\\a\\_temp\\'
+      - '\$\{?(?:GITHUB_(?:TOKEN|ENV|PATH|OUTPUT|WORKSPACE|STEP_SUMMARY|EVENT_PATH|HEAD_REF|RUN_ID|ACTION)|RUNNER_(?:TEMP|WORKSPACE|TOOL_CACHE)|ACTIONS_(?:RUNTIME_TOKEN|RUNTIME_URL|CACHE_URL|ID_TOKEN_REQUEST_URL|ID_TOKEN_REQUEST_TOKEN))\b'
+      - '\$env:(?:GITHUB|RUNNER|ACTIONS)_'
+      - '\$\{\{\s*(?:secrets|github|env|steps|inputs|needs|runner|vars|matrix)\s*\.'
+      - '(?i:github)\.event\.(?:pull_request|issue|comment|review)\b'
+
+  # ── Filters: benign command lines that legitimately carry these strings ─────
+
+  # Workflow/IaC security scanners and linters carry expression syntax and
+  # injection signatures on their own command lines.
+  filter_security_tooling:
+    command|re: '(?i)\b(?:actionlint|zizmor|poutine|semgrep|opengrep|gitleaks|trufflehog|trivy|checkov|kics|codeql|snyk|bandit|njsscan|shellcheck|hadolint|osv-scanner|grype|syft|conftest|regal)\b'
+
+  # Test suites and golden files that execute injection fixtures on purpose.
+  filter_test_fixture:
+    command|re: '(?i)/(?:testdata|fixture|fixtures|__fixtures__|__tests__|testcase|testcases|test-cases|golden|snapshot|snapshots)/'
+
+  # Repos that template, lint or rewrite their OWN workflow YAML -- the tool and
+  # the workflow path must BOTH be on the command line (two fields = AND).
+  filter_workflow_authoring:
+    command|re: '(?i)\.github/workflows?/'
+    content|re: '(?i)\b(?:yq|envsubst|ytt|jinja|jinja2|cookiecutter|mustache|jsonnet|helm\s+template|kustomize|yamllint|prettier|sed|awk|grep|rg|ripgrep|git\s+grep|renovate|dependabot)\b'
+
+  condition: >
+    sel_event and
+    (sel_gha_expr_injection or sel_gha_secret_exfil or sel_gha_env_hijack or
+     sel_pr_metadata_breakout or sel_rce_pipe_interpreter or sel_rce_revshell)
+    and not (filter_security_tooling or filter_test_fixture or filter_workflow_authoring)
+
+action: report
+
+falsepositives:
+  - Workflow linters and CI security scanners (actionlint, zizmor, semgrep, gitleaks, checkov) whose argv carries literal "${{ ... }}" expression samples or injection signatures -- suppressed by filter_security_tooling.
+  - Repositories that generate, template or rewrite their own .github/workflows/*.yml with yq, envsubst, sed, awk or grep -- suppressed by filter_workflow_authoring (tool name AND workflow path must both appear).
+  - Test suites that execute recorded script-injection fixtures from testdata/, fixtures/ or golden/ directories -- suppressed by filter_test_fixture.
+  - Self-hosted or custom runner bootstrap steps that legitimately pipe a toolchain installer to a shell while also referencing $RUNNER_TEMP or /home/runner/work in the same command line (e.g. 
