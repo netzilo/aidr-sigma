@@ -1,0 +1,313 @@
+title: Supply Chain PyPI Install-Time Code Execution
+id: 7b1e4c9a-2f3d-4a86-9c51-0e6d8b47af23
+status: experimental
+level: high
+description: |
+  Detects the PyPI supply-chain execution pattern behind packages such as
+  'free-image-library': a python package install (pip / uv / pipenv / poetry /
+  setup.py / PEP-517 build hook) that, inside the SAME process session and inside
+  a 10 minute window, spawns a download tool, a shell/python one-liner with
+  network or exec primitives, a scripting host, or a persistence mechanism —
+  i.e. arbitrary code running with the privileges of the installing process.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks the true spawn chain with
+  proc_lineage(), and expands the session only to descendants of that lineage via
+  query_events(kind="EXECUTE_PROCESS"). Nothing is attributed across sessions and
+  no path-keyed graph node walk is used, so the verdict is deterministic.
+
+  An HTTP_REQUEST performed inside the window by a NON-installer process of the
+  same session (i.e. the spawned downloader, not pip talking to its index) is
+  attached as an escalation stage. No host, domain or path allowlist is used —
+  the discriminator is the process role and the ordered sequence, not the
+  destination.
+
+  Reporting only: install-time downloads are legitimate for some scientific and
+  binary-wheel packages, so this rule surfaces the chain for review rather than
+  interrupting a build.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.002
+  - attack.t1059
+  - atlas.aml.t0010
+  - owasp.a08-2021
+falsepositives:
+  - Legitimate source distributions that download prebuilt binaries, model
+    weights or test fixtures at build time (curl/wget invoked from setup.py or a
+    PEP-517 backend) — common for CUDA, OpenCV, tokenizer and ffmpeg wrappers.
+  - Build scripts that chmod +x a compiled artifact staged under /tmp or
+    /var/tmp before running it as part of a configure step.
+  - Container/CI provisioning where a dependency install is immediately followed
+    in the same shell session by crontab, systemctl enable or launchctl calls.
+  - Developer shells where 'pip install -e .' is run and the same shell is then
+    used to run an unrelated curl/base64 command within ten minutes.
+  - Internal package mirrors accessed by a wrapper script that is not named
+    pip/python (the egress stage is escalation only and never fires alone).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_supply_chain_indicator:
+    content|re: '(?i)(\bpip[0-9.]*\b|-m\s+pip\b|\bpipenv\b|\bpoetry\b|\beasy_install\b|\buv\b|setup\.py|pep517|build_meta|\bcurl\b|\bwget\b|\bncat\b|\bsocat\b|\bnc\b\s+-|\bbase64\b|\bchmod\b|\bosascript\b|\bpowershell\b|\bpwsh\b|\bcrontab\b|\blaunchctl\b|python[0-9.]*\s+-c|/bin/(ba|z|k)?sh\s+-c|free[-_]?image[-_]?library)'
+  condition: sel_exec and sel_supply_chain_indicator
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── PyPI supply chain: install-time arbitrary code execution ───────────────
+  IOC_PKGS = ["free-image-library", "free_image_library", "freeimagelibrary"]
+
+  WINDOW_NS = 600000000000          # 10 minutes — one install session
+
+  INSTALL_PAT = r"(?i)(\bpip[0-9.]*\b[^\n]{0,300}\b(install|download)\b|-m\s+pip\b[^\n]{0,300}\b(install|download)\b|\buv\b[^\n]{0,160}\bpip\b[^\n]{0,200}\binstall\b|\bpipenv\b[^\n]{0,200}\binstall\b|\bpoetry\b[^\n]{0,200}\badd\b|\beasy_install\b|setup\.py[^\n]{0,200}\b(install|develop|egg_info|bdist_wheel|build_ext)\b|pep517|build_meta)"
+
+  INSTALLER_TOKENS = ["python", "pip", "uv", "poetry", "pipenv", "conda", "pdm", "hatch"]
+
+  def trim(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def ioc_hit(s):
+      low = s.lower()
+      for p in IOC_PKGS:
+          if p in low:
+              return p
+      return ""
+
+  def is_install(s):
+      if s == "":
+          return False
+      return re.find(INSTALL_PAT, s) != None
+
+  def is_installer_proc(p):
+      low = p.lower()
+      for t in INSTALLER_TOKENS:
+          if t in low:
+              return True
+      return False
+
+  # High-specificity install-time execution primitives. Compilers, linkers and
+  # ordinary python build subprocesses deliberately do NOT match.
+  def suspicious_child(cmd):
+      if cmd == "":
+          return ""
+      if re.find(r"(?i)\b(curl|wget)\b", cmd) != None:
+          return "download tool executed during package install"
+      if re.find(r"(?i)\b(ncat|socat)\b", cmd) != None:
+          return "raw socket tool executed during package install"
+      if re.find(r"(?i)\bnc\b\s+-", cmd) != None:
+          return "netcat executed during package install"
+      if re.find(r"(?i)\bbase64\b\s+-{1,2}[dD]", cmd) != None:
+          return "base64-decoded payload executed during package install"
+      if re.find(r"(?i)python[0-9.]*\s+-c\b", cmd) != None:
+          if re.find(r"(?i)(urllib|requests\.|socket|base64|__import__|exec\(|eval\(|subprocess|os\.system|marshal|pty\.spawn)", cmd) != None:
+              return "inline python one-liner with network/exec primitives"
+      if re.find(r"(?i)\b(ba|z|k)?sh\b\s+-c\b", cmd) != None:
+          if re.find(r"(?i)(curl|wget|/dev/tcp|base64|\beval\b|chmod\s+\+x|bashrc|zshrc|authorized_keys|crontab|launchctl)", cmd) != None:
+              return "shell one-liner with download or persistence primitives"
+      if re.find(r"(?i)\b(osascript|powershell|pwsh|wscript|cscript|mshta)\b", cmd) != None:
+          return "scripting host invoked during package install"
+      if re.find(r"(?i)\bchmod\b[^\n]{0,80}\+x[^\n]{0,160}(/tmp/|/var/tmp/|/dev/shm/|/private/tmp/)", cmd) != None:
+          return "temp-directory file made executable during package install"
+      if re.find(r"(?i)\b(crontab|launchctl|systemctl\s+enable|schtasks)\b", cmd) != None:
+          return "persistence mechanism invoked during package install"
+      return ""
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = e.get("actor_path", "")
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "process://" + e.get("actor_path", "")
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + frm,
+          "to":       tgt,
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+      }
+
+  def run():
+      # ── 1. relevance gate — pure string checks on meta, no graph/log calls ──
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd_now = meta.get("content", "")
+      trig_install   = is_install(cmd_now)
+      trig_exec_desc = suspicious_child(cmd_now)
+      if not trig_install and trig_exec_desc == "":
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ─────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      now_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, now_ts)
+      if inst == None:
+          return "allow"                       # degraded — re-fires when logged
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # ── 3. session scope: this lineage only (never cross-session) ──────────
+      session = {}
+      for x in lineage:
+          pid = x.get("actor_pid", "")
+          if pid != "":
+              session[pid] = x.get("actor_start", "0")
+
+      # ── 4. REQUIRED anchor stage: a python package install in this session ─
+      anchor = None
+      for x in lineage:
+          if is_install(x.get("cmdline", "")):
+              anchor = x
+              break
+      if anchor == None:
+          for x in lineage:
+              rows0 = query_events(kind="EXECUTE_PROCESS",
+                                   actor_pid=int(x.get("actor_pid", "0")),
+                                   actor_start=int(x.get("actor_start", "0")),
+                                   limit=10)
+              for r in rows0:
+                  if is_install(r.get("cmdline", "")):
+                      anchor = r
+                      break
+              if anchor != None:
+                  break
+      if anchor == None and trig_install:
+          anchor = {
+              "kind":        "EXECUTE_PROCESS",
+              "ts":          str(now_ts),
+              "actor_pid":   inst.get("actor_pid", ""),
+              "actor_start": inst.get("actor_start", "0"),
+              "actor_path":  inst.get("actor_path", ""),
+              "parent_path": inst.get("parent_path", ""),
+              "cmdline":     cmd_now,
+              "target_id":   "process://" + inst.get("actor_path", ""),
+          }
+      if anchor == None:
+          return "allow"                       # no install context — not our threat
+
+      anchor_ts = int(anchor.get("ts", "0"))
+      if anchor_ts == 0:
+          anchor_ts = int(anchor.get("actor_start", "0"))
+      if anchor_ts == 0:
+          return "allow"
+      if now_ts > 0 and (now_ts - anchor_ts) > WINDOW_NS:
+          return "allow"                       # stale — a different install session
+      until = 0
+      if now_ts > 0:
+          until = now_ts + 1
+
+      # descendants of the lineage, bounded to the install window
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=anchor_ts,
+                          until_ns=until, limit=3000)
+      for i in range(3):
+          for r in rows:
+              ap = r.get("actor_pid", "")
+              if ap == "":
+                  continue
+              if r.get("parent_pid", "") in session and ap not in session:
+                  session[ap] = r.get("actor_start", "0")
+
+      # ── 5. REQUIRED stage: install-time arbitrary code execution ───────────
+      exec_ev   = None
+      exec_desc = ""
+      if trig_exec_desc != "":
+          # trigger stage comes from meta — never re-looked-up (async ingest race)
+          exec_ev = {
+              "kind":        "EXECUTE_PROCESS",
+              "ts":          str(now_ts),
+              "actor_path":  inst.get("actor_path", ""),
+              "parent_path": inst.get("parent_path", ""),
+              "cmdline":     cmd_now,
+              "target_id":   "process://" + inst.get("actor_path", ""),
+          }
+          exec_desc = trig_exec_desc
+      else:
+          for r in rows:
+              if r.get("actor_pid", "") not in session:
+                  continue
+              d = suspicious_child(r.get("cmdline", ""))
+              if d == "":
+                  continue
+              if int(r.get("ts", "0")) < anchor_ts:
+                  continue                      # ordering: must follow the install
+              exec_ev   = r
+              exec_desc = d
+              break
+
+      pkg = ioc_hit(anchor.get("cmdline", ""))
+      if pkg == "":
+          pkg = ioc_hit(cmd_now)
+
+      if exec_ev == None and pkg == "":
+          return "allow"                       # plain install — nothing to say
+
+      # ── 6. escalation stage: egress by a NON-installer process of the session
+      http_ev = None
+      probed  = 0
+      for p in session:
+          if probed >= 12:
+              break
+          if p == "":
+              continue
+          probed = probed + 1
+          for r in query_events(kind="HTTP_REQUEST", actor_pid=int(p),
+                                actor_start=int(session[p]), since_ns=anchor_ts,
+                                until_ns=until, limit=10):
+              if is_installer_proc(r.get("actor_path", "")):
+                  continue                      # the package manager's own index traffic
+              http_ev = r
+              break
+          if http_ev != None:
+              break
+
+      # ── 7. kill chain, rooted at the session owner ─────────────────────────
+      root_path = lineage[-1].get("actor_path", inst.get("actor_path", ""))
+      chain = new_chain("process://" + root_path)
+      chain.append(step(ev_edge(anchor), stage_id="Package Install",
+                        stage_desc="python package install: " + trim(anchor.get("cmdline", ""), 220)))
+      stages = ["package install"]
+      if pkg != "":
+          stages.append("reported malicious package '" + pkg + "'")
+      if exec_ev != None:
+          chain.append(step(ev_edge(exec_ev), stage_id="Install-Time Code Execution",
+                            stage_desc=exec_desc + ": " + trim(exec_ev.get("cmdline", ""), 220)))
+          stages.append(exec_desc)
+      if http_ev != None:
+          chain.append(step(ev_edge(http_ev), stage_id="Install-Time Egress",
+                            stage_desc="HTTP " + http_ev.get("method", "?") + " to " +
+                                       http_ev.get("host", "?") + " by " +
+                                       http_ev.get("actor_path", "?")))
+          stages.append("egress to " + http_ev.get("host", "?"))
+
+      names = []
+      for x in lineage:
+          seg = x.get("actor_path", "").split("/")
+          names.append(seg[-1])
+      attrib = " -> ".join(names)
+      if len(lineage) < 2:
+          attrib = attrib + " (attribution: degraded)"
+
+      print("PyPI supply-chain signal | " + ", ".join(stages) + " | lineage: " + attrib)
+      return {
+          "action": "report",
+          "reason": "PyPI supply chain — " + ", ".join(stages) + " | session: " + attrib,
+          "chain":  chain,
+      }
+
+  result = run()
