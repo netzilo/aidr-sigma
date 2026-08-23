@@ -1,0 +1,96 @@
+title: Jailbreak Tooling Acquisition - basemode Raw Continuation Package
+id: 7f3c1a94-2d6b-4e58-9a21-c5b0e7d84f36
+status: experimental
+level: high
+description: |
+  Detects an agent-monitored process acquiring or invoking the 'basemode' package
+  (notably version 0.1.22), which forces language models into raw text continuation
+  mode to bypass chat-template safety scaffolding and output filtering.
+
+  SCOPE AND HONESTY ABOUT TELEMETRY: the engine has no event for model invocation,
+  package installation, or generated model output, and ACQUIRED_SKILL is a graph-only
+  edge that cannot trigger a rule. The safety-filter bypass itself is therefore NOT
+  observable. The only live signal is execute_process, so this rule detects the
+  narrow, high-specificity precursor - the literal acquisition or module-level
+  invocation of the named tooling on the command line - and nothing more. Because
+  the rule proves possession of the tooling rather than abuse of a model, the action
+  is report, not block: an analyst must correlate with subsequent LLM traffic from
+  the same host to confirm an actual jailbreak.
+
+  Anchoring: every pattern requires the exact token 'basemode' with word boundaries,
+  so 'basemodel' (pydantic BaseModel), 'base_mode' and 'database_mode' cannot match.
+  Bare execution of a same-named binary or directory (cd/ls into a 'basemode' path)
+  is deliberately NOT matched - that recall gap is accepted to keep this rule at
+  near-zero false-positive rate on ordinary developer shell activity.
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.resource-development
+  - attack.t1195.001
+  - atlas.aml.t0054
+  - atlas.aml.t0010
+  - owasp.llm01
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # Package acquisition: an installer verb and the exact package token on one line.
+  sel_install:
+    content|re:
+      - '(?i)\b(?:pip[0-9.]*|pipenv|poetry|conda|micromamba|uv)\b[^\n]{0,200}?\b(?:install|add|download)\b[^\n]{0,200}?\bbasemode\b'
+      - '(?i)\bpipx\s+(?:run|install)\b[^\n]{0,200}?\bbasemode\b'
+      - '(?i)\buvx\b[^\n]{0,80}?\bbasemode\b'
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,120}?\b(?:install|add|i)\b[^\n]{0,120}?\bbasemode\b'
+
+  # Named-version artefact or pin - highest confidence, matches requirement writes too.
+  sel_pinned:
+    content|re:
+      - '(?i)\bbasemode\s*(?:==|===|~=|>=|@)\s*0\.1\.22\b'
+      - '(?i)\bbasemode-0\.1\.22\b'
+
+  # Direct invocation of the package as a module or import inside an inline script.
+  sel_module:
+    content|re:
+      - '(?i)\bpython[0-9.]*\b[^\n]{0,200}?[\s"'',]-m[\s"'',]+basemode\b'
+      - '(?i)\b(?:from|import)\s+basemode\b'
+
+  # Remediation, inventory and SCA tooling that legitimately names the package.
+  filter_inspect:
+    content|re:
+      - '(?i)\buninstall\b'
+      - '(?i)--dry-run'
+      - '(?i)\bpip[0-9.]*\s+(?:show|list|freeze|index|check|config)\b'
+      - '(?i)\b(?:pip-audit|osv-scanner|trivy|grype|snyk|bandit|semgrep|dependabot)\b'
+      - '(?i)\bsafety\s+(?:check|scan)\b'
+      - '(?i)\bnpm\s+audit\b'
+
+  # Reading or searching files that merely mention the package name.
+  filter_search:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|ripgrep|rg|ack|strings)\b'
+
+  condition: sel_event and (sel_install or sel_pinned or sel_module) and not (filter_inspect or filter_search)
+falsepositives:
+  - Security researchers or red teams reproducing the basemode jailbreak in an isolated
+    evaluation harness - the install and invocation commands are byte-identical to an
+    attacker's, so this rule cannot distinguish them. Action is report for this reason.
+  - CI lockfile regeneration or dependency resolution that pulls basemode transitively
+    behind an approved model-evaluation package.
+  - A developer writing remediation notes or an advisory into a file with echo/heredoc
+    that quotes 'basemode==0.1.22' - matched by sel_pinned. Deliberately not filtered,
+    because the same shape is how a requirements pin is actually planted.
+  - An unrelated internal project or console script legitimately named 'basemode'.
+    Word boundaries prevent matches on basemodel, base_mode and database_mode, but not
+    on a genuine same-name collision.
+  - Known blind spot in the remediation filter - a combined command such as
+    'pip uninstall x && pip install basemode' is suppressed by filter_inspect.
+action: report
