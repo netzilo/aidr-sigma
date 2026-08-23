@@ -1,0 +1,66 @@
+title: Unicode Variant Selector ASCII Smuggling in Tool Response
+id: 7f3c9a21-4d68-4b0e-9c15-2a8f6b1d4e73
+status: experimental
+level: medium
+description: |
+  Detects runs of three or more CONSECUTIVE Unicode variation selectors inside a
+  tool response body. Legitimate typography (CJK ideographic variation sequences,
+  emoji presentation selectors) places at most ONE selector immediately after a
+  base character - consecutive runs are structurally invalid rendering data and
+  are the signature of ASCII-smuggled payloads, where hidden instruction text is
+  encoded one byte per selector and attached to a visually innocent base glyph.
+  Because the smuggled bytes are invisible to a human reviewer and to plain-text
+  filters, the tool result can carry an indirect prompt-injection payload that
+  the model still reads verbatim.
+
+  Primary selection covers the Variation Selectors Supplement (U+E0100-U+E01EF,
+  which contains the U+E0100-U+E017F range named in the threat report). A second,
+  deliberately stricter selection covers mixed runs that also draw on the basic
+  Variation Selectors block (U+FE00-U+FE0F), requiring 4+ consecutive selectors
+  so that no valid emoji or CJK sequence can reach the threshold.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://www.unicode.org/reports/tr51/
+  - https://www.unicode.org/reports/tr37/
+  - https://attack.mitre.org/techniques/T1027/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - atlas.aml.t0051.001
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type: tool_response
+  sel_vs_supplement_run:
+    content|re: '[\x{E0100}-\x{E01EF}]{3,}'
+  sel_vs_mixed_run:
+    content|re: '[\x{FE00}-\x{FE0F}\x{E0100}-\x{E01EF}]{4,}'
+  filter_escaped_codepoint_notation:
+    content|re: '(?i)(\\u\{0?0?e01[0-9a-f]{2}\}|\\U000E01[0-9A-Fa-f]{2}|U\+0?0?E01[0-9A-Fa-f]{2})'
+  filter_security_writeup:
+    content|contains|all:
+      - 'variation selector'
+      - 'ascii smuggling'
+  filter_unicode_conformance_data:
+    content|contains|all:
+      - 'ideographic variation sequence'
+      - 'conformance'
+  condition: sel_scope and (sel_vs_supplement_run or sel_vs_mixed_run) and not (filter_escaped_codepoint_notation or filter_security_writeup or filter_unicode_conformance_data)
+falsepositives:
+  - Security research or awareness material that pastes a live smuggling sample
+    alongside its explanation (suppressed by filter_security_writeup and
+    filter_escaped_codepoint_notation).
+  - Unicode conformance / IVD test corpora fetched by a documentation or
+    localisation tool, where variation sequences appear en masse with explicit
+    conformance wording (suppressed by filter_unicode_conformance_data).
+  - Font-rendering or shaping regression fixtures deliberately containing invalid
+    consecutive-selector sequences to exercise a shaper's error path. Rare, and
+    reported rather than blocked.
+  - Corrupted or double-encoded text (mojibake) from a legacy CJK source that
+    collapses several selectors together. Reported for triage.
+action: report
