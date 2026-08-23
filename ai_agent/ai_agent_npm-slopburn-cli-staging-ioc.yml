@@ -1,0 +1,81 @@
+title: Supply Chain IOC - npm Package @vibekiln/slopburn-cli-staging
+id: 3f9c1e2a-7b64-4d81-9a05-c6e2f8b31d47
+status: experimental
+level: medium
+description: |
+  Single-event IOC watch for the suspicious npm package @vibekiln/slopburn-cli-staging.
+
+  The engine has no package-install telemetry: event_type 'package_install' is unknown and
+  the edge kinds INSTALLED_PACKAGE / EXECUTED_CODE do not exist, so the install -> payload
+  provenance chain cannot be modelled or traversed. The only live signal that can carry the
+  package identifier is execute_process, whose content is the spawned command line. This rule
+  therefore makes no behavioural inference at all: it matches the literal, high-entropy package
+  identifier (scope + name, URL-encoded form, packed tarball form, git-style org/name form) or
+  its bin name in a Node/package-manager command line, and only reports. It is an IOC tripwire
+  for a package whose payload is unconfirmed, not a supply-chain behaviour detection.
+
+  Fires on: npm/npx/pnpm/yarn/bun install or execution of the package, lifecycle-script spawns
+  under node_modules/@vibekiln/slopburn-cli-staging, tarball installs, and direct invocation of
+  the slopburn-cli binary in a Node context.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://www.npmjs.com/package/@vibekiln/slopburn-cli-staging
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.execution
+  - attack.t1059.007
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Literal package identifier in a spawned command line. Covers:
+  #   @vibekiln/slopburn-cli-staging      (scoped install / node_modules path)
+  #   vibekiln/slopburn-cli-staging       (git / GitHub shorthand install)
+  #   vibekiln\slopburn-cli-staging       (Windows path form)
+  #   vibekiln-slopburn-cli-staging-1.0.0.tgz  (npm pack tarball naming)
+  #   %40vibekiln%2fslopburn-cli-staging  (URL-encoded registry fetch)
+  sel_pkg_ref:
+    event_type: execute_process
+    content|re:
+      - '(?i)vibekiln[/\\_-]slopburn-cli'
+      - '(?i)%40vibekiln%2fslopburn-cli'
+  # Bare bin-name invocation once the package is on PATH or in node_modules/.bin
+  sel_bin_name:
+    event_type: execute_process
+    content|re: '(?i)\bslopburn-cli(?:-staging)?\b'
+  sel_node_ctx:
+    content|re: '(?i)(?:\b(?:npm|npx|pnpm|pnpx|yarn|bun|bunx|corepack|node)\b|node_modules)'
+  # An actual install / execute verb — this branch is NOT suppressed by the triage
+  # filter, so an analyst-tool token cannot be appended to a real install to evade.
+  sel_install_or_run:
+    content|re: '(?i)\b(?:install|add|ci|dlx|exec|create|link|update|upgrade|preinstall|postinstall|prepare|run|start)\b'
+  # Benign handling of the IOC string by responders and read-only tooling
+  filter_triage:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|osv-scanner|trivy|grype|syft|semgrep|snyk|retire|npq|dependency-check)\b'
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:view|info|show|search|why|ls|list|outdated|audit|dist-tag|deprecate|unpublish|uninstall|remove)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)\b(?:cat|bat|less|more|head|tail)\s+\S*\.(?:ya?ml|json|md|log|txt|csv)\b'
+  condition: >
+    (sel_pkg_ref and sel_install_or_run)
+    or (sel_pkg_ref and not filter_triage)
+    or (sel_bin_name and sel_node_ctx and not filter_triage)
+action: report
+falsepositives:
+  - Incident responders or SOC analysts grepping lockfiles, node_modules trees or SBOMs for this
+    IOC (grep/rg/osv-scanner/trivy/syft/semgrep) - suppressed by filter_triage.
+  - Read-only registry triage of the package (npm view / npm info / npm search / yarn info) and
+    remediation (npm uninstall / npm remove) - suppressed by filter_triage. Note "uninstall" does
+    not satisfy the \binstall\b word boundary, so removal does not re-trigger the rescue branch.
+  - Dependency resolution dry runs (--dry-run) performed while assessing the package.
+  - A developer who legitimately depends on this package if it is later confirmed benign; the rule
+    only reports, so no build or agent action is interrupted.
+  - A CI job whose command line embeds a threat-intel feed or this rule file as an argument; the
+    file-viewer clause of filter_triage covers the common cat/head/less cases.
