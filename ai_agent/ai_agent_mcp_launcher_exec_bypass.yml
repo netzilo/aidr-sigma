@@ -15,6 +15,10 @@ tags:
   - attack.t1059
   - attack.defense-impairment
   - attack.t1027
+  - atlas.aml.t0053
+  - atlas.aml.t0050
+  - owasp.asi07
+  - owasp.asi02
 level: critical
 falsepositives:
   - Security research discussing the bypass technique

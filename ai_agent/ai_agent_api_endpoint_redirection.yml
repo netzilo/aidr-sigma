@@ -29,6 +29,10 @@ tags:
   - attack.t1556
   - attack.command-and-control
   - attack.t1090
+  - atlas.aml.t0083
+  - atlas.aml.t0055
+  - owasp.asi01
+  - owasp.llm02
 logsource:
   product: ai_agent
   category: agent_events

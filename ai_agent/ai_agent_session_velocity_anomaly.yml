@@ -14,6 +14,9 @@ date: "2026-03-18"
 tags:
   - attack.discovery
   - attack.t1046
+  - atlas.aml.t0053
+  - owasp.asi02
+  - owasp.asi10
 logsource:
   product: ai_agent
   category: agent_events

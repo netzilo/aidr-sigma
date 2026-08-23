@@ -17,6 +17,10 @@ tags:
   - attack.t1546
   - attack.stealth
   - attack.t1564
+  - atlas.aml.t0051
+  - atlas.aml.t0068
+  - owasp.llm01
+  - owasp.asi06
 logsource:
   product: ai_agent
   # tool_response is where retrieved external content arrives (tool outputs, RAG results).

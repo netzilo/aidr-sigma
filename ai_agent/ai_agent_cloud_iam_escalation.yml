@@ -17,6 +17,10 @@ tags:
   - attack.t1548
   - attack.credential-access
   - attack.t1552
+  - atlas.aml.t0053
+  - atlas.aml.ta0012
+  - owasp.asi01
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

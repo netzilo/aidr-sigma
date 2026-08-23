@@ -20,6 +20,11 @@ modified: "2026-08-03"
 tags:
   - attack.collection
   - attack.t1005
+  - atlas.aml.t0090
+  - atlas.aml.t0055
+  - atlas.aml.t0010
+  - owasp.asi08
+  - owasp.llm02
 logsource:
   product: ai_agent
   category: agent_events

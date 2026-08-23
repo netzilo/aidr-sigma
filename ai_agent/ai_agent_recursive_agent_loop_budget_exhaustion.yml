@@ -34,7 +34,7 @@ references:
 tags:
   - attack.impact
   - attack.t1499
-  - atlas.t1499
+  - atlas.aml.t0034
   - owasp.asi10
 falsepositives:
   - Long-poll / status-poll tools (get_job_status, wait_for_build) called with identical

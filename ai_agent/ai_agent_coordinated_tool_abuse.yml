@@ -25,6 +25,8 @@ modified: "2026-08-03"
 tags:
   - attack.discovery
   - attack.t1078
+  - atlas.aml.t0053
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: tool_input

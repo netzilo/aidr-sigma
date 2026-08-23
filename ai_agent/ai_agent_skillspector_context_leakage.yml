@@ -13,6 +13,10 @@ tags:
   - attack.t1041
   - attack.collection
   - attack.t1119
+  - atlas.aml.t0086
+  - atlas.aml.t0057
+  - owasp.asi02
+  - owasp.llm02
 logsource:
   product: ai_agent
   category: agent_events

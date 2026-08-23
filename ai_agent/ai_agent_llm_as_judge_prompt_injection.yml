@@ -14,6 +14,8 @@ tags:
   - attack.initial-access
   - attack.t1190
   - attack.stealth
+  - atlas.aml.t0051
+  - owasp.llm01
 logsource:
   product: ai_agent
   category: agent_events

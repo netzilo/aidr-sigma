@@ -22,6 +22,10 @@ tags:
   - attack.t1053
   - attack.t1543
   - attack.t1546
+  - atlas.aml.t0053
+  - atlas.aml.t0050
+  - owasp.asi07
+  - owasp.llm06
 logsource:
   product: ai_agent
   category: agent_events

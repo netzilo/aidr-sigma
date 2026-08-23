@@ -10,6 +10,8 @@ date: "2026-06-03"
 tags:
   - attack.impact
   - attack.t1496
+  - atlas.aml.t0048
+  - owasp.asi07
 logsource:
   product: ai_agent
   category: agent_events

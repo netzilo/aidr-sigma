@@ -18,6 +18,10 @@ tags:
   - attack.persistence
   - attack.t1546
   - attack.t1053
+  - atlas.aml.t0053
+  - atlas.aml.t0081
+  - owasp.asi02
+  - owasp.asi07
 logsource:
   product: ai_agent
   category: periodic

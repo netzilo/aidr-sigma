@@ -15,6 +15,12 @@ tags:
   - attack.execution
   - attack.t1059
   - attack.initial-access
+  - atlas.aml.t0010
+  - atlas.aml.t0050
+  - atlas.aml.t0081
+  - owasp.asi08
+  - owasp.asi07
+  - owasp.llm03
 level: critical
 falsepositives:
   - Security research discussing CVEs or the attack pattern

@@ -12,6 +12,9 @@ tags:
   - attack.initial-access
   - attack.t1195
   - attack.supply-chain
+  - atlas.aml.t0010
+  - owasp.llm03
+  - owasp.asi08
 logsource:
   product: ai_agent
   category: agent_events

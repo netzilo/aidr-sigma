@@ -15,6 +15,11 @@ modified: "2026-03-16"
 tags:
   - attack.exfiltration
   - attack.t1048
+  - atlas.aml.t0051
+  - atlas.aml.t0070
+  - atlas.aml.t0077
+  - owasp.llm02
+  - owasp.llm05
 logsource:
   product: ai_agent
   category: agent_events

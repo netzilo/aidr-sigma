@@ -30,6 +30,10 @@ tags:
   - attack.persistence
   - attack.t1195.002
   - attack.stealth
+  - atlas.aml.t0110
+  - atlas.aml.t0109
+  - owasp.asi08
+  - owasp.llm03
 logsource:
   product: ai_agent
   category: tool_description

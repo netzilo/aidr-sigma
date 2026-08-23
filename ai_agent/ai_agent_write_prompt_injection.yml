@@ -15,6 +15,10 @@ modified: "2026-02-24"
 tags:
   - attack.initial-access
   - attack.t1566
+  - atlas.aml.t0080
+  - atlas.aml.t0070
+  - owasp.asi04
+  - owasp.llm01
 logsource:
   product: ai_agent
   category: agent_events

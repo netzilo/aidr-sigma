@@ -17,6 +17,10 @@ tags:
   - attack.t1059
   - attack.command-and-control
   - attack.t1573
+  - atlas.aml.t0050
+  - atlas.aml.t0072
+  - atlas.aml.t0053
+  - owasp.asi07
 logsource:
   product: ai_agent
   category: agent_events

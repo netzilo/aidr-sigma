@@ -13,6 +13,9 @@ date: "2026-06-03"
 tags:
   - attack.stealth
   - attack.t1027
+  - atlas.aml.t0080
+  - owasp.asi04
+  - owasp.llm01
 logsource:
   product: ai_agent
   category: agent_events

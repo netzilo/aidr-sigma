@@ -17,6 +17,8 @@ tags:
   - attack.t1059
   - attack.persistence
   - attack.t1573
+  - atlas.aml.t0072
+  - owasp.asi07
 logsource:
   product: ai_agent
   category: agent_events

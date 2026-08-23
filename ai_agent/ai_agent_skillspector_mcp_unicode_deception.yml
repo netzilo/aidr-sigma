@@ -16,6 +16,10 @@ tags:
   - attack.t1027
   - attack.initial-access
   - attack.t1190
+  - atlas.aml.t0110
+  - atlas.aml.t0068
+  - owasp.asi02
+  - owasp.asi08
 logsource:
   product: ai_agent
   category: agent_events

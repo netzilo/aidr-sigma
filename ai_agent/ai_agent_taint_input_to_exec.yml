@@ -13,6 +13,10 @@ tags:
   - attack.t1059
   - attack.initial-access
   - attack.t1195
+  - atlas.aml.t0050
+  - atlas.aml.t0011
+  - owasp.asi07
+  - owasp.llm05
 logsource:
   product: ai_agent
   category: agent_events

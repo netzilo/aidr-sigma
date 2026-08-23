@@ -12,6 +12,9 @@ tags:
   - attack.defense-impairment
   - attack.t1562
   - attack.credential-access
+  - atlas.aml.t0053
+  - atlas.aml.t0110
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

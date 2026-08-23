@@ -16,6 +16,11 @@ tags:
   - attack.credential-access
   - attack.exfiltration
   - attack.lateral-movement
+  - atlas.aml.t0110
+  - atlas.aml.t0098
+  - atlas.aml.t0086
+  - owasp.asi08
+  - owasp.asi02
 level: critical
 falsepositives:
   - >

@@ -14,6 +14,10 @@ tags:
   - attack.privilege-escalation
   - attack.t1078
   - attack.defense-impairment
+  - atlas.aml.t0053
+  - atlas.aml.t0081
+  - owasp.llm06
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

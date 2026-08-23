@@ -30,6 +30,8 @@ tags:
   - attack.t1048
   - attack.stealth
   - attack.t1027
+  - atlas.aml.t0074
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

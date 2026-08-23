@@ -13,6 +13,8 @@ date: "2026-06-30"
 tags:
   - attack.exfiltration
   - pii.leakage
+  - atlas.aml.t0057
+  - owasp.llm02
 logsource:
   product: ai_agent
   category: agent_events

@@ -15,6 +15,9 @@ tags:
   - attack.exfiltration
   - attack.collection
   - attack.t1048
+  - atlas.aml.t0086
+  - owasp.asi02
+  - owasp.llm06
 level: critical
 falsepositives:
   - Legitimate batch operations combining web search, file read, and file write
