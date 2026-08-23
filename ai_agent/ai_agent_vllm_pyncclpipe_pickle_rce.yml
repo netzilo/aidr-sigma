@@ -1,0 +1,110 @@
+title: vLLM PyNcclPipe Unsafe Pickle Deserialization RCE
+id: 3f7a1c92-5e84-4d6b-9a1f-0c2be7d5a483
+status: experimental
+level: high
+description: |
+  Detects agent-originated command lines and tool arguments that either (a) drive
+  vLLM's PyNcclPipe / PyNcclConnector KV-transfer channel with an unsafe pickle
+  primitive (pickle.loads/dumps, __reduce__, send_obj/recv_obj, _recv_metadata,
+  _recv_impl), or (b) stand up that same pipe bound to all interfaces
+  (kv_ip=0.0.0.0 / kv_port=18888 / TCPStore master).
+
+  vLLM's PyNcclPipe.recv_obj() calls pickle.loads() on attacker-controllable bytes
+  received from StatelessProcessGroup, so any object implementing __reduce__ that
+  reaches the socket executes with the privileges of the vLLM server process.
+  PyTorch's TCPStore additionally binds to 0.0.0.0 regardless of the configured
+  kv_ip, so a "private" configuration is still reachable from the network.
+
+  Single-event content detection only: this rule requires a vLLM KV-transfer token
+  AND (a deserialization/RCE primitive OR an all-interfaces listener config) in the
+  same event. Neither half fires on its own.
+author: Selhan
+date: "2026-01-14"
+references:
+  - https://owasp.org/www-community/vulnerabilities/Deserialization_of_untrusted_data
+  - https://docs.vllm.ai/en/latest/features/disagg_prefill.html
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - owasp.deserialization-of-untrusted-data
+  - owasp.code-injection
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Only the two live-producing surfaces where a command line or a written payload
+  # is visible: the agent's own tool invocation, and the EDR process-exec event.
+  sel_scope:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # Anchor 1 — the event must reference the vLLM KV-transfer pipe specifically.
+  sel_vllm_pipe:
+    content|re:
+      - '(?i)\bPyNcclPipe\b'
+      - '(?i)\bPyNcclConnector\b'
+      - '(?i)\bStatelessProcessGroup\b'
+      - '(?i)\bkv[_-]transfer[_-]config\b'
+      - '(?i)\bvllm\b[^\n]{0,120}\bkv[_-]?(?:role|ip|port|connector)\b'
+
+  # Anchor 2a — the deserialization / gadget primitive that turns the pipe into RCE.
+  sel_pickle_rce:
+    content|re:
+      - '(?i)\bpickle\.(?:loads|dumps)\s*\('
+      - '(?i)\bcPickle\.(?:loads|dumps)\s*\('
+      - '(?i)\b__reduce__\b'
+      - '(?i)\b__reduce_ex__\b'
+      - '(?i)\bsend_obj\s*\('
+      - '(?i)\brecv_obj\s*\('
+      - '(?i)\b_recv_metadata\b'
+      - '(?i)\b_recv_impl\b'
+
+  # Anchor 2b — the exposed-listener configuration described in the advisory.
+  sel_exposure:
+    content|re:
+      - '(?i)"?kv[_-]?ip"?\s*[:=]\s*"?(?:0\.0\.0\.0|::|\*)'
+      - '(?i)"?kv[_-]?port"?\s*[:=]\s*"?18888\b'
+      - '(?i)\bTCPStore\b[^\n]{0,80}(?:0\.0\.0\.0|is_master\s*=\s*True)'
+
+  # Advisory text, CVE/GHSA write-ups and release notes discussing this exact bug.
+  filter_docs:
+    content|re:
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\bGHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}\b'
+      - '(?i)\b(?:security advisory|vulnerability (?:report|disclosure|write[- ]?up)|responsible disclosure|release notes|changelog)\b'
+
+  # vLLM''s own KV-transfer unit tests legitimately call send_obj/recv_obj.
+  filter_tests:
+    content|re:
+      - '(?i)\bdef\s+test_[a-z0-9_]+\s*\('
+      - '(?i)@pytest\.(?:mark|fixture)\b'
+      - '(?i)\bimport\s+pytest\b'
+      - '(?i)\bunittest\.TestCase\b'
+
+  # Hardening / remediation work on the same code path.
+  filter_defensive:
+    content|re:
+      - '(?i)\bweights_only\s*=\s*True\b'
+      - '(?i)\bsafetensors\b'
+      - '(?i)\bRestrictedUnpickler\b'
+      - '(?i)\bfind_class\s*\('
+      - '(?i)\b(?:do not expose|must not be exposed|never expose|trusted network only)\b'
+
+  condition: >
+    sel_scope and sel_vllm_pipe
+    and (sel_pickle_rce or sel_exposure)
+    and not (filter_docs or filter_tests or filter_defensive)
+
+falsepositives:
+  - Legitimate vLLM disaggregated-prefill deployment launched with --kv-transfer-config containing kv_ip 0.0.0.0 or kv_port 18888. This is a true exposure of the vulnerable service, not exploitation; triage as configuration risk rather than intrusion.
+  - vLLM upstream KV-transfer test suite exercising StatelessProcessGroup.send_obj/recv_obj. Suppressed by filter_tests (pytest/unittest markers).
+  - Security engineers reading or writing an advisory, PoC write-up or changelog entry for this CVE. Suppressed by filter_docs.
+  - Developers patching pynccl_pipe.py to add a RestrictedUnpickler, find_class allowlist or weights_only load. Suppressed by filter_defensive.
+  - Internal benchmark harnesses that pickle tensors for KV transfer as part of a measured baseline; these still warrant review because they exercise the vulnerable path.
+
+action: report
