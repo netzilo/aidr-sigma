@@ -1,0 +1,114 @@
+title: Unauthorized Privileged Tool Call
+id: 7c1f4a92-3d6b-4e58-9a2c-5f0b8d31e4a7
+status: experimental
+level: high
+description: |
+  Detects a single AI-agent tool invocation that reaches beyond the agent's
+  intended permission scope: a tool whose *name* belongs to the privileged /
+  protected family (admin_*, grant_role, assume_role, disable_mfa, export_secret,
+  bypass_guardrail, ...), a database tool carrying destructive DDL or a privilege
+  grant, or any tool call whose arguments explicitly request an elevated identity
+  ("is_admin": true, "role": "superadmin", ...).
+
+  A second, deliberately narrow branch covers the same escalation performed by
+  escaping the sanctioned tool surface into a shell: a cloud/kubernetes IAM CLI
+  invocation that *also* names an all-powerful role in the same command line.
+
+  This is a single-event content detection only. It makes no claim about how the
+  agent came to issue the call (prompt injection, poisoned tool description,
+  compromised skill); it only records that the call itself exceeded the expected
+  scope. Action is report so the measured precision can be established before any
+  enforcement decision is made.
+author: Evgen
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1098/
+  - https://attack.mitre.org/techniques/T1548/
+  - https://atlas.mitre.org/techniques/AML.T0053
+  - https://genai.owasp.org/llmrisk/llm06-excessive-agency/
+tags:
+  - attack.privilege-escalation
+  - attack.persistence
+  - attack.t1098
+  - attack.t1548
+  - atlas.aml.t0053
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: the agent-tool surface ────────────────────────────────────────
+  sel_event_tool:
+    event_type: tool_call
+
+  # 1a. The tool NAME itself is in the protected/privileged family.
+  #     Anchored at start so read-only siblings (list_admins, get_role) do not hit.
+  sel_protected_tool:
+    tool_name|re: '(?i)^(?:(?:admin|superuser|root|sudo)[_\-.]|(?:grant|revoke)[_\-.]?(?:role|permission|privilege|access)|(?:assume|switch|escalate|impersonate)[_\-.]?(?:role|identity|user|account)|(?:disable|bypass|suppress)[_\-.]?(?:mfa|2fa|audit|logging|guardrail|approval)|(?:rotate|export|dump)[_\-.]?(?:secret|credential|key|token))'
+
+  # 1b. A database/query tool ...
+  sel_sql_tool:
+    tool_name|re: '(?i)(?:sql|query|postgres|mysql|mariadb|snowflake|bigquery|redshift|athena|clickhouse|database)'
+
+  # 1c. ... carrying destructive DDL or a privilege grant in its arguments.
+  sel_sql_destructive:
+    content|re:
+      - '(?i)\bdrop\s+(?:table|database|schema|user|role)\b'
+      - '(?i)\btruncate\s+table\b'
+      - '(?i)\bgrant\s+all\s+privileges\b'
+      - '(?i)\brevoke\s+all\b'
+      - '(?i)\b(?:alter|create)\s+(?:user|role)\s+[^\s;"]{1,64}\s+(?:with\s+)?(?:superuser|createrole|createdb\s+superuser)\b'
+
+  # 1d. Any tool call whose parameters explicitly request elevation.
+  sel_privesc_param:
+    content|re:
+      - '(?i)"(?:is_?admin|is_?superuser|is_?root|elevated|sudo|bypass_?(?:policy|guardrails?|approval|review))"\s*:\s*true'
+      - '(?i)"(?:role|roles|access_level|privilege|permission_set|grant)"\s*:\s*\[?\s*"(?:global_?admin|super_?admin|superuser|administrator|administratoraccess|cluster-admin|roles/owner|owner)"'
+
+  # ── Branch 2: the same escalation via a spawned IAM CLI (shell escape) ──────
+  sel_event_exec:
+    event_type: execute_process
+
+  sel_exec_priv_cli:
+    command|re: '(?i)\b(?:aws\s+iam\s+(?:attach-(?:user|role|group)-policy|put-(?:user|role|group)-policy|create-access-key|create-login-profile)|gcloud\s+projects\s+add-iam-policy-binding|az\s+role\s+assignment\s+create|kubectl\s+create\s+(?:cluster)?rolebinding)\b'
+
+  sel_exec_admin_scope:
+    command|re: '(?i)(?:administratoraccess|cluster-admin|roles/owner|roles/editor|iam\.serviceaccounttokencreator|--role[= ]"?(?:owner|admin|cluster-admin))'
+
+  # ── Filters — benign shapes that otherwise match the selections above ───────
+
+  # Planning / validation invocations that never mutate anything.
+  filter_dry_run:
+    content|re: '(?i)"(?:dry_?run|read_?only|explain|explain_?only|simulate|preview|plan_?only|validate_?only)"\s*:\s*true'
+
+  # CI / test teardown against disposable objects.
+  filter_scratch_objects:
+    content|re: '(?i)\b(?:drop|truncate)\s+table\s+(?:if\s+exists\s+)?[`"\[]?(?:tmp|temp|test|tests|scratch|staging|sandbox|pytest|ci|fixture)[_.]'
+
+  # Documentation, tutorials and quoted examples fed into a tool call.
+  filter_docs_example:
+    content|re: '(?i)(?:```(?:sql|bash|shell|console)|--\s*example\b|/\*\s*example|\bthis is (?:an|just an) example\b|\bsample (?:query|command|payload)\b|\bdo not run\b)'
+
+  # Unfilled templates and placeholders.
+  filter_placeholder:
+    content|re: '(?i)(?:<[a-z_]{2,30}>|\{\{\s*[a-z_.]{2,40}\s*\}\}|\bYOUR_[A-Z_]{3,}\b|\bREPLACE_ME\b|\bTODO\b\s*:)'
+
+  condition: >
+    (
+      (sel_event_tool and (sel_protected_tool or sel_privesc_param or (sel_sql_tool and sel_sql_destructive)))
+      or
+      (sel_event_exec and sel_exec_priv_cli and sel_exec_admin_scope)
+    )
+    and not (filter_dry_run or filter_scratch_objects or filter_docs_example or filter_placeholder)
+
+falsepositives:
+  - Database-migration or DBA agents executing approved DDL (DROP/ALTER) as part of a scheduled schema migration.
+  - CI pipelines dropping or truncating disposable tables whose names are not prefixed tmp_/test_/staging_ and therefore escape filter_scratch_objects.
+  - Infrastructure-as-code agents performing legitimate first-time role assignment during environment provisioning (aws iam attach-role-policy with AdministratorAccess on a bootstrap role).
+  - Organisations whose read-only dashboard tools are named with an admin_ prefix (e.g. admin_list_users); tool-name naming conventions vary per deployment.
+  - Security-training, incident-response or runbook content quoted verbatim inside a tool argument where the code fence or example marker is absent.
+  - Break-glass operator workflows deliberately driven through the agent during an outage.
+
+action: report
