@@ -1,0 +1,127 @@
+title: Codex CLI PreToolUse Guardrail Tamper or Unhooked-Surface Evasion
+id: 7f3c1e2a-9d64-4b57-a1c8-6e0f2b5d84c9
+status: experimental
+level: medium
+description: |
+  Single-event detection for the observable precursors of an attempt to defeat the
+  AgentShield PreToolUse hook guardrail on OpenAI Codex CLI.
+  The engine cannot see the guardrail internals: there are no TOOL_CALL_ALLOWED,
+  TOOL_CALL_DENIED, TOOL_EXECUTION or FILE_ACCESS edges, and no session_start,
+  session_end or tool_result events, so PreToolUse/PostToolUse pairing and
+  correlation-tracker state desynchronisation are NOT observable and are not claimed
+  here. What IS observable on execute_process and tool_call is the command text and
+  the tool name. This rule therefore looks only for three concrete, self-evidencing
+  actions:
+    1. a mutating operation (rm, mv, truncate, sed -i, tee, redirect, find -delete,
+       language-level file writes) whose target text names the Codex or AgentShield
+       on-disk guardrail state (.codex/config.toml, .codex/hooks, agentshield state,
+       correlation tracker, circuit breaker store);
+    2. a write-class tool (Write/Edit/apply_patch/...) whose arguments name that same
+       guardrail state;
+    3. explicit hook disablement: CODEX_*/AGENTSHIELD_*/NETZILO_* disable-or-bypass
+       environment assignments, --disable-hooks / --dangerously-bypass-* flags,
+       agentshield|codex hook disable subcommands, unset of those variables, or a
+       [hooks] TOML stanza being set to false/off/empty;
+    4. an obfuscated or self-detaching payload (base64 -d, eval $(), pipe-to-shell,
+       python -c b64decode, ${IFS}, nohup/setsid backgrounding) routed through the
+       documented un-hooked surfaces (unified_exec, local_shell, web_search).
+  Report-only: the guardrail already denies dangerous calls synchronously, so the
+  value of this rule is auditing attempts against the guardrail itself, not blocking.
+author: Evgen
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://attack.mitre.org/techniques/T1027/
+tags:
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.execution
+  - attack.t1059
+  - attack.t1027
+  - atlas.aml.t0050
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type:
+      - execute_process
+      - tool_call
+
+  sel_guardrail_state:
+    content|re:
+      - '(?i)[/\\]?\.codex[/\\](config\.toml|hooks?|state|logs?|sessions?|history|internal)'
+      - '(?i)agentshield[/\\._-][A-Za-z0-9_.-]{0,40}(correlat|circuit|breaker|state|audit|tracker|db)'
+      - '(?i)\b(correlation[_-]?(tracker|store|db|state|log)|circuit[_-]?breaker[_-]?(state|store|db|file))\b'
+      - '(?i)\bpre_?tool_?use\b[^\n]{0,80}\b(state|db|json|sqlite|lock|log|tracker)\b'
+
+  sel_state_mutation:
+    content|re:
+      - '(?i)\b(rm|unlink|shred|srm|truncate|chattr|chflags|chmod|chown|mv)\b'
+      - '(?i)\bsed\b[^\n]{0,80}\s-i\b'
+      - '(?i)\b(tee|sponge|dd)\b'
+      - '(?i)\bfind\b[^\n]{0,120}\s(-delete|-exec)\b'
+      - '(?i)>\s*[^\s|>]{0,160}(\.codex|agentshield|correlat|circuit)'
+      - '(?i)\b(printf|echo|cat)\b[^\n]{0,160}>\s*[^\s|>]{0,160}(\.codex|agentshield)'
+      - '(?i)\b(write_text|writefilesync|appendfilesync|json\.dump|pickle\.dump|shutil\.(copy|move|rmtree)|os\.(remove|unlink|rename|truncate))\s*\('
+
+  sel_write_tool:
+    tool_name|re: '(?i)^(write|edit|multiedit|write_file|create_file|apply_patch|str_replace_editor|str_replace_based_edit_tool|notebookedit|filesystem__write_file)$'
+
+  sel_hook_disable:
+    content|re:
+      - '(?i)\b(codex|agentshield|agent_shield|netzilo)_[a-z0-9_]{0,40}(disable|disabled|bypass|skip|off|noop)[a-z0-9_]{0,20}\s*=\s*"?(1|true|yes|on)\b'
+      - '(?i)\bunset\s+(CODEX|AGENTSHIELD|NETZILO)_[A-Z0-9_]{2,40}'
+      - '(?i)--(disable|skip|no|without)[-_](pre[-_]?tool[-_]?use|hooks?|guardrails?|agentshield)\b'
+      - '(?i)--dangerously[-_]bypass[a-z-]{0,40}'
+      - '(?i)\b(agentshield|codex)\s+(hooks?\s+)?(disable|uninstall|off|bypass)\b'
+      - '(?i)\[hooks?[\].][\s\S]{0,160}\b(enabled|pre_?tool_?use|command)\s*=\s*(false|off|0|\[\s*\]|"")'
+
+  sel_unhooked_tool:
+    tool_name|re: '(?i)^(unified_exec|local_shell|websearch|web_search|browser|fetch)$'
+
+  sel_evasive_payload:
+    content|re:
+      - '(?i)\bbase64\b[^\n]{0,40}\s-{1,2}d(ecode)?\b'
+      - '(?i)\becho\s+"?[A-Za-z0-9+/=]{60,}'
+      - '(?i)\beval\s*[\($"]'
+      - '(?i)\bpython[23]?\b[^\n]{0,100}\s-c\b[^\n]{0,120}(b64decode|base64|exec\(|__import__|compile\()'
+      - '\$\{IFS\}'
+      - '(?i)\bxxd\s+-r\b'
+      - '(?i)\|\s*(bash|sh|zsh|dash|python[23]?|perl|ruby|node)\b'
+      - '(?i)\$\(\s*(curl|wget|fetch)\b'
+      - '(?i)\b(nohup|setsid|disown)\b[^\n]{0,120}&'
+
+  filter_readonly:
+    content|re: '(?i)^\s*(sudo\s+)?(cat|bat|less|more|head|tail|grep|rg|ag|ls|stat|file|wc|jq|yq|diff|du|md5sum|sha256sum|codex\s+(--version|-V|version)|agentshield\s+(status|version|doctor|logs)|git\s+(status|diff|log|show))\b[^|>&;$\n`]*\s*$'
+
+  filter_docs_tests:
+    content|re:
+      - '(?i)(^|[\s"/])(tests?|__tests__|spec|specs|fixtures?|testdata|docs?|examples?|samples?)[/\\]'
+      - '(?i)\.(md|mdx|rst|adoc|txt)([\s"]|$)'
+      - '(?i)\b(pytest|jest|vitest|mocha|tox|nox|go\s+test|cargo\s+test|npm\s+test|yarn\s+test)\b'
+
+  filter_pkg_install:
+    content|re: '(?i)\b(npm|pnpm|yarn|bun|brew|pip|pip3|pipx|uv|cargo|apt-get|apt|dnf|yum|winget|choco|scoop)\s+(install|add|upgrade|update|reinstall|i)\b'
+
+  condition: >
+    sel_scope and
+    ((sel_guardrail_state and sel_state_mutation) or
+    (sel_guardrail_state and sel_write_tool) or
+    sel_hook_disable or
+    (sel_unhooked_tool and sel_evasive_payload))
+    and not (filter_readonly or filter_docs_tests or filter_pkg_install)
+
+falsepositives:
+  - "Operator or installer cleanup of a corrupted Codex state directory, e.g. rm -rf ~/.codex/sessions after an upgrade — suppressed only when it appears as a package-manager install/upgrade line; a bare interactive rm will still report."
+  - "Dotfile management (chezmoi, stow, Ansible, Nix home-manager) templating or symlinking ~/.codex/config.toml, which surfaces as mv/chmod plus that path."
+  - "Log rotation or disk cleanup scripts that truncate or tee ~/.codex/logs."
+  - "Legitimate CI automation that exports CODEX_*_DISABLE=1 to run Codex headless in an already-isolated sandbox."
+  - "Security engineering or incident-response work that edits AgentShield hook configuration on purpose; expected to report and be dispositioned as authorised change."
+  - "A web_search or unified_exec argument that quotes an unrelated shell one-liner containing a pipe-to-shell string, e.g. researching an installer command."
+  - "Documentation or test fixtures describing hook disablement — mitigated by filter_docs_tests."
+action: report
