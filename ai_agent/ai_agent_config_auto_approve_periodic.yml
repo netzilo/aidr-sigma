@@ -4,6 +4,7 @@ related:
   - id: 440a1431-0683-58c2-83b5-ccad310b764f
     type: companion
 status: stable
+level:          critical
 description: |
   Periodic companion. Checks WRITE_FILE graph edges for writes to IDE/agent config
   files that control safety settings. Runs every 30s via EDR graph traversal.

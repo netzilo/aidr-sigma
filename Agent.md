@@ -450,6 +450,22 @@ action:   block | allow | redact | report | scan | blockmodel | allowmodel |
 
 ---
 
+## Severity — always set it
+
+`level:` is mandatory on every rule. It is the axis the public threat library
+sorts and filters on, so an unrated rule cannot be placed there — and when
+`level` is absent the engine derives the action from it anyway, so the rule
+ends up enforcing at a strength nobody chose.
+
+```yaml
+level: critical | high | medium | low
+```
+
+A periodic companion takes its parent rule's level unchanged. It re-checks one
+behaviour at a different level of the stack; it is not a different severity.
+
+---
+
 ## Tagging — ATT&CK, ATLAS and OWASP
 
 Every rule carries tags from three taxonomies. They are not decoration: they

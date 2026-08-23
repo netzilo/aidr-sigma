@@ -4,6 +4,7 @@ related:
   - id: 2564f91e-155e-5d1c-afda-718922bb8a5f
     type: companion
 status: stable
+level:          high
 description: |
   execute_process companion. Fires when a process is spawned from /tmp, /var/tmp,
   or /dev/shm and verifies the agent previously wrote a script to that location.
