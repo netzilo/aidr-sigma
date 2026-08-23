@@ -1,0 +1,341 @@
+title: Play Console MCP Privileged API Sweep
+id: 7f3c1e2a-9b64-4d18-8c5f-2a71d0e4b93c
+status: experimental
+level: medium
+description: |
+  Detects a single, instance-resolved process session driving the Google Play
+  Developer API across multiple privileged domains in a short window, anchored on a
+  rare high-impact write (account users/grants mutation, monetization/price/refund
+  mutation, or an HTTP DELETE of a Play resource).
+
+  This rule deliberately does NOT claim to detect "MCP server compromise". The triage
+  dissent is correct: the narrative supplies no injection vector, no auth bypass, and
+  the graph has no ACQUIRED_CREDENTIAL edge, so the initial-access step is not
+  traceable here. What IS observable — and what this rule reports — is the downstream
+  abuse footprint: one process instance and its session children issuing privileged
+  androidpublisher writes that span unrelated business domains (account access
+  control + release publishing + store assets + earnings retrieval) inside ten
+  minutes. A normal release pipeline is release-adjacent and narrow; a sweep by an
+  actor holding the 170-tool surface is broad. The rule requires that breadth, not
+  mere privilege, and is report-only precisely because the server's own confirmation
+  gate and legitimate CI automation make blocking unjustifiable.
+
+  Attribution is instance-resolved: caller_pid -> proc_instance -> proc_lineage, with
+  sibling expansion limited to processes spawned by pids already in that lineage and
+  to events inside the trigger's own window. No cross-session attribution is possible.
+  The triggering request is read from meta (never re-queried) to avoid the async
+  ingest race; only prior corroborating stages come from the event log.
+
+  No MITRE ATLAS technique maps to this behaviour (triage returned none); per the
+  tagging guide an invented identifier is worse than an omitted one, so no atlas.
+  tag is carried. OWASP LLM06 (Excessive Agency) is the accurate mapping for an
+  agent wielding a 170-tool privileged surface.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://developers.google.com/android-publisher/api-ref/rest
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+tags:
+  - attack.persistence
+  - attack.t1098
+  - attack.impact
+  - attack.t1565
+  - owasp.llm06
+falsepositives:
+  - Full CI/CD release rollout (fastlane supply, Gradle Play Publisher) that creates an
+    edit, uploads a bundle, updates a track, updates listings and commits — this stays
+    inside release/store-assets and does NOT hit the access-control or monetization
+    anchor, so it is not reported unless it also mutates prices or user grants.
+  - Scheduled monetization jobs that update in-app product prices or subscription
+    base plans while a staged rollout is running in the same session — anchor plus one
+    other domain; reported only if a third domain or a 12-write burst is also present.
+  - Play Console user onboarding/offboarding scripts that add or remove developer
+    account grants and then pull a report in the same run — this is the intended
+    access-control anchor firing on a legitimate admin action.
+  - Bulk cleanup jobs that DELETE stale internal app sharing artifacts, expansion
+    files or obsolete in-app products (three or more DELETEs trips the burst branch).
+  - Monthly earnings/financial export jobs reading the pubsite_prod_rev_* bucket that
+    happen to run during a release window under the same shell session.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_play_write:
+    event_type: http_request
+    method:
+      - POST
+      - PUT
+      - PATCH
+      - DELETE
+    host|endswith:
+      - androidpublisher.googleapis.com
+      - playdeveloperreporting.googleapis.com
+      - playcustomapp.googleapis.com
+      - play.googleapis.com
+      - storage.googleapis.com
+  condition: sel_play_write
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Tunables (this rule's own window — never persisted) ──────────────────
+  WINDOW_NS   = 600000000000      # 10 minutes = one operator / CI session
+  MAX_PIDS    = 64                # bound session expansion
+  PER_PID_CAP = 300               # bound per-instance log reads
+  BURST_MUT   = 12                # writes in-window that alone justify a report
+  BURST_DEL   = 3                 # destructive deletes that alone justify a report
+  MAX_STEPS   = 6                 # kill-chain evidence cap
+
+  MUTATING = ["POST", "PUT", "PATCH", "DELETE"]
+
+  # Detection targets (NOT a trust list — nothing here is permitted by this rule).
+  PLAY_HOSTS = [
+      "androidpublisher.googleapis.com",
+      "playdeveloperreporting.googleapis.com",
+      "playcustomapp.googleapis.com",
+      "play.googleapis.com",
+  ]
+
+  CAT_PRIV  = ["/users", "/grants"]
+  CAT_MONEY = ["/inappproducts", "/monetization", "/subscriptions",
+               "/pricechange", "/orders", "/purchases", ":refund", ":revoke"]
+  CAT_REL   = ["/edits", ":commit", "/tracks", "/bundles", "/apks",
+               "/expansionfiles", "/deobfuscationfiles",
+               "/internalappsharingartifacts", "/testers"]
+  CAT_ASSET = ["/listings", "/images", "/details", "/countryavailability"]
+  CAT_DATA  = ["/vitals", "/anomalies", "/metricsets", "/reports",
+               "/financial", "/earnings", "/reviews", "pubsite_prod"]
+
+  # ── Pure helpers (no graph / log calls) ──────────────────────────────────
+  def suffix_match(h, t):
+      return h == t or h.endswith("." + t)
+
+  def play_api_host(h):
+      for t in PLAY_HOSTS:
+          if suffix_match(h, t):
+              return True
+      return False
+
+  def play_target(h, p):
+      if play_api_host(h):
+          return True
+      # Play earnings/financial exports are served from the pubsite_prod_rev_* bucket
+      if suffix_match(h, "storage.googleapis.com") and "pubsite_prod" in p:
+          return True
+      return False
+
+  def hit(p, toks):
+      for t in toks:
+          if t in p:
+              return True
+      return False
+
+  def categorize(h, p):
+      if "pubsite_prod" in p:
+          return "earnings-export"
+      if hit(p, CAT_PRIV):
+          return "access-control"
+      if hit(p, CAT_MONEY):
+          return "monetization"
+      if hit(p, CAT_REL):
+          return "release"
+      if hit(p, CAT_ASSET):
+          return "store-assets"
+      if hit(p, CAT_DATA):
+          return "vitals-earnings"
+      if suffix_match(h, "playdeveloperreporting.googleapis.com"):
+          return "vitals-earnings"
+      return ""
+
+  # The REQUIRED high-specificity anchor. Ordinary release writes are not anchors.
+  def anchor_for(method, h, p):
+      if not play_api_host(h):
+          return ""
+      if method == "DELETE":
+          return "destructive-delete"
+      if hit(p, CAT_PRIV):
+          return "access-control"
+      if hit(p, CAT_MONEY):
+          return "monetization"
+      return ""
+
+  def sort_by_ts(items):
+      out  = []
+      rest = items
+      for i in range(len(items)):
+          best = -1
+          bts  = 0
+          for j in range(len(rest)):
+              t = int(rest[j].get("ts", "0"))
+              if best < 0 or t < bts:
+                  best = j
+                  bts  = t
+          out.append(rest[best])
+          rest = rest[:best] + rest[best + 1:]
+      return out
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "method":   e.get("method", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── Relevance gate: pure string checks on meta, no traversal ─────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      if meta.get("method", "").upper() not in MUTATING:
+          return False
+      return play_target(meta.get("host", "").lower(),
+                         meta.get("path", "").lower())
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      host   = meta.get("host", "").lower()
+      path   = meta.get("path", "").lower()
+      method = meta.get("method", "").upper()
+
+      anchor = anchor_for(method, host, path)
+      if anchor == "":
+          return "allow"          # ordinary release write — no anchor, no report
+
+      trigger_ts = int(meta.get("event_ts", "0"))
+      cp         = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trigger_ts == 0:
+          return "allow"
+
+      # ── Instance resolution: never a path-keyed node walk ────────────────
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          print("play-console anchor seen but attribution degraded (pid " +
+                str(cp) + ") — deferring to the next event")
+          return "allow"
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      win_start = trigger_ts - WINDOW_NS
+
+      # ── Session scope: lineage + processes spawned by lineage, in-window ─
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x["actor_start"]
+      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
+                            until_ns=trigger_ts, limit=2000)
+      for depth in range(3):
+          for e in spawns:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap != "" and ap not in session:
+                  if len(session) < MAX_PIDS:
+                      session[ap] = e.get("actor_start", "0")
+
+      # ── Corroborating stages: prior in-window Play traffic by THIS session ─
+      cid       = meta.get("callid", "")
+      cats      = {}
+      other     = {}
+      evidence  = []
+      mut_count = 1
+      del_count = 0
+      cats[anchor] = True
+      if method == "DELETE":
+          del_count = 1
+
+      for pid in session:
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              since_ns=win_start, until_ns=trigger_ts,
+                              limit=PER_PID_CAP)
+          for e in rows:
+              if cid != "" and e.get("callid", "") == cid:
+                  continue                      # the trigger itself — counted already
+              eh = e.get("host", "").lower()
+              ep = e.get("path", "").lower()
+              em = e.get("method", "").upper()
+              if not play_target(eh, ep):
+                  continue
+              c = categorize(eh, ep)
+              if c == "":
+                  continue
+              writeish = em in MUTATING
+              if writeish:
+                  mut_count = mut_count + 1
+                  if em == "DELETE":
+                      del_count = del_count + 1
+              # reads only count for data-pull domains; elsewhere require a write
+              if not writeish and c != "earnings-export" and c != "vitals-earnings":
+                  continue
+              cats[c] = True
+              if c != anchor and c not in other:
+                  other[c] = True
+                  if len(evidence) < MAX_STEPS:
+                      evidence.append(e)
+
+      # ── Verdict: anchor alone is never enough ────────────────────────────
+      n_other = len(other)
+      fire    = False
+      why     = ""
+      if anchor == "access-control" and n_other >= 1:
+          fire = True
+          why  = "account access-control mutation plus " + str(n_other) + \
+                 " other privileged Play domain(s)"
+      elif n_other >= 2:
+          fire = True
+          why  = "one session touched " + str(len(cats)) + \
+                 " distinct privileged Play domains"
+      elif mut_count >= BURST_MUT:
+          fire = True
+          why  = "burst of " + str(mut_count) + " Play write operations in-session"
+      elif del_count >= BURST_DEL:
+          fire = True
+          why  = str(del_count) + " destructive Play DELETE operations in-session"
+      if not fire:
+          return "allow"
+
+      # ── Kill chain, rooted at the session owner ──────────────────────────
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lineage_str = " -> ".join(names)
+
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      for e in sort_by_ts(evidence):
+          eh = e.get("host", "").lower()
+          ep = e.get("path", "").lower()
+          em = e.get("method", "").upper()
+          chain.append(step(ev_edge(e),
+                            stage_id="Privileged Play API: " + categorize(eh, ep),
+                            stage_desc=em + " " + eh + ep))
+
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "method":   method,
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+      }
+      chain.append(step(trig,
+                        stage_id="Anchor: " + anchor,
+                        stage_desc=method + " " + host + path + " by " + lineage_str))
+
+      degraded = ""
+      if len(lineage) < 2:
+          degraded = " (lineage degraded — root not ingested)"
+
+      reason = "Play Console privileged API sweep — " + why + \
+               "; anchor=" + anchor + "; writes=" + str(mut_count) + \
+               "; deletes=" + str(del_count) + \
+               "; session=" + lineage_str + degraded
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
