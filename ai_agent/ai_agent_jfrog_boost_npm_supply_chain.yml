@@ -1,0 +1,94 @@
+title: Supply Chain - @jfrog-boost/boost Package Install or Binary Execution
+id: 6f3b1c4e-9a27-4d5b-8e10-2c7f4a91d0b3
+status: experimental
+level: medium
+description: |
+  Reports when a monitored agent or CI process spawns a child process whose command
+  line references the npm coordinate @jfrog-boost/boost, or executes the shim that
+  package drops into node_modules/.bin.
+
+  Threat: @jfrog-boost/boost distributes prebuilt binaries for a CLI that compresses
+  agent and CI tool output. A compromised or typosquatted release would execute
+  attacker-controlled native code with the privileges of the installing or invoking
+  process (npm lifecycle scripts run unsandboxed), inside the same process tree as
+  the agent.
+
+  Answering the triage dissent: this rule does NOT alert on generic execute_process.
+  The only trigger is the literal, high-entropy package coordinate
+  "@jfrog-boost/boost" (or its installed .bin shim path) appearing in a spawned
+  command line. That string does not occur in ordinary CI or agent process
+  execution, so the signal is specific to this package rather than to process
+  execution in general. Because the report is speculative (no CVE, no confirmed
+  malicious artifact, no IOC), the action is report-only: this is inventory and
+  provenance telemetry for a named third-party binary, not an enforcement control.
+  The unbuildable parts of the chain (package_install events, INSTALLED_PACKAGE /
+  EXECUTED_BINARY / MODIFIED_FILE edges, live file_write) are deliberately not
+  referenced - the rule uses only execute_process, which is the one live producer.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── Trigger: the literal package coordinate, or its installed bin shim ──────
+  sel_ref_scope_content:
+    content|contains: '@jfrog-boost/boost'
+  sel_ref_scope_cmd:
+    command|contains: '@jfrog-boost/boost'
+  sel_ref_bin_content:
+    content|re: '(?i)node_modules[\\/]\.bin[\\/]boost\b'
+  sel_ref_bin_cmd:
+    command|re: '(?i)node_modules[\\/]\.bin[\\/]boost\b'
+
+  # ── Escalator: an install/exec verb or a real artifact path is present.
+  #    When this is true the read-only filters are overridden, so chained
+  #    commands such as `npm view <pkg> && npm i <pkg>` still report. ────────
+  sel_exec_content:
+    content|re: '(?i)(\b(npm|pnpm)\s+(i|in|ins|install|ci|add|exec|dlx)\b|\byarn\s+(add|install|dlx)\b|\bbun\s+(add|install|i|x)\b|\b(npx|pnpx|bunx)\b|node_modules[\\/](\.bin[\\/]boost\b|@jfrog-boost[\\/]boost[\\/]))'
+  sel_exec_cmd:
+    command|re: '(?i)(\b(npm|pnpm)\s+(i|in|ins|install|ci|add|exec|dlx)\b|\byarn\s+(add|install|dlx)\b|\bbun\s+(add|install|i|x)\b|\b(npx|pnpx|bunx)\b|node_modules[\\/](\.bin[\\/]boost\b|@jfrog-boost[\\/]boost[\\/]))'
+
+  # ── Suppress: registry metadata lookups that never fetch or run code ───────
+  filter_inspect_content:
+    content|re: '(?i)\b(npm|pnpm|yarn|bun)\s+(view|info|show|search|ls|list|why|outdated|audit|docs|repo)\b'
+  filter_inspect_cmd:
+    command|re: '(?i)\b(npm|pnpm|yarn|bun)\s+(view|info|show|search|ls|list|why|outdated|audit|docs|repo)\b'
+
+  # ── Suppress: resolution-only runs that never unpack or execute anything ───
+  filter_dryrun_content:
+    content|contains: '--dry-run'
+  filter_dryrun_cmd:
+    command|contains: '--dry-run'
+
+  condition: >
+    sel_event
+    and (sel_ref_scope_content or sel_ref_scope_cmd or sel_ref_bin_content or sel_ref_bin_cmd)
+    and not (filter_dryrun_content or filter_dryrun_cmd)
+    and (sel_exec_content or sel_exec_cmd or
+         not (filter_inspect_content or filter_inspect_cmd))
+falsepositives:
+  - First-time or routine installation of @jfrog-boost/boost by a developer or CI job
+    that has legitimately vetted the publisher. Installation is not itself malicious,
+    which is why this rule reports rather than blocks.
+  - Automated dependency bots (Renovate, Dependabot) re-resolving the dependency on
+    every scheduled run in a repository that already depends on the package.
+  - SBOM, SCA or provenance tooling (syft, osv-scanner, trivy, cyclonedx) that passes
+    the package coordinate or purl to a child process. Read-only npm/pnpm/yarn/bun
+    metadata subcommands are filtered, but third-party scanners that shell out with
+    the name as an argument are not and will surface.
+  - Manifest maintenance that rewrites the dependency string via sed/awk/jq against
+    package.json or a lockfile.
+  - An unrelated package that also ships a bin named "boost" into node_modules/.bin.
+    The C++ Boost toolchain does not install there, so this collision is rare.
+action: report
