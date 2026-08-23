@@ -1,0 +1,307 @@
+title: Auto-Approved Package Install Executes Postinstall Payload
+id: 7f3c1d92-4a68-4f1e-9b0c-2d5e8a71c604
+status: experimental
+level: high
+description: |
+  Detects the Roo Code auto-approve npm-install abuse chain (Roo Code <= 3.25.23, fixed
+  in 3.26.0): the agent auto-runs a package-manager install for an attacker-supplied
+  repository, npm executes the package.json postinstall lifecycle script, and that
+  script spawns a high-specificity malicious payload (download-and-pipe-to-shell,
+  base64-decoded exec, inline interpreter with child_process/socket, reverse shell,
+  crontab/launchctl persistence, shell-profile append, credential/env exfiltration).
+
+  The rule is instance-resolved: it anchors on meta.caller_pid for the process that
+  actually executed the payload, resolves that exact (pid, start) instance with
+  proc_instance(), walks its true spawn chain with proc_lineage(), and only then
+  looks for the package-manager install ancestor. Every supporting query_events()
+  lookup is scoped to a pid+start pair taken from that one lineage, so attribution
+  never crosses sessions or process instances. The triggering exec itself is read
+  from meta (never re-queried), because the just-fired event races async ingest.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://docs.npmjs.com/cli/v10/using-npm/scripts
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.persistence
+  - attack.t1546
+  - owasp.a06.2021
+  - owasp.a04.2021
+falsepositives:
+  - Native-module build postinstalls (node-gyp, prebuild-install, node-pre-gyp) that
+    shell out to fetch prebuilt binaries. These normally invoke node directly and do
+    not pipe a download into a shell, so they miss the payload anchor; if a vendor
+    genuinely ships a curl-pipe-to-sh postinstall it will be reported (deliberately).
+  - Browser/binary downloader postinstalls (playwright, puppeteer, cypress, esbuild,
+    sharp) - these use the node https module inside install.js, not an exec of
+    curl/wget piped to a shell, and therefore do not match the required anchor.
+  - Corporate monorepo bootstrap scripts that legitimately run `chmod +x` on files
+    under /tmp or append to a shell profile during `npm install`.
+  - A developer manually running `npm install` in the editor's integrated terminal on
+    a repository whose postinstall matches one of the payload patterns. The rule only
+    reports (never blocks) and records the full lineage so the analyst can see whether
+    an agent process or an interactive shell drove the install.
+  - CI/container image builds that run `npm ci` followed by a bootstrap script using
+    curl | sh, if the agent client is installed on the build host.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Window: how far back the install ancestor may be from the payload exec.
+  # npm lifecycle scripts run within seconds/minutes of the install starting.
+  # ---------------------------------------------------------------------------
+  WINDOW_NS = 600000000000   # 10 minutes
+
+  # REQUIRED anchor - high-specificity payload signatures. A postinstall that only
+  # compiles or downloads through the node https module matches NONE of these.
+  PAYLOAD = [
+      r"(?i)\b(curl|wget|fetch)\b[^|]*\|\s*(sudo\s+)?(ba|z|k|da)?sh\b",
+      r"(?i)\b(curl|wget|fetch)\b[^|]*\|\s*(python[0-9]?|perl|ruby|node)\b",
+      r"(?i)\bbase64\b\s+--?d\S*[^|]*\|\s*(ba|z)?sh\b",
+      r"(?i)\|\s*base64\s+--?d",
+      r"(?i)\beval\s+\$\(",
+      r"(?i)\beval\b[^\n]*base64",
+      r"(?i)\bnode\b\s+(-e|--eval|-p)\b[\s\S]*(child_process|execsync|spawnsync|base64|http)",
+      r"(?i)\bpython[0-9]?\b\s+-c\b[\s\S]*(socket|urllib|requests|subprocess|os\.system|base64|exec\()",
+      r"(?i)\b(ba|z)?sh\b\s+-i\b[\s\S]*/dev/tcp/",
+      r"/dev/tcp/[0-9]",
+      r"(?i:\bnc(at)?\b)\s[^\n]*\s-e\s",
+      r"(?i:\b(curl|wget)\b)[^\n]*\s(-d|--data|--data-binary|-F|--form|-T|--upload-file)\s*@",
+      r"(?i)\|\s*crontab\b",
+      r"(?i)\blaunchctl\s+(load|bootstrap|submit)\b",
+      r"(?i)>>\s*\S*\.(bashrc|zshrc|bash_profile|profile|zprofile)\b",
+      r"(?i)\bchmod\b\s+\S*x\S*\s+\S*/(tmp|var/tmp|dev/shm)/",
+      r"(?i)\b(env|printenv)\b[^\n]*\|\s*(curl|wget|nc)\b",
+      r"(?i)\b(cat|cp|tar|zip|base64|xxd|curl)\b[^\n]*/\.(aws|ssh|gnupg)/",
+      r"(?i)\.npmrc\b[^\n]*(curl|wget|nc|http)",
+      r"(?i)\bauthorized_keys\b",
+      r"(?i)\b(osascript|powershell|pwsh)\b[^\n]*(-e\b|-enc|-encodedcommand)",
+  ]
+
+  # Corroborating signal only - names of coding-agent / editor hosts that auto-approve.
+  AGENT_HINTS = ["roo", "cline", "code helper", "visual studio code", "vscode",
+                 "/code", "code.exe", "cursor", "windsurf", "electron", "extensionhost"]
+
+  SENS_RE = r"(?i)/\.(aws/|ssh/|gnupg/|npmrc|docker/config)"
+
+  def payload_hit(cmd):
+      for p in PAYLOAD:
+          if re.find(p, cmd) != None:
+              return p
+      return ""
+
+  def is_pkg_install(cmd, path):
+      blob = path + " " + cmd
+      if re.find(r"(?i)(^|[/\\ ])(npm|npm-cli\.js|pnpm|yarn|bun)([ /\\]|$)", blob) == None:
+          return False
+      if cmd == "":
+          return True                      # cmdline unavailable - degraded accept
+      if re.find(r"(?i)(^|\s)(install|i|ci|add|rebuild|update|it)(\s|$)", cmd) != None:
+          return True
+      return False
+
+  def short(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def ev_exec_edge(e):
+      return {
+          "from":     "process://" + e.get("parent_path", ""),
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def ev_file_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = e.get("path", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     e.get("kind", "READ_FILE"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def agent_paths():
+      out = {}
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          pa = p.get("path", "")
+          if pa != "":
+              out[pa] = p.get("name", "")
+      return out
+
+  def run():
+      # -- 1. relevance gate: pure string work on meta, no graph/log calls -----
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      hit = payload_hit(cmd)
+      if hit == "":
+          return "allow"
+
+      # -- 2. anchor on the exact triggering instance -------------------------
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"                    # degraded - re-fires when create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if lineage == None or len(lineage) < 2:
+          return "allow"                    # no ancestry -> cannot prove install origin
+
+      # -- 3. REQUIRED stage: package-manager install ancestor, ordered+windowed
+      npm_row = None
+      npm_idx = -1
+      for i in range(1, len(lineage)):
+          x = lineage[i]
+          if not is_pkg_install(x.get("cmdline", ""), x.get("actor_path", "")):
+              continue
+          xts = int(x.get("ts", "0"))
+          if xts > 0 and event_ts > 0:
+              if xts > event_ts:
+                  continue
+              if (event_ts - xts) > WINDOW_NS:
+                  continue
+          npm_row = x
+          npm_idx = i
+          break
+      if npm_row == None:
+          return "allow"
+
+      # -- 4. corroborating: auto-approving agent/editor above the install ----
+      apaths = agent_paths()
+      agent_row = None
+      for i in range(npm_idx, len(lineage)):
+          x = lineage[i]
+          pth = x.get("actor_path", "")
+          if pth in apaths:
+              agent_row = x
+              break
+          low = pth.lower()
+          for h in AGENT_HINTS:
+              if h in low:
+                  agent_row = x
+                  break
+          if agent_row != None:
+              break
+
+      # -- 5. corroborating: manifest read by THIS install instance -----------
+      manifest = None
+      npm_pid = int(npm_row.get("actor_pid", "0"))
+      npm_start = int(npm_row.get("actor_start", "0"))
+      if npm_pid > 0:
+          for e in query_events(kind="READ_FILE", actor_pid=npm_pid,
+                                actor_start=npm_start, limit=400):
+              fp = e.get("path", "")
+              if fp == "":
+                  fp = e.get("target_id", "")
+              if "package.json" in fp:
+                  manifest = e
+                  break
+
+      # -- 6. corroborating: credential read by THIS payload instance ---------
+      cred = None
+      for e in query_events(kind="READ_FILE", actor_pid=int(inst["actor_pid"]),
+                            actor_start=int(inst["actor_start"]), limit=300):
+          fp = e.get("path", "")
+          if fp == "":
+              fp = e.get("target_id", "")
+          if re.find(SENS_RE, fp) != None or "/etc/shadow" in fp:
+              cred = e
+              break
+
+      # -- 7. kill chain, rooted at the session owner -------------------------
+      root = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+
+      if agent_row != None:
+          chain.append(step(ev_exec_edge(agent_row),
+                            stage_id="Agent Session",
+                            stage_desc="auto-approving agent/editor host in lineage: " +
+                                       agent_row.get("actor_path", "?")))
+          stages.append("agent:" + base(agent_row.get("actor_path", "?")))
+
+      chain.append(step(ev_exec_edge(npm_row),
+                        stage_id="Auto-Approved Install",
+                        stage_desc="package install executed: " +
+                                   short(npm_row.get("cmdline", npm_row.get("actor_path", "?")), 160)))
+      stages.append("install:" + base(npm_row.get("actor_path", "?")))
+
+      if manifest != None:
+          mp = manifest.get("path", "")
+          if mp == "":
+              mp = manifest.get("target_id", "package.json")
+          chain.append(step(ev_file_edge(manifest),
+                            stage_id="Manifest Read",
+                            stage_desc="install read repository manifest: " + mp))
+          stages.append("manifest")
+
+      trig = {
+          "from":     "process://" + inst.get("parent_path", npm_row.get("actor_path", "")),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+          "cmdline":  short(cmd, 400),
+      }
+      chain.append(step(trig,
+                        stage_id="Postinstall Execution",
+                        stage_desc="lifecycle script spawned payload: " + short(cmd, 200)))
+      stages.append("payload:" + base(inst.get("actor_path", "?")))
+
+      if cred != None:
+          cpth = cred.get("path", "")
+          if cpth == "":
+              cpth = cred.get("target_id", "?")
+          chain.append(step(ev_file_edge(cred),
+                            stage_id="Credential Access",
+                            stage_desc="payload read sensitive file: " + cpth))
+          stages.append("creds")
+
+      names = " -> ".join([base(x.get("actor_path", "?")) for x in lineage])
+      degraded = ""
+      if agent_row == None:
+          degraded = " (agent ancestor unresolved - verify whether an interactive shell drove the install)"
+      print("npm postinstall payload: " + short(cmd, 200) + " | lineage: " + names)
+
+      return {
+          "action": "report",
+          "reason": "Auto-approved package install ran a malicious postinstall payload - " +
+                    ", ".join(stages) + " | lineage: " + names +
+                    " | matched: " + hit + degraded,
+          "chain":  chain,
+      }
+
+  result = run()
