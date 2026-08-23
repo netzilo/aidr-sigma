@@ -1,0 +1,113 @@
+title: Indirect Prompt Injection via Obfuscated Instruction Smuggling
+id: 7f3d1c2e-9a64-4b1f-8c0d-5e7a2b6f4d91
+status: experimental
+level: high
+description: |
+  Detects indirect prompt injection payloads that an agent carries in an outbound
+  HTTP request (retrieved page/document text forwarded to an LLM, webhook, index,
+  or downstream tool), where an instruction-override directive is co-located with
+  a DELIBERATE CONCEALMENT PRIMITIVE in the same body.
+
+  This rule is intentionally NOT a second copy of 24bc5b40-f601-5055-aa6d-0252c7a23a36
+  ("Indirect Prompt Injection in Retrieved Content"), which matches plain-language
+  injection phrasing on its own. That rule cannot see, and does not match, the
+  obfuscation layer: Unicode tag-block (ASCII) smuggling, runs of zero-width /
+  invisible format characters, bidi override smuggling, ANSI conceal-and-erase
+  sequences, and directives buried inside HTML comments or hidden DOM nodes.
+  Here, the directive alone is NOT sufficient - the concealment primitive is a
+  required conjunct - so this rule fires only on the machine-targeted, human-invisible
+  variant of the attack, which is the variant that survives human review of a page.
+  It also carries a standalone branch for tag-block / zero-width smuggling inside
+  url.full, which has no textual directive at all and is invisible to any
+  natural-language injection rule.
+
+  Schema note: the proposed FETCHES_EXTERNAL_DATA / PROCESSES_UNTRUSTED_INPUT edges
+  and fetch_external_content / process_retrieved_data event types do not exist in the
+  engine. This rule therefore uses the only supported telemetry path, event_type
+  http_request, and differentiates itself by signal, not by telemetry source.
+author: Evgen
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1027/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.initial-access
+  - owasp.a01.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ---- scope -----------------------------------------------------------------
+  sel_scope:
+    event_type: http_request
+
+  # ---- conjunct 1: an instruction-override directive aimed at the agent -------
+  sel_directive:
+    content|re:
+      - '(?i)\b(?:ignore|disregard|forget|override|bypass)\b[^\n]{0,48}\b(?:previous|prior|above|preceding|earlier|initial|original|system)\b[^\n]{0,24}\b(?:instruction|instructions|prompt|prompts|directive|directives|rule|rules|guardrail|guardrails)\b'
+      - '(?i)\bnew\s+(?:system\s+|updated\s+)?(?:instruction|instructions|directive|directives|task|objective|role)\s*[:\-]'
+      - '(?i)\bnew\s+instructions\b'
+      - '(?i)\byou\s+are\s+now\s+(?:a|an|the|in|no\s+longer)\b'
+      - '(?i)\b(?:reveal|print|output|repeat|dump|disclose|show)\b[^\n]{0,32}\b(?:system\s+prompt|initial\s+instructions|hidden\s+instructions|developer\s+message)\b'
+      - '(?i)\b(?:send|post|upload|exfiltrate|forward|transmit)\b[^\n]{0,64}\b(?:api[_ -]?key|api[_ -]?keys|access[_ -]?token|credential|credentials|password|secret|secrets|\.env|private\s+key)\b'
+      - '(?i)\bdo\s+not\s+(?:tell|inform|reveal\s+this\s+to|mention\s+this\s+to)\s+the\s+user\b'
+      - '(?i)\b(?:important|urgent|attention)\b[^\n]{0,16}\b(?:instruction|note|message)\b[^\n]{0,24}\b(?:ai|assistant|agent|model|llm|claude|gpt|copilot)\b'
+      - '(?:<\|im_(?:start|end)\|>|<<\s*SYS\s*>>|\[/?INST\])'
+
+  # ---- conjunct 2a: strong concealment primitive ------------------------------
+  sel_obf_strong:
+    content|re:
+      # 3+ consecutive invisible format characters (ZWSP/ZWNJ/ZWJ/word-joiner/BOM)
+      - '[\x{200b}\x{200c}\x{200d}\x{2060}\x{2061}\x{2062}\x{2063}\x{2064}\x{feff}]{3,}'
+      # 8+ Unicode tag-block codepoints - ASCII smuggling (longer than any flag tag sequence)
+      - '[\x{e0000}-\x{e007f}]{8,}'
+      # ANSI conceal / screen-erase / cursor-reposition (overwrite-to-hide), not plain colour SGR
+      - '\x{001b}\[(?:8m|2J|3J|\?25l|[0-9]{1,3}[AF])'
+      # directive buried inside an HTML comment
+      - '(?i)<!--[\s\S]{0,600}?\b(?:ignore\s+(?:all\s+)?(?:previous|prior|above)|you\s+are\s+now|system\s+prompt|new\s+instructions|do\s+not\s+tell\s+the\s+user)\b'
+      # directive buried inside a visually hidden DOM node
+      - '(?i)<[a-z][a-z0-9]{0,12}\b[^<>]{0,240}(?:display\s*:\s*none|visibility\s*:\s*hidden|font-size\s*:\s*0(?:\.0+)?\s*(?:px|pt|em|rem)?[^0-9.]|opacity\s*:\s*0(?:\.0+)?[^0-9.]|aria-hidden\s*=\s*"?true|text-indent\s*:\s*-\d{4})[^<>]{0,240}>[\s\S]{0,600}?\b(?:ignore\s+(?:all\s+)?(?:previous|prior|above)|you\s+are\s+now|system\s+prompt|new\s+instructions|do\s+not\s+tell\s+the\s+user)\b'
+
+  # ---- conjunct 2b: bidi override smuggling (weaker - gated on RTL filter) -----
+  sel_obf_bidi:
+    content|re: '[\x{202a}-\x{202e}\x{2066}-\x{2069}]'
+
+  # ---- standalone: invisible-codepoint smuggling inside the request URL -------
+  sel_url_tag_smuggle:
+    url.full|re:
+      - '[\x{e0000}-\x{e007f}]{4,}'
+      - '(?i)(?:%f3%a0%[0-9a-f]{2}%[0-9a-f]{2}){4,}'
+      - '(?i)(?:%e2%80%8[b-df]){3,}'
+
+  # ---- filters ----------------------------------------------------------------
+  filter_rtl_script:
+    content|re: '[\x{0590}-\x{05ff}\x{0600}-\x{06ff}\x{0700}-\x{074f}\x{0780}-\x{07bf}\x{07c0}-\x{08ff}\x{fb1d}-\x{fdff}\x{fe70}-\x{fefc}]'
+
+  filter_security_docs:
+    content|re:
+      - '(?i)\b(?:owasp|llm0[1-9]|mitre\s+atlas|atlas\.mitre\.org|cve-\d{4}-\d{4,}|sigma\s+rule|detection\s+rule|yara\s+rule|security\s+advisory|threat\s+(?:model|intel|report)|red[\s-]team\s+(?:exercise|report)|penetration\s+test)\b'
+      - '(?i)\b(?:ascii\s+smuggling|unicode\s+tag\s+(?:block|smuggling)|zero[\s-]width\s+character|trojan\s+source|bidi(?:rectional)?\s+(?:override|attack))\b'
+
+  filter_research_framing:
+    content|re:
+      - '(?i)\b(?:example|sample|demo|demonstration|illustrat[a-z]{0,4}|test\s+case|fixture|benchmark|dataset|proof[\s-]of[\s-]concept|poc)\b[^\n]{0,72}\b(?:prompt\s+injection|injection\s+payload|jailbreak\s+(?:prompt|string)|attack\s+string)\b'
+      - '(?i)\bprompt[\s-]injection\b[^\n]{0,64}\b(?:defen[cs]e|defenses|mitigation|mitigations|detection|research|taxonomy|survey|benchmark|dataset|evaluation)\b'
+      - '(?i)\b(?:how\s+to\s+(?:prevent|mitigate|defend|detect)|guard(?:ing)?\s+against|protection\s+against)\b[^\n]{0,48}\b(?:prompt\s+injection|indirect\s+injection|jailbreak)\b'
+
+  condition: 'sel_scope and ((sel_directive and sel_obf_strong) or (sel_directive and sel_obf_bidi and not filter_rtl_script) or sel_url_tag_smuggle) and not (filter_security_docs or filter_research_framing)'
+
+falsepositives:
+  - Security research, vendor blog posts or internal wiki pages about prompt injection that quote a payload verbatim and are then forwarded by the agent - suppressed by filter_security_docs and filter_research_framing.
+  - Emoji ZWJ sequences (family/profession emoji) and Indic/Thai shaping that use ZWJ/ZWNJ - the invisible-character branch requires 3+ CONSECUTIVE format characters, which ZWJ emoji sequences never produce.
+  - Regional-indicator flag tag sequences for England/Scotland/Wales, which legitimately use 6-7 Unicode tag codepoints - the tag-block branch requires 8+.
+  - CI, build or terminal logs relayed by the agent that contain ANSI colour codes - only conceal (8m), erase (2J/3J), cursor-hide and cursor-reposition sequences are matched, not plain SGR colour output.
+  - Hebrew, Arabic, Farsi or Urdu localisation content that legitimately uses bidi isolates/overrides - the bidi branch is suppressed by filter_rtl_script.
+  - Marketing/analytics HTML with display:none, aria-hidden or off-screen nav blocks - the hidden-DOM branch requires the injection directive to appear INSIDE the hidden element, not merely somewhere on the page.
+  - Prompt-engineering libraries POSTing chat templates that contain <|im_start|> or [INST] to an LLM proxy - these match the directive conjunct only and cannot fire without a concealment primitive.
+  - Percent-encoded zero-width characters pasted into a search query string by a user - the URL branch requires 3+ repetitions (zero-width) or 4+ tag codepoints.
+action: report
