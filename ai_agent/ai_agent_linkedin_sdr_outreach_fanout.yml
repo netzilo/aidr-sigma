@@ -1,0 +1,351 @@
+title: LinkedIn SDR Agent Automated Outreach Fan-Out
+id: 7b3c1e42-9d0a-4f6b-8c25-1ae5f70d3b98
+status: experimental
+level: medium
+description: |
+  Detects an AI agent session (e.g. an MCP-native LinkedIn SDR connector such as heylead)
+  driving high fan-out outreach on LinkedIn *without a human in the loop*.
+
+  The narrative for this tool ("potentially phishing / credential harvesting at scale")
+  is not by itself detectable, and the engine exposes no EXECUTE_ACTION or
+  EXTERNAL_COMMUNICATION telemetry. So this rule does NOT try to judge intent or message
+  content. It detects the one thing that is concretely observable in http_request /
+  HTTP_REQUEST telemetry and that genuinely distinguishes agent-driven mass outreach from
+  ordinary LinkedIn traffic:
+
+    Stage 1 (ordering prerequisite) - profile / lead / search enumeration calls on the
+             LinkedIn API surface (recipient-list construction).
+    Stage 2 (required anchor)       - >= 12 WRITE (POST/PUT/PATCH) requests to LinkedIn
+             messaging or invitation endpoints inside a 15-minute window, all attributed
+             to ONE process session (caller instance + its lineage/siblings), starting
+             AFTER the enumeration stage.
+    Stage 3 (escalation only)       - the same session also egressed to a non-LinkedIn
+             public host in the window (lead-list source / reply capture / exfil surface).
+
+  A human using the LinkedIn web UI produces this volume from a browser process, not from
+  a monitored agent process lineage, and never with the enumeration-then-burst ordering
+  driven by one automation instance. That is the discriminator - unattended fan-out, not
+  "phishing".
+
+  Because sanctioned SDR campaigns look identical on the wire, the verdict is report only:
+  the rule exists to attribute the campaign to a session, quantify its fan-out, and put a
+  kill chain in front of an analyst. It never blocks.
+author: Haibo
+date: "2026-03-05"
+references:
+  - https://attack.mitre.org/techniques/T1566/003/
+  - https://attack.mitre.org/techniques/T1585/001/
+tags:
+  - attack.initial-access
+  - attack.t1566.003
+  - attack.resource-development
+  - attack.t1585.001
+  - attack.collection
+falsepositives:
+  - Sanctioned sales-development or recruiting campaign - an approved SDR agent legitimately
+    sending connection invites and InMails from a seeded prospect list. This rule reports
+    (never blocks) precisely so authorised campaigns can be attributed and volume-audited
+    rather than interrupted.
+  - Sales Navigator bulk operations performed by an authorised user whose browser traffic is
+    proxied through a process that resolves into a monitored agent lineage.
+  - QA / integration testing of a LinkedIn connector against a test-account seed list, which
+    produces the same enumeration-then-burst pattern.
+  - A LinkedIn client that batches many messaging writes in a single thread (multi-part
+    message send, retries, or read-receipt/typing writes on the same conversation endpoint);
+    mitigated by requiring write methods, a 12-request floor, and a preceding enumeration
+    stage, and by the 10-minute report dedupe.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_linkedin:
+    host|contains: linkedin.com
+  condition: sel_http and sel_linkedin
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Detection targets (NOT trust lists - nothing here widens what is permitted).
+  # LINKEDIN_SURFACE scopes which host the outreach surface lives on; every other
+  # host is treated as potential third-party egress (escalation only).
+  # ---------------------------------------------------------------------------
+  LINKEDIN_SURFACE = ["linkedin.com", "licdn.com"]
+
+  OUTREACH_PATHS = [
+      "(?i)/voyager/api/messaging/",
+      "(?i)/voyager/api/voyagermessagingdash",
+      "(?i)/voyager/api/growth/norminvitations",
+      "(?i)/voyager/api/relationships/invitations",
+      "(?i)/voyager/api/voyagerrelationshipsdashmemberrelationships",
+      "(?i)/rest/messengermessages",
+      "(?i)/rest/messengerconversations",
+      "(?i)/rest/norminvitations",
+      "(?i)/rest/invitations",
+      "(?i)/sales-api/salesapimessag",
+      "(?i)/msgapi/",
+      "(?i)/v2/messages",
+      "(?i)/v2/invitations",
+  ]
+
+  ENUM_PATHS = [
+      "(?i)/voyager/api/search",
+      "(?i)/voyager/api/voyagersearchdash",
+      "(?i)/voyager/api/graphql",
+      "(?i)/voyager/api/identity/profiles",
+      "(?i)/rest/search",
+      "(?i)/rest/profiles",
+      "(?i)/rest/leads",
+      "(?i)/sales-api/salesapileadsearch",
+      "(?i)/sales-api/salesapipeoplesearch",
+      "(?i)/v2/people",
+  ]
+
+  WRITE_METHODS = ["POST", "PUT", "PATCH"]
+
+  WINDOW_NS     = 900000000000   # 15 minutes - campaign clustering window
+  DEDUPE_NS     = 600000000000   # 10 minutes - one report per campaign burst
+  OUTREACH_MIN  = 12             # write requests to messaging/invite endpoints
+  ENUM_MIN      = 2              # recipient-enumeration calls preceding the burst
+  MAX_SESSION_PIDS = 40          # bound the cost of session expansion
+
+  def is_linkedin(h):
+      hl = h.lower()
+      for d in LINKEDIN_SURFACE:
+          if hl == d or hl.endswith("." + d):
+              return True
+      return False
+
+  def match_any(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def base_name(p):
+      parts = p.split("/")
+      if len(parts) == 0:
+          return p
+      return parts[len(parts) - 1]
+
+  # ---- relevance gate: pure string checks on meta, no graph / log calls ------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      if not is_linkedin(meta.get("host", "")):
+          return False
+      if meta.get("method", "").upper() not in WRITE_METHODS:
+          return False
+      return match_any(OUTREACH_PATHS, meta.get("path", ""))
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "https://" + e.get("host", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     "HTTP_REQUEST",
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+          "method":   e.get("method", ""),
+      }
+
+  def build_session(lineage):
+      pids = {}
+      for x in lineage:
+          pids[x.get("actor_pid", "")] = True
+      rows = query_events(kind="EXECUTE_PROCESS", limit=4000)
+      # two expansion passes: children and grandchildren of the session
+      for _ in range(2):
+          for e in rows:
+              if len(pids) >= MAX_SESSION_PIDS:
+                  return pids
+              if e.get("parent_pid", "") in pids:
+                  pids[e.get("actor_pid", "")] = True
+      return pids
+
+  def find_agent_node(spaths, agent_name):
+      fallback = None
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          pp = p.get("path", "")
+          if pp != "" and pp in spaths:
+              return p
+          if agent_name != "" and pp == agent_name:
+              fallback = p
+      return fallback
+
+  def earliest(rows):
+      best = 0
+      for r in rows:
+          t = int(r.get("ts", "0"))
+          if t > 0 and (best == 0 or t < best):
+              best = t
+      return best
+
+  def pick_earliest(rows):
+      best = None
+      bt = 0
+      for r in rows:
+          t = int(r.get("ts", "0"))
+          if t > 0 and (bt == 0 or t < bt):
+              bt = t
+              best = r
+      return best
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      if now <= 0:
+          return "allow"
+      since = now - WINDOW_NS
+
+      # one report per burst - keeps a 500-invite campaign from producing 500 alerts
+      last = store_get("last_report_ts")
+      if last != None and (now - int(last)) < DEDUPE_NS:
+          return "allow"
+
+      # ---- anchor on the exact triggering instance ---------------------------
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                      # degraded attribution - never guess
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      pids   = build_session(lineage)
+      spaths = {}
+      for x in lineage:
+          spaths[x.get("actor_path", "")] = True
+
+      # ---- session-scoped, windowed stage collection -------------------------
+      outreach = []
+      enum     = []
+      third    = {}
+      for pid in pids:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=since, until_ns=now, limit=500):
+              h = e.get("host", "")
+              if h == "":
+                  continue
+              p = e.get("path", "")
+              m = e.get("method", "").upper()
+              if not is_linkedin(h):
+                  third[h] = True
+                  continue
+              if m in WRITE_METHODS and match_any(OUTREACH_PATHS, p):
+                  outreach.append(e)
+              elif match_any(ENUM_PATHS, p):
+                  enum.append(e)
+
+      if len(outreach) < OUTREACH_MIN:
+          return "allow"
+      if len(enum) < ENUM_MIN:
+          return "allow"
+
+      o_first = earliest(outreach)
+      e_first = earliest(enum)
+      if o_first == 0 or e_first == 0 or e_first > o_first:
+          return "allow"     # no recipient enumeration preceding the fan-out
+
+      # distinct conversation/invite endpoints touched (recipient-count proxy)
+      distinct = {}
+      for e in outreach:
+          distinct[e.get("path", "")] = True
+
+      # ---- attribution + kill chain -----------------------------------------
+      agent     = find_agent_node(spaths, meta.get("agent_name", ""))
+      root      = lineage[len(lineage) - 1]
+      root_path = root.get("actor_path", "")
+      anchor    = agent["id"] if agent != None else ("process://" + root_path)
+      chain     = new_chain(anchor)
+
+      names = []
+      for x in lineage:
+          names.append(base_name(x.get("actor_path", "")))
+      lineage_str = " -> ".join(names)
+
+      e_row = pick_earliest(enum)
+      if e_row != None:
+          chain.append(step(ev_edge(e_row), stage_id="Recipient Enumeration",
+                            stage_desc="LinkedIn profile/lead enumeration (" + str(len(enum)) +
+                                       " calls) building the target list: " + e_row.get("path", "")))
+
+      o_row = pick_earliest(outreach)
+      if o_row != None:
+          chain.append(step(ev_edge(o_row), stage_id="Automated Outreach Fan-Out",
+                            stage_desc=str(len(outreach)) + " write requests to LinkedIn messaging/" +
+                                       "invitation endpoints across " + str(len(distinct)) +
+                                       " distinct endpoints, burst started at " + o_row.get("path", "")))
+
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "https://" + meta.get("host", ""),
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+          "method":   meta.get("method", ""),
+      }
+      chain.append(step(trig, stage_id="Outreach Write (trigger)",
+                        stage_desc=meta.get("method", "") + " " + meta.get("path", "") +
+                                   " on " + meta.get("host", "") + " by " + lineage_str))
+
+      # escalation only: same session also talked to a non-LinkedIn public host
+      tp_host = ""
+      if agent != None:
+          for e in edges(agent["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              uh = u.get("host", "")
+              if uh == "" or is_linkedin(uh):
+                  continue
+              if u.get("is_ztna_host", "0") == "1":
+                  continue
+              if int(e.get("last_ts", "0")) < since:
+                  continue
+              tp_host = uh
+              chain.append(step(e, stage_id="Third-Party Egress",
+                                stage_desc="campaign session also sent HTTP to non-LinkedIn public host: " +
+                                           uh + " (lead-list source or reply-capture surface)"))
+              break
+      if tp_host == "":
+          for h in third:
+              tp_host = h
+              break
+
+      reason = ("Unattended LinkedIn outreach automation: " + str(len(outreach)) +
+                " write requests to messaging/invitation endpoints across " +
+                str(len(distinct)) + " endpoints in " + str(WINDOW_NS // 60000000000) +
+                " min, preceded by " + str(len(enum)) + " profile/lead enumeration calls; session " +
+                lineage_str)
+      if agent == None:
+          reason = reason + " [attribution: degraded - no monitored agent node resolved]"
+      if tp_host != "":
+          reason = reason + " [also egressed to non-LinkedIn host: " + tp_host + "]"
+
+      print(reason)
+
+      if store_usage()["free"] > 4096:
+          store_set("last_report_ts", now)
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
