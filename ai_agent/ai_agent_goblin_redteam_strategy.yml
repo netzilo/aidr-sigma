@@ -1,0 +1,297 @@
+title: Goblin Red-Team Strategy Execution
+id: 3f8c1e6a-9d24-4b71-8e5f-2a7c04b19d63
+status: experimental
+level: medium
+description: |
+  Detects execution of the promptfoo "goblin" red-teaming strategy — a decision-based
+  attack generator that reuses Hydra's multi-turn execution framework and is driven by
+  IICL-inspired attack-generation prompts supplied from a cloud task.
+
+  TELEMETRY LIMITS (answering the triage dissent, deliberately, in the rule):
+  the engine exposes no EXECUTE_STRATEGY, GENERATE_PROMPT or MULTI_TURN_INTERACTION
+  edge and no api_call event type, so the strategy's semantics cannot be read directly.
+  This rule therefore does NOT claim to see "a goblin decision attack"; it reconstructs
+  the observable shape of the chain from what the graph actually carries:
+    1. Strategy Launch          — an execute_process whose command line carries a
+                                  goblin *identity* marker (goblin-decision,
+                                  promptfoo:redteam:goblin, --strategy goblin,
+                                  goblin+hydra co-occurrence, id=goblin).
+    2. Multi-Turn Attack Delivery — >= 3 LLM_REQUEST edges from the agent or the
+                                  spawned strategy process clustered within 15 minutes
+                                  of the launch (the Hydra multi-turn execution path).
+    3. Attack Prompt Supply     — an HTTP_REQUEST to a public (is_ztna_host=0) endpoint
+                                  in the same window: the candidate cloud task supplying
+                                  the IICL attack-generation prompt.
+    plus repeated goblin-marked spawns as an orchestration signal.
+
+  Because the semantic core is not observable, the rule is report-only and is explicit
+  in its reason string about whether the sighting is marker-only or graph-corroborated.
+  A generic promptfoo invocation with no goblin identity is dropped in the relevance
+  gate and produces no event at all — the rule never claims coverage it does not have.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://www.promptfoo.dev/docs/red-team/strategies/
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - atlas.aml.t0054
+  - owasp.llm01
+falsepositives:
+  - Authorized red-team exercises or CI pipelines that intentionally enable the goblin
+    strategy in a promptfoo config — expected to fire; correlate with the change or
+    engagement ticket. The rule is report-only for exactly this reason.
+  - Developers re-running a stored promptfoo config for regression testing where the
+    goblin strategy name is still present in the YAML passed on the command line.
+  - Security research or training repositories where a directory, package, fixture or
+    branch is literally named "goblin" and is executed next to jailbreak/red-team
+    fixtures; the weak-marker path requires a red-team context token AND at least one
+    graph-corroborated stage before it will report.
+  - Unrelated third-party software named "goblin" spawned during a session that also
+    happens to make several LLM calls; mitigated by requiring a goblin identity marker
+    (not the bare word) or a red-team context token on the same command line.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_goblin_marker:
+    content|contains:
+      - goblin
+  condition: sel_exec and sel_goblin_marker
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Goblin (promptfoo red-team strategy) behavioural detector ─────────────
+  # Only execute_process is live. Everything else is reconstructed from the
+  # behaviour graph: EXECUTE_PROCESS (launch + repeat spawns), LLM_REQUEST
+  # (Hydra multi-turn delivery), HTTP_REQUEST (cloud task prompt supply).
+  # Verdict is report-only and states its own confidence.
+
+  WINDOW_NS  = 900000000000   # 15 minutes — cluster window around the launch
+  MIN_TURNS  = 3              # LLM turns that qualify as "multi-turn"
+  MIN_SPAWNS = 2              # repeated strategy invocations
+
+  # High-specificity goblin *identity* markers (the required anchor).
+  STRONG = [
+      r"(?i)goblin[-_ ]?decision",
+      r"(?i)promptfoo:redteam:goblin",
+      r"(?i)--strategy[=: ]{1,3}.{0,2}goblin",
+      r"(?i)strateg(y|ies)[^\n]{0,60}goblin",
+      r"(?i)\bgoblin\b[^\n]{0,80}\bhydra\b",
+      r"(?i)\bhydra\b[^\n]{0,80}\bgoblin\b",
+      r"(?i)\bid\b[^\n]{0,4}goblin\b",
+  ]
+  TOKEN = r"(?i)\bgoblin\b"
+  # Red-team context that upgrades a bare "goblin" token to a weak marker.
+  CTX = [
+      r"(?i)\bpromptfoo\b",
+      r"(?i)\bredteam\b",
+      r"(?i)\bred[-_]team\b",
+      r"(?i)\bhydra\b",
+      r"(?i)\bmulti[-_ ]?turn\b",
+      r"(?i)\bnum[-_]?turns\b",
+      r"(?i)\biicl\b",
+      r"(?i)\bjailbreak\b",
+  ]
+
+  def match_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return p
+      return None
+
+  # 0 = not goblin, 1 = weak (token + red-team context), 2 = strong identity
+  def goblin_marked(s):
+      if s == "":
+          return 0
+      if match_any(STRONG, s) != None:
+          return 2
+      if re.find(TOKEN, s) != None and match_any(CTX, s) != None:
+          return 1
+      return 0
+
+  def edge_ts(e):
+      v = e.get("ts", "")
+      if v == "":
+          v = e.get("first_ts", "")
+      if v == "":
+          v = e.get("last_ts", "")
+      if v == "":
+          return 0
+      return int(v)
+
+  def gap(a, b):
+      if a > b:
+          return a - b
+      return b - a
+
+  def trim(s):
+      s = s.replace("\n", " ")
+      if len(s) > 160:
+          return s[:160] + "..."
+      return s
+
+  def collect_llm(ids, a_ts):
+      turns = 0
+      first = None
+      for nid in ids:
+          for e in edges(nid, dir="out", kind="LLM_REQUEST"):
+              t = edge_ts(e)
+              if t == 0 or gap(t, a_ts) > WINDOW_NS:
+                  continue
+              turns += 1
+              if first == None or edge_ts(first) > t:
+                  first = e
+      return [turns, first]
+
+  def collect_ext(ids, a_ts):
+      for nid in ids:
+          for e in edges(nid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None or u.get("is_ztna_host", "1") != "0":
+                  continue
+              t = edge_ts(e)
+              if t == 0 or gap(t, a_ts) > WINDOW_NS:
+                  continue
+              return e
+      return None
+
+  def assess(agent):
+      aid    = agent["id"]
+      anchor = None
+      atxt   = ""
+      spawns = 0
+      kids   = []
+
+      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          child = node(e["to"])
+          blob  = e.get("cmdline", "")
+          if child != None:
+              blob = blob + " " + child.get("path", "") + " " + child.get("name", "")
+          if goblin_marked(blob) > 0:
+              spawns += 1
+              kids.append(e["to"])
+              if anchor == None or edge_ts(e) > edge_ts(anchor):
+                  anchor = e
+                  txt = e.get("cmdline", "")
+                  if txt == "" and child != None:
+                      txt = child.get("path", "")
+                  atxt = trim(txt)
+          # one hop deeper: the runner usually spawns node/python carrying the args
+          for e2 in edges(e["to"], dir="out", kind="EXECUTE_PROCESS"):
+              if goblin_marked(e2.get("cmdline", "")) > 0:
+                  spawns += 1
+                  kids.append(e2["to"])
+                  if anchor == None or edge_ts(e2) > edge_ts(anchor):
+                      anchor = e2
+                      atxt   = trim(e2.get("cmdline", ""))
+
+      if anchor == None:
+          return None
+
+      a_ts = edge_ts(anchor)
+      ids  = [aid]
+      for k in kids:
+          ids.append(k)
+
+      stages = []
+      steps  = [step(anchor, stage_id="Strategy Launch",
+                     stage_desc="goblin red-team strategy process spawned: " + atxt)]
+
+      if spawns >= MIN_SPAWNS:
+          stages.append("repeat-spawns=" + str(spawns))
+
+      lr = collect_llm(ids, a_ts)
+      if lr[0] >= MIN_TURNS and lr[1] != None:
+          l  = node(lr[1]["to"])
+          pm = "?"
+          if l != None:
+              pm = l.get("provider", "?") + "/" + l.get("model", "?")
+          stages.append("multi-turn-llm=" + str(lr[0]))
+          steps.append(step(lr[1], stage_id="Multi-Turn Attack Delivery",
+                            stage_desc=str(lr[0]) + " LLM turns to " + pm +
+                                       " clustered around the strategy launch (Hydra multi-turn path)"))
+
+      ex = collect_ext(ids, a_ts)
+      if ex != None:
+          u = node(ex["to"])
+          h = "?"
+          if u != None:
+              h = u.get("host", "?")
+          stages.append("external-fetch=" + h)
+          steps.append(step(ex, stage_id="Attack Prompt Supply",
+                            stage_desc="public endpoint contacted in the same window " +
+                                       "(candidate cloud task supplying IICL attack prompts): " + h))
+
+      return {"aid": aid, "stages": stages, "steps": steps, "spawns": spawns}
+
+  def synth(root, cmd):
+      ts   = meta.get("event_ts", "0")
+      head = cmd.replace("\n", " ").split(" ")[0]
+      if len(head) > 120:
+          head = head[:120]
+      return {"from": root, "to": "process://" + head, "kind": "EXECUTE_PROCESS",
+              "ts": ts, "first_ts": ts, "last_ts": ts, "cmdline": trim(cmd)}
+
+  def run():
+      # ── relevance gate: pure string work on meta only, no traversal ───────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd  = meta.get("content", "")
+      mark = goblin_marked(cmd)
+      if mark == 0:
+          return "allow"   # generic promptfoo / unrelated exec — not this threat
+
+      best = None
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          r = assess(agent)
+          if r == None:
+              continue
+          if best == None or len(r["stages"]) > len(best["stages"]):
+              best = r
+
+      if best == None:
+          # exec row not ingested yet: only a strong identity marker may report
+          if mark < 2:
+              return "allow"
+          root = meta.get("agent_name", "")
+          if root == "":
+              return "report"
+          if not root.startswith("process://"):
+              root = "process://" + root
+          chain = new_chain(root)
+          chain.append(step(synth(root, cmd), stage_id="Strategy Launch",
+                            stage_desc="goblin decision strategy invoked: " + trim(cmd)))
+          return {"action": "report",
+                  "reason": "promptfoo goblin red-team strategy launched — marker-only, " +
+                            "graph corroboration pending",
+                  "chain":  chain}
+
+      # weak marker must be corroborated by at least one graph stage
+      if mark < 2 and len(best["stages"]) == 0:
+          return "allow"
+
+      chain = new_chain(best["aid"])
+      for s in best["steps"]:
+          chain.append(s)
+
+      conf = "marker-only (no multi-turn or task-fetch corroboration)"
+      if len(best["stages"]) > 0:
+          conf = "corroborated: " + ", ".join(best["stages"])
+      print("goblin strategy sighting — " + conf + " | caller_pid " +
+            meta.get("caller_pid", "?"))
+
+      return {"action": "report",
+              "reason": "promptfoo goblin (Hydra multi-turn) red-team strategy executing " +
+                        "against the agent stack — " + conf,
+              "chain":  chain}
+
+  result = run()
