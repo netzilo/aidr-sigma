@@ -1,0 +1,123 @@
+title: Generative Provenance Watermark Stripping Tooling
+id: 7c3f1a92-4d68-4b0e-9c21-58ef0a6d3b47
+status: experimental
+level: medium
+description: |
+  Detects a monitored agent spawning a subprocess whose command line is a
+  purpose-built attempt to remove machine-readable provenance markings from
+  generated media - C2PA/JUMBF Content Credentials manifests, IPTC digital
+  source metadata, or an embedded invisible watermark (invisible-watermark,
+  SynthID-style marks).
+
+  Three mutually independent, deliberately narrow branches fire this rule:
+
+    1. Dedicated removal lexicon - the binary or script name itself states the
+       intent (watermark-remover, dewatermark, unwatermark, wm_remove), or a
+       provenance term (c2pa / jumbf / content-credentials / synthid) appears
+       within 60 characters of a destructive verb (remove/strip/delete/erase/
+       purge/scrub/bypass/defeat/evade).
+
+    2. Provenance-aware media tooling - a metadata-capable media binary
+       (exiftool, exiv2, ffmpeg, magick/convert/mogrify, jpegtran, pngcrush,
+       mat2, c2patool) invoked WITH an explicit deletion flag AND an explicit
+       provenance keyword on the same command line. All three must be present;
+       a bare "magick -strip" web-optimisation call does not match.
+
+    3. Destructive in-place wipe of image files - exiftool deleting an entire
+       tag group (-all= / -xmp:all= / -c2pa:all=) together with
+       -overwrite_original and an image/video target, or mat2 --inplace against
+       an image/video target. This is the irreversible form; a read-only
+       exiftool dump never matches.
+
+  ENGINE-SIGNAL CAVEAT (answers triage dissent): the metadata-mutation
+  primitives this threat conceptually needs - a MODIFY_FILE or REMOVE_METADATA
+  edge, or a file_modification event - do not exist in this engine. The only
+  live telemetry is execute_process / EXECUTE_PROCESS, which by itself carries
+  no semantic link to provenance stripping. This rule therefore does NOT try to
+  infer intent from the fact that a process ran; it only fires when the command
+  line ITSELF names the provenance artefact or the removal tool, which is the
+  single place in the available telemetry where that semantics is recoverable.
+  Everything the attacker does off our monitored surface (stripping on their own
+  host, on already-exfiltrated images) is out of scope by construction and this
+  rule makes no claim to cover it. Consequently the action is report, not block:
+  this is a compliance/provenance-tampering signal for review, not an
+  execution-path compromise verdict.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1070/
+  - https://c2pa.org/specifications/specifications/2.1/index.html
+  - https://artificialintelligenceact.eu/article/50/
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope ───────────────────────────────────────────────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── branch 1: the tool or script names the intent ───────────────────────────
+  sel_dedicated_removal:
+    content|re: '(?i)\b(?:de[-_]?watermark|watermark[-_]?remov(?:e|er|al|ing)|remove[-_]?watermark|strip[-_]?watermark|unwatermark|wm[-_]?remov(?:e|er|al)|watermark[-_]?attack|invisible[-_]?watermark[^\n]{0,60}(?:\bremove\b|\bdecode\b|\battack\b)|imwatermark[^\n]{0,60}(?:\bremove\b|\bdecode\b)|(?:c2pa|jumbf|content[-_]?credentials?|contentauth)[^\n]{0,60}(?:remov|strip|delet|erase|purge|scrub)|synthid[^\n]{0,60}(?:remov|strip|bypass|defeat|evade|scrub))'
+
+  # ── branch 2: media tool + provenance keyword + deletion flag (all three) ───
+  sel_media_tool:
+    content|re: '(?i)^(?:\S*/)?(?:exiftool|exiv2|ffmpeg|mogrify|magick|convert|pngcrush|jpegtran|mat2|c2patool|graphicsmagick)\b'
+  sel_provenance_keyword:
+    content|re: '(?i)\b(?:c2pa|jumbf|content[-_]?credentials?|contentauth|provenance|synthid|digital[-_]?source[-_]?type|iptc[-_]?digital[-_]?source)\b'
+  sel_strip_flag:
+    content|re: '(?i)(?:\s-(?:all|xmp|iptc|exif|c2pa|jumbf)(?::all)?=|\s-overwrite_original|\s-map_metadata\s+-1\b|\s-strip\b|\s--inplace\b|\s-rem\s+allb\b|\s-copy\s+none\b|\s--remove\b|\s-d\s+a\b)'
+
+  # ── branch 3: irreversible in-place wipe of image/video files ───────────────
+  sel_exiftool:
+    content|re: '(?i)^(?:\S*/)?exiftool\b'
+  sel_exiftool_delete_group:
+    content|re: '(?i)\s-(?:all|xmp|iptc|exif|c2pa|jumbf)(?::all)?=(?:\s|$|["\x27])'
+  sel_exiftool_overwrite:
+    content|re: '(?i)\s-overwrite_original(?:_in_place)?\b'
+  sel_mat2_inplace:
+    content|re: '(?i)^(?:\S*/)?mat2\b[^\n]{0,200}\s--inplace\b'
+  sel_image_target:
+    content|re: '(?i)(?:\.(?:png|jpe?g|webp|tiff?|avif|heic|heif|gif|bmp|mp4|webm|mov)\b|\s-ext\s+(?:png|jpe?g|webp|tiff?|avif|heic|heif|gif))'
+
+  # ── noise suppression (none of these widen what is permitted) ───────────────
+  filter_help_or_version:
+    content|re: '(?i)(?:\s--?help\b|\s--?version\b|\s--usage\b|\s-ver\b)'
+  filter_package_management:
+    content|re: '(?i)\b(?:pip3?|pipx|uv|conda|npm|pnpm|yarn|apt|apt-get|apk|brew|dnf|yum|poetry|cargo|go)\b[^\n]{0,40}\b(?:install|add|get|download|fetch|update|upgrade|list|show|search)\b'
+  filter_read_only_inspection:
+    content|re: '(?i)^(?:\S*/)?(?:grep|egrep|fgrep|rg|ag|ack|find|locate|cat|bat|less|more|head|tail|man|which|whereis|type|echo|printf|awk|diff|git)\b'
+  filter_test_harness:
+    content|re: '(?i)\b(?:pytest|unittest|nosetests|tox|jest|mocha|vitest|go\s+test|cargo\s+test|npm\s+(?:run\s+)?test|make\s+test|ctest)\b'
+
+  condition: >
+    sel_event
+    and (
+      sel_dedicated_removal
+      or (sel_media_tool and sel_provenance_keyword and sel_strip_flag)
+      or (sel_exiftool and sel_exiftool_delete_group and sel_exiftool_overwrite and sel_image_target)
+      or (sel_mat2_inplace and sel_image_target)
+    )
+    and not (
+      filter_help_or_version or filter_package_management
+      or filter_read_only_inspection or filter_test_harness
+    )
+
+action: report
+
+tags:
+  - attack.defense-evasion
+  - attack.t1070
+  - attack.t1027
+  - atlas.aml.t0015
+  - owasp.llm09
+
+falsepositives:
+  - Privacy-motivated EXIF scrubbing before publishing photographs (exiftool -all= -overwrite_original on JPEGs). This is the largest genuine benign case; branch 3 requires the destructive -overwrite_original form plus an image target precisely so that read-only inspection never fires, but a deliberate privacy wipe will still report.
+  - Web asset build pipelines that call "magick -strip" or "mogrify -strip" for byte-size reduction. Branch 2 additionally requires an explicit provenance keyword on the same command line, so plain optimisation calls do NOT match.
+  - ffmpeg transcodes using "-map_metadata -1" to drop container metadata for size or compatibility reasons. Same mitigation - a provenance keyword must also be present.
+  - mat2 used as intended, as a privacy anonymisation tool for documents and images shared by journalists or researchers. Branch 4 fires on this; treat as a review item, not an incident.
+  - Provenance research, red-team robustness testing, or C2PA conformance work that legitimately runs watermark-attack tooling. Test-harness invocations are filtered; direct research invocations are not, and are expected to be triaged as authorised.
+  - A repository path or artefact name containing a provenance term near an unrelated destructive verb (for example a script under a "c2pa-tools" directory that purges a cache). The 60-character proximity window keeps this rare but does not eliminate it.
+  - Documentation, search and help invocations (grep/rg/find/man/--help) and package installs of libraries such as invisible-watermark, all explicitly filtered.
