@@ -1,0 +1,129 @@
+title: vLLM Mooncake ZeroMQ Pickle Deserialization Exposure
+id: 9d4c7e12-6b8a-4f31-b2d7-5e0a91c8f463
+status: experimental
+level: high
+description: |
+  Detects an inference-serving process being started in the configuration that is
+  vulnerable to remote code execution through unsafe pickle deserialization over
+  unsecured ZeroMQ sockets (vLLM Mooncake KV-transfer integration, CVE-2025-32444,
+  affected 0.6.5 - 0.8.4, fixed in 0.8.5).
+
+  The vulnerable component calls recv_pyobj() -> pickle.loads() on data received from
+  a ZeroMQ socket that binds to all network interfaces, so any host able to reach the
+  port can execute code with the serving process privileges. The only signal available
+  at the engine layer is the process launch itself (event_type: execute_process), so
+  this rule fires on the *precondition* - the exposed vulnerable listener being started -
+  rather than on the inbound pickle payload, which is never seen by the proxy.
+
+  Four independent high-specificity launch signatures are covered:
+    A. a vLLM server started with the Mooncake KV connector
+       (--kv-transfer-config ... mooncake, kv_connector=Mooncake*, MOONCAKE_CONFIG_PATH)
+    B. python executing one of the disaggregated-prefill proxy scripts that implement
+       the recv_pyobj() loop
+    C. an inline/scripted pyzmq receiver that deserialises with recv_pyobj()/pickle.loads()
+       while bound to a wildcard address
+    D. a Mooncake transfer-engine / master service bound to all interfaces
+
+  Maps to OWASP A08:2021 Software and Data Integrity Failures (unsafe deserialisation of
+  untrusted data). Reported, not blocked: the same command line is issued by legitimate
+  disaggregated-prefill deployments on patched builds.
+author: Haibo
+date: "2026-03-14"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-32444
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1190/
+  - https://docs.python.org/3/library/pickle.html
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - cve.2025-32444
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── A: vLLM server launched with the Mooncake KV-transfer connector ──────────
+  sel_vllm_launch:
+    command|re:
+      - '(?i)\bvllm\s+(serve|bench)\b'
+      - '(?i)\s-m\s+vllm(\.\S+)?(\s|$)'
+      - '(?i)vllm[/\\]entrypoints[/\\]'
+  sel_mooncake_connector:
+    command|re:
+      - '(?i)--kv-transfer-config[^\n]{0,300}mooncake'
+      - '(?i)\bkv_connector[^\n]{0,40}mooncake'
+      - '(?i)\bMooncake(Store|Distributed)?Connector\b'
+      - '(?i)\bMOONCAKE_CONFIG_PATH\s*='
+
+  # ── B: the disaggregated-prefill proxy scripts that run the recv_pyobj() loop ─
+  sel_python:
+    command|re: '(?i)\bpython[0-9.]*\b'
+  sel_disagg_proxy:
+    command|re: '(?i)\bdisagg(regated)?[_-](prefill[_-])?proxy[a-z0-9_-]*\.py\b'
+
+  # ── C: pickle deserialisation of ZeroMQ input ────────────────────────────────
+  sel_pickle_over_zmq:
+    command|re:
+      - '(?i)\brecv_pyobj\s*\('
+      - '(?i)\bzmq[^\n]{0,200}\bpickle\.loads\s*\('
+
+  # ── D: Mooncake transfer-engine / metadata services ──────────────────────────
+  sel_mooncake_service:
+    command|re: '(?i)\b(mooncake[_-]master|mooncake[_-]http[_-]metadata[_-]server|mooncake[_-]transfer[_-]engine|transfer[_-]engine[_-]bench)\b'
+
+  # ── exposure on every network interface ──────────────────────────────────────
+  sel_bind_all_interfaces:
+    command|re:
+      - '\b0\.0\.0\.0\b'
+      - 'tcp://\*:'
+      - 'tcp://\[::\]'
+      - '(?i)--host[= ]\s*\*'
+
+  # ── filters: benign tooling that merely mentions the vulnerable strings ──────
+  filter_readonly_inspect:
+    command|re: '(?i)^\s*(?:\S*[/\\])?(grep|rg|ag|cat|bat|less|more|head|tail|man|find|fd|ls|stat|file|which|whereis|wc|diff|md5sum|sha256sum|awk|sed|jq|code|vim|nvim|nano|emacs|git)\b'
+  filter_help_version:
+    command|re:
+      - '(?i)\s--help(\s|$)'
+      - '(?i)\s-h$'
+      - '(?i)\s--version(\s|$)'
+      - '(?i)\s--dry-run(\s|$)'
+  filter_test_runner:
+    command|re: '(?i)(\bpytest\b|\s-m\s+pytest\b|\s-m\s+unittest\b|\bconftest\.py\b|^\s*(?:\S*[/\\])?(tox|nox)\b)'
+  filter_pkg_build:
+    command|re: '(?i)^\s*(?:\S*[/\\])?(pip[0-9.]*|uv|poetry|conda|mamba|apt|apt-get|yum|dnf|apk|make|cmake|ninja|npm|yarn|pnpm)\b'
+  filter_security_tooling:
+    command|re: '(?i)^\s*(?:\S*[/\\])?(trivy|grype|syft|semgrep|bandit|safety|pip-audit|osv-scanner|snyk|nuclei)\b'
+
+  condition: >
+    sel_event and
+    ((sel_vllm_launch and sel_mooncake_connector) or
+    (sel_python and sel_disagg_proxy) or
+    (sel_pickle_over_zmq and sel_bind_all_interfaces) or
+    (sel_mooncake_service and sel_bind_all_interfaces)) and
+    not (filter_readonly_inspect or filter_help_version or
+    filter_test_runner or filter_pkg_build or filter_security_tooling)
+
+action: report
+
+falsepositives:
+  - Intentional disaggregated-prefill deployment on a patched vLLM (>= 0.8.5) where the
+    Mooncake KV connector is used on a network-isolated RDMA/TCP fabric. The rule cannot
+    read the installed vLLM version from the command line, so this configuration is
+    reported every time the server is (re)started - triage once, then tune per host.
+  - Performance benchmarking of the Mooncake transfer engine (transfer_engine_bench,
+    mooncake_master) bound to 0.0.0.0 on a lab machine.
+  - CI jobs that exercise the Mooncake integration - suppressed when launched through
+    pytest/unittest/tox/nox, but a bare `python disagg_prefill_proxy_xpyd.py` inside a
+    CI step will still report.
+  - An engineer pasting a tutorial command line from the vLLM disaggregated-prefill docs
+    into a shell for a local single-node experiment.
+  - Internal red-team reproduction of CVE-2025-32444.
+  - Read-only inspection of these command lines (grep/cat/git/editor) - suppressed by
+    filter_readonly_inspect.
