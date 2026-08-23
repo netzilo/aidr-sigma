@@ -1,0 +1,308 @@
+title: vLLM Outlines Grammar Cache Exhaustion
+id: 3f7c1a92-8b4e-4d61-9a05-6e2fb1c7d840
+status: experimental
+level: high
+description: |
+  Detects a single agent session flooding a vLLM OpenAI-compatible endpoint with
+  structured-output (guided decoding) requests that each carry a UNIQUE schema.
+
+  vLLM's Outlines backend compiles a grammar per distinct schema and persists it to
+  a local filesystem cache that has no eviction policy. A stream of short requests
+  with per-request unique schemas therefore grows the cache without bound until the
+  filesystem fills, denying service to every tenant of that server.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance via proc_instance(), walks proc_lineage() to the session root, and
+  counts unique schema fingerprints ONLY within that one session. It never attributes
+  requests across sessions or across reused PIDs. Prior HTTP_REQUEST rows and any
+  local grammar-cache WRITE_FILE rows are pulled from the instance-resolved event log
+  and emitted as a kill chain.
+
+  Discriminator (the anchor that makes this non-benign): near-100% schema uniqueness.
+  Normal structured-output workloads reuse a small set of schemas thousands of times;
+  this attack must present a new schema on essentially every request or the cache does
+  not grow. The rule requires both a volume floor and a >=90% unique-to-total ratio
+  inside a 5-minute window before it reports.
+author: Tanya
+date: "2026-03-05"
+modified: "2026-03-05"
+references:
+  - https://owasp.org/API-Security/editions/2023/en/0xa5-denial-of-service/
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://dottxt-ai.github.io/outlines/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.001
+  - owasp.a05-2023
+falsepositives:
+  - Evaluation or benchmark harnesses that emit a distinct JSON schema per test item
+    (for example per-document field extraction), producing many unique schemas quickly.
+  - Schema fuzzing or conformance suites run against a self-hosted vLLM endpoint in CI.
+  - Agent frameworks that inline request-specific enum values, IDs or few-shot examples
+    inside the schema, making every schema textually unique for an otherwise benign workload.
+  - Deliberate load or capacity testing of a structured-output endpoint.
+  - Mitigations - the rule requires at least 25 schema-bearing POSTs from ONE process
+    session inside a 5-minute window, a >=90% unique-to-total schema ratio, applies a
+    10-minute per-session cooldown so a sustained job reports once rather than continuously,
+    and only ever reports (never blocks) so no inference request is interrupted.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http_post:
+    event_type: http_request
+    method: POST
+  sel_guided_schema:
+    content|contains:
+      - 'guided_json'
+      - 'guided_grammar'
+      - 'guided_regex'
+      - 'guided_choice'
+      - 'guided_decoding'
+      - 'structured_outputs'
+      - 'json_schema'
+  condition: sel_http_post and sel_guided_schema
+action: execute
+on_timeout: report
+on_error: allow
+script: |
+  # ---- tunables (this rule's own window; nothing is baked into storage) --------
+  WINDOW_NS   = 300000000000   # 5 minutes of session history
+  COOLDOWN_NS = 600000000000   # 10 minutes between reports for the same session
+  UNIQUE_MIN  = 25             # volume floor: distinct schemas in the window
+  MAX_TRACKED = 300            # cap fingerprints kept per session (store hygiene)
+  BLOB_MAX    = 1024           # bytes of schema text fingerprinted
+  BODY_MAX    = 65536          # cap body scanning cost
+  MAX_PIDS    = 8              # cap session pids scanned for cache writes
+
+  MARKERS = ["guided_json", "guided_grammar", "guided_regex", "guided_choice",
+             "guided_decoding", "structured_outputs", "json_schema"]
+  CACHE_HINTS = ["outlines", "grammar", "/cache/", "xgrammar"]
+
+  # ---- pure helpers (no graph / no log calls) ----------------------------------
+  def schema_blob(body):
+      low  = body.lower()
+      best = -1
+      for k in MARKERS:
+          i = low.find(k)
+          if i >= 0:
+              if best < 0 or i < best:
+                  best = i
+      if best < 0:
+          return ""
+      end = best + BLOB_MAX
+      if end > len(body):
+          end = len(body)
+      return body[best:end]
+
+  def fingerprint(blob):
+      # FNV-1a over the whitespace-normalised schema text.
+      s = re.replace(r"\s+", blob, "")
+      h = 14695981039346656037
+      for c in s.elem_ords():
+          h = ((h ^ c) * 1099511628211) % 18446744073709551616
+      return "%x" % h
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "count":    "1",
+      }
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def safe_int(s):
+      if s == None or s == "":
+          return 0
+      return int(s)
+
+  # ---- relevance gate: pure string checks on meta only -------------------------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      if meta.get("method", "").upper() != "POST":
+          return False
+      return True
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      body = meta.get("content", "")
+      if body == "":
+          return "allow"
+      if len(body) > BODY_MAX:
+          body = body[:BODY_MAX]
+      blob = schema_blob(body)
+      if blob == "":
+          return "allow"                      # POST carries no decoding schema
+
+      ets = safe_int(meta.get("event_ts", "0"))
+      cp  = safe_int(meta.get("caller_pid", "0"))
+      if cp == 0 or ets == 0:
+          return "allow"
+
+      # ---- anchor on the exact triggering instance ----------------------------
+      inst = proc_instance(cp, ets)
+      if inst == None:
+          return "allow"                      # degraded attribution - never guess
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+      root = lineage[len(lineage) - 1]
+
+      # session identity = the ROOT INSTANCE (pid + start) -> reuse proof,
+      # and strictly one session: no cross-session counting is possible.
+      skey = "s:" + root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+
+      # session pid set = lineage + processes spawned by lineage inside the window
+      sess = {}
+      for x in lineage:
+          sess[x.get("actor_pid", "0")] = x.get("actor_start", "0")
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS, limit=2000):
+          if e.get("parent_pid", "") in sess:
+              sess[e.get("actor_pid", "0")] = e.get("actor_start", "0")
+
+      # ---- per-session unique-schema accounting (rule-private store) ----------
+      st = store_get(skey)
+      if st == None:
+          st = {"first_ts": str(ets), "total": 0, "schemas": {}, "last_report": "0"}
+      if ets - safe_int(st.get("first_ts", "0")) > WINDOW_NS:
+          st = {"first_ts": str(ets), "total": 0, "schemas": {},
+                "last_report": st.get("last_report", "0")}
+
+      st["total"] = int(st.get("total", 0)) + 1
+      schemas = st.get("schemas", {})
+      f = fingerprint(blob)
+      if f not in schemas:
+          if len(schemas) < MAX_TRACKED:
+              schemas[f] = str(ets)
+      st["schemas"] = schemas
+
+      # store hygiene: drop stale sessions before writing, never overflow the cap
+      u = store_usage()
+      if u["free"] < 131072:
+          for k in store_keys():
+              if k == skey:
+                  continue
+              v = store_get(k)
+              if v == None:
+                  store_delete(k)
+              elif ets - safe_int(v.get("first_ts", "0")) > WINDOW_NS * 4:
+                  store_delete(k)
+      if store_usage()["free"] < 16384:
+          store_reset()
+      store_set(skey, st)
+
+      uniq  = len(schemas)
+      total = int(st.get("total", 0))
+      if uniq < UNIQUE_MIN:
+          return "allow"                      # below the volume floor
+      if uniq * 10 < total * 9:
+          return "allow"                      # schemas are reused - normal workload
+      last_rep = safe_int(st.get("last_report", "0"))
+      if last_rep > 0 and ets - last_rep < COOLDOWN_NS:
+          return "allow"                      # already reported this session recently
+
+      # ---- evidence: earliest prior schema request by THIS instance -----------
+      prior = None
+      for r in query_events(kind="HTTP_REQUEST",
+                            actor_pid=int(inst["actor_pid"]),
+                            actor_start=int(inst["actor_start"]),
+                            since_ns=ets - WINDOW_NS, limit=200):
+          if prior == None:
+              prior = r
+          elif safe_int(r.get("ts", "0")) < safe_int(prior.get("ts", "0")):
+              prior = r
+
+      # ---- evidence: local grammar-cache writes by any session instance -------
+      cache_ev = None
+      seen = 0
+      for pid in sess:
+          if seen >= MAX_PIDS:
+              break
+          seen = seen + 1
+          rows = query_events(kind="WRITE_FILE",
+                              actor_pid=safe_int(pid),
+                              actor_start=safe_int(sess[pid]),
+                              since_ns=ets - WINDOW_NS, limit=300)
+          for r in rows:
+              p = r.get("path", "").lower()
+              if p == "":
+                  continue
+              for hnt in CACHE_HINTS:
+                  if hnt in p:
+                      cache_ev = r
+                      break
+              if cache_ev != None:
+                  break
+          if cache_ev != None:
+              break
+
+      # ---- kill chain ---------------------------------------------------------
+      root_path = root.get("actor_path", "")
+      if root_path == "":
+          root_path = inst.get("actor_path", "")
+      chain = new_chain("process://" + root_path)
+
+      if prior != None:
+          chain.append(step(ev_edge(prior),
+              stage_id="Schema Flood Start",
+              stage_desc="first guided-decoding POST of this burst: " +
+                         prior.get("host", "?") + prior.get("path", "")))
+
+      if cache_ev != None:
+          chain.append(step(ev_edge(cache_ev),
+              stage_id="Grammar Cache Growth",
+              stage_desc="local grammar cache file written: " + cache_ev.get("path", "?")))
+
+      host = meta.get("host", "")
+      trigger = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "method":   meta.get("method", ""),
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+          "count":    "1",
+      }
+      span = (ets - safe_int(st.get("first_ts", "0"))) // 1000000000
+      chain.append(step(trigger,
+          stage_id="Unbounded Schema Cache",
+          stage_desc=str(uniq) + " unique decoding schemas in " + str(total) +
+                     " requests over " + str(span) + "s to " + host + meta.get("path", "")))
+
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "?")))
+      who = " -> ".join(names)
+
+      st["last_report"] = str(ets)
+      store_set(skey, st)
+
+      corro = "no local cache write observed"
+      if cache_ev != None:
+          corro = "local grammar cache write observed"
+      print("vLLM outlines cache DoS pattern: " + str(uniq) + "/" + str(total) +
+            " unique schemas in " + str(span) + "s via " + who + "; " + corro)
+
+      return {
+          "action": "report",
+          "reason": "Unbounded guided-decoding schema flood to " + host +
+                    meta.get("path", "") + " - " + str(uniq) + " unique schemas in " +
+                    str(total) + " requests over " + str(span) + "s from session " +
+                    who + " (" + corro + "); Outlines compiles and persists a grammar " +
+                    "per unique schema, growing the on-disk cache without bound",
+          "chain":  chain,
+      }
+
+  result = run()
