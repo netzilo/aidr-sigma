@@ -1,0 +1,306 @@
+title: FastMCP OAuth Callback Reflected XSS
+id: 7c3f9a2e-5d41-4b8a-9e02-6f1c8d4b7a35
+status: experimental
+level: high
+description: |
+  Detects a reflected cross-site scripting attempt against the FastMCP OAuth client
+  callback page (FastMCP < 2.13.0), where user-controlled callback parameters are
+  inserted into the generated HTML without escaping.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), walks the spawn chain with proc_lineage(),
+  and queries the event log ONLY for that session's process instances. No attribution
+  is ever made across sessions and no graph-wide process scan is performed.
+
+  Required anchor (high specificity): the triggering event is an OAuth-callback-shaped
+  request (or a command line launching one) whose URL/query/body carries script markup,
+  event handler attributes, javascript:/data:text-html schemes, or their percent-encoded
+  equivalents. Optional corroborating stages, scoped to the same session and time window:
+  an earlier fetch of a URL that already carried script markup (the attacker's link), and
+  an in-flight OAuth authorize/token request (which is what makes token theft possible).
+
+  Report-only. No host, domain or path is ever added to a trust list; discrimination is
+  done by requiring the XSS anchor, not by exempting destinations.
+author: Haibo
+date: "2026-03-01"
+references:
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html
+  - https://github.com/jlowin/fastmcp
+tags:
+  - attack.initial-access
+  - attack.t1189
+  - attack.credential-access
+  - attack.t1539
+  - owasp.a03-2021
+  - owasp.a07-2021
+falsepositives:
+  - Authorized security testing — DAST scanners, Burp/ZAP payload replay or a red-team
+    engineer manually probing the FastMCP callback endpoint with alert()/img-onerror
+    payloads. These are true detections of the technique but expected activity; correlate
+    with the reported process lineage (scanner binary vs. browser/agent) before escalating.
+  - A developer working on oauth_callback.py locally and passing markup through the
+    callback query string to verify the escaping fix. Same signature, benign intent.
+  - An agent fetching an XSS write-up, CVE advisory or cheat-sheet whose URL happens to
+    contain a "/callback" segment together with a sample payload in the query string.
+  - An OAuth provider redirecting back with an error_description that contains raw angle
+    brackets or quotes from an upstream error message. Mitigated by requiring tag names,
+    on*= handlers, javascript:/data:text/html schemes or entity-encoded '<' rather than
+    bare punctuation.
+  - Redirect-chain or URL-shortener traffic where an encoded downstream target string
+    resembles a script scheme. Mitigated by requiring the callback-shaped path on the
+    triggering request itself.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http_url:
+    event_type: http_request
+    url.full|re: '(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/oauth2?/redirect|/callback[/?#&])'
+  sel_http_path:
+    event_type: http_request
+    path|re: '(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/oauth2?/redirect|/callback)'
+  sel_http_body:
+    event_type: http_request
+    content|re: '(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/callback[/?#&])'
+  sel_exec_cmd:
+    event_type: execute_process
+    command|re: '(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/callback[/?#&])'
+  sel_exec_content:
+    event_type: execute_process
+    content|re: '(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/callback[/?#&])'
+  condition: 1 of sel_*
+action: execute
+on_timeout: report
+on_error: allow
+script: |
+  # ── Reflected XSS in the FastMCP OAuth client callback page (FastMCP < 2.13.0) ──
+  WINDOW_NS = 600000000000      # 10 min — session clustering window
+  DEDUP_NS  = 900000000000      # 15 min — suppress identical repeat reports
+
+  CALLBACK_RE   = r"(?i)(oauth[_-]?callback|/auth/callback|/oauth2?/callback|/oauth2?/redirect|/callback[/?#&]|/callback$)"
+  OAUTH_FLOW_RE = r"(?i)(/authorize|/oauth2?/auth|/oauth2?/token|/connect/authorize|/device/code)"
+  FASTMCP_RE    = r"(?i)(fastmcp|oauth_callback|mcp[._-]?client)"
+  URL_RE        = r'https?://[^\s"<>|]+'
+
+  XSS_MARKERS = [
+      r"(?i)<\s*/?\s*script",
+      r"(?i)%3c\s*/?\s*script",
+      r"(?i)%253c[a-z0-9%]{0,6}script",
+      r"(?i)<\s*(img|svg|iframe|body|video|audio|object|embed|details|marquee|form|input|math|style|link)\b",
+      r"(?i)%3c\s*(img|svg|iframe|body|video|audio|object|embed|details|marquee|form|input|math|style|link)\b",
+      r"(?i)\bon(error|load|focus|blur|toggle|mouseover|animationstart|animationend|pageshow|start|begin)\s*=",
+      r"(?i)\bon(error|load|focus|blur|toggle|mouseover|animationstart|animationend|pageshow|start|begin)%3d",
+      r"(?i)javascript\s*:",
+      r"(?i)javascript%3a",
+      r"(?i)data:text/html",
+      r"(?i)data%3atext%2fhtml",
+      r"(?i)document\s*\.\s*(cookie|location|domain|write)",
+      r"(?i)document%2e(cookie|location|domain|write)",
+      r"(?i)\bstring\.fromcharcode\b",
+      r"(?i)&#x?0*(3c|60);",
+      r"(?i)\\x3c\s*script",
+      r"(?i)%22%3e%3c[a-z]",
+      r'(?i)"><\s*[a-z]',
+      r"(?i)<[a-z]{1,12}[^>]{0,120}\son[a-z]{3,18}\s*=",
+      r"(?i)\balert\s*\(",
+  ]
+
+  def clip(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def payload_hit(s):
+      if s == "":
+          return None
+      for p in XSS_MARKERS:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return None
+
+  def url_root(u):
+      p = u.find("://")
+      if p < 0:
+          return ""
+      rest = u[p+3:]
+      sl = rest.find("/")
+      if sl >= 0:
+          rest = rest[:sl]
+      return u[:p+3] + rest
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     "HTTP_REQUEST",
+          "method":   e.get("method", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── relevance gate: pure string checks on meta, no graph / log calls ──
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          surface = meta.get("url", "") + " " + meta.get("path", "")
+          return re.find(CALLBACK_RE, surface) != None
+      if ct == "execute_process":
+          cmd = meta.get("content", "")
+          if re.find(CALLBACK_RE, cmd) == None:
+              return False
+          return re.find(URL_RE, cmd) != None
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      ct  = meta.get("context_type", "")
+      now = int(meta.get("event_ts", "0"))
+      win0 = 0
+      if now > WINDOW_NS:
+          win0 = now - WINDOW_NS
+
+      # ── anchor stage comes from meta (the triggering event races async ingest) ──
+      if ct == "http_request":
+          surface = meta.get("url", "") + " " + meta.get("path", "") + " " + meta.get("content", "")
+          target  = url_root(meta.get("url", ""))
+          if target == "":
+              target = "http://" + meta.get("host", "")
+          where = meta.get("host", "") + meta.get("path", "")
+      else:
+          surface = meta.get("content", "")
+          raw = re.find(URL_RE, surface)
+          if raw == None:
+              return "allow"
+          target = url_root(raw)
+          where  = clip(raw, 180)
+
+      marker = payload_hit(surface)
+      if marker == None:
+          return "allow"                      # callback traffic without script markup
+      marker = clip(marker.strip(), 60)
+
+      # ── dedup identical repeats so one probe run is not reported 50 times ──
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      dkey = ct + "|" + where + "|" + marker
+      prev = int(seen.get(dkey, 0))
+      if prev > 0 and now - prev < DEDUP_NS:
+          return "allow"
+
+      # ── instance-resolved attribution ──
+      cp = int(meta.get("caller_pid", "0"))
+      inst = None
+      if cp > 0:
+          inst = proc_instance(cp, now)
+      lineage = []
+      if inst != None:
+          lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      degraded = (inst == None or len(lineage) == 0)
+
+      actor_path = meta.get("agent_name", "")
+      session = {}
+      fastmcp = ""
+      if not degraded:
+          actor_path = lineage[0].get("actor_path", actor_path)
+          for x in lineage:
+              pid = x.get("actor_pid", "")
+              if pid != "":
+                  session[pid] = x.get("actor_start", "")
+          exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=win0, until_ns=now, limit=2000)
+          for e in exec_rows:                      # siblings spawned by this session only
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "")
+          for e in exec_rows:                      # is a FastMCP OAuth client in this session?
+              if e.get("actor_pid", "") not in session:
+                  continue
+              cl = e.get("cmdline", "") + " " + e.get("actor_path", "")
+              if re.find(FASTMCP_RE, cl) != None:
+                  fastmcp = clip(cl.strip(), 120)
+                  break
+
+      # ── prior stages, scoped to this session's instances and this window ──
+      link_row  = None
+      oauth_row = None
+      for pid in session:
+          if pid == "":
+              continue
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              since_ns=win0, until_ns=now, limit=200)
+          for r in rows:
+              u = r.get("host", "") + r.get("path", "")
+              if link_row == None and payload_hit(u) != None:
+                  link_row = r
+              if oauth_row == None and re.find(OAUTH_FLOW_RE, r.get("path", "")) != None:
+                  oauth_row = r
+          if link_row != None and oauth_row != None:
+              break
+
+      # ── kill chain ──
+      root = "process://" + actor_path
+      if not degraded:
+          root = "process://" + lineage[-1].get("actor_path", actor_path)
+      chain = new_chain(root)
+      stages = []
+
+      if link_row != None:
+          chain.append(step(ev_edge(link_row), stage_id="Attacker Link",
+                            stage_desc="session already fetched a URL carrying script markup: " +
+                                       clip(link_row.get("host", "") + link_row.get("path", ""), 140)))
+          stages.append("attacker-link-fetch")
+
+      if oauth_row != None:
+          chain.append(step(ev_edge(oauth_row), stage_id="OAuth Flow Active",
+                            stage_desc="live OAuth authorize/token request in same session: " +
+                                       clip(oauth_row.get("host", "") + oauth_row.get("path", ""), 140)))
+          stages.append("oauth-flow-active")
+
+      anchor = {
+          "from":     "process://" + actor_path,
+          "to":       target,
+          "kind":     "HTTP_REQUEST",
+          "method":   meta.get("method", ""),
+          "ts":       str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+      }
+      chain.append(step(anchor, stage_id="Reflected XSS",
+                        stage_desc="unescaped script markup in OAuth callback request (" + marker +
+                                   ") -> " + clip(where, 160)))
+      stages.append("xss-in-oauth-callback")
+
+      names = "unresolved"
+      if not degraded:
+          parts = []
+          for x in lineage:
+              parts.append(x.get("actor_path", "").split("/")[-1])
+          names = " -> ".join(parts)
+
+      reason = ("FastMCP OAuth callback reflected-XSS candidate: " + marker +
+                " in " + clip(where, 160) + " | session: " + names)
+      if fastmcp != "":
+          reason = reason + " | fastmcp process: " + fastmcp
+      if degraded:
+          reason = reason + " | attribution: degraded"
+      reason = reason + " | stages: " + ", ".join(stages)
+      reason = reason + " | callid: " + meta.get("callid", "")
+
+      fresh = {}
+      for k, v in seen.items():
+          if now - int(v) < DEDUP_NS:
+              fresh[k] = v
+      if len(fresh) > 300:
+          fresh = {}
+      fresh[dkey] = now
+      if store_usage()["free"] > 8192:
+          store_set("seen", fresh)
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
