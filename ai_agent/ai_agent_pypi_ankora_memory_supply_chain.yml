@@ -1,0 +1,123 @@
+title: Supply Chain PyPI ankora-memory Acquisition
+id: 7c3f5a91-2d64-4e0b-9a58-6f1c8b40d2e7
+status: experimental
+level: high
+description: |
+  Detects an AI coding agent installing, importing, pinning, or fetching the PyPI
+  package "ankora-memory" — a package marketed as persistent-memory tooling for
+  coding agents and tracked as a supply-chain delivery vector for malicious code
+  into agent runtimes.
+
+  Detection is deliberately single-event and content-only. The engine has no
+  package_installed / package_imported / INSTALLED_DEPENDENCY telemetry, so the
+  install act itself is observed at the only two surfaces where it is actually
+  visible:
+    1. the agent's own action layer — the shell command, the tool_use input, or
+       the manifest text the agent writes (event_type tool_call / execute_process /
+       llm_tool_call, where `command` and `content` are populated), and
+    2. the resulting index/artifact fetch on the wire (event_type http_request,
+       matched on `path`, which is the one live signal HTTP_REQUEST gives us).
+
+  Every branch requires an *actionable* reference (an install verb, an import
+  statement, a dependency pin, or a distribution-artifact path) — a bare mention
+  of the package name in prose is intentionally NOT a match.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://peps.python.org/pep-0503/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Surface 1: the agent's own action layer ────────────────────────────────
+  sel_agent_action:
+    event_type:
+      - tool_call
+      - execute_process
+      - llm_tool_call
+
+  # Package-manager install/add/sync naming the package on the same line.
+  # \binstall\b cannot match inside "uninstall" (no word boundary), so
+  # remediation commands are excluded by construction.
+  sel_content_install:
+    content|re:
+      - '(?i)\b(?:pip3|pipx|pip|uvx|uv|poetry|pdm|pipenv|conda|micromamba|rye)\b[^\n]{0,120}?\b(?:install|add|sync)\b[^\n]{0,160}?\bankora[-_.]{1,3}memory\b'
+      - '(?i)\bpip[^\n]{0,120}?\bdownload\b[^\n]{0,160}?\bankora[-_.]{1,3}memory\b'
+
+  # Import of the distribution's module name, in real or JSON-escaped source.
+  sel_content_import:
+    content|re:
+      - '(?im)(?:^|\\n|;)[ \t]*(?:from|import)[ \t]+ankora_memory\b'
+      - '(?i)(?:__import__|importlib\.import_module)\([^)\n]{0,24}ankora[-_.]{1,3}memory'
+
+  # Dependency pin written into requirements.txt / pyproject.toml / lockfile text.
+  sel_content_manifest:
+    content|re:
+      - '(?i)\bankora[-_.]{1,3}memory\b[ \t]*(?:==|>=|<=|~=|!=|@[ \t]*git\+)'
+      - '(?i)\bankora[-_.]{1,3}memory\b[ \t]*=[ \t]*[{"\^~0-9]'
+      - '(?im)(?:^|\\n)[ \t]*ankora[-_.]{1,3}memory[ \t]*(?:$|\\n|[<>=!~,;])'
+
+  # Index URL or distribution artifact referenced in agent-authored content.
+  sel_content_artifact:
+    content|re:
+      - '(?i)(?:pypi\.org|pypi\.python\.org|pythonhosted\.org)[^\s]{0,200}ankora[-_.]{1,3}memory'
+      - '(?i)\bankora[-_.]{1,3}memory-[0-9][0-9a-z.\-+]{0,24}\.(?:tar\.gz|whl|zip)\b'
+
+  # ── Surface 2: the wire fetch (the only live edge kind, HTTP_REQUEST) ──────
+  sel_http_fetch:
+    event_type: http_request
+    path|re: '(?i)/(?:simple|project|packages|pypi)/[^\s]{0,200}ankora[-_.]{1,3}memory'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+
+  # Remediation and blocking work: uninstalling, pruning, or denying the package.
+  filter_remediation:
+    content|re:
+      - '(?i)\b(?:uninstall|remove|purge|prune|revert|rollback|unpin|drop)\b[^\n]{0,160}?\bankora[-_.]{1,3}memory\b'
+      - '(?i)\bankora[-_.]{1,3}memory\b[^\n]{0,80}?\b(?:uninstall|removed|blocked|denied|quarantined|forbidden)\b'
+      - '(?i)\b(?:--exclude|--ignore|deny[-_]?list|block[-_]?list|banned[-_]packages)\b[^\n]{0,160}?ankora[-_.]{1,3}memory'
+
+  # Advisory, SBOM and typosquat-research context authored by security work.
+  filter_advisory:
+    content|contains:
+      - 'GHSA-'
+      - 'CVE-20'
+      - 'security advisory'
+      - 'malicious package'
+      - 'malware report'
+      - 'typosquat'
+      - 'supply chain attack'
+      - 'do not install'
+      - 'known-bad package'
+      - 'indicator of compromise'
+
+  # This rule and its own artefacts being read, edited or tested by an agent.
+  filter_selfref:
+    content|contains:
+      - 'ai_agent_pypi_ankora_memory'
+      - '7c3f5a91-2d64-4e0b-9a58-6f1c8b40d2e7'
+      - 'Supply Chain PyPI ankora-memory Acquisition'
+
+  condition: >
+    ((sel_agent_action and (sel_content_install or sel_content_import or
+    sel_content_manifest or sel_content_artifact)) or sel_http_fetch)
+    and not (filter_remediation or filter_advisory or filter_selfref)
+
+falsepositives:
+  - Security or platform engineer using an agent to reproduce the supply-chain
+    incident in a disposable sandbox (install verb present, no advisory keywords).
+  - Dependency-audit or SBOM-generation agent that emits a requirements-style
+    line for the package while inventorying an already-infected project, if the
+    output carries no advisory vocabulary.
+  - Internal mirror/proxy warming or vendoring job that fetches /simple/ index
+    pages for every package name in a corpus, including this one.
+  - Incident-response runbook or detection-engineering document that quotes a
+    literal `pip install ankora-memory` line without any advisory wording around it.
+action: report
