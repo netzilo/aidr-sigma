@@ -1,0 +1,263 @@
+title: PyPI Supply Chain Acquisition - minia-telegram
+id: 7b3f1c2e-9d4a-4f61-b8e5-2a6c0d5e94f7
+status: experimental
+level: high
+description: |
+  Detects a Python package-acquisition command (pip / pipx / uv / poetry / pdm /
+  conda, a wheel or sdist artefact, or a direct VCS install) that names the
+  suspected trojanised PyPI package 'minia-telegram' or a close typosquat of it,
+  and attributes the acquisition to one exact process instance and one session.
+
+  The rule is anchored on meta["caller_pid"] for the triggering exec, resolves the
+  instance with proc_instance() and the owning session with proc_lineage(), then
+  queries the instance-resolved event log (EXECUTE_PROCESS rows only - the sole
+  verified signal for this threat) for corroborating stages performed by the same
+  session inside a 15 minute window: repeat acquisition attempts, package build /
+  install hook execution (setup.py, egg_info, bdist_wheel, pep517 - the arbitrary
+  code-execution surface of a malicious sdist), and download / decode utilities
+  spawned alongside the install.
+
+  Reporting only. It never blocks a build, and it never attributes an install to a
+  process outside the triggering caller's own lineage or its descendants.
+author: Tanya
+date: "2026-06-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Security researcher or incident responder deliberately fetching the package for
+    analysis in a sandbox (e.g. "pip download minia-telegram"). The rule reports so
+    the analyst action is auditable rather than obstructed.
+  - An organisation that publishes its own vetted internal fork named
+    minia-telegram to a private index - the install still reports, and the
+    non-default-package-source corroborator will be present.
+  - CI dependency-audit or SBOM tooling that shells out with the package name in the
+    command line while pinning or resolving a requirements file.
+  - Reinstall after remediation. Plain "pip uninstall"/"remove" with no acquisition
+    verb is filtered out in the script and does not report.
+  - Typosquat-tolerant matching (minai-, minnia-, mnia-, -telegramm) could match an
+    unrelated project whose real name happens to fall inside the variant set.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_pkg:
+    content|re: '(?i)\b(m[i1]n[i1]a|mnia|minai|minnia)[._-]?telegra?m{1,2}\b'
+  sel_acquire:
+    content|re: '(?i)(\b(pip|pip2|pip3|pipx|uv|uvx|poetry|pdm|conda|mamba|micromamba|easy_install)\b|setup\.py|pyproject\.toml|\.whl\b|\.tar\.gz\b|git\+https?://|\bgit\s+clone\b|requirements[^\s]*\.txt)'
+  condition: sel_exec and sel_pkg and sel_acquire
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── PyPI supply chain: suspected trojanised "minia-telegram" ──────────────
+  # Instance-resolved: anchored on caller_pid, scoped to ONE session lineage.
+  WINDOW_NS = 900000000000        # 15 minutes - session clustering window
+  MAX_STEPS = 5                   # cap evidence steps per stage
+
+  TARGET_RE    = r'(?i)\b(m[i1]n[i1]a|mnia|minai|minnia)[._-]?telegra?m{1,2}\b'
+  INSTALLER_RE = r'(?i)\b(pip|pip2|pip3|pipx|uv|uvx|poetry|pdm|conda|mamba|micromamba|easy_install)\b'
+  INSTALL_VERB = r'(?i)\b(install|download|add|sync|wheel|clone|fetch)\b'
+  REMOVE_VERB  = r'(?i)\b(uninstall|remove)\b'
+  ARTIFACT_RE  = r'(?i)(setup\.py|pyproject\.toml|build_meta|pep517|\.whl\b|\.tar\.gz\b|\bgit\s+clone\b|git\+https?://)'
+  SOURCE_RE    = r'(?i)(--index-url|--extra-index-url|--trusted-host|--find-links|git\+https?://|https?://[^\s"]+\.(whl|tar\.gz|zip))'
+  HOOK_RE      = r'(?i)(setup\.py|egg_info|bdist_wheel|build_meta|pep517|pip-build-env)'
+  TOOL_RE      = r'(?i)(\bcurl\b|\bwget\b|\bnc\b|\bncat\b|\bbase64\b|\bchmod\b|\bosascript\b|\bpowershell\b|\bxxd\b)'
+  AGENT_RE     = r'(?i)(claude|cursor|windsurf|codex|copilot|gemini|aider|cline|goose|openhands|devin|continue|mcp|agent)'
+
+  def short(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def clip(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def row_cmd(e):
+      c = e.get("cmdline", "")
+      if c == "":
+          c = e.get("actor_path", "")
+      return c
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "process://" + e.get("actor_path", "")
+      par = e.get("parent_path", "")
+      if par == "":
+          src = "process://unknown"
+      else:
+          src = "process://" + par
+      ts = e.get("ts", "0")
+      return {"from": src, "to": tgt, "kind": e.get("kind", "EXECUTE_PROCESS"),
+              "ts": ts, "first_ts": ts, "last_ts": ts,
+              "cmdline": e.get("cmdline", "")}
+
+  def is_acquisition(cmd):
+      inst_hit = re.find(INSTALLER_RE, cmd) != None
+      verb_hit = re.find(INSTALL_VERB, cmd) != None
+      if inst_hit and verb_hit:
+          return True
+      return re.find(ARTIFACT_RE, cmd) != None
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no graph/log calls ──
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      if re.find(TARGET_RE, cmd) == None:
+          return "allow"
+      # benign remediation: uninstall/remove with no acquisition verb
+      if re.find(REMOVE_VERB, cmd) != None and re.find(INSTALL_VERB, cmd) == None:
+          return "allow"
+      # mere textual mention (grep, ls, editor, log line) is not an acquisition
+      if not is_acquisition(cmd):
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ────────────────────────
+      cp    = int(meta.get("caller_pid", "0"))
+      ev_ts = int(meta.get("event_ts", "0"))
+      if cp == 0 or ev_ts == 0:
+          return {"action": "report",
+                  "reason": "PyPI supply chain: acquisition of suspected trojanised " +
+                            "package 'minia-telegram' (no caller attribution): " + clip(cmd, 200)}
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          # degraded - create row has not landed yet; never guess a lineage
+          return {"action": "report",
+                  "reason": "PyPI supply chain: acquisition of suspected trojanised " +
+                            "package 'minia-telegram' by pid " + str(cp) +
+                            " (attribution degraded): " + clip(cmd, 200)}
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if lineage == None or len(lineage) == 0:
+          lineage = [inst]
+      root = lineage[len(lineage) - 1]
+
+      # ── 3. session scope: lineage instances + their descendants only ──────
+      session = {}
+      names   = []
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+          names.append(short(x.get("actor_path", "?")))
+      lin_str = " <- ".join(names)
+
+      since = ev_ts - WINDOW_NS
+      rows  = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ev_ts,
+                           limit=2000)
+      for i in range(3):
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              if pp != "" and pp in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "")
+
+      # ── 4. corroborating stages, same session, inside the window ──────────
+      self_pid   = inst.get("actor_pid", "")
+      self_start = inst.get("actor_start", "")
+      prior_pkg  = []
+      hooks      = []
+      tools      = []
+      for e in rows:
+          ap = e.get("actor_pid", "")
+          if ap not in session:
+              continue
+          if ap == self_pid and e.get("actor_start", "") == self_start:
+              continue                      # the triggering instance itself
+          c = row_cmd(e)
+          if c == "":
+              continue
+          if re.find(TARGET_RE, c) != None:
+              prior_pkg.append(e)
+          elif re.find(HOOK_RE, c) != None:
+              hooks.append(e)
+          elif re.find(TOOL_RE, c) != None:
+              tools.append(e)
+
+      if len(prior_pkg) > MAX_STEPS:
+          prior_pkg = prior_pkg[:MAX_STEPS]
+      if len(hooks) > MAX_STEPS:
+          hooks = hooks[:MAX_STEPS]
+      if len(tools) > MAX_STEPS:
+          tools = tools[:MAX_STEPS]
+
+      agent_hit = False
+      for x in lineage:
+          if re.find(AGENT_RE, x.get("actor_path", "")) != None:
+              agent_hit = True
+      an = meta.get("agent_name", "")
+      if an != "" and re.find(AGENT_RE, an) != None:
+          agent_hit = True
+      src_hit = re.find(SOURCE_RE, cmd) != None
+
+      # ── 5. kill chain, oldest evidence first, anchor last ─────────────────
+      chain  = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+
+      n = len(prior_pkg)
+      for i in range(n - 1, -1, -1):
+          e = prior_pkg[i]
+          chain.append(step(ev_edge(e), stage_id="Repeat Acquisition",
+                            stage_desc="earlier command in the same session naming the package: " +
+                                       clip(row_cmd(e), 160)))
+      if n > 0:
+          stages.append("repeat-acquisition x" + str(n))
+
+      n = len(hooks)
+      for i in range(n - 1, -1, -1):
+          e = hooks[i]
+          chain.append(step(ev_edge(e), stage_id="Build Hook Execution",
+                            stage_desc="package build/install hook ran (arbitrary code at install time): " +
+                                       clip(row_cmd(e), 160)))
+      if n > 0:
+          stages.append("build-hook-execution")
+
+      n = len(tools)
+      for i in range(n - 1, -1, -1):
+          e = tools[i]
+          chain.append(step(ev_edge(e), stage_id="Out-of-Band Tooling",
+                            stage_desc="download/decode utility spawned in the install session: " +
+                                       clip(row_cmd(e), 160)))
+      if n > 0:
+          stages.append("out-of-band-tooling")
+
+      par = inst.get("parent_path", "")
+      if par == "":
+          trig_from = "process://unknown"
+      else:
+          trig_from = "process://" + par
+      trig = {"from": trig_from,
+              "to": "process://" + inst.get("actor_path", ""),
+              "kind": "EXECUTE_PROCESS",
+              "ts": str(ev_ts), "first_ts": str(ev_ts), "last_ts": str(ev_ts),
+              "cmdline": cmd}
+      chain.append(step(trig, stage_id="Supply Chain Acquisition",
+                        stage_desc="python package acquisition naming suspected trojanised " +
+                                   "'minia-telegram': " + clip(cmd, 240)))
+
+      if agent_hit:
+          stages.append("agent-driven")
+      if src_hit:
+          stages.append("non-default-package-source")
+
+      reason = "PyPI supply chain: suspected trojanised package 'minia-telegram' " + \
+               "acquired by " + short(inst.get("actor_path", "?")) + " [" + lin_str + "]"
+      if len(stages) > 0:
+          reason = reason + " - corroborating: " + ", ".join(stages)
+
+      print(reason + " | cmd: " + clip(cmd, 240))
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
