@@ -1,0 +1,130 @@
+title: LlamaIndex LangChainLLM stream_complete Type-Confusion DoS Invocation
+id: 7c3f9a2e-5d41-4b86-9f0c-2ad81e6b47d3
+status: experimental
+level: medium
+description: |
+  Detects an inline interpreter execution whose command line contains the
+  CVE-2024-12704 trigger: a call to LangChainLLM.stream_complete()/astream_complete()
+  (llama_index) whose first positional or keyword argument is a non-string literal
+  (list, dict, bytes, numeric, None/True/False, or a container constructor).
+
+  Mechanism: llama_index's LangChainLLM.stream_complete spawns a worker thread to run
+  _llm.predict. A wrongly-typed prompt makes that thread die before predict executes,
+  and because no exception is propagated, StreamingGeneratorCallbackHandler.get_response_gen
+  spins forever waiting for a result that never arrives -- the process never exits and
+  keeps consuming CPU/memory.
+
+  LIMITATION -- read before tuning. The engine has no thread_create, no exception_thrown,
+  no SPAWNS_THREAD / EXCEPTION_UNHANDLED / RESOURCE_EXHAUSTION edge, so the causal chain
+  (malformed input -> thread abort -> unhandled exception -> infinite wait) is NOT observable.
+  The only live surface is execute_process, and a hung process is indistinguishable from any
+  long-running one there. This rule therefore does not detect the hang; it detects the
+  *invocation of the exploit primitive* on the one event where the payload is literally
+  present in telemetry -- an inline `-c` / heredoc execution carrying the vulnerable call
+  with a demonstrably wrong argument type. Requiring all three independent signatures
+  (inline execution + LangChainLLM/llama_index.langchain target + non-string stream_complete
+  argument) in a single command line is what keeps this specific rather than "a process ran
+  for a while". It is report-only precisely because runtime confirmation is unavailable:
+  a match is evidence of intent/reproduction, not proof of a live denial of service.
+
+  Known blind spot: if the malformed value is bound to a variable earlier in the same
+  snippet (`x = [1]; llm.stream_complete(x)`), the type is not literal at the call site and
+  this rule will not fire. That is accepted to keep the false-positive rate at zero.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-12704
+  - https://attack.mitre.org/techniques/T1499/
+  - https://atlas.mitre.org/techniques/AML.T0029
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - atlas.aml.t0029
+  - owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: the only event type that carries this payload in live telemetry.
+  sel_scope:
+    event_type: execute_process
+
+  # Signature 1 - the code is inline on the command line (python -c, sh -c, heredoc).
+  # Without this, the payload never appears in execute_process content at all.
+  sel_inline_cmd:
+    command|re:
+      - '\b(?i:python)[0-9.]*\s+(?:-[A-Za-z]+\s+)*-c[\s\x27"]'
+      - '\b(?i:bash|sh|zsh|dash|ksh)\s+(?:-[A-Za-z]+\s+)*-c[\s\x27"]'
+      - '<<[-\s]*[\x27"]?(?:EOF|PY|PYCODE|PYTHON)\b'
+  sel_inline_content:
+    content|re:
+      - '\b(?i:python)[0-9.]*\s+(?:-[A-Za-z]+\s+)*-c[\s\x27"]'
+      - '\b(?i:bash|sh|zsh|dash|ksh)\s+(?:-[A-Za-z]+\s+)*-c[\s\x27"]'
+      - '<<[-\s]*[\x27"]?(?:EOF|PY|PYCODE|PYTHON)\b'
+
+  # Signature 2 - the vulnerable class / module is the target.
+  sel_target_cmd:
+    command|re:
+      - '\bLangChainLLM\s*\('
+      - '(?i)\bllama[_.-]?index[\w.]*\.langchain\b'
+  sel_target_content:
+    content|re:
+      - '\bLangChainLLM\s*\('
+      - '(?i)\bllama[_.-]?index[\w.]*\.langchain\b'
+
+  # Signature 3 - stream_complete / astream_complete called with a literal that is
+  # provably NOT a str. A correctly-typed call ("...", f"...", or a bare variable)
+  # does not match, so ordinary llama_index usage is invisible to this rule.
+  sel_badarg_cmd:
+    command|re:
+      - '\b(?:a)?stream_complete\s*\(\s*(?:\[|\{|\*\*|[+-]?[0-9]|b[\x27"]|None\b|True\b|False\b|(?:bytes|bytearray|dict|list|set|tuple|object|open|int|float|complex|memoryview)\s*\()'
+      - '\b(?:a)?stream_complete\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:\[|\{|\*\*|[+-]?[0-9]|b[\x27"]|None\b|True\b|False\b|(?:bytes|bytearray|dict|list|set|tuple|object)\s*\()'
+  sel_badarg_content:
+    content|re:
+      - '\b(?:a)?stream_complete\s*\(\s*(?:\[|\{|\*\*|[+-]?[0-9]|b[\x27"]|None\b|True\b|False\b|(?:bytes|bytearray|dict|list|set|tuple|object|open|int|float|complex|memoryview)\s*\()'
+      - '\b(?:a)?stream_complete\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*=\s*(?:\[|\{|\*\*|[+-]?[0-9]|b[\x27"]|None\b|True\b|False\b|(?:bytes|bytearray|dict|list|set|tuple|object)\s*\()'
+
+  # Suppression 1 - the caller has explicitly bounded or asserted the failure.
+  # Someone who wraps the call in an expected-exception assertion, a hypothesis
+  # strategy, an alarm, or a wait_for timeout is deliberately exercising the bug
+  # under control and cannot be denied service by it.
+  filter_controlled_test:
+    content|re:
+      - '(?i)\bpytest\.raises\b'
+      - '(?i)\bassert_?Raises\b'
+      - '(?i)\bhypothesis\b'
+      - '@given\s*\('
+      - '\bsignal\.alarm\s*\('
+      - '(?i)\basyncio\.wait_for\s*\('
+      - '(?i)\bfaulthandler\b'
+      - '(?i)\bxfail\b'
+
+  # Suppression 2 - executed by a test runner rather than as a standalone snippet.
+  filter_test_runner:
+    command|re:
+      - '(?i)\b(?:pytest|py\.test|nox|tox|unittest)\b'
+      - '(?i)\bcoverage\s+run\b'
+
+  condition: >
+    sel_scope
+    and (sel_inline_cmd or sel_inline_content)
+    and (sel_target_cmd or sel_target_content)
+    and (sel_badarg_cmd or sel_badarg_content)
+    and not (filter_controlled_test or filter_test_runner)
+
+falsepositives:
+  - AppSec or platform engineers reproducing CVE-2024-12704 by hand with a one-liner to
+    confirm whether a pinned llama_index version is still vulnerable. Suppressed only when
+    the snippet bounds the call (pytest.raises, signal.alarm, asyncio.wait_for) or runs under
+    a recognised test runner; a bare unbounded reproduction WILL report, which is intended -
+    it hangs the host exactly like the attack does.
+  - Library maintainers or integrators debugging prompt type coercion in LangChainLLM with
+    inline `python -c` while checking what non-string inputs do.
+  - Fuzzing and property-based harnesses that intentionally pass non-string prompts.
+    Suppressed via the hypothesis/@given and test-runner filters when those markers are on
+    the same command line; a bespoke fuzzer with none of those markers will report.
+  - Copy-pasted advisory proof-of-concept executed inside a CI security-validation job that
+    does not invoke a recognised runner.
+action: report
