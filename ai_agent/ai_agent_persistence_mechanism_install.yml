@@ -1,0 +1,210 @@
+title: Agent Persistence Mechanism Installation
+id: 7c3f9a41-2d5e-4b86-9f0a-1e6d4c8b52f3
+status: experimental
+level: high
+description: |
+  Detects an AI agent installing a host persistence mechanism through a single tool call.
+
+  Three independent evidence shapes are required, each of which is a complete
+  persistence action on its own:
+
+    1. WRITE TARGET  - the tool call writes/edits a file whose path IS a persistence
+       surface (cron spool and /etc/cron.*, systemd unit directories, launchd
+       LaunchAgents/LaunchDaemons plists, shell init files, /etc/profile.d, init.d /
+       rc.local, XDG autostart, .ssh/authorized_keys, /etc/passwd|shadow|sudoers,
+       Windows Startup folder). A write is required - a bare read of these paths is
+       NOT a match, because the path selection is ANDed with a write-capable tool
+       name or a write-shaped argument key (content, new_string, file_text, ...).
+
+    2. WRITE PAYLOAD - the tool call writes a launchd job body (a trigger key plus a
+       Program/ProgramArguments key) or a complete systemd unit body ([Install] plus
+       WantedBy=*.target plus ExecStart=). This catches persistence installed to a
+       relocated or non-standard path.
+
+    3. SHELL COMMAND - the command argument installs persistence directly: crontab -e
+       / crontab - / crontab <file>, redirection or tee/cp/mv/ln into a cron, systemd,
+       init.d, rc.local, profile.d, LaunchAgents/LaunchDaemons or authorized_keys
+       location, launchctl load|bootstrap|enable|submit, systemctl enable|link,
+       systemd-run --on-calendar, update-rc.d / chkconfig ... on|defaults|add, appends
+       to shell rc files, useradd|adduser|newusers, usermod -aG into an admin group,
+       dscl -create /Users, sysadminctl -addUser, net user /add, New-LocalUser,
+       schtasks /create, Register-ScheduledTask, sc create / New-Service, or reg add
+       of a Run key.
+
+  Command binaries that also occur in English prose (crontab, useradd, adduser) are
+  anchored to the start of a command or to a shell separator / sudo prefix, so an
+  echoed instruction or a commit message does not match.
+
+  Report-only: an agent editing .zshrc or authoring a systemd unit is frequently a
+  legitimate, user-requested action. The rule exists to make every such change visible
+  and attributable, not to interrupt it.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/tactics/TA0003/
+  - https://attack.mitre.org/techniques/T1053/003/
+  - https://attack.mitre.org/techniques/T1543/
+  - https://attack.mitre.org/techniques/T1546/004/
+  - https://attack.mitre.org/techniques/T1136/001/
+tags:
+  - attack.persistence
+  - attack.t1053.003
+  - attack.t1543
+  - attack.t1546.004
+  - attack.t1136.001
+  - atlas.aml.t0050
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: tool_call
+
+  # 1. persistence write TARGET
+  sel_persist_path:
+    file_path|re:
+      - '(?i)^(/private)?/etc/(crontab$|cron\.(d|daily|hourly|weekly|monthly)/|rc\.local|rc[0-9]?\.d/|init\.d/|profile\.d/|systemd/(system|user)/|launchd\.conf|ld\.so\.preload|sudoers\.d/|xdg/autostart/)'
+      - '(?i)^(/private)?/var/spool/cron/'
+      - '(?i)/(usr/)?(local/)?(lib|share)/systemd/(system|user)/[^/]+\.(service|timer|socket|path)$'
+      - '(?i)/\.config/systemd/user/[^/]+\.(service|timer|socket|path)$'
+      - '(?i)/Library/Launch(Agents|Daemons)/[^/]+\.plist$'
+      - '(?i)(^|/)\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|zlogin|profile|kshrc|cshrc|tcshrc|xinitrc|xprofile)$'
+      - '(?i)/\.config/(fish/config\.fish|autostart/[^/]+\.desktop)$'
+      - '(?i)(^|/)\.ssh/authorized_keys2?$'
+      - '(?i)^(/private)?/etc/(passwd|shadow|sudoers)$'
+      - '(?i)start menu[\\/]programs[\\/]startup[\\/]'
+
+  sel_write_tool:
+    tool|re: '(?i)(^|[_.:-])(write|edit|multiedit|notebookedit|notebook_edit|write_file|create_file|edit_file|apply_patch|apply_diff|str_replace|text_editor|fs_write|put_file|upload_file|append_file)([_.:-]|$)'
+
+  sel_write_args:
+    content|re: '(?i)"(content|contents|new_string|new_str|newtext|new_text|file_text|file_content|replacement|patch|diff|edits)"\s*:'
+
+  # 2. persistence write PAYLOAD
+  sel_plist_trigger:
+    content|re: '(?i)<key>\s*(RunAtLoad|StartCalendarInterval|StartInterval|KeepAlive)\s*</key>'
+  sel_plist_program:
+    content|re: '(?i)<key>\s*(ProgramArguments|Program)\s*</key>'
+
+  sel_unit_install:
+    content|contains: '[Install]'
+  sel_unit_wantedby:
+    content|re: '(?i)WantedBy\s*=\s*[\w.@-]+\.target'
+  sel_unit_exec:
+    content|re: '(?i)ExecStart\s*='
+
+  # 3. persistence SHELL COMMAND
+  sel_cmd_cron:
+    command|re:
+      - '(?i)(^|[;&|(]\s*|\bsudo\s+([-\w=./]+\s+){0,3}|\bdoas\s+)crontab\s+(-u\s+\S+\s+)?(-e\b|-\s*($|[;&|])|[~./][^\s;|&]*)'
+      - '(?i)>>?\s*(/private)?/etc/(crontab|cron\.(d|daily|hourly|weekly|monthly))'
+      - '(?i)>>?\s*(/private)?/var/spool/cron/'
+      - '(?i)\b(tee|cp|mv|install|ln|rsync)\b[^\n]{0,200}?\s(/private)?/etc/cron'
+      - '(?i)\b(tee|cp|mv|install)\b[^\n]{0,200}?\s(/private)?/var/spool/cron'
+
+  sel_cmd_launchd:
+    command|re:
+      - '(?i)\blaunchctl\s+(load|bootstrap|enable|submit)\b'
+      - '(?i)>>?\s*[^\n]{0,200}/Library/Launch(Agents|Daemons)/'
+      - '(?i)\b(tee|cp|mv|install|ln|plutil|defaults\s+write)\b[^\n]{0,200}/Library/Launch(Agents|Daemons)/'
+
+  sel_cmd_systemd:
+    command|re:
+      - '(?i)\bsystemctl\s+(--user\s+|--global\s+|--now\s+)*(enable|link|reenable)\b'
+      - '(?i)\bsystemd-run\b[^\n]{0,200}--on-(calendar|boot|startup|active|unit)'
+      - '(?i)\bloginctl\s+enable-linger\b'
+      - '(?i)>>?\s*[^\n]{0,200}/systemd/(system|user)/[^\s;|&]+\.(service|timer|socket|path)'
+      - '(?i)\b(tee|cp|mv|install|ln)\b[^\n]{0,200}/systemd/(system|user)/'
+
+  sel_cmd_initrc:
+    command|re:
+      - '(?i)\b(update-rc\.d|chkconfig)\b[^\n]{0,120}\s(on|add|defaults)\b'
+      - '(?i)>>?\s*(/private)?/etc/(rc\.local|init\.d/|rc[0-9]?\.d/|profile\.d/|profile\b)'
+      - '(?i)\b(tee|cp|mv|install|ln)\b[^\n]{0,200}\s(/private)?/etc/(rc\.local|init\.d/|profile\.d/)'
+
+  sel_cmd_shellrc:
+    command|re:
+      - '(?i)>>\s*[~$][^\s;|&]{0,120}/\.(bashrc|bash_profile|bash_login|zshrc|zprofile|zshenv|zlogin|profile|kshrc|cshrc|tcshrc)\b'
+      - '(?i)>>\s*[^\n]{0,160}/\.config/fish/config\.fish\b'
+      - '(?i)>>\s*[^\n]{0,160}/\.ssh/authorized_keys2?\b'
+      - '(?i)\b(tee|cat)\b[^\n]{0,160}\s-a\s[^\n]{0,120}/\.(bashrc|zshrc|bash_profile|zprofile|profile)\b'
+      - '(?i)\btee\s+(-a\s+)?[^\n]{0,160}/\.ssh/authorized_keys2?\b'
+
+  sel_cmd_account:
+    command|re:
+      - '(?i)(^|[;&|(]\s*|\bsudo\s+([-\w=./]+\s+){0,3}|\bdoas\s+)(useradd|adduser|newusers)\s+[-\w]'
+      - '(?i)\busermod\b[^\n]{0,120}\s-a?G\s+[\w,]*(sudo|wheel|admin|root|adm)\b'
+      - '(?i)\bdscl\b[^\n]{0,80}\s-create\s+/Users/'
+      - '(?i)\bsysadminctl\b[^\n]{0,120}-addUser\b'
+      - '(?i)\bnet\s+user\s+\S+[^\n]{0,80}/add\b'
+      - '(?i)\bNew-LocalUser\b'
+      - '(?i)\bAdd-LocalGroupMember\b[^\n]{0,120}(Administrators|Remote Desktop Users)'
+
+  sel_cmd_windows:
+    command|re:
+      - '(?i)\bschtasks(\.exe)?\b[^\n]{0,200}/create\b'
+      - '(?i)\bRegister-ScheduledTask\b'
+      - '(?i)\bsc(\.exe)?\s+(\\\\\S+\s+)?create\s+\S'
+      - '(?i)\bNew-Service\b'
+      - '(?i)\breg(\.exe)?\s+add\b[^\n]{0,200}(CurrentVersion\\\\Run|Winlogon\\\\Shell|Winlogon\\\\Userinit)'
+      - '(?i)\bSet-ItemProperty\b[^\n]{0,200}CurrentVersion\\\\Run'
+
+  # ── filters: documentation, teaching material, inspection, removal, sandbox ─
+  filter_read_only_tool:
+    tool|re: '(?i)(^|[_.:-])(read|read_file|cat|view|open|get|list|list_dir|glob|grep|search|find|ripgrep|head|tail|stat|diff_view|fetch|web_fetch|web_search)([_.:-]|$)'
+
+  filter_doc_path:
+    file_path|re: '(?i)(/(docs?|documentation|examples?|samples?|fixtures?|testdata|test_data|__tests__|__fixtures__|spec|specs|man|manpages)/|(^|/)(readme|changelog|contributing|security|install|setup|troubleshooting|runbook|playbook)[^/]*\.(md|rst|txt|adoc)$|\.(md|rst|adoc|mdx)$)'
+
+  filter_container_build:
+    file_path|re: '(?i)(^|/)(dockerfile[^/]*|containerfile|.*\.dockerfile|docker-compose[^/]*\.ya?ml|devcontainer\.json|vagrantfile|cloud-init[^/]*\.ya?ml|user-data)$'
+
+  filter_iac_path:
+    file_path|re: '(?i)/(ansible|roles|playbooks|chef|cookbooks|puppet|manifests|salt|helm|charts|kustomize|terraform|packer|debian|rpmbuild|SPECS|snap|flatpak|nix)/'
+
+  filter_ephemeral_path:
+    file_path|re: '(?i)^(/tmp/|/var/tmp/|/private/tmp/|/dev/shm/)'
+
+  filter_container_cmd:
+    command|re: '(?i)^\s*(sudo\s+)?(docker|podman|nerdctl|kubectl|helm|vagrant|packer|multipass|lxc|incus|colima|minikube|kind|terraform|pulumi|ansible(-playbook)?|molecule|chef-solo|puppet|salt-call)\b'
+
+  filter_inspect_cmd:
+    command|re: '(?i)^\s*(sudo\s+)?(systemctl\s+(status|is-enabled|list-units|list-unit-files|list-timers|cat|show)\b|launchctl\s+(list|print|blame|dumpstate)\b|crontab\s+-l\b|schtasks(\.exe)?\s+/query\b|Get-ScheduledTask\b|Get-LocalUser\b|Get-Service\b|sc(\.exe)?\s+query\b|chkconfig\s+--list\b)'
+
+  filter_removal_cmd:
+    command|re: '(?i)\b(systemctl\s+(--user\s+)?(disable|mask)|launchctl\s+(unload|bootout|remove|disable)|crontab\s+-r|userdel|deluser|schtasks(\.exe)?\s+/delete|Unregister-ScheduledTask|Remove-LocalUser|sc(\.exe)?\s+delete|update-rc\.d\s+-f\s+\S+\s+remove)\b'
+
+  filter_teaching_text:
+    content|re: '(?i)(persistence (technique|mechanism)s?\b[^\n]{0,120}\b(explain|example|demonstrat|tutorial|training|awareness|detect|hunt|blue.?team)|for (educational|training|demonstration|illustrative) purposes|mitre att&ck|\bT1053\b|\bT1543\b|\bT1546\b|\bT1136\b|do not (actually )?run this|this is (just )?an example)'
+
+  filter_sigma_self:
+    content|re: '(?i)(^|\n)\s*(logsource|detection|falsepositives)\s*:'
+
+  condition: >
+    sel_event
+    and (
+      (sel_persist_path and (sel_write_tool or sel_write_args))
+      or (sel_plist_trigger and sel_plist_program)
+      or (sel_unit_install and sel_unit_wantedby and sel_unit_exec)
+      or sel_cmd_cron or sel_cmd_launchd or sel_cmd_systemd or sel_cmd_initrc
+      or sel_cmd_shellrc or sel_cmd_account or sel_cmd_windows
+    )
+    and not (
+      filter_read_only_tool or filter_doc_path or filter_container_build
+      or filter_iac_path or filter_ephemeral_path or filter_container_cmd
+      or filter_inspect_cmd or filter_removal_cmd or filter_teaching_text
+      or filter_sigma_self
+    )
+
+falsepositives:
+  - Developer environment setup - an agent asked to "add nvm/pyenv/rbenv to my shell" or "put this alias in my zshrc" writes .zshrc or .bashrc legitimately. Filtered only when the write targets a documentation or IaC path; a genuine home-directory rc edit will still report by design, since it is exactly the change an operator wants attributed.
+  - Packaging and infrastructure-as-code work - authoring a systemd unit inside an Ansible role, a Debian packaging tree, a Helm chart or a Dockerfile. Suppressed by filter_iac_path and filter_container_build.
+  - Documentation and runbook authoring - a README or runbook that shows a crontab line or a launchd plist. Suppressed by filter_doc_path (any .md/.rst/.adoc target and any docs/ examples/ testdata/ path) and by filter_teaching_text.
+  - Security training and detection-engineering content - writing this very Sigma rule, an ATT&CK write-up, or a purple-team exercise script. Suppressed by filter_teaching_text and filter_sigma_self.
+  - Diagnostics and inventory - systemctl status, crontab -l, launchctl list, schtasks /query, Get-ScheduledTask. Suppressed by filter_inspect_cmd.
+  - Cleanup and remediation - disabling a unit, unloading a launch agent, deleting a scheduled task or a user account. Suppressed by filter_removal_cmd.
+  - Container and VM provisioning - RUN useradd inside an image build, or a systemd unit written into a container rootfs. Suppressed by filter_container_cmd, filter_container_build and filter_ephemeral_path.
+  - CI job authoring - a systemd unit or cron entry written into a temporary build directory. Partially suppressed by filter_ephemeral_path; a write to a real /etc path from CI will report.
+action: report
