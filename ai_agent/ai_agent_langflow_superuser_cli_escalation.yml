@@ -1,0 +1,110 @@
+title: Langflow Privilege Escalation via Superuser CLI Invocation
+id: 3f2b8c1e-7d4a-4e6b-9c05-8a1d2f6b4e93
+status: experimental
+level: high
+description: |
+  Detects an agent-spawned process invoking the internal Langflow CLI subcommand
+  'langflow superuser', which mints a new administrative account directly against the
+  Langflow database and bypasses the UI registration path (which only ever creates
+  non-admin users).
+
+  An attacker who already holds authenticated access plus RCE inside a Langflow host
+  can run this one command to escalate from an ordinary UI-registered account to a
+  full superuser, then log back in through the normal login page as an administrator.
+
+  The rule fires on the exec event itself (event_type: execute_process, where content
+  carries the spawned command line). It matches the subcommand in the positions an
+  attacker can actually reach it from:
+    - direct binary invocation ......... /opt/venv/bin/langflow superuser --username hax
+    - global-flag prefixed ............. langflow --log-level debug superuser
+    - module form ...................... python3 -m langflow superuser
+    - argv/JSON exec payload ........... ["langflow","superuser","--username","hax"]
+    - environment runners .............. uv run langflow superuser
+    - container pivot .................. docker exec langflow-api langflow superuser
+
+  Deliberately OUT OF SCOPE: the LANGFLOW_SUPERUSER / LANGFLOW_SUPERUSER_PASSWORD
+  environment-variable bootstrap. That is the vendor-documented first-run provisioning
+  mechanism and appears in nearly every docker-compose and Helm values file, so keying
+  on it would generate constant noise without indicating escalation.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://attack.mitre.org/techniques/T1136/001/
+  - https://attack.mitre.org/techniques/T1078/003/
+tags:
+  - attack.privilege_escalation
+  - attack.persistence
+  - attack.t1136.001
+  - attack.t1078.003
+  - owasp.a01_2021
+  - owasp.a04_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Primary: the superuser subcommand in a real invocation position ──────────
+  sel_cli:
+    event_type: execute_process
+    content|re:
+      # direct binary / path-qualified / shell-chained, optional global flags between
+      - '(?i)(^|[\s"''/=(\x60])langflow(\.exe)?(\s+-{1,2}[a-z0-9][a-z0-9._-]*(\s+[^\s-][^\s]*)?)*\s+superuser\b'
+      # argv array / JSON-encoded exec payload: ["langflow","--flag","superuser"]
+      - '(?i)"langflow(\.exe)?"[\s,]*("-{1,2}[^"]{1,40}"[\s,]*){0,4}"superuser"'
+      # python -m langflow superuser  /  python -m langflow.__main__ superuser
+      - '(?i)\bpython[0-9.]*(\.exe)?["\s,]+-m["\s,]+langflow(\.__main__)?["\s,]+superuser\b'
+      # environment runners: uv/uvx/poetry/pipenv/pdm/hatch/conda run langflow superuser
+      - '(?i)\b(uv|uvx|poetry|pipenv|pdm|hatch|conda|micromamba)\s+run\s[^\n;&|$\x60]{0,80}\blangflow\s+superuser\b'
+      # container pivot into the langflow runtime
+      - '(?i)\b(docker|podman|nerdctl|kubectl)\s+exec\b[^\n]{0,240}\blangflow[\s"'',]+superuser\b'
+
+  # ── Unambiguous account-creation form: superuser + credential flags ──────────
+  sel_credentialed:
+    event_type: execute_process
+    content|re:
+      - '(?i)\blangflow[\s"'',]+superuser[^\n;&|$\x60]{0,140}--(username|password)\b'
+      - '(?i)"superuser"[\s,]+"--(username|password)"'
+
+  # ── Filters ──────────────────────────────────────────────────────────────────
+  # Engineer reading CLI usage, not creating an account.
+  filter_help:
+    content|re:
+      - '(?i)\blangflow[\s"'',]+superuser[\s"'',]+(--help|-h|--show-completion|--install-completion)\b'
+      - '(?i)\blangflow[\s"'',]+(--help|-h)\b'
+
+  # The string is being read/searched/printed, not executed. Shell separators
+  # (; & | $ `) are excluded from the gap so "echo hi; langflow superuser" is NOT
+  # suppressed - only a genuine read of the literal text is.
+  filter_readonly_inspection:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ag|ack|cat|bat|less|more|head|tail|man|awk|sed|strings|diff|git|echo|printf)\b[^\n;&|$\x60]{0,160}\blangflow[\s"'',]+superuser\b'
+
+  # Test suites and doc builders that reference the command string.
+  filter_test_harness:
+    content|re:
+      - '(?i)\b(pytest|py\.test|tox|nox|unittest|coverage)\b[^\n;&|$\x60]{0,160}\blangflow[\s"'',]+superuser\b'
+      - '(?i)\b(mkdocs|sphinx-build|mdbook|docusaurus)\b[^\n;&|$\x60]{0,160}\blangflow[\s"'',]+superuser\b'
+
+  condition: >
+    ((sel_cli and not filter_help) or sel_credentialed)
+    and not (filter_readonly_inspection or filter_test_harness)
+
+falsepositives:
+  - Legitimate first-run administrator provisioning by the platform operator - an
+    entrypoint, Dockerfile RUN step, Ansible task or Helm post-install hook executing
+    'langflow superuser --username admin --password $PW'. Expected once at install
+    time; the same command appearing on a long-running host after deployment is the
+    actual signal. Action is report precisely so this bootstrap case is auditable
+    rather than disruptive.
+  - Platform engineers performing an authorised admin-account reset or recovery after
+    an admin lockout.
+  - Local development environments where the developer intentionally promotes their
+    own account while building flows.
+  - Engineers inspecting CLI usage with 'langflow superuser --help' - suppressed by
+    filter_help.
+  - Documentation greps, git commits and CI doc builds that merely mention the command
+    string - suppressed by filter_readonly_inspection and filter_test_harness.
+
+action: report
