@@ -1,0 +1,354 @@
+title: vLLM Guided Decoding Schema DoS
+id: 7c1d4a92-5f3b-4e08-9a67-2d5b8c4f1e03
+status: experimental
+level: high
+description: |
+  Detects an AI agent (or an agent-driven tool) submitting malformed JSON Schema in the
+  guided-decoding parameters of a completion request to a self-hosted inference engine
+  (vLLM 0.8.0-0.9.0 /v1/completions and /v1/chat/completions), and correlates it with the
+  behavioural aftermath of a crashed engine.
+
+  The engine has no crash/error_log/server_crash vocabulary, so service termination cannot
+  be observed directly. Instead the script infers unavailability from the HTTP_REQUEST graph:
+  a request pile-up against a single engine host inside a short window, an HTTP_REQUEST vs
+  HTTP_RESPONSE count delta (requests that were never answered), and repeated malformed
+  guided-schema submissions to the same host tracked in the rule's private store.
+
+  Sequence detected:
+    1. Anchor  - http_request to a completion endpoint whose body carries a guided-decoding
+                 key (guided_json / json_schema / response_format / structural_tag) whose
+                 schema value is structurally invalid (non-object schema, schema passed as a
+                 bare non-JSON string, Python-style type keyword such as "str"/"dict",
+                 unresolvable or self-recursive $ref, unbalanced braces, pathological nesting).
+    2. Repeat  - the same host receives MIN_REPEAT or more malformed guided-schema requests
+                 inside the correlation window (session store).
+    3. Pile-up - the HTTP_REQUEST edge to that host shows a burst of requests clustered in the
+                 window (client retrying against an engine that stopped answering).
+    4. Silence - HTTP_RESPONSE edges exist but answer far fewer requests than were sent.
+
+  A single hard schema defect is enough to report (one malformed schema is sufficient to kill a
+  vulnerable engine). Soft structural heuristics alone are never reported without graph
+  corroboration from stage 2, 3 or 4.
+author: Egemen
+date: "2026-03-04"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://attack.mitre.org/techniques/T1499/004/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - owasp.a06_2023
+falsepositives:
+  - Developer iterating on a brand new guided-decoding schema against a local or staging vLLM
+    endpoint - a genuinely buggy hand-written schema is indistinguishable on the wire from a
+    deliberate one, and the outcome (engine termination) is identical. Reported, never blocked.
+  - Schema generators (pydantic/dataclass exporters) that emit "$ref" pointers while the
+    "$defs"/"definitions" block is carried in a sibling request field, tripping the
+    unresolvable-reference heuristic.
+  - Conformance or fuzz test suites that intentionally post invalid guided schemas to verify
+    the engine returns 4xx instead of dying; these legitimately repeat and will satisfy the
+    repeat stage.
+  - Machine-generated schemas derived from deeply nested ORM/protobuf models that legitimately
+    exceed the nesting heuristic - this is a soft signal and requires graph corroboration.
+  - Client-side exponential-backoff retry logic inflating the request count against a slow but
+    healthy engine, satisfying the pile-up stage without a crash. The required schema-defect
+    anchor prevents this from firing on its own.
+  - Custom tool payloads that reuse the key name "type" with Python type names inside a
+    non-schema object while a guided key is also present elsewhere in the body.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_completion_path:
+    path|contains:
+      - '/completions'
+      - '/v1/responses'
+      - '/generate'
+      - '/v1/engines'
+  sel_guided_hint:
+    content|contains:
+      - 'guided_json'
+      - 'guided_decoding'
+      - 'guided_grammar'
+      - 'guided_regex'
+      - 'guided_choice'
+      - 'json_schema'
+      - 'structural_tag'
+      - 'response_format'
+  condition: sel_http and (sel_completion_path or sel_guided_hint)
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------------------
+  # vLLM guided-decoding denial of service (invalid json_schema, 0.8.0 - 0.9.0)
+  # Behavioural: malformed schema anchor + engine-unavailability aftermath.
+  # ---------------------------------------------------------------------------
+  WINDOW_NS   = 600000000000   # 10 minute correlation window
+  MIN_REPEAT  = 2              # repeated malformed submissions to one engine
+  RETRY_BURST = 8              # request pile-up against one engine host
+  MAX_NEST    = 40             # nesting depth that breaks the schema compiler
+  MAX_SCAN    = 20000          # chars of body scanned for structural defects
+  STORE_KEY   = "vllm_schema_targets"
+  MAX_TRACKED = 48
+
+  INFER_PATHS = ["/completions", "/v1/responses", "/generate", "/v1/engines"]
+
+  GUIDED_KEYS = ["guided_json", "guided_decoding", "guided_grammar",
+                 "guided_regex", "guided_choice", "json_schema",
+                 "structural_tag", "response_format"]
+
+  # Type keywords that are NOT valid JSON Schema types. A guided schema carrying
+  # one of these fails validation inside the schema compiler.
+  BAD_TYPES = ["str", "int", "float", "bool", "dict", "list", "tuple", "set",
+               "bytes", "complex", "NoneType", "Any", "Dict", "List", "Str",
+               "Int", "Float", "Bool", "String", "Number", "Integer",
+               "Boolean", "Object", "Array", "Null"]
+
+  def has_any(s, needles):
+      for n in needles:
+          if n in s:
+              return True
+      return False
+
+  def to_int(v, d):
+      if v == None:
+          return d
+      if type(v) == "int":
+          return v
+      if v == "":
+          return d
+      return int(v)
+
+  def max_depth(s):
+      d = 0
+      m = 0
+      for c in s.elems():
+          if c == "{" or c == "[":
+              d += 1
+              if d > m:
+                  m = d
+          elif c == "}" or c == "]":
+              if d > 0:
+                  d -= 1
+      return m
+
+  def brace_delta(s):
+      o = 0
+      c = 0
+      for ch in s.elems():
+          if ch == "{":
+              o += 1
+          elif ch == "}":
+              c += 1
+      return o - c
+
+  def bad_type_keywords(s):
+      out = []
+      for m in re.find_all(r'"type"\s*:\s*"[A-Za-z_][A-Za-z_0-9]*"', s, 200):
+          parts = m.split('"')
+          if len(parts) < 4:
+              continue
+          t = parts[3]
+          if t in BAD_TYPES and t not in out:
+              out.append(t)
+      return out
+
+  def schema_defects(body):
+      hard = []
+      soft = []
+      # a scalar / array / empty string where a schema object is required
+      if re.find(r'"(guided_json|json_schema|schema)"\s*:\s*(null|true|false|-?[0-9]+(\.[0-9]+)?|\[|"")', body) != None:
+          hard.append("schema value is not an object")
+      # schema handed over as a bare string that is not JSON
+      if re.find(r'"(guided_json|json_schema|schema)"\s*:\s*"[^"{\\]', body) != None:
+          hard.append("schema passed as non-JSON string literal")
+      bad = bad_type_keywords(body)
+      if bad:
+          hard.append("invalid schema type keyword: " + ",".join(bad))
+      # reference with no definition block anywhere in the payload
+      if '"$ref"' in body and not has_any(body, ['"$defs"', '"definitions"']):
+          hard.append("unresolvable $ref in schema")
+      if re.find(r'"\$ref"\s*:\s*"#"\s*[,}]', body) != None:
+          hard.append("self-recursive root $ref")
+      seg = body[:MAX_SCAN]
+      if len(body) <= MAX_SCAN and brace_delta(seg) != 0:
+          soft.append("unbalanced JSON braces in payload")
+      depth = max_depth(seg)
+      if depth > MAX_NEST:
+          soft.append("schema nesting depth " + str(depth))
+      return [hard, soft]
+
+  def load_targets():
+      t = store_get(STORE_KEY)
+      if t == None:
+          return {}
+      return t
+
+  def prune(t, now):
+      out = {}
+      for h in t:
+          rec = t[h]
+          if now - to_int(rec.get("last", 0), 0) <= WINDOW_NS:
+              out[h] = rec
+      return out
+
+  def save_targets(t):
+      extra = len(t) - MAX_TRACKED
+      for i in range(extra):
+          oldest = ""
+          oldest_ts = 0
+          for h in t:
+              ts = to_int(t[h].get("last", 0), 0)
+              if oldest == "" or ts < oldest_ts:
+                  oldest = h
+                  oldest_ts = ts
+          if oldest == "":
+              break
+          t.pop(oldest)
+      u = store_usage()
+      if to_int(u.get("free", 0), 0) > 8192:
+          store_set(STORE_KEY, t)
+
+  def run():
+      # -- relevance gate: pure string checks on meta, no graph work ----------
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      path = meta.get("path", "")
+      if not has_any(path, INFER_PATHS):
+          return "allow"
+      body = meta.get("content", "")
+      if body == "":
+          return "allow"
+      if not has_any(body, GUIDED_KEYS):
+          return "allow"
+
+      # -- payload defect classification (still no graph work) ----------------
+      d = schema_defects(body)
+      hard = d[0]
+      soft = d[1]
+      if not hard and not soft:
+          return "allow"
+
+      host = meta.get("host", "")
+      now  = to_int(meta.get("event_ts", "0"), 0)
+
+      # -- session memory: repeated malformed submissions to this engine ------
+      tracked = prune(load_targets(), now)
+      prev    = tracked.get(host, None)
+      n       = 1
+      first   = now
+      if prev != None:
+          n     = to_int(prev.get("n", 0), 0) + 1
+          first = to_int(prev.get("first", now), now)
+      tracked[host] = {"n": n, "first": first, "last": now}
+      save_targets(tracked)
+
+      # -- graph corroboration: request pile-up / unanswered requests ---------
+      url_nodes = []
+      for u in graph(type="URL"):
+          if u.get("host", "") == host:
+              url_nodes.append(u)
+
+      proc_id    = ""
+      url_id     = ""
+      burst_e    = None
+      burst_cnt  = 0
+      req_total  = 0
+      resp_total = 0
+      resp_e     = None
+
+      for u in url_nodes:
+          if url_id == "":
+              url_id = u["id"]
+          for e in edges(u["id"], dir="in", kind="HTTP_REQUEST"):
+              c = to_int(e.get("count", "1"), 1)
+              req_total += c
+              p = node(e["from"])
+              if p != None and p.get("agent", "0") == "1" and proc_id == "":
+                  proc_id = p["id"]
+              if c > burst_cnt:
+                  burst_cnt = c
+                  burst_e   = e
+                  url_id    = u["id"]
+          for e in edges(u["id"], dir="out", kind="HTTP_RESPONSE"):
+              resp_total += to_int(e.get("count", "0"), 0)
+              if resp_e == None:
+                  resp_e = e
+
+      burst = False
+      if burst_e != None and burst_cnt >= RETRY_BURST:
+          f = to_int(burst_e.get("first_ts", "0"), 0)
+          l = to_int(burst_e.get("last_ts", "0"), 0)
+          if (now - l) <= WINDOW_NS and (l - f) <= WINDOW_NS:
+              burst = True
+
+      # only meaningful when response edges exist at all - absence never fires
+      unanswered = False
+      gap = req_total - resp_total
+      if resp_e != None and gap >= RETRY_BURST:
+          unanswered = True
+
+      repeat       = n >= MIN_REPEAT
+      corroborated = repeat or burst or unanswered
+
+      # soft structural heuristics alone are not enough
+      if not hard and not corroborated:
+          return "allow"
+
+      if hard:
+          label = "invalid guided schema (" + "; ".join(hard) + ")"
+      else:
+          label = "suspect guided schema (" + "; ".join(soft) + ")"
+
+      if proc_id == "":
+          an = meta.get("agent_name", "")
+          if an != "":
+              proc_id = "process://" + an
+          else:
+              proc_id = "process://unknown"
+      if url_id == "":
+          url_id = meta.get("url", host)
+
+      chain = new_chain(proc_id)
+
+      trig = {"from": proc_id, "to": url_id, "kind": "HTTP_REQUEST",
+              "method": meta.get("method", ""), "count": "1",
+              "ts": str(now), "first_ts": str(now), "last_ts": str(now)}
+      chain.append(step(trig, stage_id="Guided Decoding Abuse",
+                        stage_desc=meta.get("method", "POST") + " " + path +
+                                   " on " + host + " - " + label))
+
+      if repeat:
+          rep_e = trig
+          if burst_e != None:
+              rep_e = burst_e
+          chain.append(step(rep_e, stage_id="Repeat Submission",
+                            stage_desc=str(n) + " malformed guided-schema requests to " +
+                                       host + " inside the correlation window"))
+      if burst:
+          chain.append(step(burst_e, stage_id="Request Pile-Up",
+                            stage_desc=str(burst_cnt) + " clustered requests to " + host +
+                                       " - retry storm consistent with an engine that stopped answering"))
+      if unanswered:
+          chain.append(step(resp_e, stage_id="Engine Unresponsive",
+                            stage_desc=str(gap) + " requests to " + host +
+                                       " never answered (" + str(req_total) + " sent / " +
+                                       str(resp_total) + " answered)"))
+
+      reason = "vLLM guided-decoding DoS pattern: " + label + " sent to " + host + path
+      if repeat:
+          reason += " | repeated " + str(n) + "x"
+      if burst:
+          reason += " | " + str(burst_cnt) + " request pile-up"
+      if unanswered:
+          reason += " | " + str(gap) + " unanswered requests"
+      print(reason)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
