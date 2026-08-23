@@ -1,0 +1,138 @@
+title: Telegram Remote Control Daemon Targeting Claude Code CLI (aipager)
+id: 3f2c9a41-7d68-4e5b-9c1a-b8e6d02f4a37
+status: experimental
+level: high
+description: |
+  Detects the aipager remote-control daemon — a package that bridges an
+  attacker-controlled Telegram bot to a running Claude Code CLI session held open
+  in dtach/tmux/screen — being installed, launched or hand-rolled on the endpoint.
+
+  Two independent evidence paths, both evaluated on a single event:
+
+    1. Explicit aipager package acquisition or invocation
+       (uvx/pipx/npx/bunx/pnpm dlx aipager, pip|npm install aipager,
+        python -m aipager, `aipager daemon|start|serve|bot|attach`).
+
+    2. A hand-rolled equivalent: Telegram Bot API credentials or endpoint
+       (api.telegram.org/bot..., a live bot token, TELEGRAM_BOT_TOKEN)
+       co-occurring in the SAME command line / tool argument with detached
+       Claude Code session control (dtach -a/-c/-n, tmux send-keys into claude,
+       screen -S ... claude, or `claude --dangerously-skip-permissions|--print`).
+       Neither half fires alone — Telegram alone is a normal notifier, and dtach
+       alone is a normal session manager. Only the conjunction is the C2 bridge.
+
+  Scoped to execute_process (spawned command line) and tool_call (the agent's own
+  Bash/Write arguments) so it fires at the moment the daemon is stood up rather
+  than after the operator already has a shell into the agent session.
+
+  Placement: after any organisation-specific `action: allow` rules for approved
+  developer tooling, and before generic execute_process rules so the Telegram+dtach
+  conjunction is attributed to this specific threat rather than a broad exec alert.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://attack.mitre.org/techniques/T1219/
+  - https://attack.mitre.org/techniques/T1102/
+  - https://attack.mitre.org/techniques/T1546/
+tags:
+  - attack.command-and-control
+  - attack.t1102.002
+  - attack.t1219
+  - attack.execution
+  - attack.t1059.004
+  - attack.persistence
+  - owasp.a01-2021
+  - owasp.a04-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only command lines and tool arguments, never prose ──────────────
+  sel_event:
+    event_type:
+      - execute_process
+      - tool_call
+
+  # ── Path 1: the aipager package itself is fetched, installed or launched ───
+  sel_pkg_exec:
+    content|re:
+      - '(?i)\b(?:uvx|pipx\s+run|npx(?:\s+-y)?|bunx|pnpm\s+dlx)\s+(?:--?[\w=.-]+\s+)*aipager\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+aipager\b'
+      - '(?i)\b(?:pip[0-9.]*|uv\s+pip|pipx)\s+install\b[^\n]{0,200}\baipager\b'
+      - '(?i)\bnpm\s+(?:i|install|exec)\b[^\n]{0,200}\baipager\b'
+      - '(?i)(?:^|["''\s;&|(])aipager\s+(?:daemon|start|serve|run|watch|attach|listen|bot)\b'
+
+  # ── Path 2a: Telegram bot control plane present in the same event ──────────
+  sel_telegram_api:
+    content|re:
+      - '(?i)\bapi\.telegram\.org/bot'
+      - '\b[0-9]{8,10}:AA[0-9A-Za-z_\-]{30,}\b'
+      - '(?i)\b(?:TELEGRAM_BOT_TOKEN|TELEGRAM_CHAT_ID|TG_BOT_TOKEN|TELEGRAM_API_TOKEN)\b'
+      - '(?i)/bot[0-9]{6,}:[A-Za-z0-9_\-]{25,}/(?:getUpdates|sendMessage|setWebhook)'
+
+  # ── Path 2b: …driving a detached Claude Code CLI session ───────────────────
+  sel_session_control:
+    content|re:
+      - '(?i)\bdtach\s+-[acnAN]\b'
+      - '(?i)\bdtach\b[^\n]{0,200}\bclaude\b'
+      - '(?i)\btmux\s+send-keys\b[^\n]{0,200}\bclaude\b'
+      - '(?i)\bscreen\s+-[SxXr]\b[^\n]{0,200}\bclaude\b'
+      - '(?i)\bclaude\b[^\n]{0,160}--(?:dangerously-skip-permissions|print|output-format)\b'
+
+  # ── FP suppression: package inspection, audit and removal, not execution ───
+  filter_inspection:
+    content|re:
+      - '(?i)\b(?:pip[0-9.]*|uv\s+pip|pipx)\s+(?:show|list|uninstall|index|freeze|download)\b'
+      - '(?i)\bnpm\s+(?:view|info|ls|audit|uninstall|remove|search)\b'
+      - '(?i)\b(?:pip-audit|safety|osv-scanner|trivy|syft|grype|snyk|semgrep|bandit)\b'
+      - '(?i)\b(?:man|whatis|apropos|type|which|command\s+-v)\s'
+      - '(?i)\s--(?:help|version)\b'
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ag|ack)\b'
+
+  # ── FP suppression: documentation, advisories and write-ups about aipager ──
+  filter_docs:
+    content|re:
+      - '(?i)"(?:file_path|path|filename|notebook_path)"\s*:\s*"[^"]{0,240}\.(?:md|mdx|rst|txt|adoc|ipynb)"'
+      - '(?i)\b(?:README|CHANGELOG|SECURITY|CONTRIBUTING|ADVISORY|THREAT[_-]?MODEL)\.(?:md|rst|txt|adoc)\b'
+      - '(?i)\b(?:CVE|GHSA)-[0-9A-Za-z\-]{4,}\b'
+
+  # ── FP suppression: template / placeholder Telegram credentials ────────────
+  filter_placeholder:
+    content|re:
+      - '(?i)(?:your|my|insert|replace|example|sample|dummy|fake|placeholder|redacted)[_\-]?(?:telegram[_\-]?)?(?:bot[_\-]?)?(?:api[_\-]?)?token'
+      - '(?i)<[^>\n]{0,48}token[^>\n]{0,48}>'
+      - '(?i)\b(?:1234567890|123456789|0{6,}):AA'
+      - '(?i)\bAA(?:x{6,}|X{6,}|\*{4,})'
+
+  # ── FP suppression: test suites and fixture material ───────────────────────
+  filter_test:
+    content|re:
+      - '(?i)\b(?:pytest|unittest|tox|nox|jest|vitest|mocha|playwright\s+test)\b'
+      - '(?i)/(?:tests?|__tests__|__mocks__|fixtures?|examples?|samples?|testdata)/'
+      - '(?i)\b(?:conftest\.py|test_[a-z0-9_]+\.py|[a-z0-9_.\-]+\.spec\.[jt]sx?)\b'
+
+  condition: >
+    sel_event
+    and (sel_pkg_exec or (sel_telegram_api and sel_session_control))
+    and not (filter_inspection or filter_docs or filter_placeholder or filter_test)
+
+falsepositives:
+  - Developer legitimately evaluating or removing the aipager package (suppressed by
+    filter_inspection - pip show/uninstall, npm view, --help, which, grep).
+  - Security team documenting this threat in a README, advisory or threat model, or
+    an agent writing a markdown/rst report that quotes the aipager invocation
+    (suppressed by filter_docs).
+  - CI pipelines and unit tests that assert on the aipager command string or use a
+    placeholder Telegram token such as 123456789:AAxxxxxxxx (suppressed by
+    filter_test and filter_placeholder).
+  - An in-house build/notify script that posts to api.telegram.org AND separately
+    manages a dtach session in the same long composite command line - the Telegram
+    half and the session-control half must co-occur in one event to match, so this is
+    the main residual FP. Reviewed as report-only for that reason.
+  - Approved internal "Claude Code over chat" bridges built on Telegram; these are a
+    true positive for this detection by design and should be triaged as policy
+    exceptions, not silenced by widening the pattern.
+action: report
