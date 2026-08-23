@@ -1,0 +1,100 @@
+title: Persistence via Cron Job Modification
+id: 7c1e9f2a-4d3b-4a86-9f10-2b5c8e6d41af
+status: experimental
+level: high
+description: |
+  Detects an AI agent establishing persistence by installing or modifying scheduled
+  cron jobs. Fires on a single event when the agent either (a) invokes crontab in a
+  WRITE mode (piped stdin install, `crontab -`, `-e`, `-r`, or installing a crontab
+  file), (b) redirects/copies/edits content into a system cron path
+  (/etc/crontab, /etc/cron.d|hourly|daily|weekly|monthly, /var/spool/cron), (c) issues a
+  write-class tool call whose path argument targets one of those cron locations, or
+  (d) emits a cron schedule line (`@reboot` or a 5-field spec) whose payload is a
+  downloader or shell interpreter.
+
+  Read-only cron inspection (`crontab -l`, `cat /etc/crontab`, Read/Grep tool calls)
+  is intentionally NOT matched — only write/execute-shaped events are.
+author: Evgen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1053/003/
+  - https://atlas.mitre.org/techniques/AML.T0050
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+tags:
+  - attack.persistence
+  - attack.execution
+  - attack.t1053.003
+  - atlas.aml.t0050
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: only agent-issued tool calls and spawned processes ───────────────
+  sel_event:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # ── (a)+(b) crontab invoked in a write mode, or a write redirected into a
+  #            system cron path.  List values are OR'ed.
+  sel_crontab_write_cmd:
+    content|re:
+      # something piped into crontab  ->  echo "..." | crontab -
+      - '(?i)\|\s*(?:sudo\s+(?:-[A-Za-z]+\s+)*)?crontab\b'
+      # crontab -   (install from stdin)
+      - '(?i)\bcrontab\s+(?:-u\s+[A-Za-z0-9_.-]{1,32}\s+)?-(?:\s|["\x27]|\\n|$)'
+      # crontab -e  (interactive edit)
+      - '(?i)\bcrontab\s+(?:-u\s+[A-Za-z0-9_.-]{1,32}\s+)?-e\b'
+      # crontab -r  (remove all jobs)
+      - '(?i)\bcrontab\s+(?:-u\s+[A-Za-z0-9_.-]{1,32}\s+)?-r\b'
+      # crontab /path/to/file  (install crontab from a file)
+      - '(?i)\bcrontab\s+(?:-u\s+[A-Za-z0-9_.-]{1,32}\s+)?["\x27]?[~/][^\s"\x27;|&]{1,200}'
+      # shell write verb landing on a system cron path, same command only
+      - '(?i)(?:>>|>|\btee\b|\bsed\s+-i\b|\bcp\b|\bmv\b|\binstall\b|\bln\s+-s\b)[^\n;|&]{0,80}["\x27]?/(?:etc/cron|var/spool/cron)'
+
+  # ── (d) cron schedule line whose payload is a downloader / interpreter ──────
+  sel_cron_schedule_payload:
+    content|re:
+      - '(?i)(?:^|["\x27\s]|\\n)@reboot\s+[^\n"]{0,200}(?:\bcurl\b|\bwget\b|\bbash\b|\bsh\b|\bpython[23]?\b|\bperl\b|\bnc\b|/tmp/|base64\s+-{1,2}d)'
+      - '(?i)(?:^|["\x27\s]|\\n)(?:[\d*/,-]+\s+){4}[\d*/,-]+\s+[^\n"]{0,120}(?:\bcurl\s|\bwget\s|\bnc\s|\bbash\s|/bin/sh|\bpython[23]?\s+-c|base64\s+-{1,2}d)'
+
+  # ── (c) write-class tool whose path argument is a system cron location ──────
+  sel_tool_write:
+    tool_name|re: '(?i)(write|edit|create|append|patch|insert|replace|save|upload|put)'
+  sel_cron_path_arg:
+    content|re: '(?i)"(?:file_?path|path|filename|file|target|destination|dst|dest)"\s*:\s*["\x27]?[^"\x27]{0,80}/(?:etc/crontab|etc/cron\.(?:d|hourly|daily|weekly|monthly)|var/spool/cron)'
+
+  # ── suppressions ────────────────────────────────────────────────────────────
+  filter_manpage:
+    content|re: '(?i)(\bcrontab\s+(?:--help|-h|-V|--version)\b|\bman\s+(?:\d\s+)?crontab\b|\bcrontab\(\d\)|\bcrontab\.5\b)'
+  filter_security_doc:
+    content|re: '(?i)(mitre|att&ck|\bt1053\b|sigma rule|detection rule|falsepositives|logsource:|atlas\.aml|owasp\.(?:llm|asi))'
+  filter_test_fixture:
+    content|re: '(?i)(/tests?/|/fixtures?/|/testdata/|__tests__|conftest\.py|_test\.go\b|\.test\.[jt]sx?\b|\.spec\.[jt]sx?\b)'
+  filter_cron_package_install:
+    content|re: '(?i)\b(?:apt-get|apt|yum|dnf|zypper|apk)\s+(?:-y\s+|--no-install-recommends\s+|add\s+)*install\b[^\n;|&]{0,60}\b(?:cron|cronie|crontabs|cron-daemon)\b'
+
+  condition: >
+    sel_event and
+    (sel_crontab_write_cmd or sel_cron_schedule_payload or
+     (sel_tool_write and sel_cron_path_arg)) and
+    not (filter_manpage or filter_security_doc or filter_test_fixture or
+         filter_cron_package_install)
+
+falsepositives:
+  - DevOps/SRE agents legitimately scheduling backups, log rotation, or certificate
+    renewal at the operator's explicit request (`crontab -e`, a new /etc/cron.d/ file).
+  - Container image build steps (Dockerfile RUN lines) that append a job to /etc/crontab
+    after installing cron — the narrow filter_cron_package_install suppression covers
+    the common form, but multi-stage builds may still surface.
+  - Configuration-management runs (Ansible/Chef/Puppet/Salt) rendering cron files onto
+    a host during a normal deployment task.
+  - CI teardown or bootstrap scripts running `crontab -r` to clear a scratch runner.
+  - Backup/restore workflows that dump with `crontab -l > file` and restore with
+    `crontab file` or `cat file | crontab -`.
+  - Agents authoring documentation, tutorials, or detection content about cron
+    persistence — mostly suppressed by filter_manpage and filter_security_doc.
+
+action: report
