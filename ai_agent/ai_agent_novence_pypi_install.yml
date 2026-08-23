@@ -1,0 +1,79 @@
+title: Supply Chain Novence PyPI Package Install
+id: 3f8c1b42-6d7e-4a19-9c05-be2741d80e63
+status: experimental
+level: medium
+description: |
+  Fires on a single execute_process event whose command line explicitly names the
+  PyPI distribution 'novence' as an argument to a Python package-manager install
+  verb (pip / pipx / uv / poetry / pdm / rye / hatch / conda / micromamba).
+
+  Scope and intent. The upstream report contains no confirmed backdoor, no file
+  hash, no C2 indicator and no observed malicious behaviour for this package; it
+  states only that the package appeared on PyPI claiming to be an official SDK.
+  The engine also has no package_install event type and no INSTALLED_PACKAGE /
+  EXECUTE_CODE edge kind, so the narrated install-then-execute chain cannot be
+  modelled behaviourally. This rule therefore makes no malice claim and is
+  deliberately report-only: it is an exposure-inventory signal that answers the
+  single question an incident responder can actually act on -- 'did any monitored
+  agent or developer machine pull this specific named distribution?'
+
+  Precision comes entirely from the literal distribution name. The rule never
+  fires on generic package-manager activity: it requires an install verb AND the
+  word-bounded token 'novence' on the same command line. 'pip install -r
+  requirements.txt' does not name the package on the command line and does not
+  match. If a confirmed IOC (version, hash, C2 host) is published later, replace
+  this rule with a behavioural chain rule anchored on caller_pid.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_install_novence:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:pip3|pipx|pip)(?:\.exe)?\b[^\n]{0,200}?\binstall\b[^\n]{0,200}?\bnovence\b'
+      - '(?i)\b(?:uv|poetry|pdm|rye|hatch|conda|mamba|micromamba)(?:\.exe)?\b[^\n]{0,200}?\b(?:add|install)\b[^\n]{0,200}?\bnovence\b'
+
+  # Text about the command, not the command. Doc builds, log greps, README
+  # generation and shell-history searches routinely embed the exact string.
+  filter_text_handling:
+    content|re: '(?i)\b(?:echo|printf|grep|egrep|fgrep|rg|ripgrep|ag|sed|awk|history)\b[^\n]{0,80}?\b(?:pip|uv|poetry|conda)\b'
+
+  # Resolver / auditor invocations that resolve or report on the name without
+  # fetching and executing its build backend.
+  filter_resolve_only:
+    content|contains:
+      - '--dry-run'
+      - '--no-build-isolation --no-deps --no-binary'
+      - 'pip index versions'
+      - 'pip download --no-deps --dest'
+
+  # Local editable install of a checkout that happens to be named novence --
+  # a developer working on their own tree, not a PyPI fetch.
+  filter_local_editable:
+    content|re:
+      - '(?i)\binstall\b[^\n]{0,60}?(?:\s-e\s+|--editable[= ])\s*[.~/]'
+      - '(?i)\binstall\b[^\n]{0,60}?(?:\s-e\s+|--editable[= ])\s*[A-Za-z]:[\\/]'
+
+  condition: sel_pkg_install_novence and not 1 of filter_*
+falsepositives:
+  - Security researcher or IR analyst deliberately fetching the package inside a
+    sandbox to triage it - expected and desirable to see in the audit log.
+  - A developer maintaining an unrelated internal project or checkout literally
+    named 'novence' and installing it editable from a local path (suppressed by
+    filter_local_editable, but a non-editable local wheel install would still fire).
+  - Documentation, tutorial or CI-config generation that emits the literal string
+    'pip install novence' through echo/printf/sed (suppressed by filter_text_handling).
+  - Grepping shell history or build logs for the package name during hunting
+    (suppressed by filter_text_handling).
+  - A future unrelated PyPI distribution whose normalised name begins with
+    'novence-' (for example 'novence-sdk'), which shares the word boundary.
+action: report
