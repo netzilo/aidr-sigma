@@ -1,0 +1,159 @@
+title: MCP Neo4j Unauthenticated Cypher Abuse
+id: 7f3c9b1e-4a52-4d6f-9c08-2b1e5a7d3c94
+status: experimental
+level: high
+description: |
+  Detects abuse of the unauthenticated SSE/JSON-RPC surface exposed by mcp-neo4j 0.3.0
+  (CVE-2025-56406) for information disclosure or arbitrary command execution.
+
+  The engine has no execute_command / access_credential / network_connection event type
+  and no EXECUTE_COMMAND or READ_SENSITIVE_DATA edge, so the exploit cannot be observed
+  at the OS layer. The only live signal is the request body itself. This rule therefore
+  detects the *payload*, not the effect: a single event that simultaneously carries
+  (a) an mcp-neo4j / Neo4j-over-SSE surface marker, and (b) a Cypher primitive that has
+  no purpose other than reaching the filesystem, evaluating dynamic Cypher, enumerating
+  server configuration and users, or minting a privileged account.
+
+  Neither half is conclusive on its own. A Neo4j MCP tool name is ordinary traffic; an
+  APOC call in free text is ordinary traffic. The conjunction inside one request body is
+  the exploitation attempt described in the advisory.
+
+  Deliberately NOT matched: apoc.meta.data / db.schema.visualization (what get-neo4j-schema
+  legitimately calls), apoc.periodic.iterate (routine bulk ETL), apoc.load.* over ordinary
+  public HTTPS (routine ingestion), and SHOW DATABASES (routine).
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-56406
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1059/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - attack.credential-access
+  - attack.t1552
+  - owasp.llm02
+  - owasp.asi02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: the three contexts whose `content` carries the JSON-RPC body ──────
+  sel_event:
+    event_type:
+      - http_request
+      - tool_call
+      - llm_tool_call
+
+  # ── Half 1a: this traffic is addressed to an mcp-neo4j / Neo4j endpoint ──────
+  sel_surface_mcp_neo4j:
+    content|re:
+      - '(?i)\b(?:read|write|get)[-_]neo4j[-_](?:cypher|schema)\b'
+      - '(?i)\bmcp[-_]neo4j\b'
+      - '(?i)"(?:uri|url|db_url|server_url|connection_string|neo4j_uri)"\s*:\s*"[^"]{0,200}\b(?:bolt|neo4j)(?:\+s|\+ssc)?://'
+
+  # ── Half 1b: the SSE transport paths mcp-neo4j 0.3.0 binds unauthenticated ───
+  sel_surface_sse_endpoint:
+    path|re: '(?i)^/(?:sse|messages)(?:/|$)'
+
+  # ── Half 2a: arbitrary file read / SSRF primitives ───────────────────────────
+  sel_cypher_file_read:
+    content|re:
+      - '(?i)\bapoc\.(?:load\.(?:json|jsonparams|csv|xml|html)|import\.(?:csv|json|graphml))\s*\(\s*[''"]?\s*(?:file:/|jar:file:|ftp://|/(?:etc|root|proc|var|home|users)/)'
+      - '(?i)\bapoc\.load\.(?:directory|driver)\s*\('
+      - '(?i)\bapoc\.load\.(?:json|jsonparams|csv|xml|html)\s*\(\s*[''"]\s*https?://(?:169\.254\.169\.254|metadata\.google\.internal|127\.0\.0\.1|localhost|\[::1\]|0\.0\.0\.0)'
+      - '(?i)\bload\s+csv\b[\s\S]{0,120}?\bfrom\s+[''"]\s*(?:file:/|/(?:etc|root|proc|var|home|users)/)'
+
+  # ── Half 2b: dynamic Cypher evaluation / persistence — the RCE primitives ────
+  sel_cypher_dynamic_exec:
+    content|re:
+      - '(?i)\bapoc\.cypher\.(?:runfile|runfiles|runschemafile|runschemafiles|doit)\s*\('
+      - '(?i)\bapoc\.systemdb\.(?:execute|graph)\s*\('
+      - '(?i)\bapoc\.custom\.(?:declareprocedure|declarefunction|installprocedure|installfunction|asprocedure)\s*\('
+      - '(?i)\bapoc\.trigger\.(?:add|install)\s*\('
+      - '(?i)\bapoc\.periodic\.(?:submit|repeat)\s*\('
+      - '(?i)\bapoc\.util\.sleep\s*\('
+      - '(?i)\bapoc\.export\.[a-z]+\.(?:all|query|data|graph)\s*\(\s*[''"]?\s*(?:file:/|/(?:etc|root|proc|var|tmp|home|users)/)'
+
+  # ── Half 2c: unauthenticated configuration / credential-surface disclosure ───
+  sel_dbms_disclosure:
+    content|re:
+      - '(?i)\bcall\s+dbms\.(?:listconfig|listconnections|listqueries|listactivelocks|showcurrentuser|cluster\.overview)\s*\('
+      - '(?i)\bcall\s+dbms\.security\.(?:listusers|listroles|listrolesforuser|listusersforrole)\s*\('
+      - '(?i)\bshow\s+(?:current\s+user|users|roles)\b'
+
+  # ── Half 2d: privilege escalation / account minting ──────────────────────────
+  sel_priv_esc:
+    content|re:
+      - '(?i)\bcall\s+dbms\.security\.(?:createuser|deleteuser|changeuserpassword|addroletouser)\s*\('
+      - '(?i)\bcreate\s+user\s+\S{1,64}\s+set\s+(?:plaintext\s+|encrypted\s+)?password\b'
+      - '(?i)\bgrant\s+role\s+(?:admin|architect)\s+to\b'
+      - '(?i)\bgrant\s+all\s+(?:dbms\s+)?privileges\s+on\s+dbms\s+to\b'
+
+  # ── Filters ──────────────────────────────────────────────────────────────────
+
+  # MCP capability discovery — tools/list and initialize echo procedure names in
+  # tool descriptions and schemas. An actual tools/call exploit body has none of these.
+  filter_mcp_discovery:
+    content|contains:
+      - '"inputSchema"'
+      - '"method":"tools/list"'
+      - '"method": "tools/list"'
+      - '"method":"initialize"'
+      - '"method": "initialize"'
+      - '"method":"prompts/list"'
+      - '"method":"resources/list"'
+
+  # dbms.procedures()/SHOW PROCEDURES output — a catalog listing that names every
+  # APOC procedure, rather than an invocation of one.
+  filter_procedure_catalog:
+    content|re:
+      - '(?i)"signature"\s*:\s*"apoc\.'
+      - '(?i)\bshow\s+procedures\b'
+      - '(?i)\bcall\s+dbms\.procedures\s*\('
+
+  # Vulnerability write-ups, advisories and remediation guidance quoting the payload.
+  filter_security_docs:
+    content|re:
+      - '(?i)\bcve-\d{4}-\d{4,7}\b'
+      - '(?i)\b(?:proof[- ]of[- ]concept|security\s+advisory|vulnerability\s+(?:report|advisory|disclosure|write[- ]?up)|remediation\s+steps|mitigation\s+guidance|cvss\s*:?\s*\d)'
+
+  # Templates, tutorials and redacted samples.
+  filter_placeholder:
+    content|re:
+      - '(?i)<your[-_ ]'
+      - '(?i)\byour[-_](?:password|username|api[-_ ]?key|host|uri)\b'
+      - '(?i)\b(?:placeholder|replace[-_ ]me|changeme|todo|fixme|dummy[-_ ]?value|redacted)\b'
+      - '(?i)\bx{5,}\b'
+
+  # Unit/integration test fixtures for mcp-neo4j and APOC wrappers.
+  filter_test_fixture:
+    content|re:
+      - '(?i)\b(?:pytest|unittest|conftest|@pytest\.mark|def\s+test_[a-z0-9_]+|jest\.mock|mock\.patch)\b'
+      - '(?i)\bassert(?:Equal|Raises|True)\s*\('
+
+  condition: >
+    sel_event
+    and (sel_surface_mcp_neo4j or sel_surface_sse_endpoint)
+    and (sel_cypher_file_read or sel_cypher_dynamic_exec or sel_dbms_disclosure or sel_priv_esc)
+    and not (filter_mcp_discovery or filter_procedure_catalog or filter_security_docs
+             or filter_placeholder or filter_test_fixture)
+
+falsepositives:
+  - Authorised data-engineering runs where an agent uses apoc.import.csv or apoc.export.*
+    against a local staging path during a genuine ETL job. These fire on sel_cypher_file_read.
+    This is the single largest residual FP source and is the reason the action is report.
+  - A Neo4j administrator legitimately auditing configuration through an MCP agent with
+    CALL dbms.listConfig() or SHOW USERS. Genuine but privileged, and worth a record.
+  - Novel security research or an internal runbook pasted into an agent conversation that
+    quotes APOC exploitation payloads without carrying a CVE identifier or the words
+    advisory/proof-of-concept, so filter_security_docs does not catch it.
+  - mcp-neo4j's own test suite and CI fixtures, mitigated by filter_test_fixture.
+  - MCP tools/list responses whose tool descriptions mention APOC procedures, mitigated by
+    filter_mcp_discovery, and dbms.procedures()/SHOW PROCEDURES catalog output, mitigated by
+    filter_procedure_catalog.
+
+action: report
