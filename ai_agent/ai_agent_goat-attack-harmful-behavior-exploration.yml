@@ -1,0 +1,117 @@
+title: GOAT Adversarial Attacker Loop In LLM Traffic
+id: 7b3d9c41-2f6a-4e58-9d1c-0a5f8e2b7c34
+status: experimental
+level: high
+description: |
+  Detects the operational artefacts of a GOAT (Generative Offensive Agent Tester)
+  adversarial attacker loop inside LLM request or response bodies.
+
+  GOAT drives an attacker model that, on every conversation turn, emits a
+  structured observation / thought / strategy / reply scratchpad and selects an
+  attack from a fixed toolbox of adversarial prompting techniques (Refusal
+  Suppression, Dual Response, Response Priming, Persona Modification, Topic
+  Splitting, Opposite Intent, Hypotheticals, Safe Responses). Up to five model
+  calls are made per turn, so a single conversation produces the same attacker
+  scaffolding repeatedly.
+
+  This is a single-event content rule: it fires on the presence of the GOAT
+  attacker scaffolding itself, not on the harmful topic being probed. It does not
+  attempt to judge whether the content requested is harmful — that is a different
+  problem and a much noisier one.
+
+  Three independent, high-specificity paths:
+    1. garak GOAT probe identifiers (module path / config keys) in the payload.
+    2. The GOAT attack toolbox enumerated together with the GOAT JSON scratchpad
+       schema, or together with explicit red-team turn framing.
+    3. The GOAT JSON scratchpad schema whose "strategy" field is set to a literal
+       GOAT technique name — the attacker model's own turn output.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://github.com/NVIDIA/garak
+  - https://arxiv.org/abs/2410.01606
+tags:
+  - attack.defense-evasion
+  - atlas.aml.t0054
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Authorised AI safety / red-team engineering running garak GOAT against internal
+    models on a schedule. Expected and desirable to see — correlate with the peer
+    identity and the target model before treating as an incident.
+  - LLM security researchers pasting the GOAT attack-technique taxonomy or the GOAT
+    paper into a chat for summarisation or analysis. Partially mitigated by
+    filter_paper_citation and by requiring the toolbox to co-occur with the
+    operational JSON scratchpad or with turn-level red-team framing.
+  - Detection engineers reviewing this rule, a Sigma rule set, or garak source code
+    with an assistant — mitigated by filter_rule_authoring and filter_source_review.
+  - Benign agent frameworks that use an observation / thought / reply scratchpad
+    (ReAct-style). These do not enumerate the GOAT technique toolbox and do not set
+    a "strategy" field to a GOAT technique name, so no path in this rule fires.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type:
+      - llm_request
+      - llm_response
+
+  # Path 1 — garak GOAT probe identifiers leaking into the payload.
+  sel_garak_goat:
+    content|re: '(?i)(?:garak\.probes\.goat|\bprobes\.goat\b|\bgoatattack\b|\bmax_calls_per_turn\b)'
+
+  # GOAT attack toolbox — all three multi-word technique names must be present.
+  sel_goat_toolbox:
+    content|contains|all:
+      - 'refusal suppression'
+      - 'response priming'
+      - 'persona modification'
+
+  # GOAT attacker scratchpad schema — all four JSON keys must be present.
+  sel_goat_reasoning:
+    content|contains|all:
+      - '"observation"'
+      - '"thought"'
+      - '"strategy"'
+      - '"reply"'
+
+  # Turn-level red-team framing used by the GOAT attacker system prompt.
+  sel_goat_redteam:
+    content|contains|all:
+      - 'red teaming'
+      - 'adversarial prompt'
+      - 'conversation turn'
+
+  # Path 3 — the attacker model's own turn output selecting a GOAT technique.
+  sel_goat_strategy_value:
+    content|re: '(?i)"strateg(?:y|ies)"\s*:\s*(?:\[\s*)?"(?:refusal suppression|dual response|response priming|persona modification|topic splitting|opposite intent|hypotheticals?|safe responses?)"'
+
+  # ── Filters — benign contexts that legitimately enumerate GOAT terminology ──
+
+  filter_rule_authoring:
+    content|contains|all:
+      - 'logsource'
+      - 'falsepositives'
+      - 'condition:'
+
+  filter_paper_citation:
+    content|contains|all:
+      - 'generative offensive agent tester'
+      - 'arxiv'
+
+  filter_source_review:
+    content|contains|all:
+      - 'import garak'
+      - 'def '
+
+  condition: >
+    sel_event and (
+      sel_garak_goat or
+      (sel_goat_toolbox and sel_goat_reasoning) or
+      (sel_goat_toolbox and sel_goat_redteam) or
+      (sel_goat_reasoning and sel_goat_strategy_value)
+    ) and not (filter_rule_authoring or filter_paper_citation or filter_source_review)
+
+action: report
