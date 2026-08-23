@@ -1,0 +1,103 @@
+title: FastGPT Workflow File-Read Node SSRF Link
+id: 9c4f1e6a-3b57-4d82-a1f0-7e5c8b2d4a91
+status: experimental
+level: high
+description: |
+  Detects an outbound HTTP request whose payload carries a FastGPT workflow
+  "file reading" node (readFiles / fileUrlList) whose link points at a loopback,
+  link-local, cloud-metadata, RFC1918, internal-TLD or non-HTTP-scheme target.
+
+  FastGPT < 4.11.1 does not verify network links supplied to the workflow file
+  reading node, so an attacker-supplied workflow causes the FastGPT backend to
+  fetch an arbitrary URL on the attacker's behalf (SSRF) -- reaching internal
+  services or an instance metadata endpoint from inside the trust boundary.
+
+  The rule fires only when BOTH halves of the payload are present in the same
+  event: the FastGPT file-read node marker AND an internal/obfuscated target.
+  A workflow that reads a normal public file URL never matches, and an internal
+  URL that is not attached to a file-read node never matches. A second, narrower
+  branch covers the same abuse expressed as a fileUrl/fileUrlList query parameter
+  carrying an internal target.
+author: Haibo
+date: "2026-03-12"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://github.com/labring/FastGPT/releases
+tags:
+  - attack.discovery
+  - attack.t1190
+  - owasp.a10.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: http_request
+
+  # Half 1 -- the payload is a FastGPT workflow file-reading node.
+  sel_filenode:
+    content|re:
+      - '(?i)"(flow_?node_?type|module_?type|node_?type)"\s*:\s*"read_?files"'
+      - '(?i)"(key|name)"\s*:\s*"file_?url_?list"'
+      - '(?i)"file_?url_?list"\s*:\s*\['
+      - '(?i)"plugin_?id"\s*:\s*"[^"]{0,64}read_?files"'
+
+  # Half 2 -- the link in that payload resolves inside the trust boundary,
+  # uses a non-HTTP fetchable scheme, or is obfuscated to evade a naive check.
+  sel_ssrf_target:
+    content|re:
+      - '(?i)https?://(127\.\d{1,3}\.\d{1,3}\.\d{1,3}|localhost|0\.0\.0\.0)\b'
+      - '(?i)https?://\[::1?\]'
+      - '(?i)https?://169\.254\.169\.254\b'
+      - '(?i)https?://169\.254\.170\.2\b'
+      - '(?i)https?://100\.100\.100\.200\b'
+      - '(?i)https?://metadata\.(google\.internal|azure\.com)\b'
+      - '(?i)https?://10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b'
+      - '(?i)https?://192\.168\.\d{1,3}\.\d{1,3}\b'
+      - '(?i)https?://172\.(1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}\b'
+      - '(?i)https?://[a-z0-9-]{1,63}\.(internal|intranet|localdomain|lan|svc|cluster\.local)\b'
+      - '(?i)"(file|gopher|dict|ldap|netdoc|jar)://'
+      - '(?i)https?://0x[0-9a-f]{6,8}\b'
+      - '(?i)https?://0\d{1,3}\.0\d{1,3}\.0\d{1,3}\.0\d{1,3}\b'
+      - '(?i)https?://\d{8,10}[/"]'
+      - '(?i)https?://[A-Za-z0-9._~%+-]{1,64}@(127\.|localhost|10\.|192\.168\.|169\.254\.)'
+      - '(?i)https?%3a%2f%2f(127\.|localhost|0\.0\.0\.0|10\.|192\.168\.|169\.254\.)'
+
+  # Same abuse expressed as a FastGPT-specific query parameter. The parameter
+  # name is what supplies the specificity here, so no path match is needed.
+  sel_nested_file_url_param:
+    url.full|re:
+      - '(?i)[?&]file_?url(_?list)?(%5b%5d|\[\])?=(https?(://|%3a%2f%2f))?(127\.\d|localhost|0\.0\.0\.0|10\.\d|192\.168\.|169\.254\.169\.254|169\.254\.170\.2|100\.100\.100\.200|172\.(1[6-9]|2[0-9]|3[01])\.)'
+      - '(?i)[?&]file_?url(_?list)?(%5b%5d|\[\])?=(file|gopher|dict|ldap)(%3a%2f%2f|://)'
+
+  # The node exists but its URL list is empty or holds only unresolved template
+  # variables -- a saved/exported workflow skeleton, not a live fetch.
+  filter_placeholder_only:
+    content|re: '(?i)"file_?url_?list"\s*:\s*\[\s*("\{\{[^"]{0,120}\}\}"\s*,?\s*)*\]'
+
+  # Advisory / write-up traffic that quotes the proof-of-concept payload.
+  filter_vuln_documentation:
+    content|contains|all:
+      - 'CVE-'
+      - 'server-side request forgery'
+
+  condition: >
+    sel_event
+    and ((sel_filenode and sel_ssrf_target) or sel_nested_file_url_param)
+    and not (filter_placeholder_only or filter_vuln_documentation)
+
+falsepositives:
+  - Single-host / docker-compose FastGPT installs where the file reading node
+    legitimately pulls from the instance's own co-located object store or file
+    service on 127.0.0.1 or an RFC1918 address (e.g. a bundled MinIO). Confirm
+    the port and path belong to the deployment's own storage service.
+  - CI or local development runs that execute FastGPT workflow tests against a
+    dev server on 127.0.0.1 / localhost.
+  - Security advisories, pentest reports and regression fixtures that embed the
+    SSRF proof-of-concept payload; the common phrasing is suppressed by
+    filter_vuln_documentation, but a report that omits the CVE identifier or the
+    phrase "server-side request forgery" will still match.
+  - Exported or template workflows whose fileUrlList contains only unresolved
+    {{variables}}; suppressed by filter_placeholder_only.
+action: report
