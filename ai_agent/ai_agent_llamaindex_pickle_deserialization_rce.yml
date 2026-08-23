@@ -1,0 +1,321 @@
+title: LlamaIndex Pickle Index Deserialization to Code Execution
+id: 7c4f1e2a-9b3d-4c6e-8f51-2a7d9e6b0c34
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation sequence of unsafe deserialization in LlamaIndex
+  BGEM3Index.load_from_disk() (LlamaIndex <= 0.11.6), which calls pickle.load()
+  on an attacker-supplied persist directory without validation.
+
+  There is no live event type or edge kind for "deserialize" in this engine, so the
+  rule detects the observable consequence instead: a Python interpreter instance in
+  the current process session READ a pickle artifact (multi_embed_store.pkl or another
+  .pkl/.pickle file under a persist/storage directory) and, within 45 seconds and
+  ordered after that read, the same process session spawned a payload-shaped child
+  process (shell -c, curl/wget, nc/ncat/socat, /dev/tcp, base64 -d, chmod +x,
+  powershell, osascript, crontab, python -c, ...). That ordered pair is exactly what a
+  pickle __reduce__ gadget produces: the interpreter is still deserializing when the
+  operating system sees a new process.
+
+  Attribution is anchored on meta["caller_pid"] resolved through proc_instance() and
+  proc_lineage(), so the detection is scoped to one process session and one instance
+  rather than to the path-keyed "python" graph node shared by every interpreter run.
+  The triggering spawn is taken from meta (never re-queried from the async event log).
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://docs.python.org/3/library/pickle.html#restricting-globals
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1204.002
+  - owasp.a08_2021
+tags_note: |
+  ATLAS has no mapped technique for this vector; OWASP A08:2021 is the authoritative
+  classification for unsafe deserialization of ML index artifacts.
+falsepositives:
+  - Legitimate ML/RAG pipelines that load a cached pickled index and then immediately
+    shell out (subprocess with shell=True) to git, dvc, aws, gsutil or a build tool.
+    Mitigated by requiring the pickle path to be vuln-named (multi_embed_store /
+    bgem3 / multi_embed) or to sit under a persist/storage/index_store directory
+    before a mere "sh -c"/"bash -c" wrapper is treated as evidence.
+  - Jupyter/IPython notebooks that unpickle a model and then run a shell escape such as
+    "!curl" or "!pip install" in the next cell. Mitigated by the 45 second ordered
+    window and by report-only enforcement.
+  - Model or dataset download scripts that read a .pkl cache and then invoke curl/wget
+    to fetch remaining shards. Mitigated by the persist-directory / vuln-name
+    requirement plus the tight window; still reported by design because the sequence is
+    indistinguishable from the exploit at the syscall layer.
+  - Security researchers or CI jobs intentionally reproducing this CVE against a
+    sacrificial persist directory.
+  - Packaging, freeze or test steps (pytest, tox, cx_Freeze) that unpickle fixtures and
+    then spawn compilers or chmod. Mitigated by the payload-shape allowlist-free tiering
+    (compilers and package managers are not payload-shaped) and by report-only action.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_llama_tool:
+    event_type:
+      - tool_call
+      - tool_response
+    content|contains:
+      - 'load_from_disk'
+      - 'BGEM3Index'
+      - 'BGEM3'
+      - 'multi_embed_store'
+      - 'multi_embed'
+      - 'persist_dir'
+      - 'pickle.load'
+  condition: sel_exec or sel_llama_tool
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Windows (no underscore digit separators — Starlark parse error) ──────────
+  WINDOW_NS    = 45000000000    # 45s: a pickle gadget executes during load()
+  LOOK_BACK_NS = 120000000000   # 2 min staleness guard for the tool-layer trigger
+
+  # Pickle artifacts. fs_activity() patterns are token filters: every whitespace
+  # separated token must appear in the path (paths tokenise on '/', '.', '_').
+  VULN_PATTERNS = ['"multi embed store pkl"', '"embed store pkl"',
+                   '"multi embed pkl"', '"bgem3 pkl"', '"bgem3 pickle"']
+  ANY_PATTERNS  = ['"pkl"', '"pickle"']
+  ALL_PATTERNS  = VULN_PATTERNS + ANY_PATTERNS
+
+  # Interpreter basenames that can host a pickle.load()
+  INTERP = ["ipython", "uvicorn", "gunicorn", "celery", "streamlit", "airflow",
+            "ray", "pytest"]
+
+  # Tier 2 — unambiguous RCE payload shapes
+  HIGH = [r"(?i)\bncat\b", r"(?i)\bsocat\b", r"(?i)\bnc\s+-", r"(?i)\bcurl\b",
+          r"(?i)\bwget\b", r"(?i)\bbase64\s+-{1,2}d", r"(?i)\bpowershell\b",
+          r"(?i)\bosascript\b", r"(?i)\bcrontab\b", r"(?i)\blaunchctl\s+load\b",
+          r"(?i)\bchmod\s+\+x\b", r"(?i)/dev/tcp/", r"(?i)\bmkfifo\b",
+          r"(?i)\bpython[0-9.]*\s+-c\b", r"(?i)\bperl\s+-e\b", r"(?i)\bruby\s+-e\b",
+          r"(?i)\bcmd(\.exe)?\s+/c\b", r"(?i)\bssh-keygen\b"]
+  # Tier 1 — shell wrapper only; needs a vuln-named / persist-dir pickle to count
+  MED  = [r"(?i)\bsh\s+-c\b", r"(?i)\bbash\s+-c\b", r"(?i)\bzsh\s+-c\b",
+          r"(?i)/bin/sh\b", r"(?i)/bin/bash\b", r"(?i)\beval\b"]
+
+  LLAMA = ["load_from_disk", "bgem3", "multi_embed_store", "multi_embed",
+           "persist_dir", "pickle.load"]
+  PERSIST_HINT = ["persist", "storage", "index_store", "vector_store", "llama"]
+
+  TOOL_CTX = ["tool_input", "tool_output", "tool_description",
+              "gateway_description", "prompt_request", "sampling_request"]
+
+  def basename(p):
+      return p.split("/")[-1]
+
+  def is_interpreter(p):
+      b = basename(p).lower()
+      if re.match(r"^python[0-9.]*$", b) != False and re.match(r"^python[0-9.]*$", b):
+          return True
+      if re.match(r"^jupyter", b):
+          return True
+      for i in INTERP:
+          if b == i:
+              return True
+      return False
+
+  def payload_tier(c):
+      if c == "":
+          return 0
+      for pat in HIGH:
+          if re.find(pat, c) != None:
+              return 2
+      for pat in MED:
+          if re.find(pat, c) != None:
+              return 1
+      return 0
+
+  def is_pickle_path(p):
+      lp = p.lower()
+      return lp.endswith(".pkl") or lp.endswith(".pickle")
+
+  def pickle_score(p):
+      lp = p.lower()
+      s = 1
+      if "multi_embed_store" in lp or "multi_embed" in lp or "bgem3" in lp:
+          s = 2
+      for h in PERSIST_HINT:
+          if h in lp:
+              s = s + 1
+              break
+      return s
+
+  def read_edge(proc_path, ts):
+      return {"from": "process://" + proc_path,
+              "to":   "filesystem://" + proc_path,
+              "kind": "READ_FILE",
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts)}
+
+  def exec_edge(parent_path, child_path, cmdline, ts):
+      return {"from": "process://" + parent_path,
+              "to":   "process://" + child_path,
+              "kind": "EXECUTE_PROCESS", "cmdline": cmdline,
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts)}
+
+  def run():
+      ct       = meta.get("context_type", "")
+      content  = meta.get("content", "")
+      event_ts = int(meta.get("event_ts", "0"))
+
+      # ── 1. relevance gate: pure string checks on meta, no graph/log calls ────
+      trig_tier = 0
+      if ct == "execute_process":
+          trig_tier = payload_tier(content)
+          if trig_tier == 0:
+              return "allow"
+      elif ct in TOOL_CTX:
+          lc  = content.lower()
+          hit = False
+          for t in LLAMA:
+              if t in lc:
+                  hit = True
+          if not hit:
+              return "allow"
+      else:
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ───────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # ── 3. scope to one process session (lineage + siblings) ────────────────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x
+      exec_rows = query_events(kind="EXECUTE_PROCESS", limit=3000)
+      for e in exec_rows:
+          pp = e.get("parent_pid", "")
+          ap = e.get("actor_pid", "")
+          if pp in session and ap not in session:
+              session[ap] = e
+
+      interp_paths = []
+      seen = {}
+      for pid in session:
+          p = session[pid].get("actor_path", "")
+          if p == "" or p in seen:
+              continue
+          if is_interpreter(p):
+              seen[p] = True
+              interp_paths.append(p)
+      if not interp_paths:
+          return "allow"
+
+      # ── 4. REQUIRED anchor stage: pickle artifact read by the interpreter ────
+      best = None
+      for p in interp_paths:
+          fsid = "filesystem://" + p
+          if node(fsid) == None:
+              continue
+          for pat in ALL_PATTERNS:
+              for en in fs_activity(fsid, "READ", pat):
+                  fp = en.get("path", "")
+                  if not is_pickle_path(fp):
+                      continue
+                  ts = int(en.get("ts", "0"))
+                  if ts <= 0:
+                      continue
+                  if event_ts > 0:
+                      if ct == "execute_process":
+                          # read must PRECEDE the spawn, inside the window
+                          if ts > event_ts or (event_ts - ts) > WINDOW_NS:
+                              continue
+                      else:
+                          d = event_ts - ts
+                          if d < 0:
+                              d = -d
+                          if d > LOOK_BACK_NS:
+                              continue
+                  sc   = pickle_score(fp)
+                  cand = {"path": fp, "ts": ts, "proc": p, "score": sc, "entry": en}
+                  if best == None:
+                      best = cand
+                  elif sc > best["score"]:
+                      best = cand
+                  elif sc == best["score"] and ts > best["ts"]:
+                      best = cand
+      if best == None:
+          return "allow"
+
+      # ── 5. ordered execution stage ──────────────────────────────────────────
+      ee        = None
+      exec_tier = 0
+      exec_desc = ""
+      if ct == "execute_process":
+          # trigger comes from meta — never re-queried (async ingest race)
+          exec_tier = trig_tier
+          exec_desc = "payload-shaped process spawned during index load: " + content[:200]
+          ee = exec_edge(best["proc"], content.split(" ")[0], content, event_ts)
+      else:
+          for r in exec_rows:
+              if r.get("actor_pid", "") not in session:
+                  if r.get("parent_pid", "") not in session:
+                      continue
+              cl = r.get("cmdline", "")
+              if cl == "":
+                  cl = r.get("actor_path", "")
+              t = payload_tier(cl)
+              if t == 0:
+                  continue
+              rts = int(r.get("ts", "0"))
+              if rts < best["ts"] or (rts - best["ts"]) > WINDOW_NS:
+                  continue
+              if t > exec_tier:
+                  exec_tier = t
+                  exec_desc = "payload-shaped process spawned after pickle read: " + cl[:200]
+                  ee = exec_edge(r.get("parent_path", best["proc"]),
+                                 r.get("actor_path", ""), cl, rts)
+          if ee == None:
+              return "allow"
+
+      # ── 6. confidence gate: a bare shell wrapper needs a vuln-named /
+      #        persist-directory pickle before it counts as evidence ───────────
+      if best["score"] < 2 and exec_tier < 2:
+          return "allow"
+
+      # ── 7. verdict + kill chain built from event/activity rows ──────────────
+      root  = lineage[len(lineage) - 1].get("actor_path", best["proc"])
+      chain = new_chain("process://" + root)
+      chain.append(step(read_edge(best["proc"], best["ts"]),
+                        stage_id="Untrusted Deserialization",
+                        stage_desc="interpreter " + basename(best["proc"]) +
+                                   " read pickled index artifact: " + best["path"],
+                        activity=best["entry"]))
+      chain.append(step(ee, stage_id="Code Execution", stage_desc=exec_desc))
+
+      names = []
+      for x in lineage:
+          names.append(basename(x.get("actor_path", "?")))
+      attr = " -> ".join(names)
+      degraded = ""
+      if len(lineage) < 2:
+          degraded = " (attribution degraded: incomplete lineage)"
+
+      print("pickle RCE sequence: " + best["path"] + " then " + exec_desc +
+            " via " + attr + degraded)
+      return {
+          "action": "report",
+          "reason": "Possible LlamaIndex BGEM3Index.load_from_disk pickle RCE — " +
+                    basename(best["proc"]) + " deserialized " + best["path"] +
+                    " then spawned a payload-shaped process within " +
+                    str(WINDOW_NS / 1000000000) + "s; session: " + attr + degraded,
+          "chain": chain,
+      }
+
+  result = run()
