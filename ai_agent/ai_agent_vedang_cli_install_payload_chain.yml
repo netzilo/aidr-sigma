@@ -1,0 +1,329 @@
+title: Supply Chain vedang-cli Install Followed By Payload Execution
+id: 7f3c1a9e-2d84-4b16-9c05-8ae4f1d3b72a
+status: experimental
+level: medium
+description: |
+  Instance-resolved detection for post-install / post-execution payload behaviour in a
+  process session that installed or ran the PyPI package `vedang-cli` (an AI-agent / MCP
+  CLI package of unverified provenance, v0.1.2).
+
+  This rule deliberately does NOT alert on the package name alone. Triage was correct that
+  no malicious code has been demonstrated in vedang-cli, and that naming-based suspicion is
+  not a detection. It is also correct that the engine has no `package_install` event, no
+  `network_connect` event and no PACKAGE_DEPENDENCY / NETWORK_REQUEST / EXECUTE_CODE edge —
+  only `execute_process` is live. This rule is written entirely inside that constraint and
+  fires only on the one thing `execute_process` CAN prove: that a specific, ordered,
+  session-scoped sequence occurred.
+
+  Required sequence (all instance-resolved, all inside ONE process session):
+    1. ANCHOR  - an EXECUTE_PROCESS event in the caller's own lineage (or a descendant of it)
+                 whose command line or executable path shows `vedang-cli` being installed
+                 (pip / pip3 / uv / pipx / poetry / pdm / conda / python -m pip) or executed
+                 (`vedang-cli` entrypoint, `python -m vedang`).
+    2. PAYLOAD - the triggering `execute_process` event itself is a payload-indicative spawn:
+                 curl / wget / nc / ncat / socat, a /dev/tcp socket, `base64 -d`, osascript,
+                 encoded PowerShell, crontab or launchctl persistence, or an inline
+                 `python -c` / `sh -c` that also contains a network or exec primitive.
+    3. ORDER   - the payload happens AFTER the anchor and within 10 minutes of it.
+    4. OPTIONAL- credential-file reads by the caller or the anchor instance in that window
+                 are attached as supporting evidence (never required to fire).
+
+  Distinction from the typosquat rule (c6e0b534-...): that rule keys on install-command TEXT
+  only and fires at install time. This rule ignores the install by itself and requires a
+  second, executed stage attributable to the same process instance lineage — it is a
+  behavioural sequence, not a name match. An ordinary `pip install vedang-cli` produces no
+  event from this rule.
+
+  Attribution is anchored on meta[caller_pid] -> proc_instance() -> proc_lineage(), and every
+  prior stage is read from the instance-resolved event log scoped to that lineage and its
+  descendants. Nothing is attributed across sessions. The triggering stage is taken from
+  `meta` (never re-queried) to avoid the async-ingest race.
+
+  Report-only by design: the underlying supply-chain claim is unproven, so this rule produces
+  an investigable kill chain for a human and never interferes with a developer install.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Legitimate vedang-cli install whose build backend or post-install hook fetches a prebuilt
+    binary with curl/wget. This is common for packages that ship compiled artifacts. The kill
+    chain shows the exact command line and lineage so an analyst can confirm the destination.
+  - A developer installs vedang-cli and then, in the SAME interactive shell within 10 minutes,
+    runs an unrelated curl / base64 / shell one-liner. Session scoping cannot separate two
+    human intents inside one shell; the emitted lineage trail is provided precisely so this
+    can be dismissed quickly.
+  - Custom PEP 517 build backends that invoke `python -c` with `subprocess` or `exec()` during
+    wheel construction. Mitigated by requiring a network/exec keyword alongside `python -c`
+    (plain `python -c "import setuptools"` from pip build isolation does not match), but an
+    unusual backend can still match.
+  - Self-hosted CI runners that install vedang-cli and immediately curl an internal artifact
+    store or upload logs as part of the same job.
+  - Malware-analysis or security-research sandboxes intentionally installing and exercising
+    the package.
+  - Credential-file reads attached as supporting evidence may be benign (aws/gh CLI helpers
+    invoked by the same shell); they never cause the rule to fire on their own.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_payload_cmd:
+    content|re:
+      - '(?i:\bcurl\b|\bwget\b)'
+      - '(?:^|[\s/])(?:nc|ncat|socat)\s'
+      - '/dev/tcp/'
+      - '(?i:base64)\b[^\n]{0,60}\s-{1,2}[dD]\b'
+      - '(?i:\bosascript\b|\bcrontab\b|\blaunchctl\b)'
+      - '(?i:powershell)'
+      - '\bpython[0-9.]*\b[^\n]{0,200}\s-c\s'
+      - '\b(?:ba|z|k)?sh\b[^\n]{0,200}\s-c\s'
+  condition: sel_exec and sel_payload_cmd
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants ────────────────────────────────────────────────────────────────
+  WINDOW_NS     = 600000000000        # 10 minutes: vedang-cli anchor -> payload
+  MAX_EXEC_ROWS = 4000
+  MAX_READ_ROWS = 300
+
+  CRED_PATHS = ["/.aws/", "/.ssh/", "/.netrc", "/.pypirc", "/.npmrc",
+                "/.git-credentials", "/.kube/", "/.docker/config.json",
+                "/etc/shadow", "/.config/gh/hosts.yml"]
+
+  # ── Pure helpers (no graph / no event-log calls) ─────────────────────────────
+  def safe_int(v):
+      if v == None:
+          return 0
+      s = str(v)
+      if s == "":
+          return 0
+      if re.find(r"^[0-9]+$", s) == None:
+          return 0
+      return int(s)
+
+  def short(p):
+      if p == "":
+          return "?"
+      return p.split("/")[-1]
+
+  def payload_kind(cmd):
+      # High-signal, word-boundary anchored. Returns "" when the spawn is ordinary.
+      if re.find(r"(?i:\bcurl\b)", cmd) != None:
+          return "curl"
+      if re.find(r"(?i:\bwget\b)", cmd) != None:
+          return "wget"
+      if re.find(r"(?:^|[\s/])(?:nc|ncat|socat)\s", cmd) != None:
+          return "netcat/socat"
+      if re.find(r"/dev/tcp/", cmd) != None:
+          return "bash-tcp-socket"
+      if re.find(r"(?i:base64)\b[^\n]{0,60}\s-{1,2}[dD]\b", cmd) != None:
+          return "base64-decode"
+      if re.find(r"(?i:\bosascript\b)", cmd) != None:
+          return "osascript"
+      if re.find(r"(?i:powershell)[^\n]{0,120}\s-(?:e|ec|enc|encodedcommand)\b", cmd) != None:
+          return "powershell-encoded"
+      if re.find(r"(?i:\bcrontab\b)", cmd) != None:
+          return "crontab-persistence"
+      if re.find(r"(?i:\blaunchctl\b)[^\n]{0,60}(?:load|bootstrap)", cmd) != None:
+          return "launchd-persistence"
+      if re.find(r"\bpython[0-9.]*\b[^\n]{0,200}\s-c\s", cmd) != None:
+          # plain `python -c "import setuptools..."` from pip build isolation is NOT a payload
+          if re.find(r"(?i:socket|urllib|urlopen|requests\.|http\.client|subprocess|os\.system|exec\(|eval\(|b64decode)", cmd) != None:
+              return "python-inline-network-or-exec"
+          return ""
+      if re.find(r"\b(?:ba|z|k)?sh\b[^\n]{0,200}\s-c\s", cmd) != None:
+          if re.find(r"(?i:curl|wget|/dev/tcp|base64|chmod\s+\+x|nohup)", cmd) != None:
+              return "shell-inline-network-or-exec"
+          return ""
+      return ""
+
+  def vedang_form(cmd, path):
+      s = cmd + " " + path
+      if re.find(r"(?i:vedang)", s) == None:
+          return ""
+      if re.find(r"(?i:vedang[-_. ]?cli|\bvedang\b)", s) == None:
+          return ""
+      if re.find(r"(?i:python[0-9.]*\s+-m\s+pip\b)", s) != None:
+          return "install"
+      if re.find(r"(?i:\b(?:pip|pip3|uv|pipx|poetry|pdm|conda)\b)", s) != None:
+          if re.find(r"(?i:\binstall\b|\badd\b)", s) != None:
+              return "install"
+      if re.find(r"(?i:vedang[-_]?cli)", path) != None:
+          return "execute"
+      if re.find(r"(?i:python[0-9.]*\s+-m\s+vedang)", s) != None:
+          return "execute"
+      if re.find(r"(?i:\bvedang[-_]?cli\b)", cmd) != None:
+          return "execute"
+      return ""
+
+  def is_cred_path(p):
+      for c in CRED_PATHS:
+          if c in p:
+              return True
+      return False
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "process://" + e.get("actor_path", "")
+      src = e.get("parent_path", "")
+      if src == "":
+          src = e.get("actor_path", "")
+      ts = e.get("ts", "0")
+      return {"from": "process://" + src, "to": tgt, "kind": e.get("kind", ""),
+              "ts": ts, "first_ts": ts, "last_ts": ts,
+              "cmdline": e.get("cmdline", "")}
+
+  # ── Detection ────────────────────────────────────────────────────────────────
+  def run():
+      # 1. RELEVANCE GATE — pure string checks on meta, no traversal.
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      pkind = payload_kind(cmd)
+      if pkind == "":
+          return "allow"
+
+      trigger_ts = safe_int(meta.get("event_ts", "0"))
+      cp         = safe_int(meta.get("caller_pid", "0"))
+      if cp == 0 or trigger_ts == 0:
+          return "allow"
+
+      # 2. ANCHOR on the exact triggering instance.
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when the create row lands
+      lineage = proc_lineage(safe_int(inst.get("actor_pid", "0")),
+                             safe_int(inst.get("actor_start", "0")))
+      if not lineage:
+          return "allow"
+
+      # 3. SESSION SCOPE — lineage plus descendants spawned inside the window.
+      win_start = trigger_ts - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[str(x.get("actor_pid", ""))] = True
+
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
+                          until_ns=trigger_ts, limit=MAX_EXEC_ROWS)
+      for _ in range(4):                       # propagate descendants a few levels deep
+          for e in rows:
+              if str(e.get("parent_pid", "")) in session:
+                  session[str(e.get("actor_pid", ""))] = True
+
+      # 4. REQUIRED ANCHOR STAGE — vedang-cli installed or executed in THIS session.
+      anchor = None
+      anchor_form = ""
+      for e in rows:
+          if anchor != None:
+              continue
+          ap = str(e.get("actor_pid", ""))
+          pp = str(e.get("parent_pid", ""))
+          if ap not in session and pp not in session:
+              continue
+          f = vedang_form(e.get("cmdline", ""), e.get("actor_path", ""))
+          if f == "":
+              continue
+          ts = safe_int(e.get("ts", "0"))
+          if ts > trigger_ts or ts < win_start:
+              continue
+          anchor = e
+          anchor_form = f
+
+      if anchor == None:
+          for x in lineage:
+              if anchor != None:
+                  continue
+              f = vedang_form(x.get("cmdline", ""), x.get("actor_path", ""))
+              if f == "":
+                  continue
+              ts = safe_int(x.get("ts", "0"))
+              if ts != 0:
+                  if ts > trigger_ts or ts < win_start:
+                      continue
+              anchor = x
+              anchor_form = f
+
+      if anchor == None:
+          return "allow"                      # no vedang-cli in this session — nothing to say
+
+      anchor_ts = safe_int(anchor.get("ts", "0"))
+      if anchor_ts == 0:
+          anchor_ts = win_start
+
+      # 5. OPTIONAL SUPPORTING STAGE — credential reads, scoped by actor_pid only.
+      cred_hit = None
+      check_pids = [str(cp)]
+      apid = str(anchor.get("actor_pid", ""))
+      if apid != "" and apid != str(cp):
+          check_pids.append(apid)
+      for p in check_pids:
+          if cred_hit != None:
+              continue
+          ip = safe_int(p)
+          if ip == 0:
+              continue
+          for fe in query_events(kind="READ_FILE", actor_pid=ip, since_ns=anchor_ts,
+                                 until_ns=trigger_ts, limit=MAX_READ_ROWS):
+              if cred_hit != None:
+                  continue
+              if is_cred_path(fe.get("path", "")):
+                  cred_hit = fe
+
+      # 6. KILL CHAIN — rooted at the session owner, built from event rows + meta.
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      anchor_detail = anchor.get("cmdline", "")
+      if anchor_detail == "":
+          anchor_detail = anchor.get("actor_path", "")
+      chain.append(step(ev_edge(anchor), stage_id="Supply Chain Package",
+                        stage_desc="vedang-cli (PyPI, unverified provenance) " + anchor_form +
+                                   ": " + anchor_detail[:200]))
+
+      # Trigger stage comes from meta — never re-queried (async-ingest race).
+      parent_path = inst.get("actor_path", "")
+      if len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", parent_path)
+      trig = {"from": "process://" + parent_path,
+              "to":   "process://" + inst.get("actor_path", ""),
+              "kind": "EXECUTE_PROCESS",
+              "ts": str(trigger_ts), "first_ts": str(trigger_ts), "last_ts": str(trigger_ts),
+              "cmdline": cmd[:400]}
+      chain.append(step(trig, stage_id="Post-Install Payload",
+                        stage_desc=pkind + " spawned inside the vedang-cli session: " + cmd[:200]))
+
+      if cred_hit != None:
+          chain.append(step(ev_edge(cred_hit), stage_id="Credential Access",
+                            stage_desc="session instance read " + cred_hit.get("path", "")))
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      trail = " -> ".join(names)
+
+      reason = ("vedang-cli " + anchor_form + " then " + pkind +
+                " within " + str((trigger_ts - anchor_ts) / 1000000000) + "s in the same " +
+                "process session [" + trail + "]")
+      if cred_hit != None:
+          reason = reason + "; credential file read: " + cred_hit.get("path", "")
+      if len(lineage) < 2:
+          reason = reason + " (attribution: degraded — lineage truncated)"
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
