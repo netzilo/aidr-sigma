@@ -1,0 +1,301 @@
+title: LangChain Prompt Loader Arbitrary File Read (Instance-Resolved)
+id: 7c1f3a5e-9b62-4d18-a0e7-5f3c8d2b4a91
+status: experimental
+level: medium
+description: |
+  Detects the live-observable residue of CVE-class path traversal in
+  langchain_core.prompts.loading (_load_template / _load_examples /
+  _load_few_shot_prompt). Those helpers read template_path, suffix_path,
+  prefix_path, examples and example_prompt_path straight out of a deserialized
+  prompt configuration with no traversal or absolute-path validation, limited
+  only by an extension whitelist of .txt / .json / .yaml / .yml.
+
+  The deserialization step itself is NOT observable: the engine has no
+  'load_config' event type and no DESERIALIZED_UNTRUSTED_DATA edge, and the
+  'file_read' context has no live producer. This rule therefore does not claim
+  to see the untrusted config. It reconstructs the loader's filesystem footprint
+  from the instance-resolved event log instead:
+
+    Stage 1 (required anchor) - the SAME process instance reads a
+      loader-named configuration file (prompt / template / few_shot / example /
+      chain in the path) whose extension is one of the four the loader accepts.
+      This is load_prompt() opening its own config.
+    Stage 2 (required discriminator) - within 10 seconds, ordered AFTER stage 1,
+      the SAME instance reads a second file that also carries a loader-permitted
+      extension, lies OUTSIDE the directory tree of the stage-1 config, and is
+      either a literal traversal path or a credential-class location that the
+      extension filter happens to permit (cloud SDK JSON, kube/gh/docker config,
+      mounted secret YAML).
+
+  Directory escape inside one load_prompt() call is the traversal signature; a
+  legitimate prompt load resolves every referenced path underneath its own
+  config directory. Because attribution back to an attacker-controlled config is
+  inferential, the verdict is report only - it is evidence for an analyst, never
+  an enforcement decision.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://python.langchain.com/api_reference/core/prompts/langchain_core.prompts.loading.load_prompt.html
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.a01_2021
+  - owasp.a03_2021
+falsepositives:
+  - A LangChain service running in Kubernetes that loads prompts/agent.yaml and,
+    within the same 10-second startup burst, legitimately reads its projected
+    service-account or secret volume under /var/run/secrets/ or /run/secrets/.
+  - A GCP-hosted LangChain application where google-auth resolves Application
+    Default Credentials (~/.config/gcloud/application_default_credentials.json)
+    immediately after the first prompt template load.
+  - A Python worker that reads a chain/template config and then initialises the
+    docker or kubernetes SDK, which opens ~/.docker/config.json or ~/.kube/*.yaml.
+  - Repository test suites whose fixture layout places prompt fixtures and
+    credential-shaped fixtures (credentials.json, secrets.yaml) in sibling trees.
+  - Ansible or Vault tooling invoked from the same interpreter that just parsed a
+    prompt YAML, reading vault.yml outside the prompt directory.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule's own window - never baked into storage) ─────────
+  LOOK_BACK_NS = 600000000000    # 10 min bound on every event-log query
+  WINDOW_NS    = 10000000000     # 10 s - the span of one load_prompt() call
+  MAX_PIDS     = 16
+  MAX_READS    = 500
+  MAX_SEEN     = 200
+
+  # The exact extension whitelist enforced by langchain_core.prompts.loading.
+  PERMITTED_EXT = [".txt", ".json", ".yaml", ".yml"]
+
+  # LangChain loader naming conventions for the config file the loader opens.
+  LOADER_TOKENS = ["prompt", "template", "few_shot", "fewshot", "example", "chain"]
+
+  # Credential-class locations that the loader's extension filter still permits.
+  CRED_DIRS = ["/.aws/", "/.config/gcloud/", "/.azure/", "/.kube/", "/.docker/",
+               "/.config/gh/", "/.config/doctl/", "/.gnupg/", "/.ssh/",
+               "/.chef/", "/.circleci/", "/var/run/secrets/", "/run/secrets/",
+               "/etc/kubernetes/", "/.config/openai/", "/.config/anthropic/"]
+  CRED_FILES = ["credentials.json", "credentials.yaml", "credentials.yml",
+                "credentials.txt", "secrets.json", "secrets.yaml", "secrets.yml",
+                "application_default_credentials.json", "service_account.json",
+                "service-account.json", "client_secret.json", "sa-key.json",
+                "token.json", "vault.yml", "vault.yaml", "id_rsa.txt"]
+
+  # ── Pure helpers (no graph / log calls) ──────────────────────────────────
+  def has_ext(p):
+      lp = p.lower()
+      for e in PERMITTED_EXT:
+          if lp.endswith(e):
+              return True
+      return False
+
+  def loader_named(p):
+      lp = p.lower()
+      for t in LOADER_TOKENS:
+          if t in lp:
+              return True
+      return False
+
+  def cred_hit(p):
+      lp = p.lower()
+      for d in CRED_DIRS:
+          if d in lp:
+              return d
+      for f in CRED_FILES:
+          if lp.endswith("/" + f):
+              return f
+      return ""
+
+  def traversal_literal(p):
+      lp = p.lower()
+      for t in ["/../", "/..\\", "%2e%2e", "/..%2f"]:
+          if t in lp:
+              return True
+      if lp.startswith("../"):
+          return True
+      return False
+
+  def dirof(p):
+      i = p.rfind("/")
+      if i < 0:
+          return ""
+      return p[:i + 1]
+
+  def basename(p):
+      i = p.rfind("/")
+      if i < 0:
+          return p
+      return p[i + 1:]
+
+  def is_python_host(ap):
+      b = basename(ap)
+      m = re.find(r"(?i)^(python[0-9.]*|pypy[0-9.]*|uv|uvicorn|gunicorn|celery|streamlit|jupyter[a-z_-]*)$", b)
+      return m != None
+
+  def ev_edge(actor_path, path, ts):
+      return {"from": "process://" + actor_path,
+              "to": path,
+              "kind": "READ_FILE",
+              "ts": ts,
+              "first_ts": ts,
+              "last_ts": ts}
+
+  # ── Relevance gate: pure string checks on meta, no traversal ─────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "tool_input" or ct == "tool_output":
+          return True
+      if ct == "execute_process":
+          cmd = meta.get("content", "")
+          for t in [r"\bpython[0-9.]*\b", r"\bpypy[0-9.]*\b", r"\blangchain\b",
+                    r"\buvicorn\b", r"\bgunicorn\b", r"\bcelery\b"]:
+              if re.find(t, cmd) != None:
+                  return True
+          return False
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+      since = now - LOOK_BACK_NS
+
+      # ── Anchor on the exact triggering instance ──────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"          # degraded - re-fires once the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── Session scope: lineage + processes it spawned (2 generations) ────
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000)
+      for _gen in range(2):
+          for k in spawns:
+              if k.get("parent_pid", "") in session:
+                  session[k["actor_pid"]] = k.get("actor_start", "0")
+
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      names = " -> ".join([basename(x.get("actor_path", "")) for x in lineage])
+      seen  = store_get("reported") or {}
+
+      npids = 0
+      for pid in session:
+          npids += 1
+          if npids > MAX_PIDS:
+              break
+          start = session[pid]
+
+          # READ_FILE is high volume - ALWAYS scoped to one exact instance.
+          reads = query_events(kind="READ_FILE", actor_pid=int(pid),
+                               actor_start=int(start), since_ns=since,
+                               limit=MAX_READS)
+          if not reads:
+              continue
+
+          items = []
+          for r in reads:
+              p = r.get("path", "")
+              if p == "":
+                  continue
+              if not has_ext(p):
+                  continue          # outside the loader's extension whitelist
+              items.append([r.get("ts", "0"), p, r.get("actor_path", "")])
+          if len(items) < 2:
+              continue
+          items = sorted(items)     # ns timestamps are fixed width - lexical == numeric
+
+          # Stage 1 candidates: the loader's own config file.
+          anchors = []
+          for it in items:
+              if loader_named(it[1]) and cred_hit(it[1]) == "":
+                  anchors.append(it)
+          if not anchors:
+              continue
+
+          # Stage 2: escape out of the config's tree, same instance, ordered.
+          for it in items:
+              bts   = int(it[0])
+              bpath = it[1]
+              ch    = cred_hit(bpath)
+              trav  = traversal_literal(bpath)
+              if ch == "" and not trav:
+                  continue
+              if ch != "" and not is_python_host(it[2]):
+                  continue          # credential branch scoped to the LangChain host
+
+              best = None
+              for a in anchors:
+                  ats = int(a[0])
+                  if ats > bts:
+                      continue                      # ordering: config first
+                  if bts - ats > WINDOW_NS:
+                      continue                      # outside one load_prompt() call
+                  if a[1] == bpath:
+                      continue
+                  d = dirof(a[1])
+                  if d != "" and bpath.startswith(d):
+                      continue                      # resolved inside the prompt tree
+                  if best == None or int(best[0]) < ats:
+                      best = a
+              if best == None:
+                  continue
+
+              key = pid + ":" + start + ":" + bpath
+              if key in seen:
+                  continue                          # already surfaced this pair
+
+              detail = "credential-class target (" + ch + ")"
+              if trav:
+                  detail = "literal directory-traversal path"
+
+              chain.append(step(ev_edge(best[2], best[1], best[0]),
+                                stage_id="Prompt Config Load",
+                                stage_desc="langchain loader read prompt config: " + best[1]))
+              chain.append(step(ev_edge(it[2], bpath, it[0]),
+                                stage_id="Arbitrary File Read",
+                                stage_desc="same instance escaped the config directory within " +
+                                           str((bts - int(best[0])) / 1000000) + " ms - " +
+                                           detail + ": " + bpath))
+
+              seen[key] = str(bts)
+              if len(seen) > MAX_SEEN:
+                  seen = {key: str(bts)}
+              if store_usage()["free"] > 8192:
+                  store_set("reported", seen)
+
+              print("langchain prompt-loader traversal candidate: " + best[1] +
+                    " -> " + bpath + " | pid " + pid + " | lineage " + names)
+              return {
+                  "action": "report",
+                  "reason": "LangChain prompt loader read " + bpath +
+                            " outside the tree of its config " + best[1] +
+                            " (" + detail + ") within one load_prompt() window; actor " + names,
+                  "chain": chain,
+              }
+      return "allow"
+
+  result = run()
