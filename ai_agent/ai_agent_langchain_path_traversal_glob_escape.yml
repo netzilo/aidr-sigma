@@ -1,0 +1,131 @@
+title: LangChain Sandbox Escape Path or Glob Argument
+id: 7b3f1c2e-9d64-4a51-bf08-2c6d5a41e9c7
+status: experimental
+level: medium
+description: |
+  Detects path-traversal and sandbox-escape shaped values supplied in the path,
+  directory, glob or search-pattern arguments of an agent tool call (or an LLM
+  tool_use block) before the call is executed.
+
+  Threat: LangChain file-search middleware and document loaders validate the
+  starting root but do not confine the *resolved* target, so an LLM- or
+  config-influenced path/glob can walk out of the sandbox ("../../../"),
+  reference an encoded traversal, escape via a glob that ascends out of the
+  root, or be redirected through a planted symlink, disclosing files outside
+  the authorised tree.
+
+  Scope and honesty about coverage: the engine exposes no resolve_path,
+  list_directory or read_file event type, and no FOLLOW_SYMLINK,
+  GLOB_PATTERN_MATCH or BYPASS_AUTHORIZATION edge. The resolution step that
+  actually performs the escape is therefore NOT observable, and this rule does
+  not claim to see it. What is observable in a single event is the *argument
+  shape* that must be present for the escape to occur: the traversal or
+  out-of-root glob the component is asked to resolve. That is what this rule
+  matches, on the request side, and it is why the action is report rather than
+  block \u2014 a matching argument is a necessary precondition of the exploit, not
+  proof that the resolution escaped the root. Correlating the subsequent
+  READ_FILE edge (the only live edge kind for this threat) to a sensitive path
+  belongs in a separate periodic graph rule, not here.
+
+  Tightening applied to keep this at report-grade precision: a single "../" is
+  never enough. A match requires three or more stacked traversal segments, a
+  traversal that terminates on a credential/secret artefact, a glob/pattern
+  field that ascends out of its root or targets a system root, a percent- or
+  double-encoded traversal, or a symlink being planted onto a parent path or
+  credential target.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://cwe.mitre.org/data/definitions/59.html
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.discovery
+  - attack.t1083
+  - attack.collection
+  - attack.t1005
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.llm02
+  - owasp.llm06
+falsepositives:
+  - Monorepo tooling that legitimately reaches several levels up into sibling
+    workspaces ("../../../packages/core/src/index.ts") \u2014 suppressed by
+    filter_monorepo_relative, which only clears deep traversals that land in a
+    known source/build directory and contain no dot-prefixed segment.
+  - Documentation, README or scaffolding content that carries placeholder paths
+    such as "path/to/file" or "${PROJECT_ROOT}" \u2014 suppressed by
+    filter_placeholder_path.
+  - Security training material, SBOM notes or advisory text that quotes CWE-22 /
+    CWE-59 traversal examples \u2014 suppressed by filter_vuln_documentation.
+  - Build tooling that legitimately globs an absolute system directory it owns
+    (for example a container image build listing /var/log) \u2014 will still report;
+    triage by checking whether the calling tool is a sandboxed loader.
+  - Developer-initiated "ln -s" of a dotfile into a home directory during
+    environment setup \u2014 will still report; low volume and worth an audit line.
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+
+  # --- stacked traversal in a path-bearing argument (3+ segments) -------------
+  sel_deep_traversal:
+    event_type:
+      - tool_call
+      - llm_tool_call
+    content|re: '(?i)"(?:path|file_path|filepath|dir|dir_path|directory|root|root_dir|root_path|base_dir|source_path|target_path|filename|file_name|input_file|abs_path|relative_path)"\s*:\s*"[^"]{0,200}(?:\.\.[\\/]){3,}'
+
+  # --- traversal that terminates on a credential / secret artefact ------------
+  sel_sensitive_target_traversal:
+    event_type:
+      - tool_call
+      - llm_tool_call
+    content|re: '(?i)"(?:path|file_path|filepath|dir|dir_path|directory|root|root_dir|root_path|base_dir|source_path|target_path|filename|file_name|input_file|abs_path|relative_path|glob|glob_pattern|pattern|search_pattern|file_pattern|include)"\s*:\s*"[^"]{0,200}\.\.[\\/][^"]{0,200}(?:/etc/(?:passwd|shadow)|[\\/]\.ssh[\\/]|[\\/]\.aws[\\/]|[\\/]\.kube[\\/]|[\\/]\.env\b|[\\/]\.netrc\b|[\\/]\.npmrc\b|[\\/]\.git-credentials\b|[\\/]\.docker[\\/]config\.json|id_rsa|id_ed25519|service[_-]account\.json)'
+
+  # --- glob / search pattern that ascends out of its root or targets a system root
+  sel_glob_root_escape:
+    event_type:
+      - tool_call
+      - llm_tool_call
+    content|re: '(?i)"(?:glob|glob_pattern|globs|pattern|patterns|search_pattern|file_pattern|include|includes|match_pattern)"\s*:\s*"[^"]{0,160}(?:\*\*[\\/]\.\.[\\/]|\.\.[\\/]\*\*|(?:\.\.[\\/]){2,}|~[\\/]\.(?:ssh|aws|kube|config)[\\/]|/(?:etc|root|proc|sys)/|/home/[^"/]{1,64}/\.(?:ssh|aws|kube)[\\/])'
+
+  # --- percent- / double-encoded traversal inside a path or pattern argument --
+  sel_encoded_traversal:
+    event_type:
+      - tool_call
+      - llm_tool_call
+    content|re: '(?i)"(?:path|file_path|filepath|dir|dir_path|directory|root_dir|root_path|source_path|target_path|filename|file_name|glob|glob_pattern|pattern|search_pattern|file_pattern|include)"\s*:\s*"[^"]{0,200}(?:%2e%2e(?:%2f|%5c|/|\\)|\.\.%2f|\.\.%5c|%252e%252e|\.\.%c0%af|\.\.%00|\.\.;[\\/])'
+
+  # --- engine-extracted file_path on the tool-call path -----------------------
+  sel_file_path_field:
+    event_type: tool_call
+    file_path|re: '(?i)(?:(?:\.\.[\\/]){3,}|\.\.[\\/][^\s]{0,200}(?:/etc/(?:passwd|shadow)|[\\/]\.ssh[\\/]|[\\/]\.aws[\\/]|[\\/]\.kube[\\/]|[\\/]\.netrc\b|[\\/]\.git-credentials\b|id_rsa|id_ed25519)|%2e%2e|\.\.%2f|\.\.%5c)'
+
+  # --- symlink planted onto a parent path or a credential target --------------
+  sel_symlink_escape:
+    event_type: tool_call
+    command|re: '(?i)\bln\s+-[a-z]*s[a-z]*\s+[^\s;|&]{0,200}(?:(?:\.\.[\\/]){2,}|/etc/(?:passwd|shadow)|[\\/]\.ssh[\\/]|[\\/]\.aws[\\/]|[\\/]\.kube[\\/]|[\\/]\.env\b|/root/)'
+
+  # --- suppressors ------------------------------------------------------------
+  filter_placeholder_path:
+    content|re: '(?i)"(?:path|file_path|filepath|dir|directory|root_dir|root_path|glob|glob_pattern|pattern|search_pattern|filename)"\s*:\s*"[^"]{0,140}(?:path/to/|/your/|your[_-]|<[a-z_]{2,24}>|\{\{?[a-z_]{2,30}\}?\}|\$\{[A-Z_]{2,30}\}|placeholder|dummy|\.\.\.\.\.\.)'
+
+  filter_vuln_documentation:
+    content|contains:
+      - 'CWE-22'
+      - 'CWE-59'
+      - 'path traversal vulnerability'
+      - 'directory traversal vulnerability'
+      - 'improper limitation of a pathname'
+
+  filter_monorepo_relative:
+    content|re: '(?i)"[a-z_]{2,24}"\s*:\s*"(?:\.\.[\\/]){3,}(?:packages|libs?|src|apps?|tests?|testdata|fixtures?|__fixtures__|node_modules|dist|build|docs?)[\\/][A-Za-z0-9_\-/]{0,120}(?:\.[A-Za-z0-9]{1,8})?"'
+
+  condition: >
+    (sel_deep_traversal or sel_sensitive_target_traversal or sel_glob_root_escape or
+     sel_encoded_traversal or sel_file_path_field or sel_symlink_escape)
+    and not (filter_placeholder_path or filter_vuln_documentation or filter_monorepo_relative)
+
+action: report
