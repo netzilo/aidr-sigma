@@ -1,0 +1,90 @@
+title: Supply Chain awbrowse Remote Browser Client Acquisition
+id: 7f3c2b9e-4d1a-4c86-9b52-0a6e8d3f21c7
+status: experimental
+level: medium
+description: |
+  Single-event visibility rule for the PyPI package `awbrowse`, a portable client that
+  drives a real browser through a hosted AitherBrowser-shaped rendering service.
+
+  Acquiring this package gives an agent a remote, fully-scriptable browser: navigation,
+  scraping and form/credential interaction that leaves the local egress path entirely and
+  is therefore invisible to host-level HTTP inspection (the page fetch happens on the
+  vendor's infrastructure, not on this device). That is a material capability change even
+  when the package behaves exactly as advertised.
+
+  Triage dissent is accepted and reflected in the enforcement choice: the narrative
+  describes no payload, no credential theft and no unauthorised-access mechanism, so this
+  rule is `report` only and must never block. It records capability acquisition and first
+  use for review; it does not assert compromise.
+
+  The dissent is also correct that the engine has no `package_install` event type and no
+  `ACQUIRED_CAPABILITY` edge kind, so "install" is not a first-class concept here. This
+  rule therefore approximates it with the two signals that are confirmed live:
+    1. execute_process  - an installer or interpreter command line naming `awbrowse`
+    2. http_request     - retrieval of the `awbrowse` distribution artifact or index page
+  Both are single-event, content-only checks; no graph traversal is performed.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── Acquisition: a package manager is told to fetch/install awbrowse ────────
+  sel_exec_install:
+    event_type: execute_process
+    command|re:
+      - '(?i)\b(?:pip[23]?|pipx|uv|poetry|pdm|rye|conda|micromamba)\b[^\n]{0,200}\b(?:install|add|download|sync)\b[^\n]{0,200}\bawbrowse\b'
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\bawbrowse\s{0,4}(?:==|>=|<=|~=|@|\[)'
+      - '(?i)\bgit\+[^\s\n]{0,200}awbrowse(?:\.git)?\b'
+
+  # ── First use: the client is imported or its console script is executed ─────
+  sel_exec_runtime:
+    event_type: execute_process
+    command|re:
+      - '(?i)\bpython[0-9.]{0,4}\b[^\n]{0,200}\s-m\s+awbrowse\b'
+      - '(?i)(?:import\s+awbrowse\b|from\s+awbrowse(?:\.[A-Za-z0-9_]{1,40}){0,3}\s+import\b)'
+      - '(?i)(?:^|[\s;|&])(?:[^\s;|&]{0,120}/)?awbrowse(?:\s|$)'
+
+  # ── Acquisition over the wire: index page or distribution artifact ──────────
+  # Deliberately host-agnostic so private mirrors and proxies are also covered.
+  sel_pypi_artifact:
+    event_type: http_request
+    url.full|re:
+      - '(?i)/(?:simple|pypi)/awbrowse[/\-]'
+      - '(?i)/awbrowse-[0-9][^/\s]{0,60}\.(?:whl|tar\.gz|zip)\b'
+
+  # ── Filters: metadata queries and removal are not acquisition ──────────────
+  filter_pkg_query:
+    command|re: '(?i)\b(?:pip[23]?|pipx|uv|poetry|conda)\b[^\n]{0,120}\b(?:uninstall|remove|show|list|index|search|cache|freeze)\b'
+
+  # ── Filters: the command only reads or prints text that mentions the name ──
+  # Anchored at the start of the command line so a chained `... ; pip install`
+  # is not suppressed.
+  filter_readonly_cmd:
+    command|re: '(?i)^\s{0,8}(?:[^\s]{0,120}/)?(?:grep|rg|ack|cat|less|more|head|tail|man|echo|printf|find|ls|file|sha256sum|md5sum|diff)\b'
+
+  condition: (sel_exec_install or sel_exec_runtime or sel_pypi_artifact) and not (filter_pkg_query or filter_readonly_cmd)
+
+falsepositives:
+  - Developer or QA engineer intentionally installing awbrowse for approved browser
+    automation or end-to-end testing work.
+  - CI/CD or container build step resolving a requirements.txt / pyproject.toml /
+    uv.lock that already pins awbrowse - the install command line is identical to a
+    first-time acquisition and cannot be distinguished from a single event.
+  - Internal PyPI mirror, proxy or artifact cache warming itself by fetching the
+    awbrowse sdist/wheel on behalf of another consumer.
+  - A differently-named fork or extras distribution (awbrowse-core, awbrowse-cli,
+    my-awbrowse) whose name shares the awbrowse token.
+  - Security researcher or reviewer downloading the distribution to inspect it before
+    approval.
+
+action: report
