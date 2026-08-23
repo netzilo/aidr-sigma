@@ -1,0 +1,301 @@
+title: SSRF Redirect Bypass in Agent Scraping Fetch
+id: 3f1c9a6e-8d24-4b71-9c53-2a7e5b0d61f4
+status: experimental
+level: high
+description: |
+  Detects the behavioural signature of an SSRF redirect-bypass (CrewAI < 1.15.1a1 class
+  of bug) in agent web-scraping fetches: the agent fetches an attacker-supplied PUBLIC
+  URL, that URL answers with an HTTP 3xx redirect, and within seconds the same agent
+  process (or its parent agent) issues an HTTP request to an INTERNAL destination
+  (RFC1918 / loopback / link-local / cloud-metadata / single-label or .internal-style
+  hostname) that it has barely ever touched before.
+
+  The vulnerability is that the redirect target is not re-validated against the SSRF
+  allowlist, so a public fetch is converted into an internal fetch. That conversion is a
+  *sequence*, not a payload, so this rule walks the behaviour graph:
+    Process -HTTP_REQUEST-> URL(public)   (the scrape)
+    URL(public) -HTTP_RESPONSE-> Process  (last_status 301/302/303/307/308)
+    Process -HTTP_REQUEST-> URL(internal) (the bypassed destination, = current event)
+
+  Reports only. No host, domain or path is added to any trust list; "internal" is
+  determined structurally (address family / ZTNA classification / label shape).
+author: Selhan
+date: "2026-03-05"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://github.com/crewAIInc/crewAI/releases
+tags:
+  - attack.discovery
+  - attack.t1046
+  - owasp.a10-2021-ssrf
+falsepositives:
+  - Agent scrapes an external corporate link that legitimately 302s to an intranet
+    portal or SSO host reachable over the private tunnel. Mitigated by the fetch-count
+    cap (a genuinely used internal portal quickly exceeds 3 fetches and stops matching)
+    and by the 10-minute per-(public,internal) suppression window.
+  - Local development proxy, MCP gateway or model server on 127.0.0.1 receiving its
+    first one or two requests just after an unrelated external GET. Mitigated by the
+    fetch-count cap and by requiring a 3xx response recorded on the public host.
+  - Cloud SDK IMDS credential refresh (169.254.169.254) happening to land within 15s
+    of an external fetch that returned a redirect. Mitigated by the same fetch-count
+    cap - only the first few metadata fetches of a session can match - and by report,
+    not block.
+  - Link-shortener / CDN redirect chains whose final hop is a split-horizon single-label
+    hostname. This is genuinely indistinguishable from the attack at the network layer
+    and is the intended reason this rule reports rather than blocks.
+  - Kubernetes in-cluster service fetch (svc / cluster.local) by an agent that also
+    scrapes the public internet in the same task.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: http_request
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── tunables (this rule's own window - never baked into storage) ──────────────
+  WINDOW_NS          = 15000000000      # 15s: a redirect is followed immediately
+  SUPPRESS_NS        = 600000000000     # 10 min de-dup per (public host, internal host)
+  MAX_TARGET_FETCHES = 3                # routine internal endpoints exceed this fast
+
+  REDIRECT_STATUS = ["301", "302", "303", "307", "308"]
+
+  METADATA_HOSTS = [
+      "169.254.169.254", "169.254.170.2", "100.100.100.200",
+      "metadata.google.internal", "metadata.goog",
+  ]
+
+  PRIVATE_PREFIX = [
+      "10.", "127.", "192.168.", "169.254.", "100.64.", "100.100.100.", "0.",
+      "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+      "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+      "172.28.", "172.29.", "172.30.", "172.31.",
+  ]
+
+  INTERNAL_SUFFIX = [
+      ".local", ".internal", ".intranet", ".lan", ".localdomain",
+      ".svc", ".cluster.local", ".corp", ".home.arpa",
+  ]
+
+  # ── pure helpers (no graph / log calls) ───────────────────────────────────────
+  def to_int(v):
+      if v == None:
+          return 0
+      s = str(v)
+      if s == "":
+          return 0
+      return int(s)
+
+  def is_metadata(h):
+      hl = h.lower()
+      for m in METADATA_HOSTS:
+          if hl == m:
+              return True
+      return False
+
+  def is_internal_target(h):
+      if h == "":
+          return False
+      hl = h.lower()
+      if hl.startswith("[") and hl.endswith("]"):
+          hl = hl[1:len(hl) - 1]
+      if is_metadata(hl):
+          return True
+      if hl.find(":") >= 0:
+          # IPv6 literal: loopback, unique-local, link-local only
+          if hl == "::1" or hl.startswith("fd") or hl.startswith("fc") or hl.startswith("fe80:"):
+              return True
+          return False
+      for p in PRIVATE_PREFIX:
+          if hl.startswith(p):
+              return True
+      if hl == "localhost" or hl.endswith(".localhost"):
+          return True
+      for s in INTERNAL_SUFFIX:
+          if hl.endswith(s):
+              return True
+      if hl.find(".") < 0:
+          return True    # single-label name: only resolvable on an internal network
+      return False
+
+  def is_redirect(status):
+      for s in REDIRECT_STATUS:
+          if status == s:
+              return True
+      return False
+
+  # ── graph helpers ─────────────────────────────────────────────────────────────
+  def find_url_node(host):
+      hl = host.lower()
+      for u in graph(type="URL"):
+          if u.get("host", "").lower() == hl:
+              return u
+      return None
+
+  def candidate_procs(turl):
+      base = {}
+      if turl != None:
+          for e in edges(turl["id"], dir="in", kind="HTTP_REQUEST"):
+              f = e.get("from", "")
+              if f != "":
+                  base[f] = True
+      an = meta.get("agent_name", "")
+      if an != "":
+          for p in graph(type="Process"):
+              if p.get("path", "") == an:
+                  base[p["id"]] = True
+      out = {}
+      for pid in base:
+          out[pid] = True
+          # the redirect may have been followed by the agent parent of a helper proc
+          for e in edges(pid, dir="in", kind="EXECUTE_PROCESS"):
+              f = e.get("from", "")
+              if f != "" and f.startswith("process://"):
+                  out[f] = True
+      return out
+
+  def find_public_anchor(pid, trig):
+      best = None
+      for e in edges(pid, dir="out", kind="HTTP_REQUEST"):
+          u = node(e["to"])
+          if u == None:
+              continue
+          h = u.get("host", "")
+          if h == "" or is_internal_target(h):
+              continue
+          if u.get("is_ztna_host", "0") == "1":
+              continue
+          lt = to_int(e.get("last_ts", ""))
+          if lt == 0:
+              lt = to_int(e.get("first_ts", ""))
+          if lt == 0 or lt > trig:
+              continue
+          if trig - lt > WINDOW_NS:
+              continue
+          # redirect evidence recorded on the public URL for THIS process
+          rstat = ""
+          redge = None
+          for r in edges(u["id"], dir="out", kind="HTTP_RESPONSE"):
+              if r.get("to", "") != pid:
+                  continue
+              rstat = r.get("last_status", "")
+              redge = r
+              break
+          if not is_redirect(rstat):
+              continue
+          if best == None or lt > best["ts"]:
+              best = {
+                  "ts": lt, "host": h, "edge": e, "resp": redge,
+                  "status": rstat, "method": e.get("method", ""),
+              }
+      return best
+
+  def impact_edge(pid, turl, tgt, trig):
+      if turl != None:
+          for e in edges(pid, dir="out", kind="HTTP_REQUEST"):
+              if e.get("to", "") == turl["id"]:
+                  return e
+      # the triggering request may not be ingested yet - synthesise from meta
+      tid = "https://" + tgt
+      if turl != None:
+          tid = turl["id"]
+      return {
+          "from": pid, "to": tid, "kind": "HTTP_REQUEST",
+          "ts": str(trig), "first_ts": str(trig), "last_ts": str(trig),
+          "method": meta.get("method", ""),
+      }
+
+  def lineage_label():
+      cp = to_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return ""
+      inst = proc_instance(cp, to_int(meta.get("event_ts", "0")))
+      if inst == None:
+          return ""
+      lin = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      if not lin:
+          return ""
+      names = []
+      for x in lin:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      return " -> ".join(names)
+
+  def dedupe(pub, tgt, trig):
+      seen = store_get("ssrf_seen")
+      if seen == None:
+          seen = {}
+      k = pub + ">" + tgt
+      prev = to_int(seen.get(k, 0))
+      if prev != 0 and trig - prev < SUPPRESS_NS:
+          return False
+      fresh = {}
+      for kk in seen:
+          if trig - to_int(seen[kk]) < SUPPRESS_NS:
+              fresh[kk] = seen[kk]
+      fresh[k] = trig
+      if store_usage()["free"] > 8192:
+          store_set("ssrf_seen", fresh)
+      return True
+
+  # ── relevance gate: pure string checks on meta only ───────────────────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      return is_internal_target(meta.get("host", ""))
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      tgt  = meta.get("host", "").lower()
+      trig = to_int(meta.get("event_ts", "0"))
+      if trig == 0 or tgt == "":
+          return "allow"
+
+      turl = find_url_node(tgt)
+
+      # routine internal endpoints (local gateways, model servers, IMDS refresh loops)
+      # accumulate fetches quickly - a redirect-bypass hop is a first-touch.
+      if turl != None and to_int(turl.get("fetch_count", "0")) > MAX_TARGET_FETCHES:
+          return "allow"
+
+      for pid in candidate_procs(turl):
+          anchor = find_public_anchor(pid, trig)
+          if anchor == None:
+              continue
+          if not dedupe(anchor["host"], tgt, trig):
+              return "allow"
+
+          gap   = (trig - anchor["ts"]) / 1000000
+          chain = new_chain(pid)
+          m     = anchor["method"]
+          if m == "":
+              m = "GET"
+          chain.append(step(anchor["edge"], stage_id="Scrape Fetch",
+                            stage_desc="agent fetched public scrape target: " + m + " " + anchor["host"]))
+          if anchor["resp"] != None:
+              chain.append(step(anchor["resp"], stage_id="Redirect",
+                                stage_desc="public host answered HTTP " + anchor["status"] + " (redirect not re-validated)"))
+          zt = ""
+          if turl != None and turl.get("is_ztna_host", "0") == "1":
+              zt = " (private/ZTNA-reachable)"
+          if is_metadata(tgt):
+              zt = " (cloud metadata service)"
+          chain.append(step(impact_edge(pid, turl, tgt, trig), stage_id="SSRF Impact",
+                            stage_desc="internal destination fetched " + str(int(gap)) + "ms after redirect: " + tgt + zt))
+
+          who = lineage_label()
+          reason = ("SSRF redirect bypass: scrape of public host " + anchor["host"] +
+                    " returned HTTP " + anchor["status"] + ", agent then fetched internal destination " +
+                    tgt + zt + " " + str(int(gap)) + "ms later")
+          if who != "":
+              reason = reason + " [" + who + "]"
+          print(reason)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
