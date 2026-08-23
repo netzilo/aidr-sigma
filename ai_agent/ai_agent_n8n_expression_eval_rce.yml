@@ -1,0 +1,365 @@
+title: n8n Workflow Expression Sandbox Escape to OS Execution
+id: 3f7c9a1e-5b42-4d8e-9c07-1a6f2b83d4e5
+status: experimental
+level: high
+description: |
+  Behavioural detection for exploitation of n8n's workflow expression evaluation
+  system (improper control of dynamically managed code resources, CWE-913).
+
+  A successful exploit does not look like a payload in one event, it looks like a
+  sequence: the n8n runtime process (or a descendant of it) spawns an OS-level
+  interpreter or network tool that the expression sandbox should never be able to
+  reach, and that child then does something an expression is not supposed to do.
+
+  The script anchors on the n8n runtime process in the behaviour graph, walks its
+  EXECUTE_PROCESS descendants up to three levels, and only reports when a
+  suspicious spawn is corroborated by at least one of:
+    * a JavaScript sandbox-escape / dynamic-code idiom in the command line
+      (child_process, constructor.constructor, process.mainModule.require,
+      vm.runInNewContext, Function("return ..."), pipe-to-shell, base64 -d),
+    * public egress by the spawned child (CONNECTS / HTTP_REQUEST to a host the
+      engine marks as non-ZTNA),
+    * a credential-file read by the spawned child (resolved with fs_activity).
+
+  Attribution is taken from the instance-resolved event log
+  (caller_pid -> proc_instance -> proc_lineage); the triggering command line is
+  read from meta and never re-queried from the log.
+
+  No ATLAS technique and no OWASP LLM/ASI identifier maps cleanly to this
+  server-side code-injection class, so none is asserted; the OWASP A03:2021 and
+  CWE-913 references are recorded below instead of inventing a tag.
+author: Haibo
+date: "2026-05-18"
+modified: "2026-05-18"
+references:
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://cwe.mitre.org/data/definitions/913.html
+  - https://attack.mitre.org/techniques/T1059/007/
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.007
+falsepositives:
+  - n8n "Execute Command" node used deliberately by an operator to run shell or
+    python jobs. A bare interpreter spawn is never reported on its own; the rule
+    additionally requires a dynamic-code escape idiom, public egress by that child,
+    or a credential-file read by that child.
+  - Community-node or npm install activity during n8n startup, which spawns sh and
+    fetches packages. Reported only if the spawned child also reaches a public
+    endpoint or reads a credential file inside the 5-minute window.
+  - Container entrypoint / supervisor wrappers around n8n (sh -c "n8n start"), and
+    backup jobs invoking scp/curl to internal (ZTNA/private) destinations, which do
+    not satisfy the public-egress stage.
+  - Deliberate red-team validation of the n8n expression sandbox, or a security
+    engineer reproducing the CVE in a lab instance.
+  - CI runners that build n8n from source and execute node --eval during tests; the
+    n8n runtime process is the anchor, so build tooling outside its process tree is
+    not evaluated.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # n8n workflow-expression sandbox escape -> OS command execution.
+  # Sequence: n8n runtime --(EXECUTE_PROCESS)--> interpreter/net tool,
+  #           corroborated by a dynamic-code idiom, public egress, or a
+  #           credential-file read performed by that spawned child.
+
+  WINDOW_NS    = 300000000000      # 5 minutes
+  MAX_DEPTH    = 3
+  MAX_CHILDREN = 12
+
+  N8N_MARKERS = [r"\bn8n\b", r"\bn8n-core\b", r"\bn8n-workflow\b",
+                 r"\bn8n-nodes-base\b", r"\bn8n-editor-ui\b"]
+
+  INTERPRETERS = [r"\bsh\b", r"\bbash\b", r"\bzsh\b", r"\bdash\b", r"\bksh\b",
+                  r"\bpython[0-9.]*\b", r"\bperl\b", r"\bruby\b", r"\bphp\b",
+                  r"\bosascript\b", r"\bpowershell\b", r"\bcmd\.exe\b",
+                  r"\bnode\b[^\n]{0,120}\s-e\b", r"--eval\b"]
+
+  NET_TOOLS = [r"\bcurl\b", r"\bwget\b", r"\bnc\b", r"\bncat\b", r"\bnetcat\b",
+               r"\bsocat\b", r"\bscp\b", r"\bsftp\b", r"\btftp\b"]
+
+  ESCAPE_IDIOMS = ["child_process", "constructor.constructor", "process.binding",
+                   "process.mainmodule", "mainmodule.require", "globalthis.process",
+                   "vm.runincontext", "runinnewcontext", "execsync", "spawnsync",
+                   "$evaluateexpression", 'function("return', "function('return",
+                   "|bash", "| bash", "|sh ", "| sh ", "|/bin/sh", "| /bin/sh",
+                   "base64 -d", "base64 --decode", "atob(", "/dev/tcp/"]
+
+  SENSITIVE = ['"n8n config"', '"n8n database sqlite"', '"aws credentials"',
+               '"ssh id rsa"', '"etc shadow"', '"etc passwd"', '"kube config"',
+               '"docker config json"']
+
+  def lc(s):
+      return s.lower()
+
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      return int(s)
+
+  def match_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def contains_any(subs, s):
+      for x in subs:
+          if x in s:
+              return True
+      return False
+
+  def basename(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def is_n8n_blob(blob):
+      return match_any(N8N_MARKERS, blob)
+
+  def proc_blob(p, cmdline):
+      if p == None:
+          return lc(cmdline)
+      return lc(p.get("path", "") + " " + p.get("name", "") + " " +
+                p.get("cmdline", "") + " " + cmdline)
+
+  def suspicious_blob(blob):
+      if match_any(INTERPRETERS, blob):
+          return True
+      if match_any(NET_TOOLS, blob):
+          return True
+      if contains_any(ESCAPE_IDIOMS, blob):
+          return True
+      return False
+
+  def in_window(ts, now):
+      if ts == 0 or now == 0:
+          return True
+      d = now - ts
+      if d < 0:
+          d = -d
+      return d <= WINDOW_NS
+
+  def synth(frm, to, kind, ts):
+      return {"from": frm, "to": to, "kind": kind, "ts": str(ts),
+              "first_ts": str(ts), "last_ts": str(ts)}
+
+  # ---- relevance gate: pure string checks on meta, no traversal ----------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = lc(meta.get("content", ""))
+      if cmd == "":
+          return False
+      return suspicious_blob(cmd)
+
+  # ---- attribution from the instance-resolved event log ------------------
+  def lineage_of_caller(now):
+      cp = to_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return []
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return []
+      return proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+
+  def lineage_has_n8n(lin):
+      for x in lin:
+          if is_n8n_blob(lc(x.get("actor_path", "") + " " + x.get("cmdline", ""))):
+              return True
+      return False
+
+  def lineage_str(lin):
+      names = []
+      for x in lin:
+          names.append(basename(x.get("actor_path", "")))
+      return " <- ".join(names)
+
+  # ---- graph traversal helpers -------------------------------------------
+  def find_n8n_procs():
+      out = []
+      for p in graph(type="Process"):
+          if is_n8n_blob(proc_blob(p, "")):
+              out.append(p)
+      return out
+
+  def spawn_edges(root_id):
+      seen     = {root_id: True}
+      frontier = [root_id]
+      out      = []
+      for _ in range(MAX_DEPTH):
+          nxt = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  out.append(e)
+                  cid = e["to"]
+                  if cid in seen:
+                      continue
+                  seen[cid] = True
+                  nxt.append(cid)
+          frontier = nxt
+      return out
+
+  def public_egress(child_id):
+      for e in edges(child_id, dir="out", kind="CONNECTS"):
+          h = node(e["to"])
+          if h == None:
+              continue
+          if h.get("is_ztna_host", "0") == "0":
+              return [e, h.get("host", "?") + ":" + h.get("port", "?")]
+      for e in edges(child_id, dir="out", kind="HTTP_REQUEST"):
+          u = node(e["to"])
+          if u == None:
+              continue
+          if u.get("is_ztna_host", "0") == "0":
+              return [e, u.get("host", "?")]
+      return None
+
+  def credential_read(child_id):
+      for e in edges(child_id, dir="out", kind="READ_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          for pat in SENSITIVE:
+              hits = fs_activity(fs["id"], "READ", pat)
+              if hits:
+                  return [e, hits[0]]
+      return None
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now    = to_int(meta.get("event_ts", "0"))
+      cmd    = meta.get("content", "")
+      cmd_lc = lc(cmd)
+
+      lin            = lineage_of_caller(now)
+      lineage_anchor = lineage_has_n8n(lin)
+      trigger_idiom  = contains_any(ESCAPE_IDIOMS, cmd_lc)
+
+      hosts = find_n8n_procs()
+      if not hosts and not lineage_anchor:
+          return "allow"                     # nothing ties this exec to n8n
+
+      for hp in hosts:
+          aid   = hp["id"]
+          chain = new_chain(aid)
+
+          best     = None
+          fallback = None
+          checked  = 0
+          for e in spawn_edges(aid):
+              child = node(e["to"])
+              blob  = proc_blob(child, e.get("cmdline", ""))
+              if not suspicious_blob(blob):
+                  continue
+              if not in_window(to_int(e.get("ts", "0")), now):
+                  continue
+              if checked >= MAX_CHILDREN:
+                  break
+              checked = checked + 1
+              cid = e["to"]
+              eg  = public_egress(cid)
+              cr  = credential_read(cid)
+              if eg != None or cr != None:
+                  best = [e, cid, eg, cr]
+                  break
+              if fallback == None:
+                  fallback = [e, cid, None, None]
+
+          if best == None:
+              best = fallback
+          if best == None:
+              continue
+
+          spawn_e     = best[0]
+          cid         = best[1]
+          eg          = best[2]
+          cr          = best[3]
+          idiom_spawn = contains_any(ESCAPE_IDIOMS, lc(spawn_e.get("cmdline", "")))
+
+          # Required corroboration — a bare interpreter spawn is not enough.
+          if eg == None and cr == None and not trigger_idiom and not idiom_spawn:
+              continue
+
+          child = node(cid)
+          cname = "?"
+          if child != None:
+              cname = child.get("name", "?")
+
+          stages = []
+          chain.append(step(spawn_e, stage_id="Expression Sandbox Escape",
+                            stage_desc="n8n runtime spawned OS interpreter/network tool: " +
+                                       cname + " [" + spawn_e.get("cmdline", "")[:180] + "]"))
+          stages.append("spawn:" + cname)
+
+          # Trigger stage comes from meta, never re-queried from the log.
+          chain.append(step(synth(aid, "process://" + cname, "EXECUTE_PROCESS", now),
+                            stage_id="Dynamic Code Execution",
+                            stage_desc="triggering command line: " + cmd[:200]))
+          stages.append("exec:" + cmd[:60])
+
+          if trigger_idiom or idiom_spawn:
+              stages.append("code-eval-idiom")
+          if cr != None:
+              chain.append(step(cr[0], stage_id="Credential Access",
+                                stage_desc="spawned child read sensitive file: " + cr[1]["path"],
+                                activity=cr[1]))
+              stages.append("cred-read:" + cr[1]["path"])
+          if eg != None:
+              chain.append(step(eg[0], stage_id="Egress / C2",
+                                stage_desc="spawned child reached public endpoint: " + eg[1]))
+              stages.append("egress:" + eg[1])
+
+          attribution = "graph-anchored"
+          if lineage_anchor:
+              attribution = "lineage:" + lineage_str(lin)
+
+          print("n8n expression-eval RCE chain — " + ", ".join(stages) +
+                " | attribution=" + attribution)
+          return {
+              "action": "report",
+              "reason": "Suspected n8n workflow-expression sandbox escape to OS execution — " +
+                        ", ".join(stages) + " (" + attribution + ")",
+              "chain":  chain,
+          }
+
+      # No n8n Process node in the graph, but the event log proves the exec was
+      # parented by n8n and carries a dynamic-code escape idiom.
+      if lineage_anchor and trigger_idiom:
+          root_path = "n8n"
+          if lin:
+              root_path = lin[len(lin) - 1].get("actor_path", "n8n")
+          caller = "?"
+          if lin:
+              caller = basename(lin[0].get("actor_path", "?"))
+          chain = new_chain("process://" + root_path)
+          chain.append(step(synth("process://" + root_path, "process://" + caller,
+                                  "EXECUTE_PROCESS", now),
+                            stage_id="Dynamic Code Execution",
+                            stage_desc="n8n-parented exec carrying code-evaluation escape idiom: " +
+                                       cmd[:200]))
+          print("n8n expression-eval idiom in exec — lineage " + lineage_str(lin))
+          return {
+              "action": "report",
+              "reason": "n8n-parented process executed a dynamic-code escape idiom (" +
+                        lineage_str(lin) + ")",
+              "chain":  chain,
+          }
+
+      return "allow"
+
+  result = run()
