@@ -4,6 +4,7 @@ related:
   - id: db43664e-2408-5e70-9b63-dcb0fabc8c5f
     type: companion
 status: stable
+level:          high
 description: |
   Periodic companion to the real-time rule. Checks WRITE_FILE edges in the AIDR
   behaviour graph every 30 seconds for sensitive path writes that arrived via EDR

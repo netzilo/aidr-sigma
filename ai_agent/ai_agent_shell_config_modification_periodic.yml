@@ -4,6 +4,7 @@ related:
   - id: 1e785c77-6d77-5c79-ae24-6a389f9ef7f1
     type: companion
 status: stable
+level:          high
 description: |
   Periodic companion. Checks WRITE_FILE graph edges for shell profile and
   authorized_keys writes at EDR/syscall level. Runs every 30s.

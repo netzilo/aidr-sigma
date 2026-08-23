@@ -4,6 +4,7 @@ related:
   - id: d12c1b8c-4ee7-5548-947b-a1627bdc98dc
     type: companion
 status: stable
+level:          high
 description: |
   Periodic companion. Checks WRITE_FILE graph edges for persistence path writes
   (cron, launchd, systemd, shell profiles) at EDR/syscall level. Runs every 30s.

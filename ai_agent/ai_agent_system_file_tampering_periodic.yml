@@ -4,6 +4,7 @@ related:
   - id: 89404989-df81-5ae1-9b23-d9e845e9be65
     type: companion
 status: stable
+level:          critical
 description: |
   Periodic companion. Checks WRITE_FILE graph edges for writes to /etc/,
   /usr/bin/, /usr/local/bin/ at EDR/syscall level. Runs every 30s.
