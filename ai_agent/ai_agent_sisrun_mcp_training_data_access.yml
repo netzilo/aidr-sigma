@@ -1,0 +1,84 @@
+title: SisRUN MCP Personal Training Data Retrieval
+id: 7f3c1d92-4a6e-4b18-9c05-2d8ea7fb51c3
+status: experimental
+level: medium
+description: |
+  Surfaces outbound HTTP requests from an AI agent environment to the SisRUN
+  platform (appsisrun.com.br) that target personal training-plan data — the
+  data surface exposed by the unofficial `sisrun-mcp` MCP server.
+
+  This is deliberately a REPORT-only visibility rule, not an enforcement rule.
+  The triage objection is correct: there is no CVE, no auth bypass and no
+  injection here, and the engine schema rejects both `ACCESSED_RESOURCE` and
+  `read_data`, so telemetry cannot distinguish an athlete legitimately pulling
+  their own plan from an unauthorised party harvesting someone else's. What the
+  engine CAN prove is that an agent-mediated process issued an HTTP request to
+  a SisRUN data endpoint. That is an inventory/data-governance signal (which
+  agents are reaching personal fitness PII, and how often), not an incident
+  claim — hence `action: report` and `level: medium`.
+
+  Tightening applied so the rule is not "any traffic to appsisrun":
+    1. host must be appsisrun.com.br or a subdomain (fully anchored, no
+       substring match — `appsisrun.com.br.evil.tld` does not match).
+    2. AND the request must additionally look like a personal-data fetch:
+       an API/GraphQL/versioned path, a training-plan resource path, an
+       athlete/plan identifier in the query string, or the `sisrun-mcp`
+       client fingerprint in the request body.
+    3. Static assets, well-known endpoints and documentation/placeholder
+       payloads are filtered out.
+
+  Scoped to `event_type: http_request` only. The `connects` context does not
+  populate a matchable `path`/`url.full` in the LogEntry (host/port live in
+  script `meta`), so a connects-scoped content selection would be a dead leaf.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://www.npmjs.com/package/sisrun-mcp
+  - https://genai.owasp.org/llmrisk/llm02-sensitive-information-disclosure/
+tags:
+  - attack.collection
+  - attack.t1213
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Anchored host match — subdomains allowed, suffix-spoofing is not.
+  sel_sisrun_request:
+    event_type: http_request
+    host|re: '(?i)^([a-z0-9_-]+\.)*appsisrun\.com\.br$'
+
+  # Arm 1 — the request targets an API / training-plan resource path.
+  sel_personal_data_path:
+    path|re: '(?i)(?:/(?:api|rest|graphql|v[0-9]{1,2})(?:/|$))|(?:/(?:treino|treinos|treinamento|planilha|planilhas|plano|planos|atleta|atletas|aluno|alunos|assessorado|assessorados|perfil|training|workout|schedule)s?(?:/|$))'
+
+  # Arm 2 — an athlete / plan identifier is carried in the query string.
+  sel_personal_data_query:
+    url.full|re: '(?i)[?&](?:atleta|aluno|assessorado|usuario|perfil|athlete|user|training|treino|plano|planilha|workout)[a-z_]{0,12}(?:_?id)?=[^&\s]{1,64}'
+
+  # Arm 3 — the unofficial MCP client fingerprints itself in the request body.
+  sel_mcp_client_fingerprint:
+    content|re: '(?i)\bsisrun[-_]mcp\b'
+
+  # ── Noise suppression (narrowing only — no host/domain is trusted here) ──
+  filter_static_assets:
+    path|re: '(?i)\.(?:css|js|mjs|json5|png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|map)$'
+  filter_wellknown:
+    path|re: '(?i)^/(?:favicon\.ico|robots\.txt|sitemap[a-z0-9_-]*\.xml|manifest\.json|health(?:z|check)?|ping|status|\.well-known/)'
+  filter_docs_and_placeholders:
+    content|re: '(?i)(?:example\.com|<your[-_ ]?[a-z]{2,20}>|your[-_ ]?(?:api[-_ ]?key|token|athlete[-_ ]?id)|xxxxxxxx|placeholder|lorem ipsum|```)'
+  condition: >
+    sel_sisrun_request
+    and (sel_personal_data_path or sel_personal_data_query or sel_mcp_client_fingerprint)
+    and not (filter_static_assets or filter_wellknown or filter_docs_and_placeholders)
+falsepositives:
+  - An athlete or coach legitimately using their own SisRUN account through an
+    approved agent workflow — this is the expected common case and is exactly
+    why the rule reports rather than blocks.
+  - The SisRUN single-page web app in a browser whose traffic is proxied through
+    the gateway; its XHR/fetch calls hit the same /api/ paths.
+  - Mobile or desktop SisRUN clients sharing the proxy egress path.
+  - QA, staging or load-test automation replaying training-plan API calls.
+  - Support engineers reproducing a customer issue against a test athlete
+    account.
+action: report
