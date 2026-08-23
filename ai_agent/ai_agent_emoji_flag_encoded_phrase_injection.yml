@@ -1,0 +1,109 @@
+title: Emoji Flag Encoded Hidden Phrase Injection
+id: 7b3c1f9a-6d24-4a51-9e0b-2f8c4d7a15e3
+status: experimental
+level: medium
+description: |
+  Detects indirect prompt injection delivered through runs of Unicode regional-indicator
+  symbols (U+1F1E6-U+1F1FF, the emoji flag block) inside tool output that is fed back to
+  the model. The attack hides an instruction as a flag sequence and pairs it with a
+  derivation request ("decode these emojis into a phrase") plus a directive to act on the
+  decoded result, so the payload looks like harmless decoration in isolation.
+
+  The rule fires only when THREE independent signals are present in the same tool response:
+    1. a run of four or more regional-indicator codepoints (>= 2 flags), optionally
+       separated by whitespace, ZWSP, ZWJ or VS16 to defeat naive contiguity checks;
+    2. an explicit emoji-to-text derivation request (decode / decipher / translate /
+       spell out ... emoji|flags -> phrase|message|instruction);
+    3. a follow-on execution or concealment directive (act on the decoded/hidden
+       instruction, or do not reveal it to the user).
+
+  Any one of these alone is common and benign; the conjunction is the attack.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - atlas.aml.t0034.000
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type: tool_response
+
+  # Signal 1 - a run of regional-indicator codepoints (the emoji flag block).
+  # Second alternative tolerates separators (space, ZWSP, ZWJ, VS16) between symbols.
+  sel_flag_run:
+    content|re:
+      - '[\x{1F1E6}-\x{1F1FF}]{4,}'
+      - '(?:[\x{1F1E6}-\x{1F1FF}][\s\x{200b}\x{200d}\x{fe0f}]{0,3}){4,}'
+
+  # Signal 2 - an explicit request to derive text from the emoji/flag sequence.
+  sel_derive_request:
+    content|re:
+      - '(?i)\b(decode|decipher|decrypt|translate|convert|derive|interpret|unscramble)\b[^\n]{0,60}\b(emoji|emojis|flag|flags|regional indicator|regional indicators)\b'
+      - '(?i)\b(emoji|emojis|flag|flags)\b[^\n]{0,60}\b(spell|spells|spelled|encode|encodes|represent|represents|reveal|reveals|form|forms)\b[^\n]{0,40}\b(phrase|word|words|sentence|message|instruction|instructions|command|commands|text)\b'
+      - '(?i)\bwhat (phrase|word|words|message|sentence|instruction|instructions) (do|does) (the |these |those )?(emoji|emojis|flag|flags)\b'
+
+  # Signal 3 - a directive to act on, or to conceal, the decoded result.
+  sel_act_or_conceal:
+    content|re:
+      - '(?i)\b(then|after|once)\b[^\n]{0,60}\b(follow|execute|obey|comply|perform|carry out|act on|apply)\b'
+      - '(?i)\b(follow|execute|obey|carry out|act on|comply with|perform)\b[^\n]{0,40}\b(decoded|hidden|resulting|revealed|derived|secret)\b'
+      - '(?i)\b(hidden|secret|concealed|covert)\b[^\n]{0,40}\b(instruction|instructions|command|commands|directive|directives|prompt|task)\b'
+      - '(?i)\bdo not\b[^\n]{0,50}\b(mention|reveal|disclose|tell the user|explain|output)\b'
+
+  # ── Filters: benign content that legitimately combines flags and "decode" ─────
+
+  # Unicode / emoji specification and reference material.
+  filter_unicode_reference:
+    content|contains:
+      - 'REGIONAL INDICATOR SYMBOL LETTER'
+      - 'RGI_Emoji_Flag_Sequence'
+      - 'Emoji_Presentation'
+      - 'ISO 3166-1'
+      - 'U+1F1E6'
+      - 'U+1F1FF'
+
+  # Geography / flag quizzes and language-learning exercises.
+  filter_geo_quiz:
+    content|re:
+      - '(?i)\b(guess|name|identify|match)\b[^\n]{0,40}\b(the )?(country|countries|nation|nations|capital|capitals)\b'
+      - '(?i)\b(geography|flag|emoji) (quiz|game|trivia|challenge|puzzle)\b'
+      - '(?i)\bwhich country\b'
+
+  # Internationalisation / locale tooling that pairs flags with country codes.
+  filter_i18n_locale:
+    content|re: '(?i)\b(locale|locales|i18n|internationali[sz]ation|language (picker|selector|switcher)|country[ _-]?code|hreflang|lang=)\b'
+
+  # Security research, detection engineering and advisory write-ups describing this
+  # very technique (both terms must occur on the same line).
+  filter_security_writeup:
+    content|re:
+      - '(?i)\b(prompt injection|jailbreak|adversarial prompt|red[ -]?team|smuggling)\b[^\n]{0,80}\b(example|sample|demonstrat|test case|detection|mitigation|payload|proof[- ]of[- ]concept)'
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\b(sigma rule|detection rule|yara rule|falsepositives)\b'
+
+  condition: >
+    sel_scope and sel_flag_run and sel_derive_request and sel_act_or_conceal
+    and not (filter_unicode_reference or filter_geo_quiz or filter_i18n_locale
+    or filter_security_writeup)
+
+falsepositives:
+  - Geography or language-learning tool output containing an emoji-flag quiz ("decode these
+    flags, then name the country") - suppressed by filter_geo_quiz.
+  - Unicode / emoji reference documentation fetched by a read or web-fetch tool that lists
+    regional-indicator codepoints and explains how pairs combine into flags - suppressed by
+    filter_unicode_reference.
+  - Localisation resource files, locale pickers and country-code tables that pair flag emoji
+    with instructions to convert them into ISO codes - suppressed by filter_i18n_locale.
+  - Security research, blog posts and detection content demonstrating emoji-smuggling
+    payloads, including this rule's own test fixtures - suppressed by filter_security_writeup.
+  - Marketing or social copy using a long run of flags followed by a call-to-action
+    ("then follow us") - not suppressed by a filter, but requires the emoji-to-text
+    derivation clause (sel_derive_request) to also be present, which such copy lacks.
+
+action: report
