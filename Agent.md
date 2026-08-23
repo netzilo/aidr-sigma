@@ -421,8 +421,10 @@ modified:       "YYYY-MM-DD"
 references:
   - https://attack.mitre.org/...
 tags:
-  - attack.execution
-  - attack.t1059
+  - attack.execution        # ATT&CK tactic
+  - attack.t1059            # ATT&CK technique
+  - atlas.aml.t0050         # ATLAS technique  (required — see Tagging)
+  - owasp.asi07             # OWASP ASI or LLM (required — see Tagging)
 falsepositives:
   - Known benign case that looks like this pattern
 
@@ -445,6 +447,51 @@ action:   block | allow | redact | report | scan | blockmodel | allowmodel |
 
 # Extra fields depending on action (see Actions section)
 ```
+
+---
+
+## Tagging — ATT&CK, ATLAS and OWASP
+
+Every rule carries tags from three taxonomies. They are not decoration: they
+are the browse facets of the public threat library, so a wrong identifier is a
+confident, indexable, citable error, and a missing one makes a rule
+undiscoverable.
+
+```yaml
+tags:
+  - attack.execution        # ATT&CK tactic     — conventional, keep using these
+  - attack.t1059            # ATT&CK technique
+  - atlas.aml.t0050         # ATLAS technique   — REQUIRED where one applies
+  - owasp.asi07             # OWASP ASI or LLM  — REQUIRED where one applies
+```
+
+**Required.** A rule that detects adversary behaviour must carry at least one
+`atlas.` identifier and at least one `owasp.` identifier.
+
+**Never invent an identifier.** Do not adjust a number to fit, and do not
+reproduce one from memory. `atlas.` takes a MITRE ATLAS id and nothing else —
+writing `atlas.t1499` when you mean the ATT&CK technique T1499 is wrong, and
+has already happened once in this corpus. ATT&CK identifiers belong under
+`attack.`, ATLAS identifiers under `atlas.`:
+
+| Prefix | Accepts | Example |
+|---|---|---|
+| `attack.` | ATT&CK tactic or technique | `attack.t1059` |
+| `atlas.` | `AML.TA####` tactic or `AML.T####` technique | `atlas.aml.t0050` |
+| `owasp.` | `LLM01`–`LLM10`, or `ASI01`–`ASI10` | `owasp.asi07` |
+
+**Choose what the rule detects**, not what its subject matter is adjacent to.
+A rule detecting credential theft by an agent is not prompt injection merely
+because an agent was involved. Two or three defensible identifiers beat six
+loose ones.
+
+**Omission is allowed when nothing fits.** The `llm_as_judge_*` evaluators
+score content quality rather than adversary technique, and carry no `atlas.`
+or `owasp.` tag for that reason. A forced mapping is worse than none.
+
+**A periodic companion inherits its parent's taxonomy tags** verbatim. It
+re-checks one behaviour at a different level; classifying it separately can
+only produce two mappings for one threat.
 
 ---
 
