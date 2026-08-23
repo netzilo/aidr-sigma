@@ -1,0 +1,128 @@
+title: Supply Chain Suspicious PyPI Package chad-code Install or Invocation
+id: 7f3b1c92-4d8a-4e61-9b2f-0c5a6d31e4af
+status: experimental
+level: medium
+description: |
+  Reports (never blocks) any agent action that installs, downloads, pins or executes the
+  PyPI distribution `chad-code` — a package that markets itself as a Claude-Code-style
+  coding agent for Apple Silicon and therefore impersonates trusted AI agent tooling.
+
+  Scope and honesty about the evidence: there is NO confirmed malicious payload for this
+  package and no observed IOC. This rule deliberately does not attempt to infer intent from
+  behaviour. It is pure provenance telemetry on a single, named, high-risk artifact.
+
+  Telemetry constraint: the engine models no `package_install` or `process_execute` event
+  type and no `PACKAGE_DEPENDENCY` edge, so install-time and dependency-graph signals are
+  unavailable. The only live surface is the command text the agent submits (`tool_call`) and
+  the command line of a spawned child (`execute_process`, backed by EXECUTE_PROCESS edges).
+  The rule therefore anchors on the literal PyPI-normalised distribution name
+  (chad-code / chad_code / chad.code) AND a package-manager verb, artifact URL, wheel/sdist
+  filename, module invocation, or dependency-manifest pin. A bare mention of the name in
+  prose does not match; only a command position or a manifest does.
+
+  This is not the typosquatting mechanism (name-similarity to an existing dependency) covered
+  elsewhere — it is brand-impersonation of an agent product by an exactly-named distribution,
+  so the detection is a single literal-name watch rather than an edit-distance heuristic.
+  Report-only by design until a payload is characterised.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only command-bearing events. Prose in llm_response / tool_output is out of scope.
+  sel_scope:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # ── Package manager install/add verb followed by the distribution name.
+  # "uninstall" cannot match: \binstall\b has no word boundary after "un".
+  sel_install_cmd:
+    content|re:
+      - '(?i)\b(?:pip|pip3|pipx|uv|uvx|poetry|pdm|rye|hatch|conda|mamba|micromamba)\b[^\n;|&]{0,160}\b(?:install|add)\b[^\n;|&]{0,160}\bchad[-_.]code\b'
+      - '(?i)\bpython3?\s+-m\s+pip\b[^\n;|&]{0,160}\binstall\b[^\n;|&]{0,160}\bchad[-_.]code\b'
+
+  # ── Direct artifact retrieval from the index or CDN, or a wheel/sdist filename.
+  sel_fetch_artifact:
+    content|re:
+      - '(?i)\bpypi\.org/(?:project|simple|pypi)/chad[-_.]code\b'
+      - '(?i)\bfiles\.pythonhosted\.org/[^\s"]{0,200}chad[-_.]code'
+      - '(?i)\bchad[-_.]code-[0-9][^\s"]{0,60}\.(?:whl|tar\.gz|zip)\b'
+
+  # ── Module / ephemeral-runner invocation.
+  sel_invoke_module:
+    content|re:
+      - '(?i)\bpython3?\s+-m\s+chad[-_.]code\b'
+      - '(?i)\b(?:pipx|uvx|uv\s+tool)\s+run\s+[^\n;|&]{0,80}\bchad[-_.]code\b'
+
+  # ── Bare execution of the installed console script, anchored to command position.
+  # Uses the extracted command field so ^ anchors to the command itself, not to JSON.
+  sel_invoke_bare:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:[^\s\n]{0,80}/)?chad[-_.]code\b'
+
+  # ── Dependency manifest / lockfile that pins the distribution.
+  sel_manifest_path:
+    file_path|re: '(?i)(?:requirements[^/\\]{0,40}\.txt|constraints[^/\\]{0,40}\.txt|pyproject\.toml|Pipfile|Pipfile\.lock|poetry\.lock|uv\.lock|setup\.py|setup\.cfg|environment\.ya?ml)$'
+  sel_manifest_pkg:
+    content|re: '(?i)\bchad[-_.]code\b'
+
+  # ── Removal / rollback is the desired outcome, not the threat.
+  filter_removal:
+    content|re:
+      - '(?i)\b(?:uninstall|remove|purge|drop)\b[^\n;|&]{0,80}\bchad[-_.]code\b'
+      - '(?i)\bchad[-_.]code\b[^\n;|&]{0,40}\b(?:uninstall|removed|purged)\b'
+
+  # ── Read-only inspection, simulation and SCA tooling. Kept adjacent to the package token so
+  # appending "&& grep x" to a real install cannot suppress the detection.
+  filter_inspection:
+    content|re:
+      - '(?i)\bpip3?\s+(?:show|list|freeze|index\s+versions)\s+[^\n;|&]{0,40}\bchad[-_.]code\b'
+      - '(?i)\b(?:pip|pip3|uv\s+pip|pipx)\b[^\n;|&]{0,80}--dry-run\b[^\n;|&]{0,80}\bchad[-_.]code\b'
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack)\b[^\n;|&]{0,80}\bchad[-_.]code\b'
+      - '(?i)\b(?:pip-audit|safety|osv-scanner|deptry|syft|grype|trivy|dependency-check)\b[^\n;|&]{0,120}\bchad[-_.]code\b'
+
+  # ── Threat-intel, advisory and detection-engineering text that quotes the install command.
+  filter_docs:
+    content|contains:
+      - 'malware analysis'
+      - 'threat intel'
+      - 'indicator of compromise'
+      - 'indicators of compromise'
+      - 'security advisory'
+      - 'do not install'
+      - 'detection rule'
+      - 'sigma rule'
+      - 'falsepositives'
+      - 'proof of concept'
+      - 'supply chain report'
+      - 'CVE-'
+      - 'GHSA-'
+      - 'PYSEC-'
+
+  condition: >
+    sel_scope
+    and (sel_install_cmd or sel_fetch_artifact or sel_invoke_module or sel_invoke_bare
+         or (sel_manifest_path and sel_manifest_pkg))
+    and not (filter_removal or filter_inspection or filter_docs)
+
+falsepositives:
+  - Security researcher or SCA tooling deliberately fetching chad-code in a sandbox to analyse it (partly filtered by filter_inspection and filter_docs, but a plain "pip install" in an analysis VM will still report).
+  - A developer knowingly installing chad-code because they evaluated it and accepted the risk — the package is unproven, not proven malicious.
+  - An unrelated internal or future distribution that legitimately normalises to chad-code, chad_code or chad.code (exact name collision).
+  - Incident writeups, runbooks, tickets or chat transcripts that quote the install command verbatim inside a tool argument (filter_docs covers the common markers only).
+  - Lockfile or SBOM diffs and dependency-audit output that still list a historical chad-code pin after removal.
+  - Repository or directory paths that contain a chad-code segment matched by the manifest branch.
+
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - atlas.aml.t0010
+  - owasp.llm03
+
+action: report
