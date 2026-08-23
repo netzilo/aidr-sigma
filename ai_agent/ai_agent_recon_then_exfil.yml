@@ -17,6 +17,10 @@ tags:
   - attack.t1041
   - attack.discovery
   - attack.t1046
+  - atlas.aml.t0089
+  - atlas.aml.t0037
+  - atlas.aml.t0025
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

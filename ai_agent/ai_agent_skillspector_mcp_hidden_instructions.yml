@@ -16,6 +16,10 @@ tags:
   - attack.t1566
   - attack.stealth
   - attack.t1027
+  - atlas.aml.t0110
+  - atlas.aml.t0068
+  - owasp.asi08
+  - owasp.llm01
 logsource:
   product: ai_agent
   category: agent_events

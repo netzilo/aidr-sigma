@@ -12,6 +12,7 @@ author: Netzilo (ported from LangSmith evaluator template)
 date: "2026-06-30"
 tags:
   - agent.trajectory
+  - owasp.asi09
 logsource:
   product: ai_agent
   category: agent_events

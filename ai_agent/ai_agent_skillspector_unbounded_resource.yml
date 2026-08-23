@@ -12,6 +12,9 @@ tags:
   - attack.impact
   - attack.t1498
   - attack.resource-development
+  - atlas.aml.t0034
+  - owasp.llm10
+  - owasp.asi10
 logsource:
   product: ai_agent
   category: agent_events

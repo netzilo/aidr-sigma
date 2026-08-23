@@ -18,6 +18,9 @@ modified: "2026-02-24"
 tags:
   - attack.execution
   - attack.t1195
+  - atlas.aml.t0010
+  - owasp.llm03
+  - owasp.asi08
 logsource:
   product: ai_agent
   category: agent_events

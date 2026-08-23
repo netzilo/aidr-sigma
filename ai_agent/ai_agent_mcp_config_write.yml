@@ -14,6 +14,10 @@ tags:
   - attack.persistence
   - attack.t1546
   - attack.supply-chain
+  - atlas.aml.t0081
+  - atlas.aml.t0051
+  - owasp.asi02
+  - owasp.asi07
 level: high
 falsepositives:
   - Developer explicitly asking the AI to add or update a legitimate MCP server

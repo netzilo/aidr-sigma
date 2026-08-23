@@ -18,6 +18,10 @@ date: "2026-08-03"
 tags:
   - attack.stealth
   - attack.t1027
+  - atlas.aml.t0110
+  - atlas.aml.t0068
+  - owasp.llm05
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: tool_output

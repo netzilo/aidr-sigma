@@ -15,6 +15,10 @@ tags:
   - attack.t1059
   - attack.defense-impairment
   - attack.t1027
+  - atlas.aml.t0053
+  - atlas.aml.t0050
+  - owasp.asi07
+  - owasp.asi02
 level: high
 falsepositives:
   - Very low. Legitimate MCP tool calls do not embed heredocs with command substitution.

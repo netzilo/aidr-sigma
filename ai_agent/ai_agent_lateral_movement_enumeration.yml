@@ -20,6 +20,10 @@ modified: "2026-08-03"
 tags:
   - attack.discovery
   - attack.t1083
+  - atlas.aml.t0037
+  - atlas.aml.t0075
+  - atlas.aml.t0053
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events

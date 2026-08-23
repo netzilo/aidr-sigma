@@ -19,6 +19,9 @@ tags:
   - attack.t1548
   - attack.defense-impairment
   - attack.t1112
+  - atlas.aml.t0081
+  - owasp.asi01
+  - owasp.llm06
 logsource:
   product: ai_agent
   category: agent_events

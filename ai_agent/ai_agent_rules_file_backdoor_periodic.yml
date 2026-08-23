@@ -24,6 +24,10 @@ tags:
   - attack.t1546
   - attack.stealth
   - attack.t1564
+  - atlas.aml.t0081
+  - atlas.aml.t0068
+  - owasp.asi06
+  - owasp.asi09
 logsource:
   product: ai_agent
   category: periodic

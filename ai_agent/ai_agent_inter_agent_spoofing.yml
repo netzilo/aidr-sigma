@@ -31,6 +31,10 @@ tags:
   - attack.stealth
   - attack.t1656
   - attack.lateral-movement
+  - atlas.aml.t0074
+  - atlas.aml.t0073
+  - owasp.asi03
+  - owasp.asi05
 logsource:
   product: ai_agent
   category: external_message

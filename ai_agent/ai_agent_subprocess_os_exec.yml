@@ -10,6 +10,10 @@ date: "2026-06-03"
 tags:
   - attack.execution
   - attack.t1059
+  - atlas.aml.t0050
+  - atlas.aml.t0053
+  - owasp.asi07
+  - owasp.llm06
 logsource:
   product: ai_agent
   category: agent_events

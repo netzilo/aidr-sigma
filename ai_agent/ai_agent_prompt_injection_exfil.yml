@@ -17,6 +17,9 @@ tags:
   - attack.exfiltration
   - attack.t1041
   - attack.t1048
+  - atlas.aml.t0057
+  - atlas.aml.t0077
+  - owasp.llm02
 logsource:
   product: ai_agent
   # Adapted: original used event_type: output_generation (unsupported).

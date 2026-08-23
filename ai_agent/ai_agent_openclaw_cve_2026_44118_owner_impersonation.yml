@@ -13,6 +13,9 @@ tags:
   - attack.privilege-escalation
   - attack.t1548
   - attack.lateral-movement
+  - atlas.aml.t0049
+  - owasp.asi03
+  - owasp.asi01
 level: critical
 falsepositives:
   - None expected — senderIsOwner=true has no legitimate use in external content

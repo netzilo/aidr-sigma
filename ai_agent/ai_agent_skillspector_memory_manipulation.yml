@@ -12,6 +12,8 @@ tags:
   - attack.persistence
   - attack.t1546
   - attack.stealth
+  - atlas.aml.t0080
+  - owasp.asi04
 logsource:
   product: ai_agent
   category: agent_events

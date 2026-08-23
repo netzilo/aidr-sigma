@@ -14,6 +14,9 @@ tags:
   - attack.defense-impairment
   - attack.t1036
   - attack.credential-access
+  - atlas.aml.t0105
+  - atlas.aml.t0097
+  - owasp.asi07
 level: critical
 falsepositives:
   - None expected for out-of-sandbox access to sensitive paths

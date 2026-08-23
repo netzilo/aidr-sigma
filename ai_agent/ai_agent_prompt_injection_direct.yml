@@ -17,6 +17,11 @@ tags:
   - attack.t1190
   - attack.stealth
   - attack.t1027
+  - atlas.aml.t0051
+  - atlas.aml.t0054
+  - atlas.aml.t0068
+  - owasp.llm01
+  - owasp.asi06
 logsource:
   product: ai_agent
   # user_input → llm_request: direct injections arrive in LLM request bodies.

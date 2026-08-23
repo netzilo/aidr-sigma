@@ -12,6 +12,8 @@ date: "2026-06-02"
 tags:
   - attack.privilege-escalation
   - attack.t1548
+  - atlas.aml.t0081
+  - owasp.asi01
 logsource:
   product: ai_agent
   category: periodic

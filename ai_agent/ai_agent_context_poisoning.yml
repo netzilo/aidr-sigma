@@ -30,6 +30,11 @@ tags:
   - attack.t1566
   - attack.execution
   - attack.t1204
+  - atlas.aml.t0051
+  - atlas.aml.t0053
+  - atlas.aml.t0080
+  - owasp.llm01
+  - owasp.asi04
 logsource:
   product: ai_agent
   category: agent_events

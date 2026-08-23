@@ -12,6 +12,10 @@ date: "2026-06-03"
 tags:
   - attack.impact
   - attack.privilege-escalation
+  - atlas.aml.t0081
+  - atlas.aml.t0080
+  - owasp.asi06
+  - owasp.llm06
 logsource:
   product: ai_agent
   category: agent_events

@@ -29,6 +29,9 @@ tags:
   - attack.execution
   - attack.t1059
   - attack.stealth
+  - atlas.aml.t0053
+  - owasp.asi07
+  - owasp.asi09
 logsource:
   product: ai_agent
   category: agent_events

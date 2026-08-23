@@ -11,6 +11,9 @@ tags:
   - attack.execution
   - attack.t1059
   - attack.defense-impairment
+  - atlas.aml.t0053
+  - owasp.asi02
+  - owasp.llm06
 logsource:
   product: ai_agent
   category: agent_events

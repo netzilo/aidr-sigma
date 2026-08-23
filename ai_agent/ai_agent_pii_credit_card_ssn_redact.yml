@@ -10,6 +10,8 @@ tags:
   - attack.exfiltration
   - pii.credit_card
   - pii.ssn
+  - atlas.aml.t0057
+  - owasp.llm02
 level: critical
 falsepositives:
   - Test data with example card numbers (mitigated by filter)

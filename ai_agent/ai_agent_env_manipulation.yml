@@ -13,6 +13,9 @@ modified: "2026-02-24"
 tags:
   - attack.persistence
   - attack.t1574
+  - atlas.aml.t0055
+  - atlas.aml.t0050
+  - owasp.asi02
 logsource:
   product: ai_agent
   category: agent_events
