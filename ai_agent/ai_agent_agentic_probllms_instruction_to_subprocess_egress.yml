@@ -1,0 +1,398 @@
+title: Agentic Exploit Chain - Untrusted Instruction Ingest to Subprocess Egress
+id: 7f3a1c62-9e84-4d17-b5c0-2a6d8f41e093
+status: experimental
+level: high
+description: |
+  Detects the exploitation shape common to computer-use and coding agents (39C3
+  "Agentic ProbLLMs" / Month of AI Bugs): externally-controlled instruction content is
+  ingested by the agent, the agent is steered into spawning a network-capable
+  interpreter or transfer tool, and that subprocess then egresses -- either back to the
+  host that supplied the instructions, or to a public destination that did not exist in
+  the behaviour graph before the instructions were ingested.
+
+  This rule deliberately does NOT alert on generic agent telemetry. The submission it
+  covers carries no CVE, no framework, and no PoC, and the only observable primitives
+  the engine exposes (connects, execute_process, HTTP_REQUEST, ACQUIRED_SKILL) are
+  present in virtually all benign agent activity. Individually they are worthless. The
+  rule therefore requires an ORDERED, WINDOWED, SESSION-SCOPED, INSTANCE-RESOLVED chain:
+
+    Stage 1 (REQUIRED ANCHOR)  ACQUIRED_SKILL from a PUBLIC origin (is_ztna_host==0)
+                               by a process in this caller's lineage, at t0.
+    Stage 2 (REQUIRED)         EXECUTE_PROCESS of a network-capable tool/interpreter by
+                               a pid in the same session, at t2 >= t0.
+    Stage 3 (REQUIRED)         HTTP_REQUEST or CONNECTS by a pid in the same session, at
+                               t3 >= t2, whose destination either (a) matches the
+                               instruction origin host (callback), or (b) is public and
+                               was first seen only AFTER t0 (novel destination
+                               introduced by the ingested content).
+
+  All three stages must cluster inside a 15-minute window ending at the triggering
+  event. Without Stage 1 the rule returns allow and is invisible. No host, domain or
+  path allowlist is used anywhere -- "public" is the engine-derived is_ztna_host flag
+  and "novel" is a first_seen comparison against the anchor timestamp, both of which
+  narrow rather than widen what is reported.
+
+  Attribution is anchored on meta["caller_pid"] -> proc_instance -> proc_lineage, never
+  on a path-keyed graph walk, so the same session produces the same chain every run.
+  Report-only: the underlying threat class is unspecified and the chain, while specific,
+  can legitimately occur during package installs and doc-driven developer workflows.
+author: Evgen
+date: "2026-02-18"
+references:
+  - https://embracethered.com/blog/posts/2025/month-of-ai-bugs-summary/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.command-and-control
+  - attack.t1071
+  - atlas.aml.t0051.001
+  - atlas.aml.t0050
+  - owasp.llm01
+falsepositives:
+  - Coding agent reads a public install guide or README, then a package manager or
+    setup script spawned in the same session curls a release artifact from the same
+    host or from a registry endpoint first contacted during that window. This is the
+    dominant benign match and the reason the rule is report-only.
+  - Computer-use / browsing agents that ingest a public page and then use a
+    subprocess-based HTTP client (curl, python-requests via `python -c`) against that
+    same site's API instead of the in-process fetcher.
+  - Developer typing an unrelated `curl`/`python` in the same terminal that is an
+    ancestor of the agent, within 15 minutes of the agent fetching an external doc --
+    lineage cannot distinguish a human-typed command from an agent-issued one.
+  - Degraded lineage. When an ancestor shell was never ingested, proc_lineage stops
+    early and a sibling's exec/egress may be attributed to this session. Window
+    clustering limits but does not eliminate this; treat a short lineage in the chain
+    as best-effort attribution.
+  - First run on a new machine or after a graph reset, where every destination is
+    "novel" because first_seen for all URL/Host nodes post-dates the anchor.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_events:
+    event_type:
+      - connects
+      - execute_process
+  condition: sel_events
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- constants -------------------------------------------------------------
+  WINDOW_NS    = 900000000000   # 15 minutes; every stage must cluster in here
+  MAX_PIDS     = 64
+  EXEC_LIMIT   = 2000
+  EGRESS_LIMIT = 800
+
+  # Network-capable tools / interpreters an exploited agent is steered into running.
+  # Word-anchored: a bare "nc" substring matches "franchise", "cat" matches
+  # "/Applications", etc.
+  CAPABILITY = [
+      r"\bcurl\b", r"\bwget\b", r"\bnc\b", r"\bncat\b", r"\bsocat\b",
+      r"\bpython[23]?\b", r"\bnode\b", r"\bdeno\b", r"\bbun\b",
+      r"\bruby\b", r"\bperl\b", r"\bphp\b", r"\bosascript\b",
+      r"\bpowershell\b", r"\bpwsh\b", r"\bcscript\b", r"\bwscript\b",
+      r"\bbase64\b", r"/bin/sh", r"\bsh\s+-c\b", r"\bbash\s+-c\b",
+      r"\bzsh\s+-c\b", r"\bopenssl\s+s_client\b", r"\bscp\b", r"\bsftp\b",
+  ]
+
+  # ---- pure helpers (no graph / no log) ---------------------------------------
+  def is_capability_cmd(s):
+      if s == "":
+          return False
+      for p in CAPABILITY:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def host_matches(a, b):
+      if a == "" or b == "":
+          return False
+      if a == b:
+          return True
+      if a.endswith("." + b):
+          return True
+      if b.endswith("." + a):
+          return True
+      return False
+
+  def short(p):
+      if p == "":
+          return "?"
+      return p.split("/")[-1]
+
+  # ---- relevance gate: pure string checks on meta only ------------------------
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          return is_capability_cmd(meta.get("content", ""))
+      if ct == "connects":
+          return meta.get("host", "") != ""
+      return False
+
+  # ---- session scoping --------------------------------------------------------
+  def build_session(lineage, lo):
+      pids  = {}
+      paths = {}
+      for x in lineage:
+          pids[x.get("actor_pid", "")]   = x.get("actor_start", "")
+          paths[x.get("actor_path", "")] = True
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=lo, limit=EXEC_LIMIT)
+      # three closure passes pick up children / grandchildren of the lineage
+      for i in range(3):
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in pids and ap not in pids and len(pids) < MAX_PIDS:
+                  pids[ap] = e.get("actor_start", "")
+                  paths[e.get("actor_path", "")] = True
+      return pids, paths, rows
+
+  # ---- stage 1: untrusted instruction ingest (REQUIRED ANCHOR) ----------------
+  def find_skill(paths, lo, hi):
+      best_ts   = 0
+      best_edge = None
+      best_node = None
+      for p in graph(type="Process"):
+          pp = p.get("path", "")
+          if pp == "" or pp not in paths:
+              continue
+          for e in edges(p["id"], dir="out", kind="ACQUIRED_SKILL"):
+              ts = int(e.get("ts", "0"))
+              if ts < lo or ts > hi:
+                  continue
+              s = node(e["to"])
+              if s == None:
+                  continue
+              # engine-derived reachability flag, not an author allowlist
+              if s.get("is_ztna_host", "1") != "0":
+                  continue
+              if ts > best_ts:
+                  best_ts   = ts
+                  best_edge = e
+                  best_node = s
+      if best_edge == None:
+          return None
+      return (best_ts, best_edge, best_node)
+
+  # ---- stage 2: capability subprocess after the anchor ------------------------
+  def find_exec(rows, pids, t0, hi, ct, inst, trigger_ts):
+      best_ts  = 0
+      best_row = None
+      for e in rows:
+          if e.get("actor_pid", "") not in pids:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < t0 or ts > hi:
+              continue
+          if not is_capability_cmd(e.get("cmdline", "") + " " + e.get("actor_path", "")):
+              continue
+          if best_row == None or ts < best_ts:
+              best_ts  = ts
+              best_row = e
+      if best_row != None:
+          return (best_ts, best_row)
+      if ct == "execute_process":
+          # trigger stage always comes from meta, never from a log re-lookup
+          syn = {
+              "kind":        "EXECUTE_PROCESS",
+              "actor_pid":   meta.get("caller_pid", ""),
+              "actor_start": inst.get("actor_start", ""),
+              "actor_path":  inst.get("actor_path", ""),
+              "ts":          str(trigger_ts),
+              "target_id":   "process://" + inst.get("actor_path", ""),
+              "cmdline":     meta.get("content", ""),
+          }
+          return (trigger_ts, syn)
+      return (0, None)
+
+  # ---- destination index (public + novelty), built only when needed -----------
+  def build_dest_index():
+      idx = {}
+      for n in graph(type="URL"):
+          h = n.get("host", "")
+          if h == "":
+              continue
+          fs  = int(n.get("first_seen", "0"))
+          cur = idx.get(h, None)
+          if cur == None or fs < cur[0]:
+              idx[h] = (fs, n.get("is_ztna_host", "1"))
+      for n in graph(type="Host"):
+          h = n.get("host", "")
+          if h == "":
+              continue
+          fs  = int(n.get("first_seen", "0"))
+          cur = idx.get(h, None)
+          if cur == None or fs < cur[0]:
+              idx[h] = (fs, n.get("is_ztna_host", "1"))
+      return idx
+
+  def grade_host(eh, skill_host, t0, idx):
+      if eh == "":
+          return ""
+      if host_matches(eh, skill_host):
+          return "callback to instruction origin " + eh
+      d = idx.get(eh, None)
+      if d == None:
+          return ""
+      if d[1] != "0":
+          return ""
+      if d[0] < t0:
+          return ""
+      return "novel public destination first seen after ingest: " + eh
+
+  # ---- stage 3: egress after the capability subprocess ------------------------
+  def find_egress(pids, t2, hi, skill_host, t0, ct, idx):
+      if ct == "connects":
+          cp  = meta.get("caller_pid", "")
+          eh  = meta.get("host", "")
+          ets = int(meta.get("event_ts", "0"))
+          if cp in pids and ets >= t2:
+              g = grade_host(eh, skill_host, t0, idx)
+              if g != "":
+                  syn = {
+                      "kind":        "CONNECTS",
+                      "actor_pid":   cp,
+                      "actor_start": pids.get(cp, ""),
+                      "actor_path":  "",
+                      "ts":          str(ets),
+                      "host":        eh,
+                      "target_id":   "host://" + meta.get("protocol", "tcp") + ":" +
+                                     eh + ":" + meta.get("port", ""),
+                  }
+                  return (syn, g)
+      for e in query_events(kind="HTTP_REQUEST", since_ns=t2, limit=EGRESS_LIMIT):
+          if e.get("actor_pid", "") not in pids:
+              continue
+          if int(e.get("ts", "0")) > hi:
+              continue
+          g = grade_host(e.get("host", ""), skill_host, t0, idx)
+          if g != "":
+              return (e, g)
+      for e in query_events(kind="CONNECTS", since_ns=t2, limit=EGRESS_LIMIT):
+          if e.get("actor_pid", "") not in pids:
+              continue
+          if int(e.get("ts", "0")) > hi:
+              continue
+          g = grade_host(e.get("host", ""), skill_host, t0, idx)
+          if g != "":
+              return (e, g)
+      return (None, "")
+
+  # ---- kill chain helpers -----------------------------------------------------
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+      }
+
+  # ---- duplicate suppression (report noise control) ---------------------------
+  def already_reported(sig, now):
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          v = int(seen[k])
+          if now - v < WINDOW_NS:
+              fresh[k] = v
+      if sig in fresh:
+          return True
+      fresh[sig] = now
+      if store_usage()["free"] > 4096:
+          store_set("seen", fresh)
+      return False
+
+  # ---- main -------------------------------------------------------------------
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      ct         = meta.get("context_type", "")
+      trigger_ts = int(meta.get("event_ts", "0"))
+      if trigger_ts == 0:
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"                      # degraded: never guess attribution
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      lo = trigger_ts - WINDOW_NS
+      pids, paths, rows = build_session(lineage, lo)
+
+      # Stage 1 - REQUIRED anchor. No untrusted instruction ingest in this session
+      # inside the window means this is ordinary agent traffic: stay invisible.
+      sk = find_skill(paths, lo, trigger_ts)
+      if sk == None:
+          return "allow"
+      t0         = sk[0]
+      skill_edge = sk[1]
+      skill_node = sk[2]
+      skill_host = skill_node.get("host", "")
+
+      # Stage 2 - REQUIRED capability subprocess after the anchor
+      t2, exec_row = find_exec(rows, pids, t0, trigger_ts, ct, inst, trigger_ts)
+      if exec_row == None:
+          return "allow"
+
+      # Stage 3 - REQUIRED egress after the subprocess
+      idx = build_dest_index()
+      egress_row, grade = find_egress(pids, t2, trigger_ts, skill_host, t0, ct, idx)
+      if egress_row == None:
+          return "allow"
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      lineage_str = " -> ".join(names)
+      attribution = "instance-resolved"
+      if len(lineage) < 2:
+          attribution = "degraded"
+
+      egress_host = egress_row.get("host", "")
+      sig = skill_host + "|" + egress_host + "|" + lineage[len(lineage) - 1].get("actor_pid", "")
+      if already_reported(sig, trigger_ts):
+          return "allow"
+
+      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain.append(step(
+          skill_edge,
+          stage_id="Instruction Ingest",
+          stage_desc="agent loaded externally-controlled instruction content from public host " +
+                     skill_host + " (skill: " + skill_node.get("name", "?") +
+                     ", source: " + skill_node.get("source", "?") + ")",
+      ))
+      chain.append(step(
+          ev_edge(exec_row),
+          stage_id="Capability Spawn",
+          stage_desc="session spawned network-capable subprocess after ingest: " +
+                     exec_row.get("cmdline", short(exec_row.get("actor_path", ""))),
+      ))
+      chain.append(step(
+          ev_edge(egress_row),
+          stage_id="Egress",
+          stage_desc=egress_row.get("kind", "EGRESS") + " - " + grade,
+      ))
+
+      reason = ("Agentic exploit chain (" + attribution + "): instructions ingested from " +
+                skill_host + ", then " + short(exec_row.get("actor_path", "")) +
+                " spawned, then " + grade + "; session " + lineage_str +
+                "; span " + str((int(egress_row.get("ts", "0")) - t0) / 1000000000) + "s")
+      print(reason)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
