@@ -1,0 +1,89 @@
+title: SSRF via LangChain Recursive URL Loader
+id: 6f2b1c94-3d7a-4e58-9b0f-2a4c8de71533
+status: experimental
+level: high
+description: |
+  Detects outbound HTTP requests that carry the signature of a Server-Side Request
+  Forgery pivot performed by an AI agent document loader (LangChain < 0.0.317,
+  CVE-2023-46229 recursive_url_loader). Three high-specificity single-event signals
+  are matched on the http_request itself:
+
+    1. A nested URL embedded in a query parameter whose authority is loopback,
+       RFC1918, CGNAT, link-local, or an internal-only TLD - including percent and
+       double-percent encoded forms. This is the seed request an attacker plants so
+       the loader crawls inward.
+    2. Obfuscated loopback / private-range notations that have no legitimate use:
+       decimal (2130706433), hex (0x7f000001), octal (0177.0.0.1), short form
+       (127.1), IPv4-mapped IPv6, and DNS-rebinding wildcard resolvers.
+    3. A request whose host is internal/private AND whose path targets a high-value
+       SSRF objective (cloud instance metadata, Spring actuator env/heapdump,
+       /.env, /.git/config, Elasticsearch _cat, Kubernetes secrets, pprof).
+
+  A plain request to an internal host is deliberately NOT matched on its own -
+  agents talk to localhost MCP servers and internal services constantly, and that
+  signal alone cannot be separated from normal work in a single event.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-46229
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://attack.mitre.org/techniques/T1552/005/
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+  - attack.credential-access
+  - attack.t1552.005
+  - owasp.llm06
+  - cwe.918
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type: http_request
+
+  # 1. Nested internal/loopback URL supplied as a query-parameter value
+  #    (plain, percent-encoded and double-percent-encoded schemes).
+  sel_nested_internal:
+    url.full|re: '(?i)[?&][a-z0-9_.-]{1,32}=(?:https?(?::|%3a|%253a)(?://|%2f%2f|%252f%252f))(?:[a-z0-9._~%!$&*+,;=:-]{0,64}@)?(?:127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.|192\.168\.[0-9]{1,3}\.|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.|169\.254\.[0-9]{1,3}\.|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.|0\.0\.0\.0|localhost|\[::1\]|\[::ffff:|metadata\.google\.internal|[a-z0-9-]{1,63}\.(?:internal|intranet|localdomain|corp|lan|local)(?:[:/]|%2f|&|$))'
+
+  # 2. Obfuscated loopback / private notations and rebinding resolvers.
+  sel_obfuscated_loopback:
+    url.full|re: '(?i)(?:https?(?::|%3a)(?://|%2f%2f))(?:[a-z0-9._~%!$&*+,;=:-]{0,64}@)?(?:2130706433|3232235521|2852039166|0x7f[0-9a-f]{6}|0x0a[0-9a-f]{6}|0177\.0{1,4}\.0{1,4}\.0{0,3}1|127\.1(?:[:/]|%2f|&|$)|10\.1(?:[:/]|%2f|&|$)|\[::ffff:7f00:1\]|\[0:0:0:0:0:0:0:1\]|[a-z0-9.-]{0,40}\.(?:nip\.io|sslip\.io|xip\.io|localtest\.me|vcap\.me)(?:[:/]|%2f|&|$))'
+
+  # 3a. Host is internal / non-routable.
+  sel_internal_host:
+    host|re: '(?i)^(?:127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|192\.168\.[0-9]{1,3}\.[0-9]{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3}|169\.254\.[0-9]{1,3}\.[0-9]{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}|0\.0\.0\.0|localhost|\[?::1\]?|[a-z0-9-]{1,63}\.(?:internal|intranet|localdomain|corp|lan))$'
+
+  # 3b. ...and the path is a recognised SSRF objective, not ordinary app traffic.
+  sel_internal_sensitive_path:
+    path|re: '(?i)^/(?:latest/(?:meta-data|user-data|api/token)|computeMetadata/v1|metadata/(?:instance|identity)|opc/v[12]/instance|actuator/(?:env|heapdump|configprops|beans|threaddump)|\.env(?:[./]|$)|\.git/(?:config|HEAD)|\.aws/credentials|debug/pprof|_cat/indices|solr/admin|api/v1/(?:secrets|namespaces)|admin/config|server-status|wp-config\.php)'
+
+  # OAuth / OIDC loopback redirect flows legitimately embed http://127.0.0.1:PORT
+  # or http://localhost:PORT as a parameter value. Matched only when the nested URL
+  # is the value of a standard redirect parameter and terminates in a plain
+  # callback path (no dots, no traversal, no metadata path).
+  filter_oauth_loopback:
+    url.full|re: '(?i)[?&](?:redirect_uri|post_logout_redirect_uri|callback_url|return_to|redirect_url)=(?:https?(?::|%3a)(?://|%2f%2f))(?:localhost|127\.0\.0\.1)(?::[0-9]{2,5})?(?:(?:/|%2f)[a-z0-9_%-]{0,24}){0,3}(?:&|$)'
+
+  # Unrendered templates in docs, fixtures and code samples.
+  filter_template:
+    url.full|re: '(?i)(?:\{\{?[a-z0-9_.-]{1,32}\}?\}|%7B[a-z0-9_.-]{1,32}%7D|\$\{[a-z0-9_.-]{1,32}\}|<[a-z_]{1,16}_?url>|%3C[a-z_]{1,16}url%3E)'
+
+  condition: >
+    sel_scope and
+    (sel_nested_internal or sel_obfuscated_loopback or
+     (sel_internal_host and sel_internal_sensitive_path))
+    and not (filter_oauth_loopback or filter_template)
+
+falsepositives:
+  - OAuth 2.0 / OIDC native-app loopback redirect flows (redirect_uri=http://127.0.0.1:PORT/callback). Suppressed by filter_oauth_loopback, but non-standard parameter names for the same flow will still match.
+  - Local development proxies and preview tooling (Vite, webpack-dev-server, Storybook, Grafana datasource proxies) that pass a localhost or RFC1918 target as a ?url= / ?target= parameter.
+  - Internal monitoring or dashboard links where a private-range URL is a query parameter (for example a Prometheus or Kibana deep link embedded in an internal wiki page the agent fetched).
+  - Cloud SDKs and credential helpers legitimately calling the instance metadata service from an agent host; these match rule branch 3 when the metadata path is requested.
+  - Authorised internal security testing or infrastructure-audit agents deliberately probing /actuator/env, /.git/config or /_cat/indices on private hosts.
+  - Security research, CVE write-ups or training material where the SSRF payload URL is itself the resource being fetched.
+
+action: report
