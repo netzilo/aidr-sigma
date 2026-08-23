@@ -1,0 +1,100 @@
+title: SSRF Image URL Fetch to Internal or Cloud Metadata Endpoint
+id: b7f3c1a4-6d2e-4a58-9c31-5e0f2a7d84b6
+status: experimental
+level: high
+description: |
+  Detects the Server-Side Request Forgery vector in ChatOpenAI.get_num_tokens_from_messages().
+  For vision messages without detail=low, LangChain calls _url_to_size(), which issues an
+  unvalidated HTTP GET to the attacker-supplied image_url. Two single-event signals are
+  matched on http_request:
+    (1) the realised SSRF fetch - an outbound GET from the agent host to a cloud instance
+        metadata endpoint, an obfuscated (decimal/octal/hex/IPv4-mapped/rebinding) address,
+        or an RFC1918 / loopback / link-local host on an image-file path; and
+    (2) the poisoned payload itself - a vision content block whose image_url.url points at
+        a loopback, RFC1918, link-local or metadata address. A remote model provider can
+        never resolve such an address, so the only effect of that URL is the client-side
+        token-counting fetch, i.e. the SSRF primitive.
+  Reporting only - the fetch is recorded for investigation, not interrupted.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://attack.mitre.org/techniques/T1552/005/
+tags:
+  - attack.credential-access
+  - attack.t1552.005
+  - attack.discovery
+  - attack.t1046
+  - owasp.a10_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_http:
+    event_type: http_request
+
+  # (1a) Realised SSRF - GET straight at a cloud instance metadata service.
+  sel_metadata_target:
+    method: GET
+    host|re: '(?i)^(?:169\.254\.169\.254|169\.254\.170\.2|169\.254\.169\.123|100\.100\.100\.200|192\.0\.0\.192|metadata\.google\.internal|metadata\.goog|instance-data(?:\.[a-z0-9.-]+)?)$'
+
+  # (1b) Realised SSRF - GET for an image resource on a private/loopback/link-local host,
+  #      the exact shape of the _url_to_size() fetch pointed at internal infrastructure.
+  sel_internal_image_fetch:
+    method: GET
+    host|re: '(?i)^(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.6[4-9]\.\d{1,3}\.\d{1,3}|\[?(?:::1|fd[0-9a-f]{2}:[0-9a-f:]*|fe80:[0-9a-f:]*)\]?)$'
+    path|re: '(?i)\.(?:png|jpe?g|gif|webp|bmp|tiff?|svg|ico|avif|heic|heif)(?:$|[?#])'
+
+  # (1c) Realised SSRF - filter-bypass encodings of loopback/metadata addresses.
+  sel_obfuscated_target:
+    url.full|re:
+      - '(?i)^https?://(?:\d{8,10}|0x[0-9a-f]{6,8}|0[0-7]{2,3}(?:\.0?[0-7]{1,3}){3})(?::\d{1,5})?(?:[/?#]|$)'
+      - '(?i)^https?://\[?::ffff:(?:127|10|172|192|169)\.'
+      - '(?i)^https?://[a-z0-9-]*(?:169\.254\.169\.254|127\.0\.0\.1|localhost)[a-z0-9.-]*\.(?:nip\.io|sslip\.io|xip\.io|localtest\.me|traefik\.me)(?::\d{1,5})?(?:[/?#]|$)'
+
+  # (2) The poisoned vision payload - image_url pointing at an address the remote provider
+  #     cannot reach, so it can only be dereferenced locally by the token counter.
+  sel_vision_payload_internal:
+    method: POST
+    content|re:
+      - '(?i)"image_url"\s*:\s*\{[^{}]{0,400}?"url"\s*:\s*"https?://(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|192\.0\.0\.192|metadata\.google\.internal|metadata\.goog|instance-data|\[?::1\]?|\[?fd[0-9a-f]{2}:)'
+      - '(?i)"image_url"\s*:\s*"https?://(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|192\.0\.0\.192|metadata\.google\.internal|metadata\.goog|instance-data|\[?::1\]?|\[?fd[0-9a-f]{2}:)'
+      - '(?i)"type"\s*:\s*"image(?:_url)?"[\s\S]{0,200}?"url"\s*:\s*"https?://(?:localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.100\.100\.200|192\.0\.0\.192|metadata\.google\.internal|metadata\.goog|instance-data|\[?::1\]?|\[?fd[0-9a-f]{2}:)'
+
+  # Un-substituted template markers - an SDK example or a prompt template, not a live fetch.
+  filter_template_url:
+    url.full|contains:
+      - '{{'
+      - '${'
+      - '%7b%7b'
+      - '<image_url>'
+      - '<your-image-url>'
+
+  filter_template_payload:
+    content|contains:
+      - '{{image_url}}'
+      - '${image_url}'
+      - '<your-image-url>'
+      - 'your_image_url_here'
+
+  condition: >
+    sel_http and
+    (sel_metadata_target or sel_internal_image_fetch or sel_obfuscated_target or
+     sel_vision_payload_internal)
+    and not (filter_template_url or filter_template_payload)
+
+falsepositives:
+  - Cloud SDKs running inside the agent host (boto3, google-auth, azure-identity) fetching
+    instance credentials from 169.254.169.254 - a genuine GET to a metadata endpoint that is
+    indistinguishable from the SSRF fetch at the single-event level. Mitigated by report-only
+    action and by requiring method GET, which excludes the IMDSv2 PUT token exchange.
+  - Containerised agents on ECS/EKS reading task metadata from 169.254.170.2.
+  - An agent rendering or summarising images hosted on an internal wiki, artifact store or
+    image CDN on an RFC1918 address (matches the image-path selection only).
+  - A local development server on 127.0.0.1 serving image assets that the agent fetches.
+  - Deliberately self-hosted, internal-network model gateways where a vision payload legitimately
+    references an image on a private address.
+  - Security tooling or red-team scanners intentionally probing metadata and loopback endpoints.
+
+action: report
