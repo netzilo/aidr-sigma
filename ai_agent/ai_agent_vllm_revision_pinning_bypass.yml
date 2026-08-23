@@ -1,0 +1,149 @@
+title: Model Supply Chain - vLLM Incomplete Revision Pinning at Launch
+id: 6f1c9a24-7d8e-4b3a-9c05-2ae4f7b18d31
+status: experimental
+level: medium
+description: |
+  Detects a vLLM server process being launched with a configuration in which
+  revision pinning is present but demonstrably incomplete, so that at least one
+  class of model artifact will still be resolved from the repository default
+  (unpinned) revision.
+
+  vLLM's --revision / --code-revision controls do not consistently propagate to
+  every artifact loaded for a model. Dynamic remote code, GGUF weight files,
+  sibling tokenizer/processor repositories and assorted config files can be
+  fetched from the default branch even when the operator believes the model is
+  pinned to a reviewed commit. An attacker with write access to the default
+  revision of the repository can therefore land code or weights that the
+  operator never reviewed.
+
+  This rule is a launch-time CONFIGURATION detection, not a detection of the
+  artifact fetch itself. The engine exposes no load_artifact / resolve_dependency
+  event type and no LOADED_FILE / RESOLVED_ARTIFACT edge kind, so "which revision
+  this file came from" is not observable anywhere in the pipeline. The one place
+  the intent-versus-reality gap IS fully observable is the argv of the serving
+  process at exec time, which carries every pinning flag the operator supplied
+  and, by omission, every one they did not. The rule fires only when the argv
+  proves an incomplete pin - never on a generic vLLM launch.
+
+  Four mutually reinforcing launch shapes are reported, each requiring a
+  positively identified vLLM entrypoint:
+    1. --trust-remote-code with a pinned --revision but no immutable
+       --code-revision  -> remote code executes from the default branch.
+    2. --revision / --code-revision / --tokenizer-revision set to a MUTABLE ref
+       (main, master, latest, HEAD, dev, refs/heads/*) -> pinning that does not pin.
+    3. A pinned --revision combined with GGUF loading -> GGUF resolution ignores
+       the pin.
+    4. A pinned --revision plus a separate hub tokenizer/processor repository
+       with no --tokenizer-revision -> sibling artifact loads unpinned.
+author: Tanya
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://docs.vllm.ai/en/latest/serving/engine_args.html
+  - https://atlas.mitre.org/techniques/AML.T0011
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - atlas.aml.t0011
+  - owasp.a06-2021
+  - owasp.a08-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: only real process launches ───────────────────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── the command line must be an actual vLLM serving entrypoint ──────────────
+  sel_vllm_launcher:
+    content|re:
+      - '(?i)\bvllm\s+serve\b'
+      - '(?i)vllm\.entrypoints\.[a-z0-9_.]*api_server'
+      - '(?i)\s-m\s+vllm\b'
+      - '(?i)\bvllm[-/]openai\b'
+
+  # ── operator supplied a model revision pin (intent to pin) ──────────────────
+  sel_revision_pin:
+    content|re: '(?i)--revision[=\s]+[A-Za-z0-9][A-Za-z0-9._\-/]{1,80}'
+
+  # ── shape 1: dynamic remote code is enabled ─────────────────────────────────
+  sel_remote_code:
+    content|re:
+      - '(?i)--trust[-_]remote[-_]code'
+      - '(?i)trust_remote_code["\s]*[=:]["\s]*(true|1)\b'
+
+  # ── shape 2: the "pin" is a moving ref, i.e. not a pin at all ───────────────
+  sel_mutable_ref:
+    content|re: '(?i)--(code[-_]|tokenizer[-_])?revision[=\s\x{27}"]+(main|master|latest|head|dev|develop|refs/heads/[A-Za-z0-9._\-/]+)(?:[\s\x{27}"]|$)'
+
+  # ── shape 3: GGUF artifacts, which bypass revision resolution ───────────────
+  sel_gguf_artifact:
+    content|re:
+      - '(?i)--load[-_]format[=\s]+gguf'
+      - '(?i)--quantization[=\s]+gguf'
+      - '(?i)\.gguf\b'
+
+  # ── shape 4: a sibling HUB repo supplies the tokenizer/processor ────────────
+  #    first char class excludes . ~ / so local paths are not matched
+  sel_tokenizer_repo:
+    content|re: '(?i)--tokenizer[=\s]+[A-Za-z0-9_][A-Za-z0-9_.\-]*/[A-Za-z0-9_.\-]+'
+
+  # ── narrowing filters: the pin IS complete for that artifact class ──────────
+  filter_code_revision_pinned:
+    content|re: '(?i)--code[-_]revision[=\s]+[0-9a-f]{7,40}\b'
+  filter_tokenizer_revision_pinned:
+    content|re: '(?i)--tokenizer[-_]revision[=\s]+[A-Za-z0-9]'
+
+  # ── benign-context filters ──────────────────────────────────────────────────
+  filter_inspection:
+    content|re: '(?i)(^|[\s"\x{27}])(grep|rg|ack|cat|less|echo|printf|sed|awk|nano|vim|git\s+(diff|show|log))\s'
+  filter_help:
+    content|contains:
+      - '--help'
+      - '--version'
+      - '--dry-run'
+  filter_docs:
+    content|contains:
+      - 'README'
+      - 'CHANGELOG'
+      - 'CONTRIBUTING'
+      - '/docs/'
+      - '.md'
+      - '.ipynb'
+  filter_tests:
+    content|re: '(?i)(\bpytest\b|\btox\b|\bconftest\b|/tests?/|\bunittest\b|--load[-_]format[=\s]+dummy|\bmock[-_]?model\b)'
+  filter_local_model:
+    content|re: '(?i)--model[=\s\x{27}"]+[.~/]'
+  filter_offline:
+    content|contains:
+      - 'HF_HUB_OFFLINE=1'
+      - 'TRANSFORMERS_OFFLINE=1'
+
+  condition: >
+    sel_event and sel_vllm_launcher and
+    ((sel_remote_code and sel_revision_pin and not filter_code_revision_pinned)
+     or (sel_revision_pin and sel_mutable_ref)
+     or (sel_revision_pin and sel_gguf_artifact)
+     or (sel_revision_pin and sel_tokenizer_repo and not filter_tokenizer_revision_pinned))
+    and not (filter_inspection or filter_help or filter_docs or filter_tests
+     or filter_local_model or filter_offline)
+
+falsepositives:
+  - Operator intentionally runs --trust-remote-code against a fully mirrored,
+    internally controlled model repository where the default branch is already
+    change-controlled; the incomplete pin is real but accepted risk.
+  - Deployment templates that ship '--revision main' as a placeholder which CI
+    substitutes with a commit SHA later in the pipeline; the placeholder value
+    can still reach exec in staging environments.
+  - GGUF serving where the operator reviewed and hash-verified the .gguf file
+    out of band before launch, so the unpinned GGUF resolution is compensated.
+  - Evaluation and benchmarking harnesses that deliberately point --tokenizer at
+    a separate hub repo tracking latest while pinning only the model weights.
+  - Container build or image-lint steps that materialise an example 'vllm serve'
+    command line into a real exec (partially suppressed by the docs, help and
+    inspection filters).
+
+action: report
