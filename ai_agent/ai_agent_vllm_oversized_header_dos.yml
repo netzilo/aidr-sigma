@@ -1,0 +1,284 @@
+title: vLLM Oversized HTTP Header Resource Exhaustion
+id: 6b1d4f0a-9c52-4a1e-8f37-2d5e7a03c9b4
+status: experimental
+level: medium
+description: |
+  Detects the observable precursor of the vLLM API denial-of-service condition in
+  which an unauthenticated request carries an enormously large HTTP header value
+  (the published PoC uses a multi-gigabyte X-Forwarded-For) and the server parser
+  buffers it into memory until the process degrades or dies.
+
+  The engine does not expose the causal signals (no memory_allocation or
+  process_crash event type, no DENIAL_OF_SERVICE / RESOURCE_EXHAUSTION edge kind),
+  so this rule does NOT claim to observe the outcome. It observes the *request
+  shape and its repetition*, which are both available:
+
+    * meta["header_<name>"] is populated for every request header on an
+      http_request context, so per-header byte length and aggregate header bytes
+      are directly measurable at evaluation time.
+    * The HTTP_REQUEST edge into the target URL node carries count / first_ts /
+      last_ts, so sustained pressure against the same inference host is
+      measurable from the behaviour graph rather than from a single payload.
+
+  Because an in-path proxy may truncate a multi-gigabyte header before the script
+  sees it, the rule anchors on "already impossible for a real client" rather than
+  on the full attack size: any single header value at or above 8 KB (above the
+  8 KB default limit of nginx / Apache / Go net/http), or 64 KB of aggregate
+  header bytes, or more than 200 headers on one request. That anchor alone is not
+  enough to fire; it must be corroborated by crafted-padding entropy, a grossly
+  oversized value, header flooding, sustained request volume to the same host in
+  the graph, or an inference-API target path.
+
+  Verdict is report only. The rule cannot prove impact, so it must not interrupt
+  traffic.
+
+  Replay note: header_* meta keys are not stored in session snapshots, so this
+  rule is expected to be inert during replay and must be validated live.
+author: Haibo
+date: "2026-03-05"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1499/
+  - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+tags:
+  - attack.impact
+  - attack.t1499
+  - owasp.a08_2021
+falsepositives:
+  - Enterprise SSO deployments that emit multi-kilobyte Cookie or Authorization
+    (JWT) headers. A single high-entropy 8-16 KB credential header scores 1 and is
+    suppressed unless padding entropy, flooding or graph-observed burst volume is
+    also present.
+  - SDKs or internal tooling that (incorrectly) place base64 image, audio or
+    document payloads in a custom header instead of the body. These are
+    high-entropy and will only fire if they also exceed 32 KB or arrive in a
+    sustained burst.
+  - Long X-Forwarded-For / Forwarded / trace-header chains appended by stacked
+    load balancers and service meshes. These are normally well under 8 KB.
+  - Load and soak testing against a self-hosted vLLM endpoint, which legitimately
+    produces the burst signal; the header-size anchor still has to be met.
+  - Proxies that expand a header into meta after decoding (for example the
+    synthetic header_authorization-jwt key) making the observed value longer than
+    what was sent on the wire.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Thresholds (all chosen above what any real client emits) ──────────────
+  HDR_SOFT      = 8192           # single header value >= 8 KB: above the default
+                                 # header limit of every mainstream HTTP server
+  HDR_HARD      = 32768          # grossly oversized single header value
+  HDR_TOTAL     = 65536          # aggregate header bytes on one request
+  HDR_COUNT_MAX = 200            # header-flooding variant of the same DoS
+  PAD_SAMPLE    = 4096           # bytes sampled for the padding/entropy check
+  PAD_DISTINCT  = 6              # <= this many distinct chars == crafted filler
+  BURST_COUNT   = 20             # requests to the same host ...
+  BURST_NS      = 60000000000    # ... within 60s == sustained pressure
+  SCORE_MIN     = 2
+
+  # Probed first so the common case never needs meta.keys().
+  PROBE = [
+      "header_x-forwarded-for", "header_forwarded", "header_x-real-ip",
+      "header_x-forwarded-host", "header_x-forwarded-proto", "header_via",
+      "header_user-agent", "header_cookie", "header_authorization",
+      "header_authorization-jwt", "header_authorization-basic",
+      "header_referer", "header_http-referer", "header_origin", "header_host",
+      "header_accept", "header_accept-encoding", "header_accept-language",
+      "header_content-type", "header_x-api-key", "header_x-request-id",
+      "header_x-correlation-id", "header_x-amzn-trace-id", "header_traceparent",
+      "header_x-custom-header", "header_x-title", "header_te", "header_expect",
+      "header_x-request-context", "header_x-stainless-lang",
+  ]
+
+  # Target identification only. Not a trust list: presence adds suspicion,
+  # absence never suppresses.
+  INFER_PATHS = [
+      "/v1/completions", "/v1/chat/completions", "/v1/embeddings",
+      "/v1/responses", "/v1/models", "/generate", "/tokenize",
+      "/detokenize", "/pooling", "/score", "/health", "/metrics",
+  ]
+
+  def collect(keys):
+      total = 0
+      hcount = 0
+      worst_key = ""
+      worst_val = ""
+      for k in keys:
+          if not k.startswith("header_"):
+              continue
+          v = meta.get(k, "")
+          if v == "":
+              continue
+          hcount = hcount + 1
+          n = len(v)
+          total = total + n
+          if n > len(worst_val):
+              worst_key = k
+              worst_val = v
+      return {"total": total, "hcount": hcount, "key": worst_key, "val": worst_val}
+
+  def anchored(st):
+      if len(st["val"]) >= HDR_SOFT:
+          return True
+      if st["total"] >= HDR_TOTAL:
+          return True
+      if st["hcount"] >= HDR_COUNT_MAX:
+          return True
+      return False
+
+  def distinct_chars(s, limit):
+      n = len(s)
+      if n > limit:
+          n = limit
+      seen = {}
+      for i in range(n):
+          seen[s[i]] = True
+      return len(seen)
+
+  def url_node_for(host):
+      if host == "":
+          return None
+      for u in graph(type="URL"):
+          if u.get("host", "") == host:
+              return u
+      return None
+
+  def http_edges(uid):
+      out = []
+      for e in edges(uid, dir="in", kind="HTTP_REQUEST"):
+          out.append(e)
+      return sorted(out, key=lambda e: 0 - int(e.get("count", "0")))
+
+  def edge_total(evs):
+      t = 0
+      for e in evs:
+          t = t + int(e.get("count", "0"))
+      return t
+
+  def is_burst(evs, total):
+      if total < BURST_COUNT:
+          return False
+      for e in evs:
+          f = int(e.get("first_ts", "0"))
+          l = int(e.get("last_ts", "0"))
+          if f > 0 and l >= f and (l - f) <= BURST_NS:
+              return True
+      return False
+
+  def chain_root(evs):
+      if evs:
+          f = node(evs[0]["from"])
+          if f != None:
+              return f["id"]
+      for p in graph(type="Process"):
+          if p.get("agent", "0") == "1":
+              return p["id"]
+      return meta.get("agent_name", "agent")
+
+  def actor_desc():
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return ""
+      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      if inst == None:
+          return ""
+      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lin:
+          return ""
+      parts = []
+      for x in lin:
+          parts.append(x.get("actor_path", "?").split("/")[-1])
+      return " -> ".join(parts)
+
+  def run():
+      # ── Relevance gate: pure string checks on meta, no traversal ──────────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      st = collect(PROBE)
+      if not anchored(st):
+          st = collect(meta.keys())
+      if not anchored(st):
+          return "allow"          # ordinary request shape - nothing to say
+
+      host  = meta.get("host", "")
+      path  = meta.get("path", "")
+      wl    = len(st["val"])
+      hname = st["key"][7:]
+
+      score = 0
+      sigs  = []
+
+      if wl >= HDR_HARD:
+          score = score + 2
+          sigs.append("header '" + hname + "' = " + str(wl) + " bytes")
+      elif wl >= HDR_SOFT:
+          score = score + 1
+          sigs.append("header '" + hname + "' = " + str(wl) + " bytes")
+
+      if st["total"] >= HDR_TOTAL:
+          score = score + 1
+          sigs.append("aggregate header bytes = " + str(st["total"]))
+
+      if st["hcount"] >= HDR_COUNT_MAX:
+          score = score + 1
+          sigs.append("header count = " + str(st["hcount"]))
+
+      if wl >= 2048:
+          dc = distinct_chars(st["val"], PAD_SAMPLE)
+          if dc <= PAD_DISTINCT:
+              score = score + 2
+              sigs.append("crafted padding (" + str(dc) + " distinct chars in first " + str(PAD_SAMPLE) + " bytes)")
+
+      infer = False
+      for p in INFER_PATHS:
+          if path.startswith(p) or p in path:
+              infer = True
+      if infer:
+          score = score + 1
+          sigs.append("target is an inference endpoint: " + path)
+
+      # ── Graph corroboration: repetition against the same host ─────────────
+      u     = url_node_for(host)
+      evs   = []
+      total = 0
+      if u != None:
+          evs   = http_edges(u["id"])
+          total = edge_total(evs)
+          if is_burst(evs, total):
+              score = score + 1
+              sigs.append("sustained volume: " + str(total) + " requests to " + host + " inside the burst window")
+
+      if score < SCORE_MIN:
+          return "allow"          # single large-but-plausible header, no support
+
+      chain = new_chain(chain_root(evs))
+      if evs:
+          chain.append(step(evs[0],
+                            stage_id="Oversized Header Request",
+                            stage_desc=meta.get("method", "?") + " " + host + path +
+                                       " with header '" + hname + "' of " + str(wl) +
+                                       " bytes (" + str(st["hcount"]) + " headers, " +
+                                       str(st["total"]) + " total header bytes)"))
+          if len(evs) > 1:
+              chain.append(step(evs[1],
+                                stage_id="Repeat Pressure",
+                                stage_desc="additional requester driving " + host +
+                                           "; " + str(total) + " HTTP requests recorded to this host"))
+
+      who = actor_desc()
+      if who != "":
+          sigs.append("actor: " + who)
+
+      reason = "Oversized HTTP header request to " + host + path + " - " + ", ".join(sigs)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
