@@ -1,0 +1,90 @@
+title: Supply Chain - PyPI Install of sandbox-cli-sdk
+id: 4f3c9b2e-7d81-4a56-9c0f-2b6e5d18a7c3
+status: experimental
+level: medium
+description: |
+  Detects a monitored agent (or a subprocess it spawned) invoking a Python package
+  manager to install or directly execute the PyPI package 'sandbox-cli-sdk'.
+
+  sandbox-cli-sdk is a third-party SDK that drives sandbox-cli to run arbitrary
+  commands and agents inside isolated containers. Installing it executes untrusted
+  publisher code in the local Python environment (sdist build hooks, entry points),
+  and once present it provides an agent with a supported, low-friction path to run
+  payloads inside containers where host-level EDR visibility is reduced.
+
+  This is a single-event content detection over execute_process command lines. It
+  fires only when BOTH an install/execute verb of a Python package manager AND the
+  exact package token appear in the same command line, and neither a removal, an
+  inspection-only invocation, nor a pure text-search/echo of the string is present.
+  It reports; it does not block, because installing this package is a legitimate
+  developer action that a human may have deliberately requested.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - owasp.a08-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # A Python package manager is being asked to install or directly run something.
+  sel_installer:
+    content|re:
+      - '(?i)\bpip[0-9.]*\s[^\n]{0,80}\binstall\b'
+      - '(?i)\bpipx\s+(?:install|run|inject)\b'
+      - '(?i)\buv\s+(?:pip\s+install|tool\s+install|add)\b'
+      - '(?i)\buv\s+run\b[^\n]{0,80}\s--(?:with|from)\b'
+      - '(?i)\buvx\s'
+      - '(?i)\bpoetry\s+(?:add|install)\b'
+      - '(?i)\bpdm\s+add\b'
+      - '(?i)\brye\s+add\b'
+      - '(?i)\b(?:conda|mamba|micromamba)\s+install\b'
+      - '(?i)\beasy_install\b'
+
+  # The exact distribution / import name, delimited so it cannot match as a
+  # substring of an unrelated identifier. Covers version pins, extras, VCS URLs
+  # and sdist filenames.
+  sel_pkg:
+    content|re: '(?i)(?:^|[\s"''=\[/@\\(,-])sandbox[-_]cli[-_]sdk(?:[=<>!~+#.,;:/)\]\[\s"''-]|$)'
+
+  # Removal / rollback is remediation, not exposure.
+  filter_removal:
+    content|re: '(?i)\b(?:pip[0-9.]*\s+uninstall|pipx\s+uninstall|poetry\s+remove|pdm\s+remove|rye\s+remove|uv\s+(?:pip\s+uninstall|remove)|(?:conda|mamba|micromamba)\s+remove)\b'
+
+  # Metadata inspection and help output — no publisher code is executed.
+  filter_inspect:
+    content|re:
+      - '(?i)\bpip[0-9.]*\s+(?:show|index|search|list|cache|check|debug|config)\b'
+      - '(?i)\binstall\b[^\n]{0,160}--(?:help|dry-run)\b'
+      - '(?i)\bman\s+pip\b'
+
+  # The string is only being searched for or printed as text within the SAME
+  # simple command (the character class stops at | ; & so a chained real install
+  # after a grep/echo is still detected).
+  filter_text_only:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ag|ack|awk|sed|jq)\b[^\n|;&]{0,200}sandbox[-_]cli[-_]sdk'
+      - '(?i)\b(?:echo|printf)\s[^\n|;&]{0,200}\bpip[0-9.]*\s[^\n|;&]{0,80}\binstall\b'
+
+  condition: >
+    sel_event and sel_installer and sel_pkg
+    and not (filter_removal or filter_inspect or filter_text_only)
+
+falsepositives:
+  - A developer or an agent acting on an explicit human request deliberately installing sandbox-cli-sdk as a project dependency.
+  - CI/CD or container build steps that install the project's declared dependency set with the package named inline on the command line.
+  - Environment reconstruction after a wipe (recreating a virtualenv, `uv sync` fallbacks that materialise the package name on the command line).
+  - Security or supply-chain researchers reproducing the package installation in a disposable environment for triage.
+  - Package pinning / upgrade automation (Dependabot-style bots, `poetry add sandbox-cli-sdk@^x.y`) run locally by a developer.
+
+action: report
