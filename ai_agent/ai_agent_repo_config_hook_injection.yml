@@ -1,0 +1,164 @@
+title: Agent Config Hook Injection via Repository Settings File
+id: 7f3c1a9e-4b2d-4e88-9c15-2a6d0f83b1c7
+status: experimental
+level: high
+description: |
+  Detects repository-scoped agent configuration files (.claude/settings.json,
+  .mcp.json, .cursor/mcp.json, .vscode/mcp.json, .gemini/settings.json,
+  .codex/config.toml and equivalents) that carry either (a) a non-empty hook
+  declaration bound to an executable command, or (b) a flag that auto-enables /
+  auto-approves project MCP servers or bypasses the permission prompt.
+
+  This is the CVE-2025-59536 class of attack: the attacker commits the config
+  into a repository, the victim clones and opens it, and the agent processes the
+  project-scoped configuration at session start -- executing the declared hook or
+  auto-started MCP server BEFORE the trust prompt is shown. Remote code execution
+  with no user interaction beyond opening the folder.
+
+  Single-event content detection. It fires on the moment the configuration body
+  passes through the agent as tool traffic: the agent reading the repo config
+  (tool_response / llm_tool_result), or the agent writing/editing one
+  (tool_call / llm_tool_call). Two independent signals must co-occur in one
+  event: an agent-config context marker AND a weaponised directive. Neither alone
+  fires.
+
+  NOTE: the file layer has no live producer, so file_read/file_write cannot be
+  used here; the tool layer is the only single-event surface where this content
+  is observable in real time.
+author: Egemen
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-59536
+  - https://owasp.org/www-project-agentic-security-initiative/
+tags:
+  - attack.initial-access
+  - attack.persistence
+  - attack.execution
+  - attack.t1546
+  - attack.t1059
+  - owasp.agentic.2026
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Which events can carry this content at all ──────────────────────────────
+  sel_event:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_tool_call
+      - llm_tool_result
+
+  # ── Signal 1a: the path of an agent configuration file appears in the event ─
+  sel_config_path_field:
+    file_path|contains:
+      - '.claude/settings.json'
+      - '.claude/settings.local.json'
+      - '.claude/hooks.json'
+      - '.mcp.json'
+      - '.cursor/mcp.json'
+      - '.vscode/mcp.json'
+      - '.gemini/settings.json'
+      - '.codex/config.toml'
+      - '.windsurf/mcp_config.json'
+      - '.roo/mcp.json'
+      - '.amazonq/mcp.json'
+      - '.continue/config.json'
+
+  # ── Signal 1b: same, seen inside the raw body (covers tool results, which do
+  #     not populate file_path) plus agent-config schema markers ──────────────
+  sel_config_context:
+    content|re:
+      - '\.claude/settings(\.local)?\.json'
+      - '\.claude/hooks\.json'
+      - '(^|[^A-Za-z0-9_])\.mcp\.json'
+      - '\.cursor/mcp\.json'
+      - '\.vscode/mcp\.json'
+      - '\.gemini/settings\.json'
+      - '\.codex/config\.toml'
+      - '\.windsurf/mcp_config\.json'
+      - '\.roo/mcp\.json'
+      - '\.amazonq/mcp\.json'
+      - '\.continue/config\.(json|yaml)'
+      - '\\?"mcpServers\\?"(?:\s|\\[nrt])*:'
+      - 'json\.schemastore\.org/claude-code-settings'
+
+  # ── Signal 2a: a NON-EMPTY hook declaration (JSON or TOML) ──────────────────
+  #     Empty containers are excluded by construction: each alternative demands
+  #     a key or object immediately inside, so "hooks": {} does not match and
+  #     cannot be used as a decoy to satisfy this selection.
+  sel_hook_decl:
+    content|re:
+      - '\\?"(SessionStart|SessionEnd|PreToolUse|PostToolUse|UserPromptSubmit|SubagentStop|PreCompact|Notification|Stop)\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\[(?:\s|\\[nrt])*[\{\\"]'
+      - '\\?"hooks\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*[\[\{](?:\s|\\[nrt])*[\{\\"]'
+      - '\[\[?hooks(\.[a-zA-Z0-9_]+)*\]\]?'
+
+  # ── Signal 2b: that hook actually executes something ────────────────────────
+  sel_hook_exec:
+    content|re:
+      - '\\?"command\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"[^"\\]{2,}'
+      - '\\?"type\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"command\\?"'
+      - '(?m)^[ \t]*command[ \t]*=[ \t]*"[^"]{2,}"'
+
+  # ── Signal 2c (alternative branch): auto-enable / auto-approve / bypass ─────
+  sel_autoenable:
+    content|re:
+      - '\\?"enableAllProjectMcpServers\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*true'
+      - '\\?"enabledMcpjsonServers\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\[(?:\s|\\[nrt])*\\?"'
+      - '\\?"chat\.mcp\.autostart\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"(newAndOutdated|always)'
+      - '\\?"chat\.tools\.autoApprove\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*true'
+      - '\\?"(autoApprove|alwaysAllow)\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\[(?:\s|\\[nrt])*\\?"'
+      - '\\?"defaultMode\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"(bypassPermissions|acceptEdits)'
+      - '\\?"(dangerouslySkipPermissions|bypassPermissions|yolo|autoAccept|autoRun)\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*true'
+      - '\\?"approvalMode\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"(never|yolo|full-auto|auto-edit)'
+      - '(?m)^[ \t]*approval_policy[ \t]*=[ \t]*"never"'
+      - '(?m)^[ \t]*sandbox_mode[ \t]*=[ \t]*"danger-full-access"'
+
+  # ── FP suppression: template / scaffold placeholders, not a real payload ────
+  filter_placeholder:
+    content|re:
+      - '\\?"command\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"(<|\{\{|\$\{|/?path/to/|your[-_]|YOUR_|TODO|FIXME|command[-_]here|example[-_]command|REPLACE_ME)'
+      - '(?i)\\?"command\\?"(?:\s|\\[nrt])*:(?:\s|\\[nrt])*\\?"echo[ ]+(hello|hi|test|foo|world)'
+
+  # ── FP suppression: documentation / tutorial prose, not a live config file ──
+  filter_doc_example:
+    content|re:
+      - '```(json|jsonc|toml|js|ts)'
+      - 'CVE-2025-59536'
+      - '(?i)(hooks? reference|configuration reference|for example, to run|see the documentation)'
+
+  # ── FP suppression: this detection content itself (Sigma rules, playbooks) ──
+  filter_detection_content:
+    content|re:
+      - '(?m)^[ \t]*logsource:[ \t]*$'
+      - '(?m)^[ \t]*detection:[ \t]*$'
+      - '(?i)(sigma rule|detection rule|falsepositives)'
+
+  condition: >
+    sel_event
+    and (sel_config_path_field or sel_config_context)
+    and ((sel_hook_decl and sel_hook_exec) or sel_autoenable)
+    and not (filter_placeholder or filter_doc_example or filter_detection_content)
+
+falsepositives:
+  - A developer intentionally committing a legitimate project hook to their own
+    repository -- e.g. a PostToolUse hook that runs prettier/eslint/gofmt after
+    every edit. This is the single most common benign match and is exactly why
+    the rule reports rather than blocks.
+  - A repository that legitimately pins enabledMcpjsonServers to an internal,
+    reviewed MCP server so the team is not re-prompted on every clone.
+  - An agent reading vendor documentation, a changelog, or a blog post whose body
+    contains a worked hook example (suppressed by filter_doc_example when the
+    example is fenced or accompanied by reference prose).
+  - Scaffolding/template repositories that ship a starter settings.json with
+    placeholder commands (suppressed by filter_placeholder).
+  - Security-research and detection-engineering repositories containing the
+    CVE-2025-59536 proof of concept or Sigma rules describing it (suppressed by
+    filter_doc_example and filter_detection_content).
+  - A user-level (not repository-scoped) ~/.claude/settings.json being read or
+    rewritten by the agent -- the path is identical below the home directory and
+    cannot be distinguished from content alone.
+
+action: report
