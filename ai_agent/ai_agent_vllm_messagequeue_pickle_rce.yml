@@ -1,0 +1,103 @@
+title: vLLM MessageQueue Pickle Deserialization RCE Attempt
+id: 6f0d1c3a-9b47-4e21-8a5c-2d7f4b9e13c8
+status: experimental
+level: high
+description: |
+  Detects a spawned process whose command line both builds/delivers a Python
+  pickle payload AND carries a code-execution gadget aimed at a vLLM
+  MessageQueue / ZeroMQ endpoint.
+
+  vLLM v0.6.2 MessageQueue.dequeue() calls pickle.loads() on bytes read straight
+  off a socket with no validation, so any party able to reach the queue obtains
+  arbitrary code execution on the host running the inference engine
+  (CVE-2024-9052, OWASP A08 Software and Data Integrity Failures).
+
+  The engine exposes only execute_process / EXECUTE_PROCESS for this activity —
+  there is no deserialization or network-receive event type — so this rule is a
+  single-event content match on the spawned command line. To keep the false
+  positive rate at effectively zero it never fires on one indicator: it requires
+  a pickle serialization API call, PLUS a pickle RCE gadget (Python-level
+  __reduce__ / os.system / subprocess, a raw protocol-0 global opcode resolving
+  to os.system-class callables, or an inline base64 pickle blob), PLUS a
+  vLLM / MessageQueue / ZeroMQ target reference.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-9052
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://docs.python.org/3/library/pickle.html#restricting-globals
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1190
+  - attack.t1059.006
+  - cve.2024-9052
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: the only observable the engine emits for this threat ───────────
+  sel_exec:
+    event_type: execute_process
+
+  # ── indicator A: a pickle-family serialization API call ───────────────────
+  sel_pickle_api:
+    content|re: '\b(?:c?[Pp]ickle|_pickle|dill|cloudpickle|jsonpickle)\s*\.\s*(?:dumps?|loads?)\s*\('
+
+  # ── indicator B: a Python-level pickle RCE gadget ─────────────────────────
+  sel_py_gadget:
+    content|re:
+      - '__reduce__|__reduce_ex__|__setstate__'
+      - '\b(?:os|posix|nt)\s*\.\s*(?:system|popen|execl|execv|execve|spawnl|spawnv)\s*\('
+      - '\bsubprocess\s*\.\s*(?:Popen|call|run|check_output|check_call)\s*\('
+      - '\b(?:builtins|__builtin__)\s*\.\s*(?:eval|exec|compile|__import__)\b'
+      - '\bpty\s*\.\s*spawn\s*\('
+
+  # ── indicator C: the vLLM MessageQueue / ZeroMQ transport target ──────────
+  sel_mq_target:
+    content|re:
+      - '(?i)\bvllm\b'
+      - '(?i)message_?queue|shm_broadcast|\bdequeue\s*\('
+      - '(?i)\bz(?:ero)?mq\b|\bipc://|\btcp://[^\s:]{1,80}:[0-9]{4,5}'
+
+  # ── indicator D: raw pickle wire gadget (protocol 0 GLOBAL opcode) ────────
+  sel_wire_gadget:
+    content|re: '\bc(?:os|nt|posix|subprocess|builtins|__builtin__|pty|socket|shutil)(?:\\n|\n)(?:system|popen|eval|exec|check_output|check_call|Popen|call|run|spawn|remove|rmtree)\b'
+
+  # ── indicator E: inline base64-wrapped pickle stream (\x80\x02-\x80\x05) ──
+  sel_b64_pickle:
+    content|re: '(?:b64decode|decodebytes|a2b_base64)\s*\(\s*[^\s]{0,12}gA[SWJN]'
+
+  # ── benign command shapes, anchored at argv[0] so they cannot be spoofed
+  #    by embedding the token inside a payload string ───────────────────────
+  filter_read_only_tools:
+    content|re: '(?i)^\s*(?:[^\s]{0,120}/)?(?:grep|egrep|fgrep|rg|ag|ack|sift|cat|bat|head|tail|less|more|echo|printf|strings|xxd|hexdump|wc|diff|sort|uniq|man|which|find|ls)\s'
+  filter_static_analysis:
+    content|re: '(?i)^\s*(?:[^\s]{0,120}/)?(?:semgrep|bandit|codeql|sonar-scanner|ruff|pylint|flake8|mypy|trivy|checkov|snyk|pip-audit|safety|yara)\b'
+  filter_test_runner:
+    content|re:
+      - '(?i)^\s*(?:[^\s]{0,120}/)?(?:pytest|py\.test|tox|nox|coverage|hypothesis)\b'
+      - '(?i)^\s*(?:[^\s]{0,120}/)?python[0-9.]*\s+-m\s+(?:pytest|unittest|tox|nox|coverage)\b'
+
+  condition: >
+    sel_exec
+    and (
+      (sel_pickle_api and sel_py_gadget and sel_mq_target)
+      or (sel_wire_gadget and (sel_pickle_api or sel_mq_target))
+      or (sel_pickle_api and sel_b64_pickle and sel_mq_target)
+    )
+    and not (filter_read_only_tools or filter_static_analysis or filter_test_runner)
+
+falsepositives:
+  - Security researchers or vLLM maintainers reproducing CVE-2024-9052 with a
+    local proof-of-concept one-liner against a throwaway inference instance.
+  - Purple-team, CTF or exploit-development work where the operator knowingly
+    crafts a __reduce__ gadget and pushes it over ZeroMQ.
+  - Distributed ML plumbing (Ray/Dask-style workers, custom shm_broadcast
+    harnesses) that pickles objects onto a tcp:// or ipc:// socket in an inline
+    python -c snippet and happens to reference __setstate__ in the same line.
+  - Debug snippets that round-trip a MessageQueue payload through
+    pickle.loads() while also shelling out via subprocess in the same command.
+
+action: report
