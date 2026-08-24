@@ -1,0 +1,127 @@
+title: File Backdoor via Invisible Unicode in Agent File Write
+id: 3f0b9c72-6d54-4a1e-9b83-1c7ad6e5f240
+status: experimental
+level: high
+description: |
+  Detects an AI agent writing file content that carries Unicode bidirectional
+  override/embedding controls (LRE U+202A, RLE U+202B, LRO U+202D, RLO U+202E,
+  LRI/RLI/FSI U+2066-U+2068) or deliberately clustered / in-token zero-width
+  characters (ZWSP U+200B, ZWNJ U+200C, ZWJ U+200D, WJ U+2060, BOM U+FEFF), or
+  their escaped byte/codepoint encodings, into an executable, configuration,
+  persistence or agent-instruction file.
+
+  This is the Trojan Source class of attack (CVE-2021-42574 / CVE-2021-42694)
+  applied to an agent's own workspace: the rendered source a human or a
+  reviewing model sees differs from the bytes the interpreter, shell or agent
+  runtime actually executes, giving the attacker persistence that survives code
+  review.
+
+  Scope note vs. rule 78b34f4d-5fde-57a5-905d-00fd92ed359c ("Hidden Unicode in
+  Agent Instruction Files"): that rule inspects WRITE_FILE graph edges, which are
+  only reachable after the bytes have already landed (the file_write event type
+  has no live client producer). This rule fires synchronously on the tool_call
+  that is about to perform the write, is scoped to executable/config/persistence
+  targets rather than instruction documents, and requires either a bidi
+  override/embedding control or *clustered* zero-width insertion rather than the
+  mere presence of any invisible codepoint.
+author: Selhan
+date: "2026-03-14"
+references:
+  - https://trojansource.codes/
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-42574
+  - https://nvd.nist.gov/vuln/detail/CVE-2021-42694
+  - https://attack.mitre.org/techniques/T1027/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.persistence
+  - atlas.aml.t0051.001
+  - owasp.llm01
+  - owasp.llm04
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Target scoping: the write must land on an executable, configuration,
+  #    persistence or agent-instruction artifact (path-based), or be issued
+  #    through a file-writing tool when no path could be extracted.
+  sel_write_path:
+    event_type: tool_call
+    file_path|re:
+      - '(?i)\.(sh|bash|zsh|fish|ksh|py|pyw|js|mjs|cjs|jsx|ts|tsx|rb|pl|pm|php|lua|go|rs|java|kt|scala|cs|c|h|cc|cpp|hpp|ps1|psm1|bat|cmd|vbs|sql|tf|yml|yaml|json|jsonc|toml|ini|cfg|conf|env|properties|service|plist|desktop|md|mdc|mdx|rst|gradle|cmake|mk)$'
+      - '(?i)(^|[/\\])(dockerfile|makefile|crontab|authorized_keys|\.bashrc|\.zshrc|\.zshenv|\.zprofile|\.bash_profile|\.profile|\.npmrc|\.gitconfig|\.cursorrules|\.mcp\.json|claude\.md|agents\.md)$'
+  sel_write_tool:
+    event_type: tool_call
+    tool_name|re: '(?i)(^|[._-])(write|edit|multiedit|notebookedit|apply_patch|create_file|write_file|str_replace|fs_write|text_editor|save_file|put_file)([._-]|$)'
+
+  # ── Signal 1: raw bidi override / embedding / isolate initiators.
+  sel_bidi_raw:
+    content|re: '[\x{202a}\x{202b}\x{202d}\x{202e}\x{2066}\x{2067}\x{2068}]'
+
+  # ── Signal 2: zero-width char welded INSIDE an ASCII token, twice or more.
+  #    Emoji ZWJ sequences never match (they are flanked by emoji, not ASCII);
+  #    a single stray paste artifact never matches (repetition is {2,}).
+  sel_zw_in_token:
+    content|re: '(?:[A-Za-z0-9_$][\x{200b}\x{200c}\x{200d}\x{2060}\x{feff}][A-Za-z0-9_$][\s\S]{0,400}){2,}'
+
+  # ── Signal 3: dense zero-width cluster (4+ invisibles within short spans).
+  #    U+200D is deliberately excluded here so emoji ZWJ sequences cannot match.
+  sel_zw_cluster:
+    content|re: '(?:[\x{200b}\x{200c}\x{2060}\x{feff}][^\x{200b}\x{200c}\x{2060}\x{feff}]{0,24}){4,}'
+
+  # ── Signal 4: the same controls smuggled as escapes / raw UTF-8 byte triples,
+  #    which is how they survive JSON-encoded tool arguments and source strings.
+  sel_bidi_encoded:
+    content|re:
+      - '\\[ux][{]?202[ABDEabde]'
+      - '\\[ux][{]?206[678]'
+      - '(?i)%e2%80%a[abde]'
+      - '(?i)\\xe2\\x80\\xa[abde]'
+      - '(?i)(chr|unichr|fromcharcode)\(\s*(0x202[ABDEabde]|823[4578])\s*\)'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+
+  # Genuine right-to-left / Indic / Thai / Burmese localisation content in a
+  # document or resource file legitimately carries bidi isolates and ZWNJ.
+  # Requires a real word ({4,} script characters), so a single decoy character
+  # cannot be used to silence the rule.
+  filter_natural_language:
+    file_path|re: '(?i)\.(md|mdx|txt|rst|html?|xml|json|ya?ml|po|pot|xlf|xliff|strings|resx|csv|properties|ftl|arb)$'
+    content|re: '[\x{0590}-\x{05ff}\x{0600}-\x{06ff}\x{0700}-\x{074f}\x{0780}-\x{07bf}\x{0900}-\x{097f}\x{0980}-\x{09ff}\x{0a00}-\x{0aff}\x{0b00}-\x{0bff}\x{0c00}-\x{0cff}\x{0d00}-\x{0d7f}\x{0e00}-\x{0e7f}\x{1000}-\x{109f}\x{fb1d}-\x{fb4f}\x{fe70}-\x{fefc}]{4,}'
+
+  # Security research, linters, sanitisers and advisories that discuss the
+  # technique by name.
+  filter_security_research:
+    content|contains:
+      - 'CVE-2021-42574'
+      - 'CVE-2021-42694'
+      - 'trojan source'
+      - 'bidirectional override'
+      - 'unicode security mechanisms'
+      - 'UTS #39'
+      - 'U+202E'
+      - 'U+200B'
+      - 'zero-width character'
+      - 'zero width character'
+      - 'homoglyph'
+
+  # Unit-test fixtures for the above tooling: must be BOTH under a test path AND
+  # contain a test-harness construct.
+  filter_test_fixture:
+    file_path|re: '(?i)(^|[/\\])(tests?|__tests__|testdata|specs?|fixtures?|examples?|samples?)[/\\]'
+    content|re: '(?i)(func Test[A-Z]|def test_|describe\(|it\(|@Test\b|assert(Equals|True|That)?\()'
+
+  condition: >
+    (sel_write_path or sel_write_tool) and
+    (sel_bidi_raw or sel_zw_in_token or sel_zw_cluster or sel_bidi_encoded)
+    and not (filter_natural_language or filter_security_research or filter_test_fixture)
+
+falsepositives:
+  - Localisation and i18n resource files (.po, .xlf, .strings, .arb, .json) that carry Arabic, Hebrew, Persian, Devanagari, Bengali, Tamil, Thai or Burmese strings with legitimate bidi isolates or ZWNJ - suppressed by filter_natural_language, which requires a run of at least four script characters so a single decoy character cannot silence the rule.
+  - Emoji ZWJ sequences (family, profession and flag emoji) in README/markdown written by an agent - structurally cannot match; U+200D is excluded from the cluster pattern and the in-token pattern requires ASCII on both sides.
+  - A stray UTF-8 BOM at the head of a file, or a single zero-width space picked up from scraped web content - a lone invisible character never matches; the cluster pattern needs four and the in-token pattern needs two.
+  - Trojan Source detectors, Unicode sanitisers and their advisories/test fixtures, which embed the raw or escaped control characters on purpose - suppressed by filter_security_research and filter_test_fixture.
+  - Source code that legitimately manipulates bidi codepoints (e.g. a text-shaping or terminal-rendering library referencing 0x202E) - can still match sel_bidi_encoded; this is why the rule is report-only.
+
+action: report
