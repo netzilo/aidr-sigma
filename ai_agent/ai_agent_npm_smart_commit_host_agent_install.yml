@@ -1,0 +1,88 @@
+title: Supply Chain Package Acquisition - smart-commit-host-agent
+id: 7c1e4a92-4b3d-4f8e-9a26-5d0f1b8c73ae
+status: experimental
+level: medium
+description: |
+  Reports execute_process command lines that explicitly name the npm package
+  smart-commit-host-agent (or a separator-obfuscated / typosquatted spelling of it)
+  in a package-manager install verb, a one-shot runner (npx/pnpx/bunx/dlx/npm exec),
+  a registry or tarball fetch, or a node_modules execution path.
+
+  Scope is deliberately narrow and IoC-driven. The originating report is speculative:
+  it reasons from package metadata, not from an observed payload, C2 channel or PoC.
+  This rule therefore makes NO claim about "implicit LLM connectivity" and does not
+  attempt to model it - the engine has no package_install event type and no
+  NETWORK_CONNECT / EXECUTE_CODE edge kind, so the narrative's central mechanism is
+  unrepresentable. What IS representable is the single live surface named in the
+  signal: an execute_process command line. This rule fires only when that command
+  line names the specific package, which is a verifiable fact rather than an
+  inference, and it is report-only so that the corpus accrues ground truth about
+  whether the package is ever acquired in this estate before any enforcement is
+  considered.
+
+  Note the intentional blind spot: a transitive dependency pull ("npm ci") never
+  names the package on the command line and will not fire. That is the correct
+  trade - a rule that fired on every lockfile restore would be noise, not coverage.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_manager_install:
+    event_type: execute_process
+    command|re:
+      - '(?i:\b(npm|pnpm|yarn|bun)\b[ \t]+(i|in|ins|install|add|update|upgrade|create|exec|dlx)\b)[^\n]{0,240}\bsmart[-_.]?commit[-_.]?host[-_.]?agent\b'
+      - '(?i:\b(npx|pnpx|bunx)\b)[^\n]{0,240}\bsmart[-_.]?commit[-_.]?host[-_.]?agent\b'
+  sel_local_module_exec:
+    event_type: execute_process
+    command|re:
+      - '(?i:node_modules/(\.bin/)?)(@[a-z0-9._~-]{1,64}/)?smart[-_.]?commit[-_.]?host[-_.]?agent\b'
+  sel_registry_artifact:
+    event_type: execute_process
+    content|re:
+      - '(?i:registry\.(npmjs\.org|npmmirror\.com|yarnpkg\.com)/)(@[a-z0-9._~-]{1,64}/)?smart[-_.]?commit[-_.]?host[-_.]?agent\b'
+      - '(?i:\bnpm:)(@[a-z0-9._~-]{1,64}/)?smart[-_.]?commit[-_.]?host[-_.]?agent\b'
+      - '(?i)smart[-_.]?commit[-_.]?host[-_.]?agent-[0-9]{1,4}\.[0-9]{1,4}\.[0-9]{1,4}[a-z0-9.+-]{0,24}\.tgz\b'
+  filter_readonly_inspection:
+    content|re:
+      - '(?i:\b(npm|pnpm|yarn|bun)\b[ \t]+(ls|list|view|info|show|why|outdated|audit|search|docs|repo|explain|pack|deprecate|dist-tag)\b)'
+  filter_removal:
+    content|re:
+      - '(?i:\b(npm|pnpm|yarn|bun)\b[ \t]+(uninstall|remove|rm|un|prune)\b)'
+  filter_no_side_effect_flags:
+    content|re:
+      - '(?i:--dry-run|--package-lock-only)'
+  filter_text_search_tools:
+    content|re:
+      - '(?i:(^|[\s;&|("\\])(grep|egrep|fgrep|rg|ripgrep|ack|ag|jq|sed|awk|cat|bat|less|more|head|tail|strings|find|wc|which|whereis|file|diff|xxd)[ \t])'
+  filter_editors_and_docs:
+    content|re:
+      - '(?i:(^|[\s;&|("\\])(vim|nvim|nano|emacs|code|subl|micro|man)[ \t])'
+      - '(?i:(^|[\s;&|("\\])(echo|printf|cat|tee)\b[^\n]{0,200}(>>?|\|[ \t]*tee)[ \t]*[^\n]{0,120}\.(md|mdx|txt|rst|adoc)\b)'
+  filter_security_tooling:
+    content|re:
+      - '(?i:(^|[\s;&|("\\])(socket|snyk|osv-scanner|trivy|grype|syft|semgrep|npq|retire|audit-ci|dependency-check|safety)[ \t])'
+  condition: 1 of sel_* and not 1 of filter_*
+falsepositives:
+  - A developer or platform engineer deliberately installing the package after review,
+    or an internal fork published under a colliding name.
+  - CI or build automation that pins and explicitly names the package in an install
+    step (a lockfile-only restore via "npm ci" will not match).
+  - Security researchers or triage analysts reproducing this very report in a sandbox
+    - inspection verbs (ls/view/why/audit), removal verbs, --dry-run and the common
+    scanner binaries are filtered, but a live fetch in a sandbox will still report.
+  - Documentation, changelog or advisory authoring that shells out with the package
+    name; the common redirect-into-.md/.txt and editor invocations are filtered.
+  - An unrelated package whose name normalises to the same token under the
+    separator-insensitive match (accepted cost of typosquat coverage).
+action: report
