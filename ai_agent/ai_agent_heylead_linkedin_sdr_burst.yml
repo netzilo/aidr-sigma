@@ -1,0 +1,349 @@
+title: Heylead Autonomous LinkedIn SDR Outreach Burst
+id: 7b3d9c14-2f6a-4d58-9c21-8ae5f0b47d63
+status: experimental
+level: medium
+description: |
+  Instance-resolved detection of an AI agent driving the heylead MCP-native LinkedIn SDR
+  tool (or any agent-spawned LinkedIn automation) at machine cadence, without a human in
+  the loop.
+
+  This rule deliberately does NOT fire on the presence, installation, or ordinary use of
+  an MCP server. The triage objection is correct that "an agent could misuse a tool it has
+  access to" is not a detection. The engine also confirms there is no LinkedIn-specific
+  semantic event: 'connect' is not an event_type, and ACQUIRED_SKILL is graph-only and can
+  never be a triggering edge. So the rule is built exclusively from the two signals that do
+  exist -- execute_process and http_request -- and is made specific by CORRELATION rather
+  than by vocabulary:
+
+    REQUIRED anchor  : a mutating LinkedIn endpoint (invitation send / connection request /
+                       message send) reached with POST/PUT/PATCH by a process instance whose
+                       lineage contains a monitored AI agent, or whose lineage/spawn command
+                       line is the heylead driver itself. A human clicking Connect in a
+                       browser has neither and is dropped at the autonomy gate.
+    REQUIRED volume  : >= 8 such mutating calls inside a 10-minute window, all attributed to
+                       ONE session (caller lineage + descendants spawned by that lineage).
+    REQUIRED cadence : >= 4 consecutive outreach calls separated by <= 20 s -- non-human
+                       pacing. A person cannot personalise 8 invitations in sub-20s steps.
+    CORROBORATING    : >= 15 profile/search GETs in the same window (bulk scraping), and a
+                       heylead/LinkedIn ACQUIRED_SKILL edge loaded inside the same window
+                       (read from the graph, never used as a trigger).
+
+  Attribution is instance-exact: anchored on meta["caller_pid"], resolved via
+  proc_instance() -> proc_lineage(), expanded to siblings only through EXECUTE_PROCESS rows
+  whose parent is already in this session, and every query_events() call is scoped by
+  actor_pid + actor_start + the window. No cross-session attribution is possible; no
+  path-keyed graph walk picks an owner. The triggering call is taken from meta, never
+  re-queried, so the async ingest race cannot drop it.
+
+  Verdict is report, not block: sanctioned SDR campaigns are behaviourally identical to
+  abusive ones, and only a human owner can tell them apart. The kill chain gives that human
+  the driver, the skill, the enumeration volume, and the first/last outreach call.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1119/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.collection
+  - attack.t1119
+  - atlas.aml.t0053
+  - owasp.llm06
+falsepositives:
+  - Sanctioned outbound campaign - the sales team deliberately runs heylead under an
+    approved, scheduled campaign. The burst signature is identical to abuse; the rule
+    reports so an owner can confirm the campaign was authorised.
+  - Sales Navigator / Recruiter bulk workflow launched from an IDE terminal or a scheduled
+    job that happens to descend from a monitored agent process.
+  - QA or integration testing of the heylead MCP server replaying invitation and messaging
+    endpoints against a test account.
+  - A user asking an agent to clear a large backlog of pending invitations or unread
+    messages after a conference - genuinely bulk, genuinely intended.
+  - Browser-automation or accessibility test harnesses spawned by an agent that click
+    through the LinkedIn messaging UI at scripted speed.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http_linkedin:
+    event_type: http_request
+    host|contains: linkedin
+  sel_http_heylead:
+    event_type: http_request
+    host|contains: heylead
+  sel_exec_cmd:
+    event_type: execute_process
+    command|contains: heylead
+  sel_exec_content:
+    event_type: execute_process
+    content|contains: heylead
+  condition: 1 of sel_*
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── heylead / MCP-native autonomous LinkedIn SDR ────────────────────────────
+  WINDOW_NS    = 600000000000     # 10 min correlation window
+  SUPPRESS_NS  = 900000000000     # 15 min per-session report suppression
+  PRUNE_NS     = 86400000000000   # 24 h store retention
+  BURST_GAP_NS = 20000000000      # 20 s -- machine cadence between outreach calls
+  NEAR_NS      = 2000000000       # 2 s  -- trigger/log de-duplication tolerance
+
+  MIN_MUTATIONS = 8               # mutating outreach calls in window (REQUIRED)
+  MIN_BURST     = 4               # consecutive sub-20s gaps        (REQUIRED)
+  MIN_SCRAPE    = 15              # profile/search GETs             (corroborating)
+  MAX_PIDS      = 40              # bound the per-session fan-out
+
+  LINKEDIN = ["linkedin.com"]
+  HEYLEAD  = ["heylead", "hey-lead"]
+
+  MUTATE_METHODS = ["POST", "PUT", "PATCH"]
+  MUTATE_TOKENS  = ["norminvitation", "invitation", "invite",
+                    "messengermessage", "messaging/conversations",
+                    "sendmessage", "conversations/", "connectto"]
+  SCRAPE_TOKENS  = ["identity/profiles", "identity/dash/profiles",
+                    "search/blended", "searchdashclusters", "/search/",
+                    "graphql", "profileview"]
+
+  def is_linkedin(h):
+      h = h.lower()
+      for t in LINKEDIN:
+          if h == t or h.endswith("." + t):
+              return True
+      return False
+
+  def has_token(s, toks):
+      s = s.lower()
+      for t in toks:
+          if t in s:
+              return True
+      return False
+
+  def has_word(s, words):
+      s = s.lower()
+      for w in words:
+          if re.find(r"\b" + w + r"\b", s) != None:
+              return True
+      return False
+
+  def gap(a, b):
+      if a > b:
+          return a - b
+      return b - a
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── relevance gate: pure string checks on meta, no graph, no log ───────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          h = meta.get("host", "")
+          return is_linkedin(h) or has_token(h, HEYLEAD)
+      if ct == "execute_process":
+          return has_word(meta.get("content", ""), HEYLEAD)
+      return False
+
+  def find_skill_edge(paths, lo, hi):
+      for p in paths:
+          n = node("process://" + p)
+          if n == None:
+              continue
+          for e in edges(n["id"], dir="out", kind="ACQUIRED_SKILL"):
+              ts = int(e.get("ts", "0"))
+              if ts < lo or ts > hi:
+                  continue
+              s = node(e["to"])
+              if s == None:
+                  continue
+              blob = s.get("name", "") + " " + s.get("host", "")
+              if has_token(blob, HEYLEAD) or "linkedin" in blob.lower():
+                  return e
+      return None
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp  = int(meta.get("caller_pid", "0"))
+      now = int(meta.get("event_ts", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"            # degraded -- re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      lo = now - WINDOW_NS
+
+      # ── session scope: lineage + descendants spawned inside the window ─────
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x["actor_start"]
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=lo, until_ns=now, limit=5000)
+      for depth in range(3):
+          for e in execs:
+              if e["parent_pid"] in session and e["actor_pid"] not in session:
+                  session[e["actor_pid"]] = e["actor_start"]
+
+      paths = {}
+      for x in lineage:
+          paths[x["actor_path"]] = True
+      for e in execs:
+          if e["actor_pid"] in session:
+              paths[e.get("actor_path", "")] = True
+
+      # ── autonomy gate: agent-driven, or the heylead driver itself ──────────
+      agent_path = ""
+      for x in lineage:
+          n = node("process://" + x["actor_path"])
+          if n != None and n.get("agent", "0") == "1":
+              agent_path = x["actor_path"]
+              break
+
+      driver = None
+      for e in execs:
+          if e["actor_pid"] not in session:
+              continue
+          if has_word(e.get("cmdline", "") + " " + e.get("actor_path", ""), HEYLEAD):
+              driver = e
+              break
+
+      lineage_driver = False
+      for x in lineage:
+          if has_word(x["actor_path"], HEYLEAD):
+              lineage_driver = True
+
+      if agent_path == "" and driver == None and not lineage_driver:
+          return "allow"            # human-driven browser session, not agent automation
+
+      # ── session-scoped, instance-exact LinkedIn activity in the window ─────
+      muts    = []
+      scrapes = []
+      n_pid   = 0
+      for pid in sorted(session.keys()):
+          n_pid += 1
+          if n_pid > MAX_PIDS:
+              break
+          evs = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                             actor_start=int(session[pid]),
+                             since_ns=lo, until_ns=now, limit=500)
+          for e in evs:
+              h = e.get("host", "")
+              if not (is_linkedin(h) or has_token(h, HEYLEAD)):
+                  continue
+              m = e.get("method", "").upper()
+              p = e.get("path", "")
+              if m in MUTATE_METHODS and has_token(p, MUTATE_TOKENS):
+                  muts.append(e)
+              elif m == "GET" and has_token(p, SCRAPE_TOKENS):
+                  scrapes.append(e)
+
+      # ── triggering call comes from meta, never from the log (ingest race) ──
+      trig = None
+      if meta.get("context_type", "") == "http_request":
+          tm = meta.get("method", "").upper()
+          tp = meta.get("path", "")
+          if tm in MUTATE_METHODS and has_token(tp, MUTATE_TOKENS):
+              trig = {
+                  "ts":         str(now),
+                  "kind":       "HTTP_REQUEST",
+                  "actor_path": inst.get("actor_path", ""),
+                  "target_id":  "https://" + meta.get("host", ""),
+                  "host":       meta.get("host", ""),
+                  "path":       tp,
+                  "method":     tm,
+              }
+              dup = False
+              for e in muts:
+                  if gap(now, int(e.get("ts", "0"))) < NEAR_NS and e.get("path", "") == tp:
+                      dup = True
+              if not dup:
+                  muts.append(trig)
+
+      if len(muts) < MIN_MUTATIONS:
+          return "allow"
+
+      order = sorted([(int(e.get("ts", "0")), i) for i, e in enumerate(muts)])
+      bursts = 0
+      for i in range(1, len(order)):
+          if order[i][0] - order[i - 1][0] <= BURST_GAP_NS:
+              bursts += 1
+      if bursts < MIN_BURST:
+          return "allow"            # human pacing -- not autonomous bulk outreach
+
+      first = muts[order[0][1]]
+      last  = muts[order[-1][1]]
+
+      # ── per-session suppression so one burst is not reported repeatedly ────
+      root = lineage[-1]
+      key  = root["actor_pid"] + ":" + root["actor_start"]
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      prev = seen.get(key, 0)
+      if prev != 0 and (now - int(prev)) < SUPPRESS_NS:
+          return "allow"
+      fresh = {}
+      for k in seen:
+          if (now - int(seen[k])) < PRUNE_NS:
+              fresh[k] = seen[k]
+      fresh[key] = now
+      if store_usage()["free"] > 8192:
+          store_set("reported", fresh)
+
+      # ── kill chain ─────────────────────────────────────────────────────────
+      root_path = agent_path if agent_path != "" else root["actor_path"]
+      chain = new_chain("process://" + root_path)
+
+      if driver != None:
+          chain.append(step(ev_edge(driver), stage_id="Automation Driver",
+                            stage_desc="heylead SDR driver spawned in this session: " +
+                                       driver.get("cmdline", driver.get("actor_path", ""))))
+
+      skill_edge = find_skill_edge(paths, lo, now)
+      if skill_edge != None:
+          s = node(skill_edge["to"])
+          shost = s.get("host", "?") if s != None else "?"
+          chain.append(step(skill_edge, stage_id="Automation Skill",
+                            stage_desc="LinkedIn/heylead automation instructions loaded from: " + shost))
+
+      if len(scrapes) >= MIN_SCRAPE:
+          chain.append(step(ev_edge(scrapes[0]), stage_id="Profile Enumeration",
+                            stage_desc=str(len(scrapes)) + " profile/search reads in window, first: " +
+                                       scrapes[0].get("path", "")))
+
+      chain.append(step(ev_edge(first), stage_id="Bulk Outreach",
+                        stage_desc="first mutating outreach call: " + first.get("method", "") + " " +
+                                   first.get("host", "") + first.get("path", "")))
+
+      chain.append(step(ev_edge(last), stage_id="Machine Cadence",
+                        stage_desc=str(len(muts)) + " outreach calls with " + str(bursts) +
+                                   " consecutive sub-20s gaps -- non-human pacing"))
+
+      if trig != None:
+          chain.append(step(ev_edge(trig), stage_id="Trigger",
+                            stage_desc="triggering call: " + trig["method"] + " " +
+                                       trig["host"] + trig["path"]))
+
+      names = []
+      for x in lineage:
+          names.append(x["actor_path"].split("/")[-1])
+      lin_s = " -> ".join(names)
+
+      reason = ("Autonomous LinkedIn SDR burst: " + str(len(muts)) +
+                " mutating outreach calls (" + str(bursts) + " sub-20s gaps), " +
+                str(len(scrapes)) + " profile reads, within 10 min in one session via " + lin_s)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
