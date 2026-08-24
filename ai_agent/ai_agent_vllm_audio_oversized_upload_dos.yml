@@ -1,0 +1,200 @@
+title: vLLM Audio Route Oversized Upload Memory Exhaustion
+id: b7c4f0d2-3a19-4e6b-9c58-6f2d1a84e370
+status: experimental
+level: medium
+description: |
+  Detects an agent driving oversized or repeated multipart uploads at a vLLM
+  OpenAI-compatible audio endpoint (/v1/audio/transcriptions, /v1/audio/translations).
+
+  vLLM reads the uploaded file fully into memory (request.file.read()) BEFORE the
+  documented VLLM_MAX_AUDIO_CLIP_FILESIZE_MB check runs in speech-to-text
+  preprocessing. A caller that repeatedly posts clips larger than that limit forces
+  the server to allocate memory proportional to each rejected file, producing memory
+  pressure or OOM termination of the inference process.
+
+  There is no memory-allocation telemetry in the engine, so the rule reasons about the
+  only observable signal: http_request events to the audio routes and the aggregated
+  HTTP_REQUEST edges those requests produce in the behaviour graph. Two independent
+  signatures are reported:
+    1. a single upload whose declared/observed body size meets or exceeds the
+       documented 25 MiB audio-clip limit (the direct exploit attempt), and
+    2. a burst of >= 4 large (>= 8 MiB) uploads to the same host+route inside two
+       minutes (the amplification that turns the flaw into a denial of service).
+  Per-route request history is kept in the rule's private store; the graph supplies
+  caller attribution, the aggregate request volume to the host, and the kill chain.
+author: Evgen
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+  - https://owasp.org/Top10/A05_2021-Security_Misconfiguration/
+  - https://attack.mitre.org/techniques/T1499/003/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.003
+  - owasp.a05.2021
+falsepositives:
+  - Legitimate long-form transcription work — meeting recordings, podcasts or
+    interview audio routinely exceed 25 MiB and will be reported once each. Raise
+    DOC_LIMIT or LARGE in the script to match your deployment's configured
+    VLLM_MAX_AUDIO_CLIP_FILESIZE_MB.
+  - Batch transcription pipelines that submit a queue of large clips back to back;
+    these trip the burst branch. The report-only action means the batch still runs.
+  - Client-side retry loops after a 413/timeout, which replay the same large body
+    several times within the two-minute window.
+  - Capacity or soak testing of a self-hosted vLLM audio endpoint.
+  - Proxied gateways where Content-Length covers multipart overhead for several small
+    clips in one request, inflating the measured size.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_route_path:
+    path|re: '(?i)/audio/(transcriptions|translations)\b'
+  sel_route_url:
+    url.full|re: '(?i)/audio/(transcriptions|translations)\b'
+  condition: sel_http and (sel_route_path or sel_route_url)
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- constants ---------------------------------------------------------------
+  ROUTE_RE  = r"(?i)/audio/(transcriptions|translations)"
+  DOC_LIMIT = 26214400        # 25 MiB - vLLM VLLM_MAX_AUDIO_CLIP_FILESIZE_MB default
+  LARGE     = 8388608         # 8 MiB  - large enough to count toward a flood
+  BURST_N   = 4               # large uploads inside WINDOW_NS to call it a flood
+  WINDOW_NS = 120000000000    # 2 minutes
+  MAX_HIST  = 64
+
+  # ---- pure helpers (string checks on meta only) --------------------------------
+  def route_of():
+      p = meta.get("path", "")
+      if p != "" and re.find(ROUTE_RE, p) != None:
+          return p
+      u = meta.get("url", "")
+      if u != "" and re.find(ROUTE_RE, u) != None:
+          return re.find(ROUTE_RE, u)
+      return ""
+
+  def declared_size():
+      n = 0
+      cl = meta.get("header_content-length", "")
+      if cl != "" and re.match(r"^[0-9]+$", cl):
+          n = int(cl)
+      b = len(meta.get("content", ""))
+      if b > n:
+          n = b
+      return n
+
+  def is_multipart_upload():
+      ct = meta.get("header_content-type", "")
+      if "multipart/form-data" in ct.lower():
+          return True
+      c = meta.get("content", "")
+      if re.find(r'(?i)filename="[^"]{1,200}\.(wav|mp3|mp4|mpeg|mpga|m4a|flac|ogg|opus|webm|aac)"', c) != None:
+          return True
+      if re.find(r'(?i)name="file"', c) != None:
+          return True
+      return False
+
+  def run():
+      # ---- relevance gate: no graph, no store, pure meta strings ---------------
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      m = meta.get("method", "").upper()
+      if m != "" and m != "POST" and m != "PUT":
+          return "allow"
+      route = route_of()
+      if route == "":
+          return "allow"
+      size = declared_size()
+      if size < LARGE:
+          return "allow"
+
+      host = meta.get("host", "")
+      ts   = int(meta.get("event_ts", "0"))
+
+      # ---- route-scoped history (this rule's private store) --------------------
+      key  = "aud:" + host + ":" + route
+      hist = store_get(key)
+      if hist == None:
+          hist = []
+      keep = []
+      for t in hist:
+          it = int(t)
+          if ts == 0 or ts - it <= WINDOW_NS:
+              keep.append(it)
+      keep.append(ts)
+      if len(keep) > MAX_HIST:
+          keep = keep[len(keep) - MAX_HIST:]
+      if store_usage()["free"] > 8192:
+          store_set(key, keep)
+
+      oversize = size >= DOC_LIMIT
+      burst    = len(keep) >= BURST_N
+      if not oversize and not burst:
+          return "allow"
+
+      # ---- graph: attribute the traffic and measure aggregate volume -----------
+      req_edges = []
+      for u in graph(type="URL"):
+          if u.get("host", "") != host:
+              continue
+          for e in edges(u["id"], dir="in", kind="HTTP_REQUEST"):
+              if node(e["from"]) != None:
+                  req_edges.append(e)
+
+      primary = None
+      total   = 0
+      procs   = {}
+      for e in req_edges:
+          c = int(e.get("count", "0"))
+          total = total + c
+          procs[e["from"]] = True
+          if primary == None or c > int(primary.get("count", "0")):
+              primary = e
+
+      root = meta.get("agent_name", "")
+      if primary != None:
+          root = primary["from"]
+      chain = new_chain(root)
+
+      mb = str(size // 1048576)
+      if oversize:
+          stage = "Oversized Audio Upload"
+          why   = m + " " + route + " on " + host + " with a " + mb + \
+                  " MiB body - at or above the documented vLLM audio clip limit; " + \
+                  "vLLM materialises the whole file before the size check"
+      else:
+          stage = "Audio Upload Flood"
+          why   = str(len(keep)) + " large audio uploads (latest " + mb + " MiB) to " + \
+                  route + " on " + host + " within 2 minutes"
+      if not is_multipart_upload():
+          why = why + " [multipart body not observed - size taken from Content-Length]"
+
+      if primary != None:
+          chain.append(step(primary, stage_id=stage, stage_desc=why))
+          cnt = int(primary.get("count", "0"))
+          if total >= BURST_N:
+              span = int(primary.get("last_ts", "0")) - int(primary.get("first_ts", "0"))
+              secs = span // 1000000000
+              chain.append(step(primary, stage_id="Sustained Volume",
+                                stage_desc=str(total) + " HTTP requests recorded to " + host +
+                                           " over " + str(secs) + "s (top caller edge count " +
+                                           str(cnt) + ")"))
+          if len(procs) > 1:
+              chain.append(step(primary, stage_id="Parallel Callers",
+                                stage_desc=str(len(procs)) + " distinct processes are driving requests to " + host))
+
+      print("vLLM audio DoS signal: " + why)
+      return {
+          "action": "report",
+          "reason": "vLLM audio route memory-exhaustion pattern - " + why +
+                    " (callers=" + str(len(procs)) + ", host requests=" + str(total) + ")",
+          "chain":  chain,
+      }
+
+  result = run()
