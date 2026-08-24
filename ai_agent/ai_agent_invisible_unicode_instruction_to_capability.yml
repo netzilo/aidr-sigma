@@ -1,0 +1,269 @@
+title: Invisible Unicode Instruction Carrier Followed By Capability Use
+id: 4f1c9d2e-7b83-4a56-9e0d-3c6a17f2b8d1
+status: experimental
+level: high
+description: |
+  Detects the Amazon Q Developer style "ASCII smuggling" prompt-injection sequence:
+  content that carries an INVISIBLE instruction (Unicode tag block U+E0000-U+E007F,
+  or a long run of zero-width joiners/spaces/BOMs, optionally reinforced with bidi
+  overrides) reaches the assistant through a tool description, prompt, sampling
+  request or tool argument -- and the agent then USES A CAPABILITY (invokes a tool,
+  spawns a subprocess, reaches a public host) within five minutes.
+
+  The rule is deliberately sequence-based rather than payload-based. Seeing hidden
+  characters is recorded silently in the rule's private store; nothing is reported
+  until the graph shows the agent acted after that carrier. Evidence is assembled by
+  traversing TOOL_CALL, EXECUTE_PROCESS, HTTP_REQUEST and CONNECTS edges of the
+  monitored agent process, so the alert shows what the hidden instruction actually
+  caused, not merely that odd codepoints existed.
+
+  Emoji tag sequences (subdivision flags) are budgeted out of the tag-character count,
+  bidi controls alone can never fire the rule, and zero-width characters require a run
+  of eight or more consecutive invisibles.
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051.000
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051.000
+  - owasp.llm01
+falsepositives:
+  - Emoji tag sequences (regional subdivision flags such as the England/Scotland/Wales
+    flags) in commit messages, chat text or documentation the agent is editing. Mitigated
+    by subtracting seven tag letters per waving-black-flag base character before the
+    twelve-character threshold is applied.
+  - Security research, red-team fixtures or awareness documentation that intentionally
+    embeds Unicode tag or zero-width steganography samples while the same agent session
+    is legitimately calling tools. This is a genuine true-positive-shaped false alarm;
+    the rule only reports, and the kill chain makes the benign context obvious.
+  - Internationalised source or content with legitimate bidi controls plus isolated
+    ZWJ/ZWNJ (Arabic, Hebrew, Persian, Indic scripts, emoji ZWJ sequences). Bidi
+    controls are never sufficient on their own, and zero-width detection requires eight
+    or more consecutive invisible codepoints, which normal shaping never produces.
+  - Minified/obfuscated JavaScript, watermarked LLM output, or copy-pasted web text
+    carrying long zero-width runs that the agent then writes to a file. Reported once
+    per carrier per agent, so this cannot become an alert storm.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - execute_process
+  condition: sel_trigger
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── invisible-instruction carriers ──────────────────────────────────────────
+  TAG_RE  = r"[\x{e0000}-\x{e007f}]"
+  FLAG_RE = r"\x{1f3f4}"
+  ZW_RUN  = r"[\x{200b}\x{200c}\x{200d}\x{2060}\x{180e}\x{feff}]{8,}"
+  BIDI_RE = r"[\x{202a}-\x{202e}\x{2066}-\x{2069}]"
+
+  TAG_LO      = 917504            # U+E0000
+  TAG_HI      = 917631            # U+E007F
+  TAG_MIN     = 12                # printable hidden chars, after emoji budget
+  FLAG_BUDGET = 7                 # tag letters a legit subdivision flag may use
+  WINDOW_NS   = 300000000000      # 5 minutes
+  MAX_SCAN    = 200000
+
+  CAP_CTX  = ["tool_input", "execute_process"]
+  SURF_CTX = ["tool_description", "gateway_description", "prompt_description",
+              "prompt_request", "sampling_request"]
+
+  def scan_carrier(s):
+      out = {"kind": "", "n": 0, "bidi": 0}
+      if s == "":
+          return out
+      if len(s) > MAX_SCAN:
+          s = s[:MAX_SCAN]
+      # cheap Go-side regex gate before any per-codepoint work
+      if re.find(TAG_RE, s) != None:
+          n = 0
+          for cp in s.codepoint_ords():
+              if cp >= TAG_LO and cp <= TAG_HI:
+                  a = cp - TAG_LO
+                  if a >= 32 and a <= 126:
+                      n = n + 1
+          n = n - (len(re.find_all(FLAG_RE, s)) * FLAG_BUDGET)
+          if n >= TAG_MIN:
+              out["kind"] = "unicode-tag"
+              out["n"] = n
+      if out["kind"] == "" and re.find(ZW_RUN, s) != None:
+          out["kind"] = "zero-width-run"
+          out["n"] = len(re.find_all(ZW_RUN, s))
+      if out["kind"] != "":
+          out["bidi"] = len(re.find_all(BIDI_RE, s))
+      return out
+
+  # ── rule store helpers (carrier memory + report dedupe) ─────────────────────
+  def load_map(key):
+      m = store_get(key)
+      if m == None:
+          m = {}
+      return m
+
+  def save_map(key, m, now):
+      fresh = {}
+      for k in m:
+          v = m[k]
+          ts = 0
+          if type(v) == "dict":
+              ts = int(v.get("ts", "0"))
+          else:
+              ts = int(v)
+          if now == 0 or (now - ts) <= WINDOW_NS:
+              fresh[k] = v
+      if store_usage()["free"] > 8192:
+          store_set(key, fresh)
+      return fresh
+
+  # ── graph: locate the monitored agent process ───────────────────────────────
+  def agent_nodes():
+      want = meta.get("agent_name", "")
+      exact = []
+      any_agent = []
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          any_agent.append(p)
+          if want != "" and p.get("path", "") == want:
+              exact.append(p)
+      if exact:
+          return exact
+      return any_agent
+
+  # ── graph: what did the agent do after the carrier landed ───────────────────
+  def collect(aid, since_ns, chain):
+      stages = []
+      k = 0
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          if int(e.get("ts", "0")) < since_ns:
+              continue
+          t = node(e["to"])
+          nm = "?"
+          if t != None:
+              nm = t.get("name", "?")
+          chain.append(step(e, stage_id="Hidden Instruction Acted On",
+                            stage_desc="tool invoked after invisible-Unicode content: " + nm))
+          stages.append("tool:" + nm)
+          k = k + 1
+          if k >= 3:
+              break
+      k = 0
+      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          if int(e.get("ts", "0")) < since_ns:
+              continue
+          nm = e.get("cmdline", "")
+          if nm == "":
+              p = node(e["to"])
+              if p != None:
+                  nm = p.get("path", "?")
+          chain.append(step(e, stage_id="Subprocess Spawned",
+                            stage_desc="process spawned after invisible-Unicode content: " + nm))
+          stages.append("exec")
+          k = k + 1
+          if k >= 2:
+              break
+      for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+          if int(e.get("last_ts", "0")) < since_ns:
+              continue
+          u = node(e["to"])
+          if u == None or u.get("is_ztna_host", "0") == "1":
+              continue
+          chain.append(step(e, stage_id="Possible Exfiltration",
+                            stage_desc="outbound request to public host: " + u.get("host", "?")))
+          stages.append("http:" + u.get("host", "?"))
+          break
+      for e in edges(aid, dir="out", kind="CONNECTS"):
+          if int(e.get("last_ts", "0")) < since_ns:
+              continue
+          h = node(e["to"])
+          if h == None or h.get("is_ztna_host", "0") == "1":
+              continue
+          chain.append(step(e, stage_id="Possible Exfiltration",
+                            stage_desc="connection to public host: " + h.get("host", "?") +
+                                       ":" + h.get("port", "?")))
+          stages.append("connect:" + h.get("host", "?"))
+          break
+      return stages
+
+  def run():
+      # 1. relevance gate — pure string checks, no graph/store work
+      ct = meta.get("context_type", "")
+      if ct not in CAP_CTX and ct not in SURF_CTX:
+          return "allow"
+
+      now  = int(meta.get("event_ts", "0"))
+      akey = meta.get("agent_name", "")
+      if akey == "":
+          akey = "unknown-agent"
+
+      car = scan_carrier(meta.get("content", ""))
+
+      # 2. remember the carrier; never alert on the payload alone
+      carriers = load_map("carriers")
+      if car["kind"] != "":
+          carriers[akey] = {"ts": str(now), "kind": car["kind"],
+                            "n": str(car["n"]), "bidi": str(car["bidi"]),
+                            "where": ct}
+          carriers = save_map("carriers", carriers, now)
+
+      # only a capability event can complete the sequence
+      if ct not in CAP_CTX:
+          return "allow"
+
+      prior = carriers.get(akey)
+      if prior == None:
+          return "allow"
+      pts = int(prior.get("ts", "0"))
+      if now > 0 and pts > 0 and (now - pts) > WINDOW_NS:
+          return "allow"
+
+      # 3. one report per carrier per agent
+      dkey = akey + "|" + str(pts)
+      reported = load_map("reported")
+      if reported.get(dkey) != None:
+          return "allow"
+
+      # 4. graph evidence
+      chain  = None
+      stages = []
+      for a in agent_nodes():
+          ch = new_chain(a["id"])
+          st = collect(a["id"], pts, ch)
+          if st:
+              chain  = ch
+              stages = st
+              break
+          if chain == None:
+              chain = ch
+      if chain == None:
+          chain = new_chain("process://" + akey)
+
+      reported[dkey] = str(now)
+      save_map("reported", reported, now)
+
+      reason = ("Invisible Unicode instruction carrier (" + prior.get("kind", "?") +
+                ", " + prior.get("n", "?") + " hidden chars, first seen in " +
+                prior.get("where", "?") + ") followed by agent capability use in " + ct)
+      if int(prior.get("bidi", "0")) >= 2:
+          reason = reason + " [bidi-override reinforcement]"
+      if stages:
+          reason = reason + " -- " + ", ".join(stages)
+      else:
+          reason = reason + " -- no post-carrier graph edge resolved yet"
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
