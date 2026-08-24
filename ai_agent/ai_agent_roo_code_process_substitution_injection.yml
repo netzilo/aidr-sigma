@@ -1,0 +1,107 @@
+title: Agent Auto-Execute Command Injection via Process Substitution
+id: 7c1a4e62-5b93-4f8d-a2d1-9e3f6b04c8a7
+status: experimental
+level: high
+description: |
+  Detects shell command lines spawned by a monitored agent that contain bash/zsh
+  process substitution -- <(...) or >(...) -- or a SINGLE ampersand command
+  separator immediately followed by an interpreter, network client, or credential
+  utility.
+
+  Roo Code (and comparable auto-approved command execution features) fails to
+  sanitise process substitution and single '&' characters when parsing the command
+  the model produced. An attacker who can submit a crafted prompt therefore gets a
+  second, unrelated command executed alongside the command the user approved, with
+  the privileges of the agent process.
+
+  This is a single-event content rule scoped to execute_process. It fires only when
+  the injected segment introduces a NEW executable that is an interpreter, a network
+  transfer tool, or a secret-reading utility -- not merely on the presence of '&' or
+  '<(' , both of which are common in legitimate developer command lines. Redirection
+  forms (2>&1, &>, >&2) and logical chaining (&&) are excluded structurally inside the
+  pattern rather than by a suppressing filter, so an attacker cannot re-enable the
+  injection by appending a redirection.
+author: Haibo
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - owasp.llm05
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type: execute_process
+
+  # <(cmd) or >(cmd) where the substituted command is an interpreter,
+  # network client, or privilege/identity utility.
+  sel_procsub_exec:
+    content|re: '[<>]\(\s*(?:sudo\s+)?(?:/[A-Za-z0-9_./-]*/)?(?:curl|wget|nc|ncat|netcat|socat|bash|zsh|dash|sh|python3?|python2|perl|ruby|php|osascript|powershell|pwsh|base64|xxd|openssl|eval|env|printenv|whoami|id|uname|chmod|chown|ssh|scp|crontab|systemctl|launchctl)(?:\s|;|\||\)|$)'
+
+  # <(cat /etc/shadow) style secret harvesting inside a substitution.
+  sel_procsub_secret_read:
+    content|re: '[<>]\(\s*(?:sudo\s+)?(?:cat|head|tail|less|strings|grep|awk|sed|find|xargs)\s[^)]*(?:/etc/(?:passwd|shadow|sudoers|hosts)|/proc/self/environ|\.aws/|\.ssh/|\.kube/|\.netrc|\.env\b|credentials|id_rsa|token)'
+
+  # Any process substitution at all -- only actionable when combined with
+  # sel_untrusted_payload below.
+  sel_procsub_any:
+    content|re: '[<>]\('
+
+  # Remote-payload / staged-execution indicator used to qualify sel_procsub_any.
+  sel_untrusted_payload:
+    content|re: '(?i)(?:https?://|/dev/tcp/|\|\s*(?:ba|z|d)?sh\b|base64\s+-{1,2}d\b|\b(?:\d{1,3}\.){3}\d{1,3}\b)'
+
+  # A SINGLE '&' separator that starts a new interpreter / network client.
+  # Leading class [^&>|] structurally excludes '&&', '2>&1', '>&2', '&>' and '|&'.
+  # Trailing class excludes URL query parameters such as ?a=1&sudo=2 or &sh=1.
+  sel_amp_chain:
+    content|re: '(?:^|[^&>|])\s*&\s*(?:sudo\s+)?(?:/tmp/[A-Za-z0-9_.-]+|(?:/[A-Za-z0-9_./-]*/)?(?:curl|wget|nc|ncat|netcat|socat|bash|zsh|dash|sh|python3?|python2|perl|ruby|php|osascript|powershell|pwsh|base64|xxd|openssl|chmod|chown|ssh|scp|eval))(?:\s|;|\||\)|$|[\x{22}\x{27}])'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+
+  # The metacharacter appears INSIDE the first quoted string of an echo/printf/
+  # commit-message command -- i.e. it is documentation text, not a separator.
+  # Requires the '<' or '&' to sit between the opening and closing quote, so
+  # `echo "done" & curl evil.tld` is NOT suppressed.
+  filter_quoted_literal:
+    content|re: '(?:^|[\s;|\x{22}])(?:sudo\s+)?(?:echo|printf|git\s+commit|git\s+tag|git\s+notes)\b[^\x{22}\x{27}]*[\x{22}\x{27}][^\x{22}\x{27}]*[<&]'
+
+  # Static-analysis tooling invoked with an INLINE pattern/regex argument, where
+  # the injection syntax is the search pattern being hunted for. The [^;&|]*
+  # segment forces the flag to appear before any separator.
+  filter_scanner_inline_pattern:
+    content|re: '(?:^|[\s;|\x{22}/])(?:semgrep|shellcheck|bandit|codeql|gitleaks|trufflehog|trivy|checkov|hadolint)\b[^;&|]*\s(?:-e|--pattern|--patterns|--regex|--rule|--rules)\b'
+
+  condition: >
+    sel_scope
+    and (sel_procsub_exec or sel_procsub_secret_read or sel_amp_chain
+         or (sel_procsub_any and sel_untrusted_payload))
+    and not (filter_quoted_literal or filter_scanner_inline_pattern)
+
+falsepositives:
+  - Developer bootstrap one-liners that legitimately use process substitution to run a
+    remote installer, e.g. `bash <(curl -fsSL ...)` for nvm, rustup or oh-my-zsh, executed
+    intentionally by the user through the agent terminal.
+  - Comparison workflows that pipe interpreter output through process substitution, e.g.
+    `diff <(python -m json.tool a.json) <(python -m json.tool b.json)` or `<(env)`.
+  - Build and dev-server workflows that background one task with a single ampersand and
+    immediately start an interpreter, e.g. `npm run watch & node server.js` or
+    `tsc -w & python manage.py runserver`.
+  - Security research or rule-development sessions where the literal injection syntax is
+    passed as an argument to a scanner or grep. Partially suppressed by
+    filter_scanner_inline_pattern; plain `grep`/`rg` invocations are intentionally NOT
+    suppressed because that filter would be trivially abusable as a bypass.
+  - Documentation, commit messages and README snippets echoed to a terminal. Suppressed by
+    filter_quoted_literal when the metacharacter is inside the quoted string.
+  - Shell scripts that background a cleanup job and then reference a helper under /tmp,
+    e.g. `long_job & /tmp/notify.sh`.
+action: report
