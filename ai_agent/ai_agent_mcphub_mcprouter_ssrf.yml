@@ -1,0 +1,420 @@
+title: MCPHub MCPRouter baseUrl SSRF
+id: 7f3c1d0a-5e42-4b9e-9c61-2a8d4f6b0e17
+status: experimental
+level: high
+description: |
+  Instance-resolved detection for exploitation of the MCPHub MCPRouter SSRF
+  (MCPHub <= 0.9.10, serverController.ts baseUrl argument, OWASP A10:2021).
+
+  Fires on outbound http_request events and covers both observable positions:
+
+    * PAYLOAD DELIVERY - a request whose URL or JSON body carries a
+      baseUrl-family parameter (baseUrl / serverUrl / targetUrl / mcpUrl /
+      endpoint / upstreamUrl / proxyUrl / callbackUrl / webhookUrl) whose
+      embedded absolute URL points at a cloud metadata endpoint, uses a
+      non-HTTP scheme, uses an obfuscated IP literal, or hides an internal
+      host behind userinfo.
+
+    * SSRF EGRESS - the router itself dialling a cloud metadata endpoint, an
+      obfuscated host literal, or an internal host on a non-web service port.
+
+  Attribution is instance-exact: anchors on meta.caller_pid, resolves the exact
+  instance with proc_instance(), walks the true spawn chain with proc_lineage(),
+  expands to descendants of the SAME session via EXECUTE_PROCESS rows, then
+  correlates prior HTTP_REQUEST rows scoped to those pids inside a 10-minute
+  window. The triggering request is read from meta, never re-queried.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://github.com/samanhappy/mcphub
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.discovery
+  - attack.t1046
+  - attack.credential-access
+  - attack.t1552.005
+  - owasp.a10.2021
+falsepositives:
+  - Local development agents registering an MCP server whose baseUrl points at a
+    loopback service on a non-standard port. This is a weak indicator only and
+    is reported solely when MCPHub router context or internal fan-out is also
+    present in the same process session.
+  - Cloud SDKs, CI runners and credential helpers polling the instance metadata
+    service at 169.254.169.254 or metadata.google.internal. Metadata egress on
+    its own is weak and needs a corroborating MCPHub or enumeration stage.
+  - Infrastructure tooling (Terraform providers, kubectl clients, service-mesh
+    sidecars, Redis/Postgres admin UIs) legitimately reaching internal admin
+    ports such as 2379, 6379 or 10250 from a monitored session.
+  - Documentation builds, integration tests and fixtures that POST example
+    MCPHub server configurations containing baseUrl values pointing at loopback
+    or metadata addresses.
+  - Authorised SSRF test suites and red-team exercises run against the
+    organisation's own MCPHub deployment.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  WINDOW_NS  = 600000000000
+  MAX_NESTED = 12
+  FANOUT_MIN = 3
+  MAX_SESSION_PIDS = 60
+
+  METADATA_HOSTS = [
+      "169.254.169.254", "169.254.169.253", "169.254.170.2", "100.100.100.200",
+      "metadata.google.internal", "metadata.goog", "metadata.azure.com",
+      "instance-data", "instance-data.ec2.internal",
+  ]
+
+  SENSITIVE_PORTS = [
+      "22", "23", "25", "111", "135", "139", "445", "1433", "1521", "2049",
+      "2375", "2376", "2379", "2380", "3306", "3389", "4444", "5432", "5672",
+      "5984", "6379", "7001", "8020", "8086", "8500", "9042", "9092", "9200",
+      "9300", "10250", "11211", "27017", "50070",
+  ]
+
+  DANGEROUS_SCHEMES = ["file", "gopher", "dict", "ldap", "ldaps", "ftp",
+                       "tftp", "jar", "netdoc", "smb", "expect"]
+
+  MCPHUB_TOKENS = ["mcphub", "mcp-hub", "mcp_hub", "mcprouter", "mcp-router",
+                   "mcp_router", "servercontroller"]
+  HUB_EXACT  = ["/mcp", "/sse", "/messages", "/mcp_router", "/mcprouter"]
+  HUB_PREFIX = ["/api/servers", "/api/server/", "/api/settings", "/api/groups",
+                "/api/config", "/mcp/", "/sse/", "/messages/"]
+
+  PARAM = r"(?:base[_-]?url|server[_-]?url|target[_-]?url|upstream[_-]?url|proxy[_-]?url|mcp[_-]?url|remote[_-]?url|callback[_-]?url|webhook[_-]?url|endpoint)"
+  Q     = r"[\x22\x27]?"
+  PARAM_RE  = r"(?i)" + PARAM + Q + r"\s*[:=]"
+  NESTED_RE = r"(?i)" + PARAM + Q + r"\s*[:=]\s*" + Q + r"\s*[A-Za-z][A-Za-z0-9+.\-]{1,9}(?:://|:%2[Ff]%2[Ff]|%3[Aa]%2[Ff]%2[Ff])[^\x22\x27\s,}\]&]{1,200}"
+
+  def num(s):
+      if s == None:
+          return -1
+      if re.match(r"^[0-9]+$", s):
+          return int(s)
+      return -1
+
+  def split_host(scheme, rest):
+      h = rest
+      for d in ["/", "?", "#", "\\", "\x22", "\x27", " ", ",", "}", "]", "&",
+                "%2f", "%3f", "%23"]:
+          p = h.find(d)
+          if p >= 0:
+              h = h[:p]
+      ui = False
+      at = h.rfind("@")
+      if at >= 0:
+          ui = True
+          h = h[at + 1:]
+      port = ""
+      if h.startswith("["):
+          e = h.find("]")
+          if e >= 0:
+              tail = h[e + 1:]
+              h = h[1:e]
+              if tail.startswith(":"):
+                  port = tail[1:]
+      else:
+          c = h.find(":")
+          if c >= 0:
+              port = h[c + 1:]
+              h = h[:c]
+      for i in range(4):
+          if h.endswith("."):
+              h = h[:len(h) - 1]
+      return (scheme, h, port, ui)
+
+  def parse_url(u):
+      low = u.lower()
+      i = low.find("://")
+      rest = low[i + 3:] if i >= 0 else low
+      sc = low[:i] if i > 0 else ""
+      return split_host(sc, rest)
+
+  def parse_nested(m):
+      low = m.lower()
+      i = -1
+      slen = 0
+      for s in ["://", ":%2f%2f", "%3a%2f%2f"]:
+          p = low.find(s)
+          if p >= 0 and (i < 0 or p < i):
+              i = p
+              slen = len(s)
+      if i < 0:
+          return ("", "", "", False)
+      head = low[:i]
+      j = -1
+      for d in ["=", ":", "\x22", "\x27", " ", "\t"]:
+          p = head.rfind(d)
+          if p > j:
+              j = p
+      return split_host(head[j + 1:], low[i + slen:])
+
+  def is_metadata_host(h):
+      if h == "":
+          return False
+      for m in METADATA_HOSTS:
+          if h == m or h.endswith("." + m):
+              return True
+      return False
+
+  def is_internal_host(h):
+      if h == "":
+          return False
+      if h.startswith("[") and h.endswith("]"):
+          h = h[1:len(h) - 1]
+      if is_metadata_host(h):
+          return True
+      if h in ["localhost", "127.0.0.1", "0.0.0.0", "::1", "::",
+               "host.docker.internal", "kubernetes.default", "metadata"]:
+          return True
+      for p in ["127.", "10.", "192.168.", "169.254.", "0.", "::ffff:127.",
+                "::ffff:10.", "fd", "fe80"]:
+          if h.startswith(p):
+              return True
+      if h.startswith("172."):
+          parts = h.split(".")
+          if len(parts) > 1:
+              o = num(parts[1])
+              if o >= 16 and o <= 31:
+                  return True
+      if h.startswith("100."):
+          parts = h.split(".")
+          if len(parts) > 1:
+              o = num(parts[1])
+              if o >= 64 and o <= 127:
+                  return True
+      for s in [".internal", ".local", ".localdomain", ".localhost", ".lan",
+                ".intranet", ".svc", ".cluster.local", ".home.arpa"]:
+          if h.endswith(s):
+              return True
+      if h.find(".") < 0 and h.find(":") < 0:
+          return True
+      return False
+
+  def is_obfuscated_host(h):
+      if h == "":
+          return False
+      if re.match(r"^0[xX][0-9a-fA-F]{5,}$", h):
+          return True
+      if re.match(r"^[0-9]{7,12}$", h):
+          return True
+      if re.match(r"^0[0-7]{2,}(\.[0-9]{1,3}){0,3}$", h):
+          return True
+      if re.match(r"^[0-9]{1,3}\.[0-9]{1,5}$", h):
+          return True
+      if h.find("%") >= 0:
+          return True
+      if h.startswith("::ffff:") or h.startswith("0:0:0:0"):
+          return True
+      return False
+
+  def is_hub_path(p):
+      if p == "":
+          return False
+      pl = p.lower()
+      for t in HUB_EXACT:
+          if pl == t:
+              return True
+      for t in HUB_PREFIX:
+          if pl.startswith(t):
+              return True
+      return False
+
+  def ev_edge(e):
+      t = e.get("ts", "0")
+      return {"from": "process://" + e.get("actor_path", ""),
+              "to": e.get("target_id", ""), "kind": e.get("kind", "HTTP_REQUEST"),
+              "ts": t, "first_ts": t, "last_ts": t,
+              "method": e.get("method", ""), "count": "1"}
+
+  def meta_edge(actor_path, target, ts):
+      t = str(ts)
+      return {"from": "process://" + actor_path, "to": target,
+              "kind": "HTTP_REQUEST", "ts": t, "first_ts": t, "last_ts": t,
+              "method": meta.get("method", ""), "count": "1"}
+
+  def short(p):
+      segs = p.split("/")
+      return segs[len(segs) - 1]
+
+  def run():
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      url  = meta.get("url", "")
+      body = meta.get("content", "")
+      blob = url + "\n" + body
+
+      tsc, thost, tport, tui = parse_url(url)
+      if thost == "":
+          thost = meta.get("host", "").lower()
+
+      has_param = re.find(PARAM_RE, blob) != None
+      t_meta = is_metadata_host(thost)
+      t_int  = is_internal_host(thost)
+      t_obf  = is_obfuscated_host(thost)
+      t_port_hit = t_int and tport in SENSITIVE_PORTS
+
+      if not has_param and not t_meta and not t_obf and not t_port_hit:
+          return "allow"
+
+      strong = []
+      weak   = []
+      if has_param:
+          for m in re.find_all(NESTED_RE, blob, MAX_NESTED):
+              sc, h, pt, ui = parse_nested(m)
+              if h == "":
+                  continue
+              if sc in DANGEROUS_SCHEMES:
+                  strong.append("baseUrl-family parameter carries non-HTTP scheme " +
+                                sc + "://" + h)
+              elif is_metadata_host(h):
+                  strong.append("baseUrl-family parameter points at cloud metadata endpoint " + h)
+              elif is_obfuscated_host(h):
+                  strong.append("baseUrl-family parameter uses obfuscated IP literal " + h)
+              elif ui and is_internal_host(h):
+                  strong.append("baseUrl-family parameter hides internal host behind userinfo @" + h)
+              elif is_internal_host(h) and pt in SENSITIVE_PORTS:
+                  weak.append("baseUrl-family parameter targets internal service port " + h + ":" + pt)
+
+      if t_meta:
+          weak.append("outbound request to cloud metadata endpoint " + thost)
+      if t_obf:
+          weak.append("outbound request to obfuscated host literal " + thost)
+      if tui and t_int:
+          weak.append("outbound request with userinfo confusion to internal host " + thost)
+      if t_port_hit:
+          weak.append("outbound request to internal service port " + thost + ":" + tport)
+
+      if len(strong) == 0 and len(weak) == 0:
+          return "allow"
+
+      cp  = num(meta.get("caller_pid", "0"))
+      now = num(meta.get("event_ts", "0"))
+      if cp <= 0 or now <= 0:
+          return "allow"
+      inst = proc_instance(cp, now)
+      if inst == None:
+          if len(strong) > 0:
+              return {"action": "report",
+                      "reason": "MCPHub MCPRouter SSRF payload indicator, attribution degraded - " +
+                                "; ".join(strong)}
+          return "allow"
+
+      lineage = proc_lineage(num(inst.get("actor_pid", "0")),
+                             num(inst.get("actor_start", "0")))
+      if lineage == None or len(lineage) == 0:
+          lineage = [inst]
+
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      win_start = now - WINDOW_NS
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
+                           until_ns=now, limit=2000)
+      for i in range(3):
+          for e in execs:
+              if len(session) >= MAX_SESSION_PIDS:
+                  break
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = True
+
+      ctx = []
+      hit = ""
+      for x in lineage:
+          s = (x.get("actor_path", "") + " " + x.get("cmdline", "") + " " +
+               x.get("parent_path", "")).lower()
+          for t in MCPHUB_TOKENS:
+              if hit == "" and s.find(t) >= 0:
+                  hit = t
+      an = (meta.get("agent_name", "") + " " + meta.get("server_name", "") + " " +
+            thost).lower()
+      for t in MCPHUB_TOKENS:
+          if hit == "" and an.find(t) >= 0:
+              hit = t
+      if hit != "":
+          ctx.append("MCPHub/MCPRouter process context (" + hit + ")")
+
+      bl = body.lower()
+      if bl.find("mcpservers") >= 0 or (bl.find("baseurl") >= 0 and bl.find("transport") >= 0):
+          ctx.append("MCPHub server-config payload (mcpServers/baseUrl/transport)")
+      if is_hub_path(meta.get("path", "")):
+          ctx.append("MCPHub router/config endpoint " + meta.get("path", ""))
+
+      internal = {}
+      hub_ev = None
+      for pid in session:
+          p = num(pid)
+          if p <= 0:
+              continue
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=p,
+                                since_ns=win_start, until_ns=now, limit=60):
+              eh = e.get("host", "").lower()
+              if hub_ev == None and is_hub_path(e.get("path", "")):
+                  hub_ev = e
+              if eh != "" and eh != thost and is_internal_host(eh):
+                  internal[eh] = e
+      if hub_ev != None:
+          ctx.append("prior session request to MCPHub router/config endpoint " +
+                     hub_ev.get("path", ""))
+      if len(internal) >= FANOUT_MIN:
+          ctx.append("session reached " + str(len(internal)) + " distinct internal hosts")
+
+      if len(strong) == 0 and len(ctx) == 0:
+          return "allow"
+
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      if hub_ev != None:
+          chain.append(step(ev_edge(hub_ev), stage_id="MCPRouter Access",
+                            stage_desc="session reached MCPHub router endpoint " +
+                                       hub_ev.get("method", "") + " " +
+                                       hub_ev.get("host", "") + hub_ev.get("path", "")))
+
+      if len(internal) >= FANOUT_MIN:
+          n = 0
+          for ih in internal:
+              if n >= 5:
+                  break
+              chain.append(step(ev_edge(internal[ih]), stage_id="Internal Enumeration",
+                                stage_desc="session request to internal host " + ih))
+              n = n + 1
+
+      trig_target = "https://" + thost if thost != "" else url
+      te = meta_edge(inst.get("actor_path", ""), trig_target, now)
+      if len(strong) > 0:
+          chain.append(step(te, stage_id="SSRF Payload",
+                            stage_desc=strong[0] + " (" + meta.get("method", "") + " " +
+                                       thost + meta.get("path", "") + ")"))
+      else:
+          chain.append(step(te, stage_id="SSRF Egress",
+                            stage_desc=weak[0] + " (" + meta.get("method", "") + " " +
+                                       thost + meta.get("path", "") + ")"))
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      who = " -> ".join(names)
+      sig = strong + weak
+
+      print("MCPHub MCPRouter SSRF indicators: " + "; ".join(sig) +
+            " | corroboration: " + "; ".join(ctx) + " | session: " + who)
+
+      return {"action": "report",
+              "reason": "MCPHub MCPRouter baseUrl SSRF - " + "; ".join(sig) +
+                        " | corroborated by: " + "; ".join(ctx) +
+                        " | session: " + who,
+              "chain": chain}
+
+  result = run()
