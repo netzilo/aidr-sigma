@@ -1,0 +1,271 @@
+title: LangChain load_prompt Deserialization Code Execution
+id: 7f3c1a2e-9b4d-4f61-8c2a-5d0e6b7a1c93
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation signature of the LangChain `load_prompt` /
+  `load_chain` unsafe-deserialization class of bugs (LangChain <= 0.0.171,
+  CVE-2023-36281): a malicious prompt/chain JSON or YAML file whose template
+  reaches `__subclasses__`, `__globals__` or an f-string/template evaluation
+  path and executes attacker code inside the interpreter.
+
+  The engine cannot observe the deserialization step itself (there is no
+  EXECUTE_CODE or UNSAFE_DESERIALIZATION edge kind and no `deserialize`
+  event type). What it can observe is the ordered, session-scoped pair:
+
+    stage 1 (REQUIRED anchor) - a python-family host process reads an
+                                untrusted prompt/chain specification file
+                                (*.json / *.yaml / *.yml whose path carries a
+                                prompt/template/chain/agent token), and
+    stage 2 (trigger)         - within 5 minutes the same process session
+                                spawns a shell, a network utility, an
+                                encoder/loader, or a `python -c` payload.
+
+  The rule is anchored on `meta["caller_pid"]`, resolves the exact process
+  instance with `proc_instance()`, walks the real spawn chain with
+  `proc_lineage()`, and reads only prior, instance-scoped rows out of the
+  event log with `query_events()`. The triggering exec is taken from `meta`
+  (never re-queried) because the log is populated asynchronously. Attribution
+  never crosses a session: every stage must belong to the caller's lineage or
+  to a child spawned by that lineage inside the window.
+
+  Maps to OWASP A08:2023 - Software and Data Integrity Failures (untrusted
+  deserialization of a prompt artifact). Report-only: the ordered pair is
+  strong evidence but a legitimate agent that loads a prompt file and then
+  shells out produces the same shape.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36281
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - owasp.llm03
+falsepositives:
+  - A LangChain / LlamaIndex application that legitimately loads a prompt or
+    chain JSON from disk and then, in the same session, uses a Bash/Terminal
+    tool - agent frameworks routinely spawn `sh -c` for their shell tool.
+  - CI and pytest runs that read prompt fixtures (`tests/**/prompt*.json`) and
+    then invoke shell helpers, `chmod +x`, or `curl` for artifact upload.
+  - Notebook / Streamlit / Chainlit dev loops where the kernel reads a
+    `*_prompt.json` and the same kernel later shells out for `pip install`.
+  - Non-LangChain configuration files that happen to carry a `agent`,
+    `chain` or `template` token in the filename (e.g. `agent.json` for an
+    unrelated service) read by a python process that later runs `curl`.
+  - Deployment scripts that render a Jinja/`template.yaml` and then run a
+    packaging shell command.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ─── LangChain load_prompt deserialization RCE — instance-resolved ─────────
+  # Anchor: caller_pid -> proc_instance -> proc_lineage -> query_events.
+  # Trigger stage comes from meta (async ingest race); prior stage from the log.
+
+  WINDOW_NS = 300000000000        # 5 minutes — this rule's own window
+
+  # Child processes that a prompt-template payload typically reaches for.
+  CHILD_PATTERNS = [
+      r"(?i)(^|[\s/])(sh|bash|zsh|dash|ksh)([\s]|$)",
+      r"(?i)(^|[\s/])(curl|wget)([\s]|$)",
+      r"(?i)(^|[\s/])(nc|ncat|netcat|socat)([\s]|$)",
+      r"(?i)(^|[\s/])(osascript|powershell|pwsh|wscript|cscript)([\s]|$)",
+      r"(?i)(^|[\s/])cmd\.exe([\s]|$)",
+      r"(?i)(^|[\s/])(perl|ruby|php|node)([\s]|$)",
+      r"(?i)\bchmod\s+\+x\b",
+      r"(?i)\bbase64\s+--?d\b",
+  ]
+
+  # Markers of the deserialization gadget itself leaking into the child cmdline.
+  PAYLOAD_PATTERNS = [
+      r"__subclasses__",
+      r"__globals__",
+      r"__import__",
+      r"__builtins__",
+      r"(?i)\bos\.(system|popen|execv|execvp|execl)\b",
+      r"(?i)\bsubprocess\.(run|call|Popen|check_output)\b",
+      r"(?i)(^|[\s/])python[0-9.]*\s+-c([\s]|$)",
+      r"(?i)\beval\s*\(",
+      r"(?i)\bexec\s*\(",
+  ]
+
+  PROMPT_EXT   = [".json", ".yaml", ".yml"]
+  PROMPT_HINTS = ["prompt", "template", "chain", "agent", "langchain",
+                  "few_shot", "fewshot", "llm"]
+
+  def has_any(s, pats):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def short(path):
+      if path == "":
+          return "?"
+      return path.split("/")[-1]
+
+  def is_python_proc(path):
+      if path == "":
+          return False
+      base = short(path).lower()
+      if re.match(r"^pythonw?[0-9.]*$", base):
+          return True
+      if re.match(r"^pythonw?[0-9.]*\.exe$", base):
+          return True
+      if re.match(r"^(uvicorn|gunicorn|streamlit|chainlit|celery|flask|langserve)$", base):
+          return True
+      return False
+
+  def is_prompt_spec(p):
+      if p == "":
+          return False
+      lp = p.lower()
+      ext_ok = False
+      for x in PROMPT_EXT:
+          if lp.endswith(x):
+              ext_ok = True
+      if not ext_ok:
+          return False
+      for h in PROMPT_HINTS:
+          if h in lp:
+              return True
+      return False
+
+  def ev_edge(e):
+      tgt = e.get("path", "")
+      if tgt == "":
+          tgt = e.get("target_id", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  # ─── relevance gate — pure string checks on meta, no graph / log calls ─────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if has_any(cmd, CHILD_PATTERNS):
+          return True
+      if has_any(cmd, PAYLOAD_PATTERNS):
+          return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd   = meta.get("content", "")
+      ev_ts = int(meta.get("event_ts", "0"))
+      cp    = int(meta.get("caller_pid", "0"))
+      if cp == 0 or ev_ts == 0:
+          return "allow"
+
+      # ── anchor on the exact triggering instance ───────────────────────────
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          return "allow"                     # degraded — never guess an owner
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # The LangChain host must be in this caller's own spawn chain.
+      py = None
+      for x in lineage:
+          if is_python_proc(x.get("actor_path", "")):
+              py = x
+              break
+      if py == None:
+          return "allow"
+
+      # ── session scope: lineage pids + children they spawned in-window ─────
+      since   = ev_ts - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                            until_ns=ev_ts, limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e.get("actor_pid", "")] = True
+
+      # ── REQUIRED anchor stage: prompt spec read, ordered before the exec ──
+      # READ_FILE is high volume — always scoped by actor_pid and windowed.
+      read_ev = None
+      for pid in session:
+          if pid == "" or pid == "0":
+              continue
+          for e in query_events(kind="READ_FILE", actor_pid=int(pid),
+                                since_ns=since, until_ns=ev_ts, limit=300):
+              if is_prompt_spec(e.get("path", "")):
+                  if int(e.get("ts", "0")) <= ev_ts:
+                      read_ev = e
+                      break
+          if read_ev != None:
+              break
+      if read_ev == None:
+          return "allow"                     # anchor absent — not this threat
+
+      # ── verdict + kill chain, rooted at the session owner ─────────────────
+      owner = lineage[-1]
+      root  = owner.get("actor_path", py.get("actor_path", ""))
+      chain = new_chain("process://" + root)
+
+      chain.append(step(
+          ev_edge(read_ev),
+          stage_id="Untrusted Prompt Spec Load",
+          stage_desc=short(read_ev.get("actor_path", "")) +
+                     " read prompt/chain specification: " + read_ev.get("path", ""),
+      ))
+
+      trig_edge = {
+          "from":     "process://" + py.get("actor_path", ""),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ev_ts),
+          "first_ts": str(ev_ts),
+          "last_ts":  str(ev_ts),
+          "cmdline":  cmd,
+      }
+      gadget = has_any(cmd, PAYLOAD_PATTERNS)
+      label  = "Code Execution (template gadget)" if gadget else "Code Execution"
+      chain.append(step(
+          trig_edge,
+          stage_id=label,
+          stage_desc="python session spawned: " + cmd[:240],
+      ))
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      path_str = " -> ".join(names)
+      conf = "gadget markers in child cmdline" if gadget else "no gadget markers"
+      delta = (ev_ts - int(read_ev.get("ts", "0"))) / 1000000000
+
+      print("LangChain load_prompt RCE pattern: " + read_ev.get("path", "") +
+            " then exec after " + str(delta) + "s via " + path_str + " (" + conf + ")")
+
+      return {
+          "action": "report",
+          "reason": "Possible LangChain load_prompt deserialization RCE - " +
+                    short(py.get("actor_path", "")) + " read untrusted prompt spec " +
+                    read_ev.get("path", "") + " then spawned '" + cmd[:120] +
+                    "' " + str(delta) + "s later (" + conf + "); session: " + path_str,
+          "chain":  chain,
+      }
+
+  result = run()
