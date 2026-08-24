@@ -1,0 +1,500 @@
+title: vLLM Mooncake Deserialization RCE - Inference Server Spawns Execution Primitive
+id: 4f6c1d9e-8a72-4b31-9c5e-2d1a7f0b6e84
+status: experimental
+level: high
+author: Egemen
+date: "2026-03-14"
+description: |
+  Detects the only observable consequence of the vLLM + Mooncake unsafe-deserialization
+  RCE (untrusted serialized payload delivered over the ZMQ/TCP KV-cache transport that
+  Mooncake binds on all interfaces): the vLLM serving process lineage spawning a
+  code-execution primitive.
+
+  TRIAGE DISSENT ANSWERED. The exploitation vector itself is NOT in the engine schema -
+  there is no network_connection / deserialize_data event type and no NETWORK_LISTEN,
+  ACCEPTS_CONNECTION, DESERIALIZATION_GADGET or EXECUTES_CODE edge kind. This rule does
+  not pretend to see the ZMQ payload. It takes the one live signal (execute_process) and
+  makes it attributable and specific in three ways, which is exactly what the skeptic says
+  a bare process spawn cannot do:
+
+    1. ATTRIBUTION - the spawn must be attributable, via proc_instance/proc_lineage on
+       meta["caller_pid"] (or, when the event log is degraded, via an upward walk of
+       EXECUTE_PROCESS edges in the behaviour graph), to a process whose invocation SHAPE
+       is a vLLM/Mooncake server: "vllm serve", "-m vllm.entrypoints...", mooncake_master,
+       MooncakeConnector, kv_transfer_config, MOONCAKE_CONFIG, VLLM_*= env launch. A mere
+       mention of the string "vllm" in a developer command line does not qualify.
+    2. SPECIFICITY - the child command must be an execution primitive a healthy inference
+       server never runs: reverse shell, download piped to an interpreter, base64-decode
+       piped to an interpreter, netcat/socat exec, authorized_keys or cron persistence,
+       execution staged out of a world-writable directory, or an inline interpreter
+       carrying a socket shell / pickle.loads gadget / os.system.
+    3. CORROBORATION - graph traversal of the spawned child's own edges (CONNECTS,
+       HTTP_REQUEST, CREATE_FILE/WRITE_FILE resolved with fs_activity) inside a 5 minute
+       window of the trigger. Weaker (tier B) primitives are reported ONLY when they are
+       accompanied by a write into a persistence/staging location.
+
+  Because the causal link to the network payload is inferred, not observed, the verdict is
+  report - never block. The kill chain carries the server launch context, the spawn, and
+  the child's egress/dropper edges so an analyst can confirm or discard it.
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://docs.vllm.ai/en/latest/features/disagg_prefill.html
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - attack.persistence
+  - attack.t1098.004
+  - cwe.502
+  - owasp.a08-2021
+falsepositives:
+  - Container entrypoint scripts that run "curl ... | bash" or "pip install" bootstrap steps.
+    Mitigated because the vLLM/Mooncake marker must appear on an ANCESTOR invocation, and a
+    typical entrypoint installs packages before launching the server, so no marker exists yet.
+  - torch.compile / Triton / DeepGEMM JIT compilation, which spawns "sh -c" with nvcc, g++,
+    ld or ninja from a vLLM worker. None of these match the anchor patterns.
+  - Python multiprocessing / resource_tracker workers
+    (python -c "from multiprocessing.spawn import spawn_main; ..."). Deliberately excluded -
+    inline-interpreter matching requires socket+connect, pickle+loads, or os.system/os.popen.
+  - Ray or Kubernetes cluster launchers that bootstrap workers with "bash -c" plus a remote
+    fetch. Reported at MEDIUM only, and only if the child also writes into /dev/shm, /var/tmp,
+    ~/.ssh, cron or a system binary directory.
+  - Model-weight or tokenizer downloads issued with curl/wget by the serving process. These
+    are tier B and are suppressed unless a persistence/staging write is also present.
+  - Legitimate operator debugging inside the model server container (nc, socat, bash -i during
+    an incident). Expect these during on-call sessions; correlate with change tickets.
+  - Process nodes in the graph are keyed by executable path, so CONNECTS/WRITE_FILE edges on a
+    shared binary such as /usr/bin/curl may belong to another invocation. Mitigated by
+    requiring every corroborating edge timestamp to fall inside the 5 minute trigger window.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------------------
+  # vLLM / Mooncake unsafe-deserialization RCE - post-exploitation detector.
+  # Only execute_process is observable, so the rule earns its specificity from
+  # lineage attribution + primitive specificity + graph corroboration.
+  # ---------------------------------------------------------------------------
+
+  WINDOW_NS     = 300000000000     # 5 minutes - corroboration clustering window
+  DEDUPE_NS     = 120000000000     # 2 minutes - suppress duplicate reports
+  MAX_PROC_SCAN = 400              # bound on graph(type="Process") iteration
+
+  # Invocation-shaped markers of a real vLLM / Mooncake server process.
+  SERVER_MARKERS = [
+      r"(?i)\bmooncake[_-]?master\b",
+      r"(?i)\bmooncake[_-]?(transfer|store|engine|metadata)",
+      r"(?i)MooncakeConnector",
+      r"(?i)MOONCAKE_CONFIG",
+      r"(?i)kv[_-]transfer[_-]config",
+      r"(?i)\bvllm\s+serve\b",
+      r"(?i)-m\s+vllm[._][a-z_.]*",
+      r"(?i)vllm\.entrypoints\.[a-z_.]*",
+      r"(?i)/(bin|sbin)/vllm\b",
+      r"(?i)vllm[^\n]{0,40}(api_server|EngineCore|engine_core|worker_base)",
+      r"(?i)VLLM_[A-Z0-9_]{3,}=",
+  ]
+
+  # Tier A - primitives an inference server never legitimately executes.
+  TIER_A = [
+      [r"(?i)\bbash\s+-i\b", "interactive shell requested by a serving process"],
+      [r"/dev/(tcp|udp)/[0-9a-zA-Z.\-]+/[0-9]+", "shell redirected to a raw socket (reverse shell)"],
+      [r"(?i)\b(curl|wget)\b[^|;&]{0,400}\|[^|]{0,60}\b(bash|sh|zsh|dash|python[0-9.]*|perl|ruby|node)\b", "remote payload piped straight into an interpreter"],
+      [r"(?i)\bbase64\b\s*(-d|-D|--decode)[^|;&]{0,200}\|[^|]{0,60}\b(bash|sh|zsh|dash|python[0-9.]*|perl)\b", "base64 payload decoded into an interpreter"],
+      [r"(?i)\b(nc|ncat|netcat)\b[^|;&]{0,200}\s-[a-z]{0,4}e[a-z]{0,4}\s", "netcat invoked with command execution"],
+      [r"(?i)\bsocat\b[^|;&]{0,200}(exec|system):", "socat exec/system relay"],
+      [r"(?i)>>?\s*[^\s;|&]{0,120}authorized_keys", "SSH authorized_keys tampering"],
+      [r"(?i)\bcrontab\b\s+(-\s|/tmp/|/dev/shm/|/var/tmp/)", "cron persistence installed"],
+      [r"(?i)\bchmod\s+[0-7ugoa+rwxs,]{1,8}\s+(/tmp/|/dev/shm/|/var/tmp/)", "dropped file marked executable in a world-writable directory"],
+      [r"(?i)\b(sh|bash|zsh|dash)\b\s+-c\b[^\n]{0,300}(/tmp/|/dev/shm/|/var/tmp/)[^\s;|&]{1,80}", "shell executing content staged in a world-writable directory"],
+  ]
+
+  # Tier B - suspicious for a serving process, reported only with a dropper write.
+  TIER_B = [
+      [r"(?i)\b(curl|wget)\b\s+[^|;&]{0,300}https?://", "outbound fetch issued by the inference server"],
+      [r"(?i)\b(ssh|scp|rsync)\b\s+[^|;&]{0,200}@", "lateral movement toward another cluster host"],
+      [r"(?i)/proc/self/environ", "process environment harvested"],
+      [r"(?i)(\.aws/credentials|\.ssh/id_[a-z]+|\.kube/config|/etc/shadow|/var/run/secrets/kubernetes\.io)", "credential material referenced"],
+      [r"(?i)\b(pip|pip3)\s+install\b", "package installation from the inference server"],
+      [r"(?i)\b(apt-get|apt|yum|dnf|apk)\s+(install|add)\b", "system package installation"],
+      [r"(?i)\b(whoami|uname\s+-a)\b", "host discovery"],
+  ]
+
+  # Persistence / staging write locations (narrows detection; not a trust list).
+  DROP_PATTERNS = [
+      ["authorized keys", "SSH authorized_keys"],
+      ["ssh id", "SSH private key material"],
+      ["cron", "cron location"],
+      ["systemd system", "systemd unit"],
+      ["bashrc", "shell profile"],
+      ["usr local bin", "system binary directory"],
+      ["dev shm", "shared-memory staging"],
+      ["var tmp", "world-writable staging"],
+  ]
+
+  def to_int(s):
+      if s == None:
+          return 0
+      v = str(s)
+      if v == "":
+          return 0
+      if re.find(r"^[0-9]+$", v) == None:
+          return 0
+      return int(v)
+
+  def trunc(s, n):
+      if s == None:
+          return ""
+      v = str(s)
+      if len(v) > n:
+          return v[:n] + "..."
+      return v
+
+  def within(ts_str, ref):
+      t = to_int(ts_str)
+      if t == 0 or ref == 0:
+          return True
+      d = ref - t
+      if d < 0:
+          d = -d
+      return d <= WINDOW_NS
+
+  def marker_of(text):
+      if text == "":
+          return ""
+      for p in SERVER_MARKERS:
+          m = re.find(p, text)
+          if m != None:
+              return m
+      return ""
+
+  def is_mooncake(text):
+      return re.find(r"(?i)mooncake", text) != None
+
+  def match_tier(cmd, table):
+      for row in table:
+          if re.find(row[0], cmd) != None:
+              return row[1]
+      return ""
+
+  def inline_interp(cmd):
+      # inline interpreter payloads; deliberately excludes multiprocessing.spawn
+      if re.find(r"(?i)\b(python[0-9.]*|perl|ruby|node|php)\b[^;|&]{0,120}\s-(c|e|r)\b", cmd) == None:
+          return ["", ""]
+      if re.find(r"(?i)\bsocket\b", cmd) != None:
+          if re.find(r"(?i)\b(connect|bind|dup2|SOCK_STREAM)\b", cmd) != None:
+              return ["A", "inline interpreter socket shell"]
+      if re.find(r"(?i)\bpickle\b", cmd) != None:
+          if re.find(r"(?i)(loads|__reduce__|Unpickler)", cmd) != None:
+              return ["A", "inline pickle deserialization gadget executed"]
+      if re.find(r"(?i)(os\.system|os\.popen|commands\.getoutput)", cmd) != None:
+          return ["A", "inline interpreter command execution"]
+      if re.find(r"(?i)(eval|exec)\s*\(\s*(base64|compile|zlib|marshal|__import__)", cmd) != None:
+          return ["A", "inline interpreter evaluating an encoded payload"]
+      if re.find(r"(?i)subprocess\.(Popen|run|call|check_output)", cmd) != None:
+          return ["B", "inline interpreter spawning a subprocess"]
+      return ["", ""]
+
+  def lineage_attribution(ts):
+      cp = to_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return None
+      inst = proc_instance(cp, ts)
+      if inst == None:
+          return None
+      lin = proc_lineage(to_int(inst.get("actor_pid", "0")), to_int(inst.get("actor_start", "0")))
+      if lin == None or len(lin) == 0:
+          return None
+      names  = []
+      marker = ""
+      mc     = False
+      for x in lin:
+          blob = x.get("actor_path", "") + " " + x.get("cmdline", "") + " " + x.get("parent_path", "")
+          ap = x.get("actor_path", "")
+          if ap != "":
+              names.append(ap.split("/")[-1])
+          if marker == "":
+              m = marker_of(blob)
+              if m != "":
+                  marker = m
+          if is_mooncake(blob):
+              mc = True
+      root = "process://" + lin[len(lin) - 1].get("actor_path", "")
+      return {"names": " <- ".join(names), "marker": marker, "mooncake": mc, "root": root}
+
+  def resolve_spawn(cmd):
+      # best-effort location of the graph EXECUTE_PROCESS edge for this spawn
+      best_parent = None
+      best_edge   = None
+      best_child  = None
+      best_len    = 0
+      n = 0
+      for p in graph(type="Process"):
+          n = n + 1
+          if n > MAX_PROC_SCAN:
+              break
+          for e in edges(p["id"], dir="out", kind="EXECUTE_PROCESS"):
+              ecl = e.get("cmdline", "")
+              if len(ecl) < 8:
+                  continue
+              probe = ecl
+              if len(probe) > 80:
+                  probe = probe[:80]
+              if probe in cmd:
+                  if len(probe) > best_len:
+                      best_len    = len(probe)
+                      best_parent = p
+                      best_edge   = e
+                      best_child  = node(e["to"])
+      return [best_parent, best_edge, best_child]
+
+  def resolve_child_by_path(cmd):
+      best = None
+      bl   = 0
+      n    = 0
+      for p in graph(type="Process"):
+          n = n + 1
+          if n > MAX_PROC_SCAN:
+              break
+          pth = p.get("path", "")
+          if len(pth) < 6:
+              continue
+          if pth in cmd and len(pth) > bl:
+              bl   = len(pth)
+              best = p
+      return best
+
+  def graph_ancestor_marker(startnode):
+      cur  = startnode
+      seen = {}
+      for i in range(6):
+          if cur == None:
+              break
+          cid = cur.get("id", "")
+          if cid == "" or cid in seen:
+              break
+          seen[cid] = True
+          blob = cur.get("path", "") + " " + cur.get("name", "") + " " + cur.get("cmdline", "")
+          m = marker_of(blob)
+          if m != "":
+              return [m, cur]
+          nxt = None
+          for e in edges(cid, dir="in", kind="EXECUTE_PROCESS"):
+              p = node(e["from"])
+              if p != None and p.get("_type", "") == "Process":
+                  nxt = p
+                  break
+          cur = nxt
+      return ["", None]
+
+  def already_reported(key, ts):
+      recent = store_get("recent")
+      if recent == None:
+          recent = {}
+      prev = to_int(recent.get(key, "0"))
+      if prev > 0 and ts > 0 and (ts - prev) < DEDUPE_NS:
+          return True
+      if len(recent) > 48:
+          recent = {}
+      recent[key] = str(ts)
+      u = store_usage()
+      if u["free"] > 8192:
+          store_set("recent", recent)
+      return False
+
+  def run():
+      # ---- 1. relevance gate: pure string work on meta, no graph/log calls ----
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if len(cmd) < 6:
+          return "allow"
+      ts = to_int(meta.get("event_ts", "0"))
+
+      # ---- 2. specificity: is the spawned command an execution primitive? ----
+      tier = ""
+      what = ""
+      hit = match_tier(cmd, TIER_A)
+      if hit != "":
+          tier = "A"
+          what = hit
+      else:
+          ip = inline_interp(cmd)
+          if ip[0] != "":
+              tier = ip[0]
+              what = ip[1]
+          else:
+              hb = match_tier(cmd, TIER_B)
+              if hb != "":
+                  tier = "B"
+                  what = hb
+      if tier == "":
+          return "allow"
+
+      # ---- 3. attribution: event log first, behaviour graph as fallback ----
+      marker   = ""
+      mooncake = False
+      names    = ""
+      root     = ""
+      att = lineage_attribution(ts)
+      if att != None:
+          marker   = att["marker"]
+          mooncake = att["mooncake"]
+          names    = att["names"]
+          root     = att["root"]
+
+      spawn     = resolve_spawn(cmd)
+      parent    = spawn[0]
+      exec_edge = spawn[1]
+      child     = spawn[2]
+      if child == None:
+          child = resolve_child_by_path(cmd)
+
+      if marker == "" and parent != None:
+          ga = graph_ancestor_marker(parent)
+          if ga[0] != "":
+              marker = ga[0]
+              vn     = ga[1]
+              if root == "":
+                  root = vn["id"]
+              if names == "":
+                  names = vn.get("name", vn.get("path", "?"))
+              if is_mooncake(vn.get("path", "") + " " + vn.get("cmdline", "")):
+                  mooncake = True
+
+      if marker == "":
+          return "allow"   # not attributable to a vLLM/Mooncake server lineage
+
+      if root == "":
+          if parent != None:
+              root = parent["id"]
+          else:
+              root = "process://" + meta.get("agent_name", "unknown")
+
+      # ---- 4. kill chain + graph corroboration ----
+      chain  = new_chain(root)
+      stages = []
+
+      if parent != None:
+          for e in edges(parent["id"], dir="in", kind="EXECUTE_PROCESS"):
+              chain.append(step(e, stage_id="Inference Server Context",
+                                stage_desc="vLLM/Mooncake server process launched: " +
+                                           trunc(e.get("cmdline", parent.get("path", "?")), 160)))
+              break
+
+      trig = exec_edge
+      if trig == None:
+          child_id = "process://unknown"
+          if child != None:
+              child_id = child["id"]
+          trig = {"from": root, "to": child_id, "kind": "EXECUTE_PROCESS",
+                  "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
+                  "cmdline": trunc(cmd, 300)}
+      chain.append(step(trig, stage_id="Post-Deserialization Execution",
+                        stage_desc=what + " -- " + trunc(cmd, 220)))
+      stages.append(what)
+
+      has_write = False
+      if child != None:
+          cid = child["id"]
+
+          for e in edges(cid, dir="out", kind="CONNECTS"):
+              h = node(e["to"])
+              if h == None or h.get("is_ztna_host", "0") == "1":
+                  continue
+              if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+                  continue
+              chain.append(step(e, stage_id="C2 / Exfil Egress",
+                                stage_desc="spawned process connected to public endpoint " +
+                                           h.get("host", "?") + ":" + h.get("port", "?")))
+              stages.append("public egress " + h.get("host", "?"))
+              break
+
+          for e in edges(cid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None or u.get("is_ztna_host", "0") == "1":
+                  continue
+              if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+                  continue
+              chain.append(step(e, stage_id="Payload Retrieval",
+                                stage_desc="spawned process issued HTTP " + e.get("method", "") +
+                                           " to " + u.get("host", "?")))
+              stages.append("http fetch " + u.get("host", "?"))
+              break
+
+          for k in ["CREATE_FILE", "WRITE_FILE"]:
+              if has_write:
+                  break
+              op = "CREATE"
+              if k == "WRITE_FILE":
+                  op = "WRITE"
+              for e in edges(cid, dir="out", kind=k):
+                  if has_write:
+                      break
+                  if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+                      continue
+                  fs = node(e["to"])
+                  if fs == None:
+                      continue
+                  for dp in DROP_PATTERNS:
+                      acts = fs_activity(fs["id"], op, dp[0])
+                      pick = None
+                      for a in acts:
+                          if within(a.get("ts", ""), ts):
+                              pick = a
+                              break
+                      if pick != None:
+                          chain.append(step(e, stage_id="Dropper / Persistence",
+                                            stage_desc="spawned process wrote " + dp[1] + ": " +
+                                                       pick["path"], activity=pick))
+                          stages.append("write " + pick["path"])
+                          has_write = True
+                          break
+
+      # ---- 5. verdict ----
+      if tier == "B" and not has_write:
+          return "allow"
+
+      key = marker + "|" + trunc(cmd, 90)
+      if already_reported(key, ts):
+          return "allow"
+
+      sev = "MEDIUM"
+      if tier == "A":
+          sev = "HIGH"
+      if tier == "A" and (has_write or len(stages) > 1):
+          sev = "CRITICAL"
+      transport = "vLLM"
+      if mooncake:
+          transport = "vLLM+Mooncake KV transport"
+
+      lineage_txt = names
+      if lineage_txt == "":
+          lineage_txt = "lineage degraded (graph-attributed)"
+
+      print("vLLM/Mooncake post-deser exec [" + sev + "] marker=" + trunc(marker, 60) +
+            " lineage=" + trunc(lineage_txt, 120) + " stages=" + "; ".join(stages))
+
+      return {
+          "action": "report",
+          "reason": "[" + sev + "] " + transport + " server lineage spawned an execution " +
+                    "primitive - consistent with unsafe deserialization RCE over the " +
+                    "exposed ZMQ/TCP KV-cache interface (CWE-502). Server marker: " +
+                    trunc(marker, 80) + ". Lineage: " + trunc(lineage_txt, 140) +
+                    ". Evidence: " + "; ".join(stages) +
+                    ". NOTE: the deserialization event itself is not observable by this " +
+                    "engine - this is downstream inference, verify the Mooncake listener " +
+                    "bind address and authentication.",
+          "chain": chain,
+      }
+
+  result = run()
