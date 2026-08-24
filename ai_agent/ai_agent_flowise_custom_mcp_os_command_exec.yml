@@ -1,0 +1,139 @@
+title: MCP Launcher OS Command Injection (Flowise Custom MCP)
+id: 7b3f9c42-1d58-4a6e-9f0b-2c8d54e1a733
+status: experimental
+level: high
+description: |
+  Detects a single spawned process whose command line combines an MCP-server
+  bootstrap surface (npx / bunx / uvx / pnpm dlx, or an explicit
+  modelcontextprotocol / mcp-server / --stdio / flowise token) with a shell
+  command-execution primitive on the SAME command line.
+
+  Flowise's "Custom MCP" feature is designed to launch local MCP servers by
+  executing an OS command (typically `npx -y <package>`) unsandboxed. Flowise
+  versions before 3.0.1 ship with no authentication by default and have no
+  role-based authorization, so any unauthenticated network client that can reach
+  the instance can put arbitrary text into that command field. The resulting
+  child process is the only observable: event_type=execute_process, with the full
+  command line in `content`.
+
+  Benign MCP bootstraps look like `npx -y @modelcontextprotocol/server-filesystem
+  /data`. They do not chain into a shell interpreter, do not pipe a download into
+  sh/python, do not reference /dev/tcp, and do not install a package from a raw
+  IP or tarball URL. This rule requires BOTH halves — launcher/MCP context AND an
+  execution primitive — so neither half alone can fire it.
+
+  OWASP Web Top 10 context for the underlying product flaw: A01:2021 Broken
+  Access Control (no authn/authz on the Custom MCP endpoint) and A03:2021
+  Injection (unsanitised command string). Those identifiers have no `owasp.`
+  tag form in this schema, so only the LLM-application mapping is tagged.
+  No MITRE ATLAS technique applies to this behaviour; the tag is omitted rather
+  than approximated.
+author: Selhan
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+  - https://modelcontextprotocol.io/docs/concepts/transports
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.initial-access
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only real child-process spawns ────────────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── Half 1a: the MCP bootstrap launcher itself ───────────────────────────
+  sel_mcp_launcher:
+    content|re:
+      - '(?i)\b(?:npx|bunx|pnpx|uvx)\b'
+      - '(?i)\b(?:npm\s+exec|yarn\s+dlx|pnpm\s+dlx)\b'
+
+  # ── Half 1b: explicit MCP / Flowise execution context (widens coverage to
+  #             attacker-chosen commands that skip npx entirely) ────────────
+  sel_mcp_context:
+    content|re:
+      - '(?i)\bmodelcontextprotocol\b'
+      - '(?i)\bmcp[-_]?(?:server|remote|proxy|gateway|client)\b'
+      - '(?i)\bflowise\b'
+      - '(?i)(?:^|\s)--(?:stdio|transport[= ]stdio)\b'
+      - '(?i)\bserver-(?:filesystem|github|gitlab|postgres|sqlite|slack|memory|puppeteer|everything|brave-search|google-maps|sentry)\b'
+
+  # ── Half 2a: chained into a shell / script interpreter ───────────────────
+  sel_shell_chain:
+    content|re: '(?i)(?:;|&&|\|\||\||\$\(|\x60)\s*(?:sudo\s+)?(?:/(?:usr/)?(?:local/)?bin/)?(?:bash|sh|zsh|dash|ksh|ash|python[23]?|perl|ruby|php|pwsh|powershell(?:\.exe)?|cmd(?:\.exe)?)\b'
+
+  # ── Half 2b: download-and-execute on the same line ───────────────────────
+  sel_download_exec:
+    content|re:
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,200}\|\s*(?:/(?:usr/)?bin/)?(?:ba|z|d|a)?sh\b'
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,200}\|\s*(?:python[23]?|perl|ruby|node)\b'
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,200}(?:;|&&)\s*(?:chmod\s+\+?[0-7]*x|\./)'
+      - '(?i)\b(?:invoke-webrequest|iwr|curl)\b[^\n]{0,200}\|\s*(?:iex|invoke-expression)\b'
+
+  # ── Half 2c: interactive / reverse-shell and encoded-payload primitives ──
+  sel_reverse_shell:
+    content|re:
+      - '/dev/tcp/'
+      - '(?i)\b(?:nc|ncat|netcat)\b[^\n]{0,60}\s-[a-z]{0,4}e\b'
+      - '(?i)\b(?:python[23]?|perl|ruby|node)\s+-(?:c|e)\s+[^\n]{0,300}\b(?:socket|SOCK_STREAM|child_process|exec\()'
+      - '(?i)\bpowershell(?:\.exe)?\b[^\n]{0,160}\s-(?:enc|e|ec|encodedcommand)\s+[A-Za-z0-9+/]{20}'
+      - '(?i)\bbase64\s+-{1,2}d(?:ecode)?\b[^\n]{0,120}\|\s*(?:/(?:usr/)?bin/)?(?:ba|z)?sh\b'
+      - '(?i)\bbash\s+-i\b[^\n]{0,80}>&'
+
+  # ── Half 2d: package pulled from a raw IP / tarball / VCS URL ────────────
+  sel_remote_pkg:
+    content|re:
+      - '(?i)\b(?:npx|bunx|pnpx|uvx|dlx)\b[^\n]{0,160}\bhttps?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d{1,5})?/'
+      - '(?i)\b(?:npx|bunx|pnpx|uvx|dlx)\b[^\n]{0,160}\bhttps?://[^\s]{1,200}\.(?:tgz|tar\.gz|zip|sh|js)\b'
+      - '(?i)\b(?:npx|bunx|pnpx|uvx)\b[^\n]{0,160}\b(?:git\+(?:https?|ssh)://|file://)'
+
+  # ── Noise suppression (behavioural, not host/domain trust) ───────────────
+  filter_help:
+    content|re: '(?i)\b(?:npx|bunx|pnpx|uvx)\s+-{1,2}(?:v|version|help|h|no-install|dry-run)\b'
+
+  filter_env_resolution:
+    content|re: '(?i)\$\(\s*(?:which|command\s+-v|type\s+-p|dirname|basename|pwd|node\s+-p)\b'
+
+  filter_placeholder:
+    content|contains:
+      - '<your-'
+      - '<your_'
+      - 'your-api-key'
+      - 'replace_me'
+      - 'replaceme'
+      - 'changeme'
+      - 'placeholder'
+      - 'lorem ipsum'
+      - '# example'
+      - 'example command:'
+
+  condition: >
+    sel_event
+    and (sel_mcp_launcher or sel_mcp_context)
+    and (sel_shell_chain or sel_download_exec or sel_reverse_shell or sel_remote_pkg)
+    and not (filter_help or filter_env_resolution or filter_placeholder)
+
+falsepositives:
+  - Container or devcontainer entrypoints that wrap an MCP bootstrap in a shell,
+    e.g. `sh -c "npx -y @modelcontextprotocol/server-filesystem /data | tee log"`
+    — only fires if the pipe target is itself an interpreter.
+  - CI/CD job steps that chain an npx invocation into a shell script
+    (`npx build-cli && bash ./scripts/publish.sh`); common in release pipelines.
+  - Developer one-liners typed into an agent terminal that legitimately install a
+    community MCP server directly from a git or tarball URL instead of the npm
+    registry.
+  - Security research, MCP integration testing, or red-team exercises where the
+    operator is intentionally reproducing this exact technique.
+  - Documentation, README snippets or test fixtures pasted into a tool argument
+    that then get echoed into a spawn; partially suppressed by filter_placeholder.
+
+action: report
