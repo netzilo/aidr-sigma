@@ -1,0 +1,340 @@
+title: Hidden Unicode Tag Instruction Smuggling Into Agent Context
+id: 7c4d1f96-2a8b-4e35-9d0c-5b6a1f3e8c47
+status: experimental
+level: high
+description: |
+  Detects invisible Unicode Tag characters (U+E0001, U+E0020-U+E007F) carried inside
+  content that an AI coding agent (Windsurf Cascade and equivalents) feeds to its LLM:
+  tool arguments, tool results, tool/gateway descriptions and LLM request/response
+  bodies. Tag characters render as nothing in an editor or terminal but are tokenised
+  and followed as instructions by the model, so an attacker can smuggle a prompt
+  through a repository file or a tool output that the developer literally cannot see.
+
+  Telemetry note (answering triage dissent): the only live graph edge for file access
+  is READ_FILE, and that edge records *that* a file was touched, never its bytes.
+  There is no llm_inference / process_tool_output event and no
+  HIDDEN_INSTRUCTION_INJECTION edge in this engine. This rule therefore takes the
+  byte-level evidence from the live event the engine already populates
+  (meta["content"] on tool and LLM contexts, which is where the smuggled payload is
+  observable at the moment it enters the model context) and uses the graph only for
+  provenance and attribution: which agent process, which document it had just read
+  (READ_FILE + fs_activity, resolved to the exact path and timestamp), or which
+  external skill/HTTP fetch preceded the injection, and which LLM_REQUEST /
+  TOOL_RESULT edge carried it into the model. It reports rather than blocks, because
+  the execution half of the chain (the model acting on the hidden text) is not
+  instrumented and must be confirmed by a human.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://www.unicode.org/faq/unsup_char.html
+  - https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - attack.t1204
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Subdivision emoji flags (Scotland, Wales, England) are encoded with Unicode Tag
+    sequences. The script excludes any tag run that is only lowercase tag letters
+    (U+E0061-U+E007A) optionally terminated by CANCEL TAG and no longer than 8 code
+    points, which is exactly the emoji-flag shape.
+  - Security research notes, red-team fixtures and Unicode conformance / i18n test
+    corpora that deliberately embed tag characters. These are reported (never blocked)
+    and each distinct decoded payload is reported at most once per agent per 30
+    minutes, so a test file being re-sent in every conversation turn does not generate
+    repeated alerts.
+  - Text-watermarking or provenance-marking tooling that encodes metadata in tag
+    characters. Such payloads decode to short opaque strings and only alert when at
+    least 6 decoded printable characters or an instruction-like keyword is present.
+  - Documentation that merely writes *about* this technique using literal escape text
+    such as "U+E0001" contains no real tag code points and does not match the
+    pre-filter at all.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_request
+      - llm_response
+  sel_tag_raw:
+    content|re: '[\x{e0001}\x{e0020}-\x{e007f}]'
+  sel_tag_escaped:
+    content|re: '(?i)\\u?db40\\u?dc[0-7][0-9a-f]'
+  condition: sel_event and (sel_tag_raw or sel_tag_escaped)
+action: execute
+on_timeout: report
+on_error: allow
+script: |
+  # ── Unicode Tag block constants (code points as ints) ────────────────────────
+  TAG_BASE   = 917504   # U+E0000
+  TAG_MIN    = 917505   # U+E0001 LANGUAGE TAG
+  TAG_SP     = 917536   # U+E0020 TAG SPACE
+  TAG_TILDE  = 917630   # U+E007E TAG TILDE
+  TAG_CANCEL = 917631   # U+E007F CANCEL TAG
+  TAG_A      = 917601   # U+E0061 TAG LATIN SMALL LETTER A
+  TAG_Z      = 917626   # U+E007A TAG LATIN SMALL LETTER Z
+
+  ASCII = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+  MIN_TAG_CHARS = 4
+  MIN_DECODED   = 6
+  LOOK_BACK_NS  = 300000000000     # 5 minutes of provenance window
+  SEEN_TTL_NS   = 1800000000000    # 30 minutes payload de-duplication
+
+  CONTENT_CTX = ["tool_input", "tool_output", "tool_description", "gateway_description",
+                 "prompt_request", "prompt_response", "sampling_request",
+                 "sampling_response", "llm_request", "llm_response",
+                 "llm_tool_call", "llm_tool_result", "skill_acquired"]
+
+  INSTR_WORDS = ["ignore", "instruction", "system prompt", "you are", "you must",
+                 "send", "http", "curl", "wget", "token", "secret", "credential",
+                 "password", "api key", "exfil", "delete", "rm -", "base64",
+                 "do not tell", "silently", "without telling", "read file", "post "]
+
+  DOC_EXT = [".md", ".mdx", ".txt", ".json", ".yaml", ".yml", ".html", ".htm",
+             ".csv", ".rst", ".py", ".js", ".jsx", ".ts", ".tsx", ".toml",
+             ".ipynb", ".patch", ".diff", ".xml", ".log", ".cfg", ".ini"]
+
+  # ── pure helpers (no graph / no log calls) ───────────────────────────────────
+  def is_flag_like(cps):
+      # Emoji subdivision flags: only lowercase tag letters, optional trailing
+      # CANCEL TAG, at most 8 code points. Benign — never treated as injection.
+      n = len(cps)
+      if n == 0 or n > 8:
+          return False
+      for i in range(n):
+          cp = cps[i]
+          if cp == TAG_CANCEL and i == n - 1:
+              continue
+          if cp < TAG_A or cp > TAG_Z:
+              return False
+      return True
+
+  def raw_runs(s):
+      runs = []
+      cur  = []
+      for cp in s.elem_ords():
+          if cp >= TAG_MIN and cp <= TAG_CANCEL:
+              cur.append(cp)
+          elif cur:
+              runs.append(cur)
+              cur = []
+      if cur:
+          runs.append(cur)
+      return runs
+
+  def escaped_runs(s):
+      # JSON bodies often escape plane-14 tag chars as surrogate pairs \udb40\udcXX.
+      runs = []
+      for m in re.find_all(r'(?:\\[uU]db40\\[uU]dc[0-7][0-9a-fA-F])+', s, 40):
+          cps = []
+          for h in re.find_all(r'\\[uU]db40\\[uU]dc([0-7][0-9a-fA-F])', m, -1):
+              cps.append(TAG_BASE + int(h[-2:], 16))
+          if cps:
+              runs.append(cps)
+      return runs
+
+  def decode(cps):
+      out = ""
+      for cp in cps:
+          if cp >= TAG_SP and cp <= TAG_TILDE:
+              out += ASCII[cp - TAG_SP]
+      return out
+
+  def analyse(s):
+      runs   = raw_runs(s) + escaped_runs(s)
+      total  = 0
+      hidden = ""
+      for cps in runs:
+          if is_flag_like(cps):
+              continue
+          total += len(cps)
+          d = decode(cps)
+          if d:
+              if hidden:
+                  hidden += " | "
+              hidden += d
+      return [total, hidden]
+
+  # ── graph helpers ───────────────────────────────────────────────────────────
+  def find_agent():
+      an       = meta.get("agent_name", "")
+      fallback = None
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if fallback == None:
+              fallback = p
+          pp = p.get("path", "")
+          if an != "" and pp != "" and (pp == an or pp in an or an in pp):
+              return p
+      return fallback
+
+  def file_provenance(aid, lo, hi):
+      procs = [aid]
+      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS")[:8]:
+          procs.append(pe["to"])
+      scanned = 0
+      for pid in procs:
+          for e in edges(pid, dir="out", kind="READ_FILE"):
+              scanned += 1
+              if scanned > 12:
+                  return None
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              for entry in fs_activity(fs["id"], "READ")[:150]:
+                  ts = int(entry.get("ts", "0"))
+                  if lo > 0 and ts < lo:
+                      continue
+                  if hi > 0 and ts > hi:
+                      continue
+                  p  = entry.get("path", "")
+                  pl = p.lower()
+                  for ext in DOC_EXT:
+                      if pl.endswith(ext):
+                          return [e, entry, p]
+      return None
+
+  def net_provenance(aid, lo):
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          if lo == 0 or int(e.get("ts", "0")) >= lo:
+              s = node(e["to"])
+              h = "?"
+              if s != None:
+                  h = s.get("host", "?")
+              return [e, "instruction document loaded from " + h]
+      for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+          if lo == 0 or int(e.get("last_ts", "0")) >= lo:
+              u = node(e["to"])
+              h = "?"
+              if u != None:
+                  h = u.get("host", "?")
+              return [e, "external content fetched from " + h]
+      return None
+
+  def sink_edge(aid, ct):
+      if ct == "llm_request" or ct == "llm_response" or ct == "llm_tool_call" or ct == "llm_tool_result":
+          best = None
+          bts  = -1
+          for e in edges(aid, dir="out", kind="LLM_REQUEST"):
+              t = int(e.get("ts", "0"))
+              if t >= bts:
+                  bts  = t
+                  best = e
+          if best != None:
+              return best
+      tn = meta.get("tool_name", "")
+      for e in edges(aid, dir="in", kind="TOOL_RESULT"):
+          t = node(e["from"])
+          if t != None and (tn == "" or t.get("name", "") == tn):
+              return e
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          return e
+      return None
+
+  def synth(aid, ct, ts):
+      return {"from": aid, "to": "content://" + ct, "kind": "CONTENT_OBSERVED",
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts)}
+
+  def already_reported(key, now):
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          v = int(seen[k])
+          if now == 0 or now - v < SEEN_TTL_NS:
+              fresh[k] = str(v)
+      if key in fresh:
+          return True
+      fresh[key] = str(now)
+      if len(fresh) <= 200 and store_usage()["free"] > 4096:
+          store_set("seen", fresh)
+      return False
+
+  # ── main ────────────────────────────────────────────────────────────────────
+  def run():
+      # relevance gate — pure string checks on meta only
+      ct = meta.get("context_type", "")
+      if ct not in CONTENT_CTX:
+          return "allow"
+      body = meta.get("content", "")
+      if body == "":
+          return "allow"
+
+      res    = analyse(body)
+      total  = res[0]
+      hidden = res[1]
+      if total < MIN_TAG_CHARS:
+          return "allow"
+
+      stripped = hidden.replace(" ", "").replace("|", "")
+      hl       = hidden.lower()
+      kw       = ""
+      for w in INSTR_WORDS:
+          if w in hl:
+              kw = w
+              break
+      if len(stripped) < MIN_DECODED and kw == "":
+          return "allow"
+
+      now     = int(meta.get("event_ts", "0"))
+      preview = hidden
+      if len(preview) > 160:
+          preview = preview[:160] + "..."
+
+      # de-duplicate: injected text sits in conversation history and would
+      # otherwise re-alert on every subsequent LLM request of the session.
+      if already_reported(ct + "|" + meta.get("agent_name", "") + "|" + preview, now):
+          return "allow"
+
+      agent = find_agent()
+      if agent == None:
+          r = "Invisible Unicode Tag payload (" + str(total) + " tag chars) in " + ct + \
+              " content; decodes to: " + preview + " [agent process not resolvable in graph]"
+          print(r)
+          return {"action": "report", "reason": r}
+
+      aid   = agent["id"]
+      chain = new_chain(aid)
+      prov  = ""
+      lo    = 0
+      if now > 0:
+          lo = now - LOOK_BACK_NS
+
+      fp = file_provenance(aid, lo, now)
+      if fp != None:
+          chain.append(step(fp[0], stage_id="External Data Ingested",
+                            stage_desc="agent read document that can carry the invisible payload: " + fp[2],
+                            activity=fp[1]))
+          prov = "file read: " + fp[2]
+      else:
+          np = net_provenance(aid, lo)
+          if np != None:
+              chain.append(step(np[0], stage_id="External Data Ingested",
+                                stage_desc=np[1]))
+              prov = np[1]
+
+      se = sink_edge(aid, ct)
+      if se == None:
+          se = synth(aid, ct, now)
+      chain.append(step(se, stage_id="Hidden Instruction In Model Context",
+                        stage_desc="invisible Unicode Tag payload entered the model context via " + ct +
+                                   " (" + str(total) + " tag chars) decoding to: " + preview))
+
+      reason = "Hidden Unicode Tag instruction smuggling — " + str(total) + \
+               " invisible tag characters in " + ct + " content decode to: " + preview
+      if kw != "":
+          reason += " (instruction-like keyword: " + kw + ")"
+      if prov != "":
+          reason += " | provenance: " + prov
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
