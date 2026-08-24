@@ -1,0 +1,123 @@
+title: vLLM Malicious Model Checkpoint Deserialization
+id: 7c1f4b2e-9a63-4d81-b0c5-3f6a2d5e8471
+status: experimental
+level: high
+description: |
+  Detects a process being spawned whose command line performs unsafe unpickling of a
+  model checkpoint - the execution primitive behind arbitrary code execution in vLLM's
+  weight loader (hf_model_weights_iterator calling torch.load without weights_only=True).
+
+  Five independent high-specificity combinations are required, all within the SAME
+  command line of a single spawned process:
+    A) torch.load(...) with weights_only explicitly disabled (False/0)
+    B) an unpickling primitive (torch.load / pickle / dill / joblib / Unpickler)
+       together with a HuggingFace or PyTorch checkpoint artefact
+       (hf_hub_download, snapshot_download, .../resolve/..., models--*/snapshots/,
+       pytorch_model*.bin, consolidated.NN.pth, *.pt/*.pth/*.ckpt/*.bin)
+    C) an unpickling primitive fed from an inline base64/hex blob (weaponised pickle)
+    D) a __reduce__ gadget defined alongside torch.save/pickle.dump
+       (attacker-side crafting of the poisoned checkpoint)
+    E) a vLLM entrypoint started with a pickle-based --load-format AND --trust-remote-code
+
+  Single-event, content-only detection on the spawned command line. Report-only:
+  legacy-checkpoint conversion work is a legitimate use of the same primitive, so the
+  rule is calibrated for investigation rather than enforcement.
+author: Evgen
+date: "2026-03-14"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://pytorch.org/docs/stable/generated/torch.load.html
+  - https://docs.vllm.ai/en/latest/serving/engine_args.html
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1195.002
+  - owasp.a08-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  # ── unsafe deserialization primitives ───────────────────────────────────────
+  sel_torch_load:
+    content|re: '\btorch\.load\s*\('
+  sel_weights_only_off:
+    content|re: 'weights_only\s*=\s*(?:False|0)\b'
+  sel_unsafe_deser:
+    content|re:
+      - '\btorch\.load\s*\('
+      - '\b(?:pickle|cPickle|_pickle|dill|joblib)\.(?:load|loads)\s*\('
+      - '\b(?:pickle|_pickle|dill)\.Unpickler\s*\('
+
+  # ── the thing being unpickled is a model checkpoint ─────────────────────────
+  sel_ckpt_source:
+    content|re:
+      - '\b(?:hf_hub_download|snapshot_download)\s*\('
+      - 'huggingface\.co/[^\s"]+/resolve/'
+      - '\bhf\.co/[^\s"]+/resolve/'
+      - '\bmodels--[A-Za-z0-9_.-]+--[A-Za-z0-9_.-]+/snapshots/'
+      - 'pytorch_model(?:-\d{5}-of-\d{5})?\.bin\b'
+      - '\bconsolidated\.\d{2}\.pth\b'
+      - '[^\s"]+\.(?:pt|pth|ckpt|bin)\b'
+
+  # ── weaponised pickle carried inline ────────────────────────────────────────
+  sel_encoded_payload:
+    content|re:
+      - '\bbase64\.b64decode\s*\('
+      - '\bcodecs\.decode\s*\([^)]{0,120}hex'
+      - '\bbytes\.fromhex\s*\('
+
+  # ── attacker-side crafting of the poisoned checkpoint ───────────────────────
+  sel_reduce_gadget:
+    content|re: '__reduce__\s*\('
+  sel_pickle_write:
+    content|re: '\b(?:torch\.save|pickle\.dump|pickle\.dumps|dill\.dump|dill\.dumps)\s*\('
+
+  # ── vLLM serving a pickle-format checkpoint with remote code trust ──────────
+  sel_vllm:
+    content|re:
+      - '(?:^|[\s/"])vllm\b'
+      - '\bvllm\.entrypoints\b'
+      - '\bVLLM_[A-Z_]+='
+  sel_pickle_loadfmt:
+    content|re: '--load[-_]format[\s="\\]+(?:pt|bin|npcache|mistral)\b'
+  sel_trust_remote_code:
+    content|re: '--trust[-_]remote[-_]code\b'
+
+  # ── benign contexts that merely mention the pattern ─────────────────────────
+  filter_read_only_tools:
+    content|re: '(?:^|[\s;|&(])(?:sudo\s+)?(?:/[\w./-]+/)?(?:grep|egrep|fgrep|rg|ag|ack|sed|awk|less|more|head|tail|diff|jq|yq|man|semgrep|bandit|ruff|flake8|pylint|mypy|codeql|trivy|snyk|gitleaks|shellcheck)\s'
+  filter_string_printing:
+    content|re: '(?:^|[\s;|&(])(?:echo|printf)\s+[\x{0027}"]'
+  filter_test_runner:
+    content|re: '(?:^|[\s/"])(?:pytest|py\.test|tox|nox|unittest|coverage)\b'
+  filter_help:
+    content|re: '(?:^|\s)--help\b'
+  filter_security_research:
+    content|contains:
+      - 'CVE-2023-'
+      - 'CVE-2024-'
+      - 'CVE-2025-'
+      - 'CVE-2026-'
+      - 'GHSA-'
+
+  condition: >
+    sel_exec and (
+    (sel_torch_load and sel_weights_only_off) or
+    (sel_unsafe_deser and sel_ckpt_source) or
+    (sel_unsafe_deser and sel_encoded_payload) or
+    (sel_reduce_gadget and sel_pickle_write) or
+    (sel_vllm and sel_pickle_loadfmt and sel_trust_remote_code)
+    ) and not (filter_read_only_tools or filter_string_printing or
+    filter_test_runner or filter_help or filter_security_research)
+
+falsepositives:
+  - ML engineers deliberately loading a legacy full-object PyTorch checkpoint that cannot be read with weights_only=True (fine-tune conversion, old research checkpoints) - this is the same primitive as the attack and is intentionally surfaced for review.
+  - Model conversion / quantization pipelines (AWQ, GPTQ, GGUF, safetensors converters) that unpickle pytorch_model*.bin out of the local HuggingFace cache.
+  - vLLM deployments that legitimately require --trust-remote-code for a community architecture and are started with --load-format pt because no safetensors weights are published.
+  - CI jobs and unit tests exercising checkpoint loaders - suppressed by filter_test_runner.
+  - Documentation, remediation, linting or security-scanning commands that only contain the literal strings - suppressed by filter_read_only_tools, filter_string_printing and filter_security_research.
+
+action: report
