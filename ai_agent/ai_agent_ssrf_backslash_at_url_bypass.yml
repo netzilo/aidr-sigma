@@ -1,0 +1,336 @@
+title: SSRF Backslash-At URL Authority Confusion
+id: 7c1f4a2e-9b83-4d16-a5f0-2e6c8d31b4af
+status: experimental
+level: high
+description: |
+  Detects an outbound HTTP request whose URL or request body carries a URL with a
+  backslash (or its percent-encoded forms %5C / %255C) immediately before the '@'
+  authority delimiter, where the host on either side of that confusion resolves to a
+  loopback, RFC1918, link-local, cloud-metadata, obfuscated-IP or internal-suffix
+  target.
+
+  This is the vLLM < v0.17.0 SSRF-bypass shape (fixed in v0.17.0): the server-side
+  URL validator and the HTTP client library disagree on where the authority ends when
+  a backslash precedes '@', so a URL that the validator reads as pointing at an
+  approved host is actually dialled against an internal resource.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), and correlates only within that one session (lineage plus processes
+  spawned by lineage members inside the window) using query_events(). The triggering
+  request itself is taken from meta, never re-queried from the asynchronous event log.
+  Verdict is report only - this is telemetry for investigation, not enforcement.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://github.com/vllm-project/vllm/releases
+  - https://cwe.mitre.org/data/definitions/918.html
+tags:
+  - owasp.a10-2021
+  - attack.discovery
+  - attack.t1046
+  - attack.credential-access
+  - attack.t1552.005
+falsepositives:
+  - Authorised SSRF regression tests, red-team tooling or security fuzzing corpora
+    deliberately POSTing backslash-@ payloads at a local or internal model server -
+    expected to fire; correlate with the change/test ticket.
+  - A URL whose userinfo password legitimately contains a percent-encoded backslash
+    (https://user:p%5Cssw@host/). The script suppresses this by requiring a hard
+    private/metadata/obfuscated IP target whenever a credential (colon-bearing)
+    segment precedes the '@'; a bare internal hostname alone will not fire in that case.
+  - Internal service URLs using a single-label hostname where a client library emits a
+    stray escaped backslash in the authority - rare, and still worth reviewing because
+    the parse is genuinely ambiguous.
+  - Documentation, SSRF cheat-sheets or CVE write-ups transmitted as an HTTP body to an
+    internal wiki. Suppressed unless the payload's own effective host is internal, but a
+    payload list that names 169.254.169.254 will match by design.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_marker_body:
+    content|re: '(?i)(?:\\|%5c|%255c)+(?:@|%40)'
+  sel_marker_url:
+    url.full|re: '(?i)(?:\\|%5c|%255c)+(?:@|%40)'
+  condition: sel_http and (sel_marker_body or sel_marker_url)
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── SSRF bypass via backslash-@ authority confusion (vLLM < v0.17.0 class) ──────
+  WINDOW_NS = 300000000000        # 5 minute session correlation window
+  SNIPPET   = 200
+
+  # scheme, 1-4 separators, lazy authority body, backslash run, '@', effective host.
+  # '/', '?' and '#' are excluded from the body so the backslash MUST sit inside the
+  # authority - a backslash in a path or query never matches.
+  PAYLOAD_RE = r'(?i)(?:https?|ftp|gopher|dict)(?::|%3a)(?:/|\\|%2f|%5c){1,4}[^\s"<>/?#]{0,200}?(?:\\|%5c|%255c)+(?:@|%40)[^\s"<>/?#]{0,120}'
+
+  METADATA_HOSTS = ["169.254.169.254", "169.254.170.2", "100.100.100.200",
+                    "metadata.google.internal", "metadata.goog", "metadata",
+                    "instance-data", "fd00:ec2::254", "[fd00:ec2::254]"]
+
+  LOOPBACK = ["localhost", "127.0.0.1", "0.0.0.0", "::1", "[::1]", "::", "[::]", "0"]
+
+  PRIV_PREFIX = ["10.", "127.", "192.168.", "169.254.", "0.",
+                 "192.0.0.", "198.18.", "198.19."]
+
+  INTERNAL_SUFFIXES = [".internal", ".local", ".localdomain", ".svc",
+                       ".cluster.local", ".intranet", ".corp", ".lan",
+                       ".home.arpa", ".localhost"]
+
+  OBFUSCATED = [r"^0x[0-9a-f]+$", r"^0[0-7]{7,}$", r"^[0-9]{8,10}$"]
+
+  def clean_host(p):
+      h = p.strip()
+      if h == "":
+          return ""
+      for ch in ["/", "?", "#", ",", ")", "]"]:
+          k = h.find(ch)
+          if k >= 0 and ch != "]":
+              h = h[:k]
+      if h.startswith("["):
+          e = h.find("]")
+          if e >= 0:
+              h = h[:e + 1]
+      else:
+          k = h.find(":")
+          if k >= 0:
+              h = h[:k]
+      return h.lower()
+
+  def is_hard_private(h):
+      # IP-literal / metadata / obfuscated-IP only - no name heuristics.
+      if h == "":
+          return False
+      if h in METADATA_HOSTS:
+          return True
+      if h in LOOPBACK:
+          return True
+      for p in PRIV_PREFIX:
+          if h.startswith(p):
+              return True
+      for i in range(16, 32):
+          if h.startswith("172." + str(i) + "."):
+              return True
+      for i in range(64, 128):
+          if h.startswith("100." + str(i) + "."):
+              return True
+      if ":" in h:
+          for p in ["fd", "fc", "fe80", "[fd", "[fc", "[fe80"]:
+              if h.startswith(p):
+                  return True
+      for pat in OBFUSCATED:
+          if re.find(pat, h) != None:
+              return True
+      return False
+
+  def is_private_host(h, bare_ok):
+      if is_hard_private(h):
+          return True
+      for s in INTERNAL_SUFFIXES:
+          if h.endswith(s):
+              return True
+      if bare_ok and h != "" and "." not in h and ":" not in h:
+          return True
+      return False
+
+  def payload_segments(m):
+      s   = m
+      low = s.lower()
+      i   = low.find("%3a")
+      j   = low.find(":")
+      cut = -1
+      if j >= 0 and (i < 0 or j < i):
+          cut = j + 1
+      elif i >= 0:
+          cut = i + 3
+      if cut < 0:
+          return []
+      auth = s[cut:]
+      for k in range(0, 8):
+          a = auth.lower()
+          if auth.startswith("/") or auth.startswith("\\"):
+              auth = auth[1:]
+          elif a.startswith("%255c"):
+              auth = auth[5:]
+          elif a.startswith("%2f") or a.startswith("%5c"):
+              auth = auth[3:]
+          else:
+              break
+      a = re.replace(r"(?i)%255c", auth, "\\")
+      a = re.replace(r"(?i)%5c", a, "\\")
+      a = re.replace(r"(?i)%40", a, "@")
+      parts = re.split(r"[\\@]", a, -1)
+      last  = -1
+      for idx in range(0, len(parts)):
+          if clean_host(parts[idx]) != "":
+              last = idx
+      segs = []
+      for idx in range(0, len(parts)):
+          h = clean_host(parts[idx])
+          if h == "":
+              continue
+          segs.append([h, ":" in parts[idx], idx == last])
+      return segs
+
+  def suspicious_target(segs):
+      # Credentials present before the '@' -> a percent-encoded backslash inside a
+      # password is a plausible benign explanation, so demand a hard private target.
+      creds = False
+      for s in segs:
+          if not s[2] and s[1]:
+              creds = True
+      for s in segs:
+          h       = s[0]
+          colon   = s[1]
+          is_last = s[2]
+          if is_last:
+              if creds:
+                  if is_hard_private(h):
+                      return h
+              elif is_private_host(h, True):
+                  return h
+          else:
+              if colon:
+                  continue
+              if is_private_host(h, False):
+                  return h
+      return ""
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def trig_edge(actor_path, target, ets):
+      return {
+          "from":     "process://" + actor_path,
+          "to":       target,
+          "kind":     "HTTP_REQUEST",
+          "method":   meta.get("method", ""),
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string work on meta only ───────────────────────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      url  = meta.get("url", "")
+      body = meta.get("content", "")
+      hits = []
+      for m in re.find_all(PAYLOAD_RE, url, 5):
+          hits.append(m)
+      for m in re.find_all(PAYLOAD_RE, body, 10):
+          hits.append(m)
+      if len(hits) == 0:
+          return "allow"
+
+      # ── 2. required anchor: the confusion must resolve to an internal target ───
+      target  = ""
+      payload = ""
+      for m in hits:
+          t = suspicious_target(payload_segments(m))
+          if t != "":
+              target  = t
+              payload = m
+              break
+      if target == "":
+          return "allow"          # malformed authority, no internal destination
+
+      ets     = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      dest    = meta.get("host", "")
+      dpath   = meta.get("path", "")
+      snippet = payload[:SNIPPET]
+
+      # ── 3. anchor on the exact triggering instance ─────────────────────────────
+      inst = None
+      if cp > 0:
+          inst = proc_instance(cp, ets)
+
+      if inst == None:
+          # degraded attribution - report, never guess a lineage.
+          root  = meta.get("agent_name", "")
+          chain = new_chain("process://" + root)
+          chain.append(step(trig_edge(root, "https://" + dest, ets),
+                            stage_id="SSRF Payload",
+                            stage_desc="backslash-@ authority confusion submitted to " +
+                                       dest + dpath + " : " + snippet))
+          chain.append(step(trig_edge(root, "http://" + target, ets),
+                            stage_id="Internal Target",
+                            stage_desc="effective host past the validator is internal: " + target))
+          print("SSRF backslash-@ payload -> " + target + " (attribution degraded)")
+          return {
+              "action": "report",
+              "reason": "SSRF bypass payload (backslash before @) targeting internal host " +
+                        target + " submitted to " + dest + dpath + " [attribution degraded]",
+              "chain":  chain,
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lineage) == 0:
+          lineage = [inst]
+      actor_path = inst.get("actor_path", "")
+      root_path  = lineage[len(lineage) - 1].get("actor_path", actor_path)
+      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
+
+      # ── 4. session scope: lineage + children spawned by lineage in-window ──────
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = True
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS,
+                            until_ns=ets, limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e["actor_pid"]] = True
+
+      chain = new_chain("process://" + root_path)
+      chain.append(step(trig_edge(actor_path, "https://" + dest, ets),
+                        stage_id="SSRF Payload",
+                        stage_desc="backslash-@ authority confusion submitted to " +
+                                   dest + dpath + " by " + names + " : " + snippet))
+      chain.append(step(trig_edge(actor_path, "http://" + target, ets),
+                        stage_id="Internal Target",
+                        stage_desc="effective host past the validator is internal: " + target))
+
+      # ── 5. optional corroboration, strictly inside this session/window ─────────
+      reach = None
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
+              h = e.get("host", "")
+              if h == "" or h == dest:
+                  continue
+              if is_private_host(h.lower(), True):
+                  reach = e
+                  break
+          if reach != None:
+              break
+      if reach != None:
+          chain.append(step(ev_edge(reach), stage_id="Internal Reach",
+                            stage_desc="same session also reached internal endpoint " +
+                                       reach.get("host", "") + reach.get("path", "")))
+
+      conf = "CONFIRMED" if reach != None else "SUSPECTED"
+      print("SSRF backslash-@ (" + conf + ") -> " + target + " via " + names)
+      return {
+          "action": "report",
+          "reason": "SSRF bypass " + conf + " - backslash-@ URL authority confusion " +
+                    "resolving to internal host " + target + ", submitted to " +
+                    dest + dpath + " by " + names,
+          "chain":  chain,
+      }
+
+  result = run()
