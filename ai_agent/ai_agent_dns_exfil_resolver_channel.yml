@@ -1,0 +1,384 @@
+title: DNS Exfiltration — Agent Resolver Spawn With Encoded Query Name After Secret Staging
+id: 9f3c1d7a-4b62-4e58-9a1c-0d6f2b8e5714
+status: experimental
+level: high
+author: Selhan
+date: "2026-06-11"
+description: |
+  Detects the terminal stage of the Claude Code DNS-exfiltration chain: an agent-
+  attributed subprocess invokes a DNS resolution utility (dig / drill / nslookup /
+  host / getent hosts / resolvectl / dnscat-class tooling) whose QUERY NAME carries
+  encoded data (long base64/base32/hex label, >=3 stuffed labels, or a shell
+  command-substitution spliced into the hostname), corroborated by credential
+  material and/or an encoding pipeline observed in the SAME process session inside
+  a 5-minute window.
+
+  Answering the triage dissent explicitly:
+
+  * No fabricated primitives. The engine has no dns_request event type and no
+    DNS_REQUEST / EXFILTRATE_DATA / PROMPT_INJECTION edge kind, so none are used.
+    The rule runs on event_type: execute_process and traverses only EXECUTE_PROCESS
+    (graph edges out of the lineage's Process nodes, plus the instance-resolved
+    event log for the same kind).
+  * It is not "generic process execution", and it does not overlap rule c65a9620
+    (RCE via Piped Script Download). That rule keys on a download-to-interpreter
+    pipe (curl|wget piped into a shell). This rule REQUIRES two things that a
+    download pipe can never satisfy: (a) argv of a DNS lookup utility, and (b) a
+    data-bearing DNS query name in that same command line. A `curl … | bash`
+    command matches neither predicate and is discarded at the relevance gate.
+  * It does not claim to observe DNS packets. What it observes is the resolver
+    INVOCATION channel — which is where a hijacked bash tool call must pass to
+    smuggle bytes into a query name — plus the data that was staged for it. The
+    exfiltration-specific evidence the dissent asked for is supplied by the
+    ordered secret-staging / encoding stages preceding the lookup, not by the
+    spawn alone.
+  * It does not claim to detect the prompt injection. Agent ancestry (a lineage
+    process whose graph node carries agent="1") is used only as attribution and to
+    set the corroboration bar (1 stage when agent-attributed, 2 when lineage is
+    degraded). Because causation is inferred, the action is report, not block.
+
+  A bare `dig example.com`, a resolver loop with random cache-buster labels but no
+  secret/encoding staging, and any command without a data-bearing query name all
+  return allow — the rule is then completely invisible (no event, no alert).
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://attack.mitre.org/techniques/T1048/003/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.exfiltration
+  - attack.t1048.003
+  - attack.t1071.004
+  - attack.t1059.004
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - DNS blocklist / reputation lookups that hash the subject into the query label
+    (Spamhaus DBL hashblock, URIBL, SURBL) run from a shell in the same session as
+    a base64/cut pipeline — the hex or base64 label plus the encoding stage can
+    satisfy the corroboration bar.
+  - ACME dns-01 automation and DNS-provider scripts that read an API token from
+    .env / .aws/credentials to publish a challenge and then poll the record with
+    dig; the token read is genuine secret staging and the challenge label is long.
+  - Security engineers and red teams exercising DNS-exfiltration tooling
+    (dnscat2, dnsteal, iodine, dns2tcp) or CTF/lab exercises on the developer's
+    own machine.
+  - Debug or CI helper scripts that base64 a config blob and, within the same
+    5-minute window and process session, run dig/nslookup connectivity checks
+    against long generated hostnames (ephemeral preview environments, per-build
+    review-app DNS names).
+  - Service-discovery tooling that queries SRV/TXT names built from many stacked
+    labels, executed alongside a credential-reading step for the same service.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_dns_tooling:
+    event_type: execute_process
+    content|re:
+      - '(?i)(^|[^A-Za-z0-9_.-])(dig|drill|kdig|doggo|nslookup)\b'
+      - '(?i)(^|[^A-Za-z0-9_.-])host\s+[A-Za-z0-9$`]'
+      - '(?i)(^|[^A-Za-z0-9_.-])getent\s+hosts\b'
+      - '(?i)(resolvectl\s+query|systemd-resolve)\b'
+      - '(?i)(dnscat2?|dnsteal|iodine|dns2tcp|dnsexfil|dnschef)\b'
+      - '(?i)(gethostbyname|getaddrinfo|dns\.resolver)'
+      - '(?i)(^|[^A-Za-z0-9_.-])(nc|ncat|socat)\b[^\n]{0,60}[\s:]53\b'
+      - '(?i)(^|[^A-Za-z0-9_.-])ping\b'
+  condition: sel_dns_tooling
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables — this rule's own window, never persisted ────────────────────
+  WINDOW_NS      = 300000000000   # 5 minutes
+  MAX_EXEC_ROWS  = 4000
+  MAX_CMDS       = 400
+  MIN_ATTRIBUTED = 1              # agent ancestry confirmed
+  MIN_DEGRADED   = 2              # lineage degraded / no agent ancestor
+
+  # Stage A anchor — a DNS resolution channel is being invoked.
+  RESOLVER = [
+      r'(^|[^A-Za-z0-9_.-])dig\b',
+      r'(^|[^A-Za-z0-9_.-])drill\b',
+      r'(^|[^A-Za-z0-9_.-])kdig\b',
+      r'(^|[^A-Za-z0-9_.-])doggo\b',
+      r'(^|[^A-Za-z0-9_.-])nslookup\b',
+      r'(^|[^A-Za-z0-9_.-])host\s+[A-Za-z0-9$`]',
+      r'(^|[^A-Za-z0-9_.-])getent\s+hosts\b',
+      r'(^|[^A-Za-z0-9_.-])resolvectl\s+query\b',
+      r'(^|[^A-Za-z0-9_.-])systemd-resolve\b',
+      r'(^|[^A-Za-z0-9_.-])(dnscat2?|dnsteal|iodine|dns2tcp|dnsexfil|dnschef)\b',
+      r'(?i:gethostbyname|getaddrinfo|dns\.resolver|dnspython)',
+      r'(^|[^A-Za-z0-9_.-])(nc|ncat|socat)\b[^\n]{0,60}[\s:]53\b',
+      r'(^|[^A-Za-z0-9_.-])ping\b[^\n]{0,40}\s[A-Za-z0-9$`][A-Za-z0-9._$`{}()-]{16,}',
+  ]
+
+  # Stage B discriminator — the query NAME carries data, not a hostname.
+  DATA_NAME = [
+      r'[A-Za-z0-9+/=_-]{26,}\.[A-Za-z0-9-]{1,63}\.[A-Za-z]{2,24}',
+      r'[0-9a-fA-F]{32,}\.[A-Za-z0-9-]{1,63}\.[A-Za-z]{2,24}',
+      r'(\.[A-Za-z0-9+/=_-]{10,}){3,}\.[A-Za-z]{2,24}',
+      r'\$\([^)\n]{0,160}\)[A-Za-z0-9._-]{0,80}\.[A-Za-z]{2,24}',
+      r'`[^`\n]{0,160}`[A-Za-z0-9._-]{0,80}\.[A-Za-z]{2,24}',
+      r'\$\{?[A-Za-z_][A-Za-z0-9_]{2,}\}?\.[A-Za-z0-9-]{1,63}\.[A-Za-z]{2,24}',
+  ]
+
+  # Stage C — credential material staged for the channel.
+  SECRET = [
+      r'\.aws/credentials',
+      r'\.aws/config',
+      r'\.ssh/id_[A-Za-z]',
+      r'\.git-credentials',
+      r'\.netrc',
+      r'\.npmrc',
+      r'\.pypirc',
+      r'\.kube/config',
+      r'\.docker/config\.json',
+      r'(^|[^A-Za-z0-9_.-])\.env(\.[A-Za-z]+)?\b',
+      r'(?i:credentials\.json|service[_-]account[A-Za-z0-9._-]*\.json)',
+      r'(?i:\b(api|secret|access|private|auth)[_-]?(key|token|secret)\b)',
+      r'\b(ANTHROPIC|OPENAI|AWS|GITHUB|GITLAB|SLACK|STRIPE|AZURE|GOOGLE)_[A-Z0-9_]*(KEY|TOKEN|SECRET|PASSWORD)\b',
+      r'\bAKIA[0-9A-Z]{16}\b',
+      r'(^|[^A-Za-z0-9_.-])sk-[A-Za-z0-9_-]{20,}',
+      r'(^|[^A-Za-z0-9_.-])(printenv|env)\b\s*($|[|>;&])',
+      r'(?i:\bBEGIN [A-Z ]*PRIVATE KEY\b)',
+      r'(^|[^A-Za-z0-9_.-])security\s+find-generic-password\b',
+      r'(^|[^A-Za-z0-9_.-])(gh|aws|az|gcloud)\s+auth\b',
+  ]
+
+  # Stage D — payload shaped for DNS label transport.
+  ENCODE = [
+      r'(^|[^A-Za-z0-9_.-])base64\b',
+      r'(^|[^A-Za-z0-9_.-])base32\b',
+      r'(^|[^A-Za-z0-9_.-])basenc\b',
+      r'(^|[^A-Za-z0-9_.-])xxd\b',
+      r'(^|[^A-Za-z0-9_.-])hexdump\b',
+      r'(^|[^A-Za-z0-9_.-])od\s+-',
+      r'\bopenssl\s+(base64|enc)\b',
+      r'\bfold\s+-w\s*[0-9]{1,3}',
+      r'\btr\s+-d\s*[^\n]{0,8}[=+/\\]',
+      r'(?i:b64encode|b32encode|hexlify)',
+      r'\bcut\s+-c\s*[0-9]',
+      r'\bsplit\s+-b\s*[0-9]',
+      r'\bxargs\b[^\n]{0,40}(dig|nslookup|host)\b',
+  ]
+
+  def hit(pats, s):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return ""
+
+  def clip(s, n):
+      if len(s) <= n:
+          return s
+      return s[:n] + "..."
+
+  def ev_edge(row):
+      t = row.get("ts", "0")
+      pp = row.get("parent_path", "")
+      ap = row.get("actor_path", "")
+      return {
+          "kind":     "EXECUTE_PROCESS",
+          "from":     "process://" + (pp if pp != "" else "unknown"),
+          "to":       "process://" + (ap if ap != "" else "unknown"),
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+          "cmdline":  row.get("cmdline", ""),
+      }
+
+  def synth_edge(frm, to, ts, cmdline):
+      return {
+          "kind":     "EXECUTE_PROCESS",
+          "from":     frm,
+          "to":       to,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+          "cmdline":  cmdline,
+      }
+
+  def run():
+      # 1 ── relevance gate: pure string checks on meta, no graph / log calls
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      res_hit = hit(RESOLVER, cmd)
+      if res_hit == "":
+          return "allow"                      # not a DNS-channel spawn at all
+      name_hit = hit(DATA_NAME, cmd)
+
+      trigger_ts = int(meta.get("event_ts", "0"))
+      since = trigger_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+
+      # 2 ── instance-anchored attribution (never a path-keyed node walk)
+      cp = int(meta.get("caller_pid", "0"))
+      inst = None
+      lineage = []
+      session = {}
+      if cp > 0:
+          session[str(cp)] = True
+          inst = proc_instance(cp, trigger_ts)
+          if inst != None:
+              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+              pp = inst.get("parent_pid", "")
+              if pp != "" and pp != "0":
+                  session[pp] = True
+      for x in lineage:
+          session[str(x.get("actor_pid", ""))] = True
+
+      # 3 ── bounded session expansion over one cached event-log query
+      rows = []
+      if session:
+          rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                              until_ns=trigger_ts + 1, limit=MAX_EXEC_ROWS)
+          for _ in range(2):
+              for e in rows:
+                  if str(e.get("parent_pid", "")) in session:
+                      session[str(e.get("actor_pid", ""))] = True
+
+      cmds = []
+      for e in rows:
+          if len(cmds) >= MAX_CMDS:
+              break
+          if str(e.get("actor_pid", "")) not in session and str(e.get("parent_pid", "")) not in session:
+              continue
+          c = e.get("cmdline", "")
+          if c == "":
+              c = e.get("actor_path", "")
+          if c == "":
+              continue
+          cmds.append({"ts": int(e.get("ts", "0")), "cmd": c, "edge": ev_edge(e)})
+
+      # 4 ── graph traversal: EXECUTE_PROCESS edges out of the lineage's process
+      #      nodes (covers spawns the event log has not yet materialised) and the
+      #      agent-ancestry check via the Process node's agent flag.
+      paths = {}
+      for x in lineage:
+          p = x.get("actor_path", "")
+          if p != "":
+              paths[p] = True
+      agent_node = None
+      root_id = "process://" + (lineage[-1].get("actor_path", "unknown") if lineage else "unknown")
+      for p in graph(type="Process"):
+          pth = p.get("path", "")
+          if pth == "" or pth not in paths:
+              continue
+          if agent_node == None and p.get("agent", "0") == "1":
+              agent_node = p
+          for e in edges(p["id"], dir="out", kind="EXECUTE_PROCESS"):
+              if len(cmds) >= MAX_CMDS:
+                  break
+              ts = int(e.get("ts", "0"))
+              if ts < since or ts > trigger_ts + 1:
+                  continue
+              c = e.get("cmdline", "")
+              if c == "":
+                  ch = node(e["to"])
+                  if ch != None:
+                      c = ch.get("cmdline", "")
+                      if c == "":
+                          c = ch.get("path", "")
+              if c != "":
+                  cmds.append({"ts": ts, "cmd": c, "edge": e})
+      if agent_node != None:
+          root_id = agent_node["id"]
+
+      # 5 ── ordered stage evaluation, session- and window-scoped
+      secret_ev = None
+      encode_ev = None
+      lookup_n = 0
+      data_lookup_n = 1 if name_hit != "" else 0
+      sib_name = ""
+      for c in cmds:
+          if c["ts"] < since or c["ts"] > trigger_ts + 1:
+              continue
+          s = c["cmd"]
+          if secret_ev == None:
+              m = hit(SECRET, s)
+              if m != "":
+                  secret_ev = {"ev": c, "m": m}
+          if encode_ev == None:
+              m = hit(ENCODE, s)
+              if m != "":
+                  encode_ev = {"ev": c, "m": m}
+          if hit(RESOLVER, s) != "":
+              lookup_n += 1
+              m = hit(DATA_NAME, s)
+              if m != "":
+                  data_lookup_n += 1
+                  if sib_name == "":
+                      sib_name = m
+
+      # Discriminator: a resolver invocation whose query name carries data.
+      if name_hit == "" and sib_name == "":
+          return "allow"
+
+      # Exfiltration-specific evidence must exist — a lookup alone is never enough.
+      if secret_ev == None and encode_ev == None:
+          return "allow"
+
+      strength = 0
+      if secret_ev != None:
+          strength += 1
+      if encode_ev != None:
+          strength += 1
+      repetition = (data_lookup_n >= 3) or (lookup_n >= 8)
+      if repetition:
+          strength += 1                      # amplifier only, never the sole stage
+      need = MIN_ATTRIBUTED if agent_node != None else MIN_DEGRADED
+      if strength < need:
+          return "allow"
+
+      # 6 ── kill chain built from event rows / graph edges + the meta trigger
+      chain = new_chain(root_id)
+      if secret_ev != None:
+          chain.append(step(secret_ev["ev"]["edge"], stage_id="Secret Staging",
+                            stage_desc="session process touched credential material (" +
+                                       clip(secret_ev["m"], 60) + "): " +
+                                       clip(secret_ev["ev"]["cmd"], 160)))
+      if encode_ev != None:
+          chain.append(step(encode_ev["ev"]["edge"], stage_id="Payload Encoding",
+                            stage_desc="data shaped for DNS label transport (" +
+                                       clip(encode_ev["m"], 40) + "): " +
+                                       clip(encode_ev["ev"]["cmd"], 160)))
+
+      trig_actor = inst.get("actor_path", "") if inst != None else ""
+      if trig_actor == "":
+          trig_actor = "pid:" + str(cp)
+      trig_parent = inst.get("parent_path", "") if inst != None else ""
+      if trig_parent == "":
+          trig_parent = root_id
+      else:
+          trig_parent = "process://" + trig_parent
+      shown = name_hit if name_hit != "" else sib_name
+      chain.append(step(synth_edge(trig_parent, "process://" + trig_actor,
+                                   trigger_ts, clip(cmd, 400)),
+                        stage_id="DNS Exfil Channel",
+                        stage_desc="resolver spawned with data-bearing query name (" +
+                                   clip(shown, 80) + "): " + clip(cmd, 200)))
+
+      names = "pid " + str(cp)
+      if lineage:
+          parts = []
+          for x in lineage:
+              parts.append(x.get("actor_path", "?").split("/")[-1])
+          names = " -> ".join(parts)
+      attribution = "agent=" + agent_node.get("name", "?") if agent_node != None else "attribution=degraded"
+
+      reason = ("Possible DNS-channel exfiltration: " + clip(res_hit.strip(), 24) +
+                " lookup with encoded query name" +
+                (", credential material staged in session" if secret_ev != None else "") +
+                (", encoding pipeline in session" if encode_ev != None else "") +
+                (", " + str(data_lookup_n) + " data-bearing lookups" if repetition else "") +
+                " | lineage: " + names + " | " + attribution)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
