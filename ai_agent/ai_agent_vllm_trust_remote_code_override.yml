@@ -1,0 +1,124 @@
+title: vLLM Hardcoded trust_remote_code Override
+id: 6f2c7b41-9d3e-4a58-b0c7-2e1f84d5a9c3
+status: experimental
+level: high
+description: |
+  Detects a single spawned process command line that launches vLLM with remote
+  code execution EXPLICITLY DISABLED (--trust-remote-code=False / --no-trust-remote-code /
+  trust_remote_code=False / VLLM_TRUST_REMOTE_CODE=0) while simultaneously targeting one of
+  the model families whose vLLM implementation files (nemotron_vl.py, kimi_k25.py) carry a
+  hardcoded trust_remote_code=True on AutoModel.from_config() / cached_get_image_processor().
+  In that combination the user-set security control is silently overridden and arbitrary
+  Python shipped inside the model repository is executed at load time.
+
+  A second, architecture-independent branch fires when the same command line contains BOTH a
+  disabling and an enabling form of trust_remote_code (e.g. --trust-remote-code=False together
+  with --hf-overrides '{"trust_remote_code": true}') — a direct, self-contradictory override of
+  the control.
+
+  Single-event content rule: the only observable for this threat is the execute_process command
+  line. The rule deliberately requires three co-occurring signals (vLLM entrypoint + explicit
+  disable + affected architecture or contradictory enable) so that it cannot fire on ordinary
+  model serving.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://docs.vllm.ai/en/latest/serving/engine_args.html
+  - https://huggingface.co/docs/transformers/en/custom_models
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.t1195.001
+  - owasp.a06.2021
+  - owasp.a07.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # 1 — the process being spawned is actually a vLLM engine entrypoint
+  sel_vllm_launch:
+    content|re:
+      - '(?i)(?:^|[\s"/\\])vllm(?:\.exe)?\s+(?:serve|chat|complete|bench|run-batch)\b'
+      - '(?i)(?:^|[\s"])-m\s+vllm(?:[\s.]|$)'
+      - '(?i)vllm\.entrypoints\.[A-Za-z0-9_.]*api_server'
+      - '(?i)vllm[/\\]entrypoints[/\\][A-Za-z0-9_/\\.]*api_server\.py'
+      - '(?i)from\s+vllm\s+import\s+(?:LLM|AsyncLLMEngine|EngineArgs)'
+
+  # 2 — the operator explicitly turned remote code execution OFF
+  sel_trust_disabled:
+    content|re:
+      - '(?i)--trust[-_]remote[-_]code[=\s]+(?:false|0|no|off)\b'
+      - '(?i)--no[-_]trust[-_]remote[-_]code\b'
+      - '(?i)\btrust_remote_code\s*[=:]\s*["\x27]?(?:false|0)\b'
+      - '(?i)\bVLLM_TRUST_REMOTE_CODE\s*=\s*(?:0|false|no|off)\b'
+
+  # 3a — the target is a model family served by a vulnerable implementation file
+  sel_affected_arch:
+    content|re:
+      - '(?i)nemotron[A-Za-z0-9_.\-]{0,14}vl\b'
+      - '(?i)\bkimi[A-Za-z0-9_.\-]{0,6}k2(?:[._-]?5)?\b'
+      - '(?i)\bkimi[A-Za-z0-9_.\-]{0,6}vl\b'
+      - '(?i)(?:nemotron_vl|kimi_k25)\.py\b'
+
+  # 3b — the same command line both disables and re-enables the control
+  sel_contradictory_true:
+    content|re: '(?i)trust[-_]remote[-_]code["\x27\s]*[=:]\s*(?:true|1)\b'
+
+  # ── filters: benign command lines that legitimately carry these tokens ──────
+
+  # someone is reading / searching the vulnerable source, not running it
+  filter_source_inspection:
+    content|re:
+      - '(?i)(?:^|[\s"])(?:grep|egrep|fgrep|rg|ripgrep|ag|ack)\s'
+      - '(?i)(?:^|[\s"])(?:cat|bat|less|more|head|tail|wc|nl)\s+[^\s"]*\.py'
+      - '(?i)(?:^|[\s"])git\s+(?:diff|log|show|blame|grep)\b'
+      - '(?i)(?:^|[\s"])(?:diff|patch)\s+[^\s"]*\.py'
+
+  # argument parsing only — no model is ever loaded
+  filter_help_or_dryrun:
+    content|re:
+      - '(?i)(?:^|\s)--(?:help|version|dry[-_]run|print[-_]config|show[-_]config|list[-_]models)(?:\s|=|$)'
+      - '(?i)(?:^|\s)-h(?:\s|$)'
+
+  # unit / regression harness invocation
+  filter_test_harness:
+    content|re:
+      - '(?i)(?:^|[\s"/\\])pytest(?:\s|$)'
+      - '(?i)-m\s+(?:pytest|unittest)\b'
+      - '(?i)(?:^|\s)--collect-only(?:\s|$)'
+
+  # documentation / template command line, no real repository referenced
+  filter_placeholder_model:
+    content|re:
+      - '(?i)<\s*model[-_]?(?:name|path|id)?\s*>'
+      - '(?i)\bYOUR[-_](?:MODEL|REPO|CHECKPOINT)\b'
+      - '\$\{[A-Za-z_][A-Za-z0-9_]*\}'
+
+  condition: >
+    sel_vllm_launch and sel_trust_disabled and
+    (sel_affected_arch or sel_contradictory_true) and
+    not (filter_source_inspection or filter_help_or_dryrun or
+    filter_test_harness or filter_placeholder_model)
+
+falsepositives:
+  - Advisory reproduction in a lab — a security engineer intentionally runs vLLM with
+    --trust-remote-code=False against a Nemotron-VL or Kimi-K2.5 checkpoint to confirm the
+    bypass. The command line is indistinguishable from the attack; the rule reports rather
+    than blocks precisely because of this.
+  - CI or deployment wrappers that hardcode --trust-remote-code=False as a hardening default
+    and happen to serve an affected multimodal architecture from an internally vetted
+    checkpoint. The pytest / --dry-run / --help filters remove the common harness forms, but a
+    bespoke shell wrapper will still be reported.
+  - Wrapper scripts, Makefile targets or systemd/ansible units that echo or log the full vLLM
+    command line before executing it — the echo/logger child process carries the identical
+    string and matches all three selections.
+  - A locally converted checkpoint whose directory name contains 'nemotron-vl' or 'kimi-k2'
+    but that ships no custom modelling code — the hardcoded override still executes, so this
+    is a low-severity true positive rather than a pure false alarm.
+  - Documentation or demo command lines pasted into a shell with a template model reference —
+    mitigated by filter_placeholder_model.
+action: report
