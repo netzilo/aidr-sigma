@@ -1,0 +1,77 @@
+title: vLLM M-RoPE Pure Prompt-Embeds DoS Attempt
+id: 7b3f2a91-5c4d-4e8a-9f21-6d0c8b7a4e13
+status: experimental
+level: high
+description: |
+  Detects an outbound HTTP POST to a vLLM-style OpenAI-compatible /v1/completions
+  endpoint that carries a *pure* prompt-embeds payload: a large base64 tensor in the
+  "prompt_embeds" field with no accompanying textual or token-id "prompt".
+
+  vLLM 0.12.0 through 0.23.x fail an assertion inside EngineCore when a pure
+  prompt-embeds request is served by a model configured with multimodal rotary
+  position embeddings (M-RoPE, e.g. Qwen2-VL / Qwen2.5-VL class models). The
+  assertion failure terminates the EngineCore process and shuts the whole inference
+  server down, so a single authenticated request is a full-service denial of service.
+
+  This is a single-event content rule: it fires on the request body shape alone.
+  The engine exposes no process_crash event and no SERVICE_CRASHED edge, so the
+  crash itself is not observable here - only the triggering request is.
+
+  Scope notes:
+    * /v1/chat/completions is explicitly excluded (different request path, not the
+      reported vulnerable surface).
+    * Requests that also carry a non-empty "prompt" (string, string array, or token-id
+      array) are excluded - those are mixed inputs, not the "pure prompt embeds"
+      condition that trips the assertion.
+    * The base64 blob must be at least 128 characters so that documentation, schema
+      dumps, and client code that merely name the field do not match.
+author: Evgen
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+  - https://owasp.org/Top10/A08_2025-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - owasp.a08_2025
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+    method: POST
+  sel_path:
+    path|re: '(?:^|/)(?:v[0-9]+/)?completions/?(?:\?|$)'
+  sel_pure_embeds:
+    content|re: '"prompt_embeds"\s*:\s*(?:\[\s*)?"[A-Za-z0-9+/][A-Za-z0-9+/=]{127,}'
+  filter_chat_path:
+    path|contains: '/chat/'
+  filter_text_prompt:
+    content|re:
+      - '"prompt"\s*:\s*"[^"]+"'
+      - '"prompt"\s*:\s*\[\s*(?:"|[0-9])'
+      - '"prompt_token_ids"\s*:\s*\[\s*[0-9]'
+      - '"messages"\s*:\s*\[\s*\{'
+  filter_template_value:
+    content|re:
+      - '"prompt_embeds"\s*:\s*(?:\[\s*)?"\s*\{\{'
+      - '"prompt_embeds"\s*:\s*(?:\[\s*)?"\s*<[A-Za-z0-9_ -]{1,64}>'
+      - '"prompt_embeds"\s*:\s*(?:\[\s*)?"\s*\$\{?[A-Z_]{2,40}'
+  condition: >
+    sel_http and sel_path and sel_pure_embeds
+    and not (filter_chat_path or filter_text_prompt or filter_template_value)
+falsepositives:
+  - Legitimate soft-prompt / prefix-tuning workflows that intentionally submit only
+    precomputed embeddings to a self-hosted vLLM server. These are functionally
+    identical on the wire; only the target model (M-RoPE vs. text-only) decides
+    whether the server crashes, and the model config is not visible in the request.
+  - Retrieval or embedding-conditioned generation pipelines that pass a cached tensor
+    instead of text for latency reasons.
+  - Internal benchmarking, load-testing, or upgrade-regression suites that replay a
+    prompt_embeds payload to confirm a vLLM instance has been patched.
+  - Security teams reproducing the advisory against a lab instance.
+action: report
