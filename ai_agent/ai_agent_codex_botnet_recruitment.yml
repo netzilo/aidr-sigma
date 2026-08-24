@@ -1,0 +1,133 @@
+title: Codex Botnet Recruitment via Injected Fetch-to-Execute
+id: 9f3c1d47-58ba-4e21-b6d0-72c4e8a19f35
+status: experimental
+level: high
+description: |
+  Detects the post-injection stage of the ChatGPT Codex botnet-recruitment chain:
+  a prompt-injected agent abuses the Common Dependencies Allowlist (its only
+  outbound internet path) to pull attacker-controlled code and place the sandbox
+  under remote control.
+
+  Two independent single-event signatures:
+
+  1. execute_process — the spawned command line must contain BOTH
+     (a) a network-fetch-to-interpreter delivery channel (curl/wget piped into a
+         shell or interpreter, fetch-then-chmod+x, inline python -c / node -e that
+         retrieves and exec()s remote content, or base64 -d piped to a shell), AND
+     (b) a remote-control / persistence / propagation marker (persistent beacon
+         loop, /dev/tcp reverse shell, nc -e, nohup/setsid/disown daemonisation,
+         cron / systemd / launchctl persistence, shell-rc or authorized_keys
+         append, or a known bot/miner family name).
+     Either half alone is a normal dev-container action; the conjunction is not.
+
+  2. http_request — a C2 check-in whose URI or JSON body carries BOTH an implant
+     identity and a task/command channel (gate.php with a bot id, /beacon/poll,
+     /c2/task, or a body pairing agent_id with cmd/task/exec fields).
+
+  Reporting only: this is a newly deployed signature and the execute_process
+  surface inside an agent sandbox is noisy enough to warrant measuring the true
+  false-positive rate before any enforcement decision.
+author: Egemen
+date: "2026-03-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1105/
+  - https://attack.mitre.org/techniques/T1071/001/
+tags:
+  - attack.execution
+  - attack.t1059.004
+  - attack.command-and-control
+  - attack.t1071.001
+  - attack.t1105
+  - attack.persistence
+  - attack.t1053.003
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: agent-spawned process that both fetches remote code and
+  #             establishes remote control. Both selections must match.
+  sel_exec:
+    event_type: execute_process
+
+  sel_delivery:
+    content|re:
+      # curl/wget piped straight into an interpreter
+      - '(?i:\b(?:curl|wget)\b)[^|\n]{0,300}\|[^|\n]{0,80}(?i:\b(?:ba|z|da|k)?sh\b|\bpython3?\b|\bperl\b|\bruby\b|\bnode\b|\bphp\b)'
+      # fetch to disk, then make executable / run it
+      - '(?i:\b(?:curl|wget)\b)[^\n]{0,300}(?:;|&&)\s*(?i:chmod\s+\+?x\b|\./|\bbash\b|\bsh\b|\bpython3?\b|\bnode\b)'
+      # inline python that downloads and executes
+      - '(?i:\bpython3?\b[^\n]{0,120}\s-c\b)[^\n]{0,400}(?i:urllib|requests\.get|http\.client|socket\.socket)[^\n]{0,400}(?i:\bexec\(|\beval\(|subprocess|os\.system|/bin/(?:ba)?sh)'
+      # inline node that downloads and shells out
+      - '(?i:\bnode\b[^\n]{0,120}\s-e\b)[^\n]{0,400}(?i:child_process|execSync|spawnSync)[^\n]{0,400}(?i:https?://|require\(["'']https?)'
+      # base64 blob decoded straight into a shell
+      - '(?i:\bbase64\b[^\n]{0,60}-{1,2}d(?:ecode)?\b)[^\n]{0,200}\|\s*(?i:\b(?:ba|z)?sh\b|\bpython3?\b|\bnode\b)'
+
+  sel_control:
+    content|re:
+      # persistent beacon loop
+      - '(?i:\bwhile\s+(?:true|:)\b)[^\n]{0,240}(?i:\b(?:curl|wget|nc|ncat|netcat)\b)'
+      - '(?i:\bsleep\s+\d+)[^\n]{0,240}(?i:\b(?:curl|wget)\b)[^\n]{0,300}(?i:\bdone\b)'
+      # reverse shells
+      - '(?i:/dev/tcp/)'
+      - '(?i:\b(?:nc|ncat|netcat)\b[^\n]{0,120}\s-[a-z]{0,4}e[a-z]{0,4}\s+/(?:usr/)?bin/(?:ba|z)?sh)'
+      # daemonised / detached execution
+      - '(?i:\b(?:nohup|setsid|disown)\b)'
+      # persistence installation
+      - '(?i:\bcrontab\b\s+-|/etc/cron|\bsystemd-run\b|\bsystemctl\s+(?:--user\s+)?enable\b|\blaunchctl\s+(?:load|bootstrap)\b)'
+      - '(?i:>>\s*[^\n]{0,100}(?:\.bashrc|\.zshrc|\.bash_profile|\.profile|authorized_keys))'
+      # known bot / miner / propagation tooling
+      - '(?i:\b(?:xmrig|minerd|kinsing|kdevtmpfsi|tsunami|mirai|gafgyt|masscan|zmap)\b)'
+
+  # ── Branch 2: outbound C2 check-in. URI or body must carry BOTH an implant
+  #             identity and a task/command channel.
+  sel_http:
+    event_type: http_request
+
+  sel_c2_uri:
+    url.full|re:
+      - '(?i:/gate\.php\?)[^\s]{0,300}(?i:(?:bot|uid|victim|zombie|implant|agent|client)_?id=)'
+      - '(?i:/(?:bot|bots|zombie|implant|beacon|c2|cnc)/(?:check-?in|checkin|poll|task|tasks|cmd|command)(?:[/?]|$))'
+      - '(?i:\?[^\s]{0,200}(?:bot|zombie|implant|victim)_?id=)[^\s]{0,240}(?i:[?&](?:cmd|task|exec|shell)=)'
+
+  sel_c2_body:
+    content|re:
+      - '(?i:"(?:bot|agent|implant|client|victim)_?id"\s*:)[^\n]{0,400}(?i:"(?:cmd|command|task|exec)(?:_?(?:output|result))?"\s*:)'
+      - '(?i:"(?:cmd|command|task|exec)_?(?:output|result)"\s*:)[^\n]{0,400}(?i:"(?:hostname|uname|whoami|os|arch)"\s*:)'
+
+  # ── Benign-context suppressors (no host, domain or path is trusted here) ──
+  filter_static_analysis:
+    content|re:
+      - '\A\s*(?:/\S+/)?(?:grep|rg|ripgrep|ag|ack|man|less|bat|shellcheck)\b'
+      - '(?i:"(?:command|cmd)"\s*:\s*"(?:/\S+/)?(?:grep|rg|ripgrep|ag|ack|man|less|bat|shellcheck)\b)'
+      - '(?i:\bgit\s+grep\b)'
+
+  filter_help:
+    content|contains:
+      - '--help'
+      - '--dry-run'
+      - 'shellcheck'
+
+  condition: >
+    ((sel_exec and sel_delivery and sel_control)
+     or (sel_http and (sel_c2_uri or sel_c2_body)))
+    and not (filter_static_analysis or filter_help)
+
+falsepositives:
+  - Dev-container or CI bootstrap that installs a toolchain with a vendor install
+    script (curl piped to sh) launched under nohup or setsid — matches delivery
+    plus a control marker without malicious intent.
+  - Long-running health-check or deployment scripts that poll an endpoint in a
+    "while true; do curl ...; sleep N; done" loop and were themselves installed
+    by a fetch-and-run bootstrap in the same command line.
+  - Monitoring or telemetry sidecars that check in over HTTP with an agent_id and
+    a task field in the JSON body (legitimate task-queue workers use the same shape).
+  - Deliberate red-team, malware-analysis or security-training exercises executed
+    inside the agent sandbox by an authorised operator.
+  - Chat-bot integrations whose URI happens to contain /bot/command style routing.
+
+action: report
