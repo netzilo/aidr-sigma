@@ -1,0 +1,92 @@
+title: Agent Memory Hook Package Installation
+id: 7b3f1c2e-9d84-4a5f-b6c1-2e8a4f0d51c7
+status: experimental
+level: medium
+description: |
+  Detects a monitored agent (or a process it spawned) executing a command line that
+  either (a) installs/executes an npm-ecosystem package whose specifier names one of
+  the coding-assistant platforms (Claude Code / Codex / Grok) AND a persistent-memory
+  or context-compression capability, or (b) writes into an agent hook/config location
+  (~/.claude/settings.json, ~/.claude/hooks, ~/.codex/config.toml, ~/.config/grok, ...)
+  with a memory/compaction/persistence keyword in the same command.
+
+  Scope note (deliberate, answers triage dissent): the only live telemetry for this
+  threat is execute_process. There is no INSTALLED_PACKAGE / MODIFIED_STATE /
+  PERSISTED_DATA edge, and file_write has no live producer, so this rule CANNOT prove
+  that persistent state was actually written or that agent context was manipulated.
+  It observes the one thing the engine really sees: the installation/registration
+  command itself. It is therefore an evidence-collector scoped to report, not an
+  enforcement rule, and it demands three independent tokens in a single command line
+  before firing so that a bare "npm install" or a bare "node" exec never triggers it.
+author: Haibo
+date: "2026-03-04"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1546/
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - atlas.aml.t0053
+  - owasp.llm03
+falsepositives:
+  - Developer intentionally installing a memory or context MCP server / hook package
+    for their own agent setup (e.g. an internally authored session-memory hook).
+  - Dotfile or machine-provisioning scripts that copy a hooks file or settings.json
+    into ~/.claude, ~/.codex or ~/.config/grok during onboarding.
+  - CI images that install agent tooling whose package name legitimately contains
+    "context" or "memory" (context7-style docs servers, memory-bank plugins).
+  - Backup or migration one-liners that cp/mv an existing agent settings.json while a
+    memory-related package name happens to be on the same command line.
+  - Security research replaying the described npm package inside a sandbox.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── Branch A: package install / one-shot execution of the hook package ──────
+  sel_pkg_exec:
+    content|re: '(?i)\b(?:npx|bunx|npm\s+exec|pnpm\s+dlx|yarn\s+dlx)\b|\b(?:npm|pnpm|yarn|bun)\s+(?:install|i|add)\b'
+  sel_agent_target:
+    content|re: '(?i)\b(?:claude[-_]?code|claude[-_]?cli|codex[-_]?cli|codex|grok)\b'
+  sel_memory_token:
+    content|re: '(?i)(?:persistent[-_]?memory|memory[-_]?(?:hook|hooks|bank|store|server|persist|layer)|hook[-_]?memory|context[-_]?(?:compress|compression|compaction|persist|memory)|compress[-_]?context|session[-_]?(?:memory|persist)|mem0|memory[-_]?mcp)'
+
+  # ── Branch B: direct write into an agent hook / config surface ──────────────
+  sel_hook_path:
+    content|re: '(?i)(?:\.claude/(?:settings(?:\.local)?\.json|hooks|CLAUDE\.md)|\.codex/(?:config\.toml|hooks|AGENTS\.md)|\.config/(?:codex|grok)/|\.grok/(?:hooks|config))'
+  sel_write_op:
+    content|re: '(?i)(?:>>?\s*[~/$a-z.]|\btee\b|\bsed\s+-i|\bcp\s|\bmv\s|\bln\s+-s|\binstall\s+-m|\bnode\s+-e|\bpython3?\s+-c|\bjq\b|\bdd\s+of=)'
+  sel_persist_kw:
+    content|re: '(?i)(?:memory|mem0|compress|compaction|compact|persist|checkpoint|session[-_]?state|context[-_]?store|pretooluse|posttooluse|sessionstart)'
+
+  # ── Filters: non-effecting, read-only and test invocations ──────────────────
+  filter_noop_pkg_cmd:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:view|info|show|search|ls|list|why|outdated|audit|pack|publish|link|unlink|uninstall|remove|rm|help)\b'
+  filter_noop_flags:
+    content|contains:
+      - '--dry-run'
+      - '--help'
+      - '--version'
+      - 'npm help'
+  filter_test_fixtures:
+    content|contains:
+      - '/__tests__/'
+      - '/test/fixtures/'
+      - '/tests/fixtures/'
+      - '/spec/fixtures/'
+      - '.test.js'
+      - '.spec.ts'
+      - 'node_modules/.bin/jest'
+      - 'node_modules/.bin/vitest'
+      - 'node_modules/.bin/mocha'
+  condition: >
+    sel_event and
+    ((sel_pkg_exec and sel_agent_target and sel_memory_token) or
+     (sel_hook_path and sel_write_op and sel_persist_kw))
+    and not (filter_noop_pkg_cmd or filter_noop_flags or filter_test_fixtures)
+action: report
