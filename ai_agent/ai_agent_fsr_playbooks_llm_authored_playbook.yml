@@ -1,0 +1,110 @@
+title: FSR-Playbooks LLM-Authored Playbook Compilation or Publish
+id: 7c3f9a41-58d2-4be6-9f0a-1d84c6b7e352
+status: experimental
+level: medium
+description: |
+  Single-event artifact detection for the fsr-playbooks FortiSOAR authoring
+  framework when it is driven by its LLM co-authoring path, and for FortiSOAR
+  Workflow JSON payloads that carry LLM authorship attribution or embedded
+  instruction-override text.
+
+  Scope note (deliberate): the engine exposes no llm_prompt_sent / write_file
+  event types and no GENERATED_PLAYBOOK / LLM_PROMPT_INJECTION /
+  YAML_TO_JSON_CONVERSION / MCP_SERVER_INVOCATION edge kinds, so the
+  injection -> generation -> compilation -> MCP-execution chain CANNOT be
+  reconstructed or attributed from telemetry. This rule therefore makes no
+  causal claim. It records only two directly observable artifacts:
+    1. an execute_process whose command line is the fsr-playbooks CLI invoked
+       with an LLM co-authoring / prompt / model / MCP-serve argument, or with
+       a publish/deploy verb targeting FortiSOAR;
+    2. an http_request write (POST/PUT/PATCH) whose body is FortiSOAR Workflow
+       JSON ('"@type": "Workflow"') AND additionally carries either an explicit
+       LLM model attribution key or instruction-override text.
+  Both require two independent, high-specificity markers in the same event.
+  This is an audit signal for reviewing machine-generated security automation
+  before it reaches the FortiSOAR platform, not an attack verdict — hence
+  action: report.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: the fsr-playbooks CLI itself ──────────────────────────────
+  sel_exec_tool:
+    event_type: execute_process
+    command|re: '(?i)\bfsr[-_]playbooks\b'
+
+  sel_exec_llm:
+    command|re: '(?i)(\bco-?author\b|--llm\b|--ai\b|--model[ =]|--prompt[ =]|--prompt-file\b|\bmcp[-_](serve|server)\b|\bmcp\s+(serve|server)\b|\bserve[-_]mcp\b)'
+
+  sel_exec_publish:
+    command|re: '(?i)\b(publish|deploy|push|import)\b[^\n]{0,200}\b(fortisoar|fsr)\b'
+
+  # ── Branch 2/3 scope and payload markers ────────────────────────────────
+  sel_http_write:
+    event_type: http_request
+    method|re: '(?i)^(POST|PUT|PATCH)$'
+
+  sel_evt_scope:
+    event_type:
+      - execute_process
+      - http_request
+
+  sel_fsr_workflow_json:
+    content|re: '"@type"\s*:\s*"Workflow(Step|Collection)?"'
+
+  sel_llm_attribution:
+    content|re: '(?i)"(generated_?by|authored_?by|co_?authored_?by|llm_?model|assistant_?model|x-?llm[a-z-]*)"\s*:\s*"[^"]{0,80}(gpt|claude|gemini|llama|mistral|copilot|openai|anthropic|deepseek|qwen)'
+
+  sel_injection:
+    content|re: '(?i)(ignore (all |any |your |the )?(previous|prior|above|preceding) instructions|disregard (all |any |the )?(previous|prior|above) (instructions|rules|directives)|you are now (a|an|the) |system prompt override)'
+
+  # ── Filters: benign shapes that carry the same markers ──────────────────
+  filter_placeholder:
+    content|re: '(?i)(\$\{[a-z_]+\}|\{\{\s*[a-z_.]+\s*\}\}|<[a-z_]*model[a-z_]*>|\byour[-_]?(model|api[-_]?key)\b|\bplaceholder\b|\bchangeme\b|\bTODO\b|```)'
+
+  filter_help:
+    command|re: '(?i)(^|\s)(--help|-h|--version|--print-schema|--list)(\s|$)'
+
+  filter_detection_content:
+    content|re: '(?i)("(pattern|regex|signature|indicator|detection|falsepositives)"\s*:|\bsigma\b|\byara\b|\bfalsepositives\b)'
+
+  condition: >
+    (
+      (sel_exec_tool and (sel_exec_llm or sel_exec_publish)) or
+      (sel_http_write and sel_fsr_workflow_json and sel_llm_attribution) or
+      (sel_evt_scope and sel_fsr_workflow_json and sel_injection)
+    )
+    and not (filter_placeholder or filter_help or filter_detection_content)
+
+falsepositives:
+  - A playbook engineer legitimately using the fsr-playbooks LLM co-authoring
+    feature during normal authoring work — this is the intended product
+    workflow and will match branch 1. The rule reports rather than blocks
+    precisely because the invocation itself is sanctioned; the signal exists so
+    that machine-generated playbooks can be reviewed before promotion.
+  - Running the fsr-playbooks MCP server as a long-lived development service
+    (mcp serve) on an engineer workstation.
+  - CI/CD promotion of already-reviewed playbooks where the pipeline retains an
+    authorship attribution field naming the model that drafted them.
+  - FortiSOAR playbooks that intentionally contain prompt-injection strings as
+    detection content or test data (phishing-triage, LLM-abuse hunting
+    playbooks). Mitigated by filter_detection_content, which suppresses bodies
+    carrying detection-rule fields such as "pattern", "signature", "regex" or
+    Sigma/YARA references.
+  - Template and scaffold files where the model attribution value is an
+    unfilled placeholder. Mitigated by filter_placeholder.
+  - CLI help, version and schema-dump invocations. Mitigated by filter_help.
+action: report
