@@ -1,0 +1,92 @@
+title: Neo4j Cypher MCP DNS Rebinding Tool Invocation
+id: 7b3f9c2a-5d41-4e8b-9a6f-1c0d84e37f52
+status: experimental
+level: medium
+description: |
+  Detects a single HTTP request that carries a JSON-RPC 2.0 "tools/call" invocation
+  for a Neo4j Cypher MCP tool (read_neo4j_cypher / write_neo4j_cypher /
+  get_neo4j_schema) while the request is addressed to a hostname that is a
+  DNS-rebinding indicator rather than a normal loopback client address.
+
+  Two rebinding indicators are accepted:
+    (a) the hostname embeds a loopback / RFC1918 / link-local address in dotted,
+        dashed, decimal or hex form under a public wildcard-DNS suffix
+        (the canonical "rebind me to 127.0.0.1" hostname shape), or
+    (b) the URL is a registrable DNS name with an EXPLICIT local-service port
+        (3000/5000/7474/7687/8000/8080/9000 ...) — a browser-origin request to a
+        locally bound MCP server, which a legitimate local MCP client would
+        address as localhost/127.0.0.1 with no DNS name involved.
+
+  A legitimate MCP client on the same machine talks to 127.0.0.1 or localhost;
+  neither indicator can match those, so the rule fires only on the cross-origin
+  shape produced after a DNS rebind succeeds.
+
+  Threat classification supplied with this threat card: OWASP Top 10 2021 A07 —
+  Cross-Site Request Forgery (CSRF). No MITRE ATLAS technique was supplied and
+  none is asserted here; no owasp.llmXX / owasp.asiXX identifier is asserted
+  either, because inventing one would be worse than omitting it.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://github.com/neo4j-contrib/mcp-neo4j
+  - https://owasp.org/www-community/attacks/csrf
+  - https://en.wikipedia.org/wiki/DNS_rebinding
+tags:
+  - attack.initial-access
+  - attack.t1189
+  - cwe.346
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+
+  sel_jsonrpc:
+    content|re: '(?i)"jsonrpc"\s*:\s*"2\.0"'
+
+  sel_mcp_toolcall:
+    content|re: '(?i)"method"\s*:\s*"tools/call"'
+
+  sel_neo4j_tool:
+    content|re: '(?i)"(?:name|tool_name)"\s*:\s*"(?:read_neo4j_cypher|write_neo4j_cypher|get_neo4j_schema|neo4j[_-][a-z0-9_-]{2,32})"'
+
+  sel_rebind_host:
+    host|re:
+      - '(?i)^(?:[a-z0-9-]{1,63}\.)*127[.-]0[.-]0[.-]1\.[a-z0-9-]{1,63}\.[a-z]{2,}$'
+      - '(?i)^(?:[a-z0-9-]{1,63}\.)*10[.-]\d{1,3}[.-]\d{1,3}[.-]\d{1,3}\.[a-z0-9-]{1,63}\.[a-z]{2,}$'
+      - '(?i)^(?:[a-z0-9-]{1,63}\.)*192[.-]168[.-]\d{1,3}[.-]\d{1,3}\.[a-z0-9-]{1,63}\.[a-z]{2,}$'
+      - '(?i)^(?:[a-z0-9-]{1,63}\.)*172[.-](?:1[6-9]|2[0-9]|3[01])[.-]\d{1,3}[.-]\d{1,3}\.[a-z0-9-]{1,63}\.[a-z]{2,}$'
+      - '(?i)^(?:[a-z0-9-]{1,63}\.)*169[.-]254[.-]\d{1,3}[.-]\d{1,3}\.[a-z0-9-]{1,63}\.[a-z]{2,}$'
+      - '(?i)(?:^|[.-])(?:2130706433|3232235521|0x7f[0-9a-f]{6}|017700000001)(?:[.-]|$)'
+      - '(?i)(?:^|[.-])(?:rebind|rebinding|dnsrebind)(?:[.-]|$)'
+      - '(?i)(?:^|\.)(?:rbndr\.us|1u\.ms|localtest\.me|lvh\.me|nip\.io|sslip\.io|xip\.io|traefik\.me|vcap\.me|localho\.st)$'
+
+  sel_dns_host_localport:
+    url.full|re: '(?i)^https?://(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}:(?:3000|3001|5000|5001|7474|7687|8000|8001|8080|8081|8443|9000|9090)(?:[/?#]|$)'
+
+  filter_template:
+    content|re: '(?i)(?:YOUR[_-][A-Z0-9_]{2,}|REPLACE[_-]?ME|CHANGE[_-]?ME|\$\{[A-Za-z_][A-Za-z0-9_]*\}|\{\{[a-z_]{2,}\}\}|<[a-z_]{3,20}>)'
+
+  filter_markdown_doc:
+    content|re: '(?m)^\s{0,3}(?:```|~~~|#{1,6}\s)'
+
+  condition: >
+    sel_event and sel_jsonrpc and sel_mcp_toolcall and sel_neo4j_tool
+    and (sel_rebind_host or sel_dns_host_localport)
+    and not (filter_template or filter_markdown_doc)
+
+falsepositives:
+  - Developer or CI use of a wildcard-DNS loopback service (nip.io, sslip.io, lvh.me,
+    localtest.me) as a convenience hostname for a locally bound Neo4j MCP server —
+    same wire shape as a rebind, distinguishable only by intent.
+  - A self-hosted Neo4j Cypher MCP server published on an internal FQDN with an
+    explicit non-standard port over plain HTTP (e.g. http://neo4j-mcp.corp.example:8000/mcp);
+    branch (b) will match. No host is excluded, because trust lists may not be widened here.
+  - mDNS/Bonjour style names such as neo4j.local:7474 reached by an agent on the LAN.
+  - Security research, rebinding-tool regression tests, or red-team exercises replaying
+    the exact rebinding hostname shape against a lab MCP instance.
+  - Documentation or tutorial payloads that embed a full tools/call JSON example; these
+    are largely suppressed by filter_markdown_doc and filter_template.
+
+action: report
