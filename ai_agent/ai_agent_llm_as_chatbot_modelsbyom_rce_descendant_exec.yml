@@ -1,0 +1,320 @@
+title: LLM-As-Chatbot modelsbyom Component Descendant Code Execution
+id: 4f2b8d7a-1c63-4e29-9a5f-0d84b1c7e3f6
+status: experimental
+level: high
+author: Evgen
+date: "2026-03-14"
+description: |
+  Post-exploitation detection for CVE-2024-55241 (arbitrary code execution in
+  deep-diver LLM-As-Chatbot via the modelsbyom.py component, fixed in 99c2c03).
+
+  WHAT WE CANNOT SEE (triage dissent, answered): the inbound crafted HTTP request
+  is not observable by this engine. No `network_request` event type is ever
+  emitted, and neither `NETWORK_CONNECT` nor `REMOTE_CODE_EXECUTION` exists as an
+  edge kind, so there is no way to link the remote trigger to the downstream
+  spawn. The only live signal is `execute_process`, which on its own is generic
+  noise and would be indistinguishable from ordinary activity.
+
+  WHAT THIS RULE THEREFORE DOES: it refuses to fire on a bare process spawn. It
+  requires BOTH of the following, instance-resolved and scoped to a single
+  process session:
+    1. ANCHOR (required, high specificity) - the triggering process's own
+       lineage, resolved through proc_instance -> proc_lineage, contains an
+       ancestor whose executable path or command line identifies the vulnerable
+       component (modelsbyom / LLM-As-Chatbot / deep-diver). Without that
+       ancestor the script returns allow and the rule is invisible.
+    2. EXECUTION PRIMITIVE WITH PAYLOAD - the spawned command is a shell,
+       interpreter, downloader or netcat-class tool carrying an inline-payload,
+       pipe-to-shell, download, decode or reverse-shell argument. The component's
+       own startup line is explicitly excluded.
+
+  Corroborating stages (further payload spawns by the same component subtree, and
+  non-ZTNA egress by session PIDs) are gathered only from within the rule's own
+  10-minute window and only for PIDs that descend from the anchor - never across
+  sessions and never from a global scan.
+
+  Because the causal link to a remote unauthenticated request is unobservable,
+  the verdict is `report` with a full kill chain, not an enforcement action. This
+  is deliberate: the same signal is produced when an operator legitimately drives
+  the chatbot's own shell-out features.
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-55241
+  - https://github.com/deep-diver/LLM-As-Chatbot
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1190
+  - attack.initial-access
+  - owasp.a03-2021-injection
+  - cve.2024-55241
+falsepositives:
+  - Developer or operator running LLM-As-Chatbot locally and using its own
+    bring-your-own-model features, which legitimately shell out to `curl`/`wget`
+    to fetch model weights or to `python -c` during a venv/conda bootstrap.
+  - Container or supervisor entrypoint wrappers (`bash -c "python app.py ..."`)
+    that sit inside the chatbot's process tree and re-exec the application.
+  - A repository checkout or working directory whose name contains the component
+    marker, where an IDE, linter, or test runner spawned from that directory
+    inherits the marker in its command line.
+  - Legitimate operator debugging of a running instance (attaching a shell to the
+    application process) during incident response or development.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_primitive:
+    content|re: '(?i:\b(sh|bash|zsh|dash|ksh|python[0-9.]*|perl|ruby|node|php|curl|wget|nc|ncat|socat|telnet|powershell|pwsh|osascript)\b)'
+  condition: sel_exec and sel_primitive
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # 10 minute clustering window for corroborating stages. The anchor itself is
+  # structural (a long-lived server process), so it is deliberately not windowed.
+  WINDOW_NS = 600000000000
+
+  # Distinctive markers for the vulnerable component. These are detection
+  # markers only - nothing here widens what is permitted.
+  COMPONENT = [
+      "modelsbyom",
+      "models_byom",
+      "llm-as-chatbot",
+      "llm_as_chatbot",
+      "llmaschatbot",
+      "deep-diver",
+      "deepdiver",
+  ]
+
+  PRIMITIVE = [
+      r"\b(sh|bash|zsh|dash|ksh)\b",
+      r"/bin/(sh|bash|zsh|dash)\b",
+      r"\bpython[0-9.]*\b",
+      r"\b(perl|ruby|node|php)\b",
+      r"\b(curl|wget)\b",
+      r"\b(nc|ncat|socat|telnet)\b",
+      r"\b(powershell|pwsh|osascript)\b",
+  ]
+
+  PAYLOAD = [
+      r"(?i:\b(sh|bash|zsh|dash|ksh)\b[^\n]{0,200}\s-c\s)",
+      r"(?i:\bpython[0-9.]*\b[^\n]{0,200}\s-c\s)",
+      r"(?i:\b(perl|ruby|node|php)\b[^\n]{0,200}\s-e\s)",
+      r"(?i:\|\s*(sh|bash|zsh|python[0-9.]*|perl)\b)",
+      r"(?i:\b(curl|wget)\b[^\n]{0,200}(https?|ftp)://)",
+      r"/dev/tcp/",
+      r"(?i:\b(nc|ncat|socat)\b[^\n]{0,120}\s-[a-z]{0,4}e\b)",
+      r"(?i:\bbase64\b[^\n]{0,80}\s--?d\b)",
+      r"(?i:(os\.system|subprocess\.(Popen|call|run|check_output)|__import__|\beval\(|\bexec\())",
+      r"(?i:\bchmod\b[^\n]{0,80}\s\+x\b)",
+  ]
+
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def is_component(ev):
+      blob = (ev.get("actor_path", "") + " " + ev.get("cmdline", "")).lower()
+      for m in COMPONENT:
+          if m in blob:
+              return True
+      return False
+
+  def short(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("parent_path", "?"),
+          "to":       "process://" + e.get("actor_path", "?"),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def conn_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", "?"),
+          "to":       e.get("target_id", ""),
+          "kind":     "CONNECTS",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no graph / log calls ──
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      cmd_l = cmd.lower()
+      if not matches_any(PRIMITIVE, cmd_l):
+          return "allow"
+      if not matches_any(PAYLOAD, cmd):
+          return "allow"
+
+      cp_str = meta.get("caller_pid", "0")
+      cp = int(cp_str)
+      if cp == 0:
+          return "allow"
+      event_ts = int(meta.get("event_ts", "0"))
+      since = 0
+      if event_ts > WINDOW_NS:
+          since = event_ts - WINDOW_NS
+
+      # ── 2. anchor on the exact triggering instance ──────────────────────────
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          # degraded: the create row has not landed yet. Never guess an owner -
+          # the next event from this instance re-fires with full attribution.
+          return "allow"
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── 3. REQUIRED anchor stage: vulnerable component in this lineage ──────
+      anchor_idx = -1
+      for i in range(len(lineage)):
+          if is_component(lineage[i]):
+              anchor_idx = i
+              break
+      if anchor_idx < 0:
+          # Generic shell spawn with no LLM-As-Chatbot ancestry - exactly the
+          # noise the triage dissent warned about. Stay silent.
+          return "allow"
+      anchor = lineage[anchor_idx]
+
+      # The component's own startup line is not an exploitation artefact.
+      cmd_is_component = False
+      for m in COMPONENT:
+          if m in cmd_l:
+              cmd_is_component = True
+      if anchor_idx == 0 and cmd_is_component:
+          return "allow"
+
+      # ── 4. session scope: the anchor instance and the path down to the caller
+      #     Root the session at the COMPONENT, never at the lineage root (which
+      #     may be a login shell or init and would pull in unrelated processes).
+      session = {}
+      for i in range(anchor_idx + 1):
+          session[lineage[i]["actor_pid"]] = lineage[i].get("actor_start", "0")
+
+      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000)
+      # two bounded passes to pick up grandchildren of the component subtree
+      for _pass in range(2):
+          for e in spawn_rows:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in session and ap not in session:
+                  session[ap] = e.get("actor_start", "0")
+
+      # ── 5. build the kill chain ─────────────────────────────────────────────
+      chain = new_chain("process://" + anchor.get("actor_path", "?"))
+      chain.append(step(
+          ev_edge(anchor),
+          stage_id="Vulnerable Component",
+          stage_desc="deep-diver LLM-As-Chatbot / modelsbyom component instance: " +
+                     anchor.get("actor_path", "?") + " pid=" + anchor.get("actor_pid", "?") +
+                     " cmd=" + short(anchor.get("cmdline", ""), 140),
+      ))
+
+      parent_path = inst.get("parent_path", "")
+      if parent_path == "" and len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", "")
+      trigger = {
+          "from":     "process://" + parent_path,
+          "to":       "process://" + inst.get("actor_path", "?"),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+          "cmdline":  short(cmd, 300),
+      }
+      chain.append(step(
+          trigger,
+          stage_id="Code Execution",
+          stage_desc="component descendant (pid " + cp_str + ") spawned execution primitive with payload argument: " +
+                     short(cmd, 200),
+      ))
+
+      stages = 2
+
+      # ── 6. optional corroboration, window- and session-scoped only ──────────
+      follow = None
+      for e in spawn_rows:
+          if e.get("actor_pid", "") == cp_str:
+              continue
+          if e.get("parent_pid", "") not in session:
+              continue
+          c = e.get("cmdline", "")
+          if c == "":
+              continue
+          if matches_any(PAYLOAD, c):
+              follow = e
+              break
+      if follow != None:
+          stages = stages + 1
+          chain.append(step(
+              ev_edge(follow),
+              stage_id="Follow-on Execution",
+              stage_desc="additional payload spawn inside the same component subtree: " +
+                         short(follow.get("cmdline", ""), 160),
+          ))
+
+      egress = None
+      scanned = 0
+      for pid in session:
+          if scanned >= 25:
+              break
+          scanned = scanned + 1
+          for r in query_events(kind="CONNECTS", actor_pid=int(pid), since_ns=since, limit=20):
+              if r.get("is_ztna_host", "0") == "1":
+                  continue
+              h = r.get("host", "")
+              if h == "":
+                  continue
+              egress = r
+              break
+          if egress != None:
+              break
+      if egress != None:
+          stages = stages + 1
+          chain.append(step(
+              conn_edge(egress),
+              stage_id="Egress",
+              stage_desc="component subtree connected out to " + egress.get("host", "?") +
+                         ":" + egress.get("port", "?"),
+          ))
+
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "?")))
+      lin = " -> ".join(names)
+      print("CVE-2024-55241 post-exploitation candidate | lineage: " + lin +
+            " | stages=" + str(stages) + " | cmd=" + short(cmd, 200))
+
+      return {
+          "action": "report",
+          "reason": "Execution primitive with payload argument spawned as a descendant of the " +
+                    "deep-diver LLM-As-Chatbot / modelsbyom component (CVE-2024-55241 post-exploitation " +
+                    "artefact; inbound request not observable) - " + str(stages) + " stages, lineage: " + lin,
+          "chain": chain,
+      }
+
+  result = run()
