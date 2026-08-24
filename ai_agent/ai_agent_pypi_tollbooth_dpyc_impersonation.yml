@@ -1,0 +1,115 @@
+title: Supply Chain PyPI Impersonation Package tollbooth-dpyc
+id: 7c1f2a94-6b3d-4e58-9a02-5d8c31ef47b1
+status: experimental
+level: high
+description: |
+  Detects a monitored agent (or a subprocess it spawned) invoking a Python package
+  acquisition or module-invocation command line that names the suspected malicious
+  PyPI distribution "tollbooth-dpyc", which advertises itself as a Bitcoin Lightning
+  micropayment layer for MCP servers. Malicious PyPI distributions execute attacker
+  code at install time (setup.py / build backend hooks) and again on first import,
+  so the acquisition command line is the earliest and only pre-compromise signal.
+
+  Scope and honesty about the telemetry (answering triage dissent):
+  The engine exposes no ACQUIRED_PACKAGE or EXECUTE_CODE edge, no package_installed
+  event, and file_write has no live producer. There is therefore NO way to attribute
+  causality from a package to the code it later runs, and this rule deliberately does
+  not pretend otherwise. It is a single-event, content-only detection over the
+  execute_process command line: it fires only when the literal (normalised) package
+  name appears TOGETHER with an installer/fetch verb or a direct module invocation.
+  It asserts "this exact distribution was acquired or executed on this host at this
+  time" — nothing more. Because maliciousness of the distribution is unconfirmed and
+  blocking pip would break builds, the action is report: it produces an IR lead with
+  an exact host, timestamp and command line, not an enforcement decision.
+
+  Name normalisation follows PyPI rules (case-insensitive, '-' '_' '.' equivalent),
+  so tollbooth-dpyc, tollbooth_dpyc, TollBooth.DPyc, toll-booth-dpyc, the wheel
+  filename tollbooth_dpyc-<ver>-py3-none-any.whl and a pinned specifier
+  tollbooth-dpyc==0.1.0 all match.
+author: Selhan
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The distribution name, normalised per PEP 503 (case + - _ . equivalence) ──
+  # Required in every branch of the condition. This token is the entire specificity
+  # budget of the rule: it is a unique string that does not occur in normal builds.
+  sel_pkg_name:
+    content|re: '(?i)\btoll[-_.]?booth[-_.]?dpyc\b'
+
+  # ── Branch A: an acquisition/build verb from a Python package manager ─────────
+  sel_acquire:
+    content|re:
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bpython[23]?(\.\d{1,2})?\b[^\n]{0,120}-m\s+pip\b[^\n]{0,200}\binstall\b'
+      - '(?i)\buv\b[^\n]{0,200}\b(pip\s+install|add|tool\s+install)\b'
+      - '(?i)\bpipx\s+(install|run)\b'
+      - '(?i)\b(poetry|pdm|rye|hatch)\s+(add|install)\b'
+      - '(?i)\bpipenv\s+install\b'
+      - '(?i)\b(conda|mamba|micromamba)\s+install\b'
+      - '(?i)\beasy_install\b'
+      - '(?i)\b(setup\.py|pyproject\.toml)\b[^\n]{0,80}\b(install|develop|build)\b'
+
+  # ── Branch B: the distribution is executed or imported (post-install runtime) ─
+  sel_invoke:
+    content|re:
+      - '(?i)\bpython[23]?(\.\d{1,2})?\b[^\n]{0,200}-m\s+toll[-_.]?booth[-_.]?dpyc\b'
+      - '(?i)\bimport\s+toll[-_.]?booth[-_.]?dpyc\b'
+      - '(?i)\bfrom\s+toll[-_.]?booth[-_.]?dpyc\b'
+      - '(?i)(^|[/\\])toll[-_.]?booth[-_.]?dpyc(\.exe)?(\s|$)'
+
+  # ── FP suppression: remediation and read-only package-manager subcommands ─────
+  # Removing or merely describing the package is the desired response to this alert,
+  # not a new incident.
+  filter_remediation:
+    content|re:
+      - '(?i)\b(pip[23]?|pipx|poetry|pdm|rye|uv|pipenv|conda|mamba|micromamba)\b[^\n]{0,200}\b(uninstall|remove)\b'
+      - '(?i)\bpip[23]?\b[^\n]{0,160}\b(show|index|list|cache|check|debug)\b'
+      - '(?i)(^|\s)--dry-run(\s|$)'
+
+  # ── FP suppression: search / SCA / SBOM tooling that carries the name as an arg ─
+  filter_inspection_tools:
+    content|re:
+      - '(?i)(^|[/\\\s;|&])(grep|egrep|fgrep|rg|ripgrep|ag|ack|awk|sed|find|xargs|comm|diff)\b'
+      - '(?i)\b(pip-audit|safety|osv-scanner|osv-detector|trivy|syft|grype|snyk|semgrep|bandit|dependency[-_]check|cyclonedx|sbom)\b'
+      - '(?i)\bgit\s+(log|grep|show|diff|blame)\b'
+
+  condition: sel_pkg_name and (sel_acquire or sel_invoke) and not (filter_remediation or filter_inspection_tools)
+
+falsepositives:
+  - Malware analyst or incident responder intentionally fetching the distribution into
+    an isolated sandbox VM for triage — a true acquisition that the rule is correct to
+    surface, but not an incident on that host.
+  - The package turns out to be a legitimate MCP Lightning-payments library and a
+    developer installs it deliberately; the rule reports rather than blocks precisely
+    because maliciousness is unconfirmed.
+  - SCA / SBOM / vulnerability tooling (pip-audit, safety, osv-scanner, syft, grype,
+    trivy) that passes the distribution name on its command line — suppressed by
+    filter_inspection_tools.
+  - Remediation runs such as `pip uninstall tollbooth-dpyc` or `poetry remove
+    tollbooth-dpyc`, and read-only subcommands such as `pip show` / `pip index` —
+    suppressed by filter_remediation.
+  - Grep / ripgrep / git-log searches for the name across a repo or shell history while
+    hunting for the package — suppressed by filter_inspection_tools.
+  - An internal PyPI mirror or proxy warm-up job that pre-fetches distributions by name
+    on a build host; scope this out by peer/host at triage rather than by widening the
+    rule.
+  - A CI job that echoes a previously-recorded command containing the name without
+    executing an installer; this yields no installer verb in the same command line and
+    will not match.
+action: report
