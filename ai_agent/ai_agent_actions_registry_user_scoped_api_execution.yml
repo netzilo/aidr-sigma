@@ -1,0 +1,280 @@
+title: Actions Registry API Harvest and User-Scoped Route Execution
+id: 4f1c9ad2-7b6e-4c3a-9d1f-2e58a0c74b13
+status: experimental
+level: medium
+description: |
+  Detects an agent session that runs an API-to-tool extraction/registry component
+  (e.g. @vendoai/actions, ActionsRegistry, route scanners), harvests a target API's
+  OpenAPI/Swagger surface over HTTP, and then drives four or more DISTINCT routes on
+  THAT SAME host afterwards -- i.e. auto-extracted endpoints being executed as agent
+  tools with the signed-in user's credentials, with no per-action consent step.
+
+  Answering the triage dissent: the narrative's ideal telemetry (an `api_call` or
+  `authenticate` event on an ESCALATED_PRIVILEGE edge) does not exist in this engine,
+  and the residual "process made an HTTP request after acquiring a skill" shape is
+  already owned by f7b1e645. This rule therefore does NOT detect that shape. It
+  requires a far narrower, ordered, same-host signature that f7b1e645 cannot express:
+    (1) a REQUIRED actions-registry/extractor exec inside one instance-resolved
+        process session,
+    (2) an OpenAPI/Swagger spec fetch by a process in that same session,
+    (3) >= 4 distinct non-spec routes invoked on the SAME host, strictly AFTER the
+        spec fetch, by the same session, inside a 15-minute window.
+  ACQUIRED_SKILL is used only as optional graph enrichment (it is never a triggering
+  edge and is never required for the verdict).
+
+  Attribution is instance-resolved: anchored on meta.caller_pid -> proc_instance ->
+  proc_lineage, expanded to descendants of that lineage only. No cross-session
+  attribution; no path-keyed `for agent in graph(type="Process")` owner guessing.
+author: Tanya
+date: "2026-03-18"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://spec.openapis.org/oas/latest.html
+tags:
+  - attack.discovery
+  - attack.t1046
+  - attack.execution
+  - attack.t1059
+  - owasp.llm06
+falsepositives:
+  - API contract / fuzz test suites (Schemathesis, Dredd, newman, portman) that fetch
+    an OpenAPI document and then exercise every documented route against the same
+    host from a developer or CI session. This is the single most likely benign match;
+    the required actions-registry/extractor anchor in the command line is what keeps
+    it from firing on a bare test runner, and the verdict is report-only.
+  - Sanctioned in-product use of @vendoai/actions where per-action user consent is
+    enforced elsewhere in the application - the rule cannot see the consent prompt,
+    so this fires as an inventory/visibility event, not an incident.
+  - SDK or client-code generation workflows (openapi-generator, @redocly/cli, swagger
+    codegen) followed immediately by a local smoke test that walks several endpoints
+    on the generated client's base URL.
+  - Internal API gateway health/synthetic monitors that pull the spec and then probe
+    each documented path on a schedule, if they happen to run under a monitored agent
+    process tree within the same 15-minute window.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_markers:
+    content|re: '(?i)(@vendoai/actions|actions[-_ ]?registry|actionsregistry|openapi|swagger|api-docs|route[-_ ]?scan|scan[-_ ]?routes|register[-_ ]?actions)'
+  condition: sel_exec and sel_markers
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Tunables (this rule owns its window; nothing is baked into storage) ──
+  WINDOW_NS  = 900000000000   # 15 minutes — one working session
+  MIN_ROUTES = 4              # distinct extracted routes driven after the harvest
+  MAX_EXEC   = 4000
+  MAX_HTTP   = 400
+  MAX_PIDS   = 40
+
+  # High-specificity anchor: the API-to-tool extraction / registry runtime itself.
+  ACTIONS_RE = r"(?i)(@vendoai/actions|actions[-_]registry|actionsregistry|actions[ ]+(extract|scan|register)|openapi[-_]to[-_](tools|actions)|route[-_]scan|scan[-_]routes|register[-_]actions)"
+  # Cheap relevance hint only — never sufficient on its own.
+  HINT_RE    = r"(?i)\b(openapi|swagger|api-docs)\b"
+  # Spec-document paths (used to find the harvest AND to exclude the spec from fan-out).
+  SPEC_RE    = r"(?i)(/openapi(\.json|\.yaml|\.yml)?|/swagger(\.json|\.yaml)?|/swagger/v[0-9]+/swagger\.json|/v[0-9]+/api-docs|/api-docs|/\.well-known/openapi)"
+
+  # ── Pure relevance gate: string checks on meta only, no graph, no log ───
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      c = meta.get("content", "")
+      if c == "":
+          c = meta.get("command", "")
+      if c == "":
+          return False
+      if re.find(ACTIONS_RE, c) != None:
+          return True
+      if re.find(HINT_RE, c) != None:
+          return True
+      return False
+
+  def ev_edge(e):
+      t = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      trigger_ts = int(meta.get("event_ts", "0"))
+      if trigger_ts <= 0:
+          return "allow"
+      window_start = trigger_ts - WINDOW_NS
+
+      # ── Anchor on the exact triggering instance ──────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when the row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── Scope strictly to THIS session: lineage + its descendants ────────
+      pids = {}
+      for x in lineage:
+          pids[x.get("actor_pid", "")] = True
+      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=window_start,
+                               until_ns=trigger_ts, limit=MAX_EXEC)
+      for _ in range(3):
+          added = 0
+          for e in exec_rows:
+              ap = e.get("actor_pid", "")
+              pp = e.get("parent_pid", "")
+              if pp in pids and ap != "" and ap not in pids:
+                  pids[ap] = True
+                  added = added + 1
+          if added == 0:
+              break
+
+      # ── Stage 1 (REQUIRED): actions-registry / extractor exec in session ─
+      # The triggering exec comes from meta (never re-queried — it races ingest).
+      anchor = None
+      cmd = meta.get("content", "")
+      if cmd == "":
+          cmd = meta.get("command", "")
+      if re.find(ACTIONS_RE, cmd) != None:
+          anchor = {
+              "actor_path": inst.get("actor_path", ""),
+              "actor_pid":  inst.get("actor_pid", ""),
+              "kind":       "EXECUTE_PROCESS",
+              "ts":         str(trigger_ts),
+              "target_id":  "process://" + inst.get("actor_path", ""),
+              "cmdline":    cmd,
+          }
+      else:
+          for e in exec_rows:
+              if e.get("actor_pid", "") not in pids:
+                  continue
+              blob = e.get("cmdline", "") + " " + e.get("actor_path", "")
+              if re.find(ACTIONS_RE, blob) == None:
+                  continue
+              if anchor == None or int(e["ts"]) > int(anchor["ts"]):
+                  anchor = e
+      if anchor == None:
+          return "allow"                      # no extractor/registry — not this threat
+
+      # ── Session HTTP activity, scoped per instance (bounded) ─────────────
+      http_rows = []
+      seen_pids = 0
+      for pid in pids:
+          if seen_pids >= MAX_PIDS:
+              break
+          seen_pids = seen_pids + 1
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=window_start, until_ns=trigger_ts,
+                                limit=MAX_HTTP):
+              http_rows.append(e)
+      if not http_rows:
+          return "allow"
+
+      # ── Stage 2 (REQUIRED): OpenAPI/Swagger surface harvested ────────────
+      spec = None
+      for e in http_rows:
+          if re.find(SPEC_RE, e.get("path", "")) == None:
+              continue
+          if spec == None or int(e["ts"]) < int(spec["ts"]):
+              spec = e
+      if spec == None:
+          return "allow"
+      spec_host = spec.get("host", "")
+      spec_ts   = int(spec["ts"])
+      if spec_host == "":
+          return "allow"
+
+      # ── Stage 3 (REQUIRED): distinct routes on THAT SAME host, AFTER harvest
+      # Same-host + ordering is the narrowing constraint — no host allowlist is
+      # used or needed anywhere in this rule.
+      routes     = {}
+      first_route = None
+      for e in http_rows:
+          if e.get("host", "") != spec_host:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts <= spec_ts or ts > trigger_ts:
+              continue
+          p = e.get("path", "")
+          if p == "" or re.find(SPEC_RE, p) != None:
+              continue
+          key = e.get("method", "") + " " + p
+          if key not in routes:
+              routes[key] = e
+              if first_route == None or ts < int(first_route["ts"]):
+                  first_route = e
+      if len(routes) < MIN_ROUTES or first_route == None:
+          return "allow"
+
+      # ── Optional enrichment: skill/tool registration by a session binary ─
+      # ACQUIRED_SKILL is graph-only and aggregate; it is never required.
+      session_paths = {}
+      for x in lineage:
+          session_paths[x.get("actor_path", "")] = True
+      for e in exec_rows:
+          if e.get("actor_pid", "") in pids:
+              session_paths[e.get("actor_path", "")] = True
+      skill_step = None
+      for p in graph(type="Process"):
+          if p.get("path", "") not in session_paths:
+              continue
+          for se in edges(p["id"], dir="out", kind="ACQUIRED_SKILL"):
+              sts = int(se.get("ts", "0"))
+              if sts < window_start or sts > trigger_ts:
+                  continue
+              sk = node(se["to"])
+              shost = sk.get("host", "?") if sk != None else "?"
+              skill_step = step(se, stage_id="Tool Registration",
+                                stage_desc="session binary registered an external tool/skill definition from: " + shost)
+              break
+          if skill_step != None:
+              break
+
+      # ── Verdict + kill chain built from instance-resolved event rows ─────
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[-1])
+      who = " -> ".join(names)
+
+      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain.append(step(ev_edge(anchor), stage_id="Actions Registry Exec",
+                        stage_desc="API-to-tool extractor/registry executed: " + anchor.get("cmdline", anchor.get("actor_path", "?"))))
+      chain.append(step(ev_edge(spec), stage_id="API Spec Harvest",
+                        stage_desc="OpenAPI/Swagger surface fetched from " + spec_host + spec.get("path", "")))
+      chain.append(step(ev_edge(first_route), stage_id="Tool Invocation",
+                        stage_desc="first extracted route invoked as an agent tool: " +
+                                   first_route.get("method", "") + " " + spec_host + first_route.get("path", "")))
+      shown = 0
+      for k in routes:
+          if shown >= 3:
+              break
+          r = routes[k]
+          if r.get("ts", "") == first_route.get("ts", "") and r.get("path", "") == first_route.get("path", ""):
+              continue
+          shown = shown + 1
+          chain.append(step(ev_edge(r), stage_id="Tool Invocation Fan-Out",
+                            stage_desc="extracted route driven under the signed-in user: " + k))
+      if skill_step != None:
+          chain.append(skill_step)
+
+      reason = ("Agent session " + who + " ran an API-to-tool extractor, harvested the " +
+                "OpenAPI surface of " + spec_host + ", then invoked " + str(len(routes)) +
+                " distinct routes on that same host with the signed-in user's credentials " +
+                "and no observable per-action consent step")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
