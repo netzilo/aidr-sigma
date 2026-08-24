@@ -1,0 +1,336 @@
+title: Unsafe Model Weight Load Followed by Payload Execution (vLLM torch.load Pickle RCE)
+id: 6f2b91d4-7c0e-4a3f-9d18-2b5c8e41af07
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation half of a malicious-model-weights supply chain attack
+  against vLLM / PyTorch serving stacks.
+
+  vLLM's hf_model_weights_iterator() calls torch.load(..., weights_only=False) on
+  checkpoint files fetched from a model hub. Any non-safetensors checkpoint
+  (pytorch_model.bin, *.pt, *.pth, *.ckpt, or an extension-less HuggingFace hub blob)
+  is a Python pickle: unpickling it executes attacker-controlled reduce() code inside
+  the serving process.
+
+  The only signal the engine exposes for that execution is the child process the
+  payload spawns, so this rule anchors on the exec event and works backwards,
+  instance-resolved:
+
+    caller_pid -> proc_instance() -> proc_lineage()  (one session, no cross-session bleed)
+      required : an ML runtime ancestor (python / vllm / torchrun / uvicorn / ray / deepspeed)
+      required : that session instance READ a non-safetensors checkpoint inside a model
+                 cache / hub path, BEFORE the exec and within WINDOW_NS
+      required : the triggering exec carries a high-specificity payload pattern
+                 (reverse shell, downloader-pipe-to-shell, base64 decode, persistence,
+                  cloud metadata, anti-forensics)
+      optional : a model-hub HTTP fetch by the same instance inside the window
+
+  Report-only: it names an unsafe deserialization path, it does not stop the process
+  that already executed.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://pytorch.org/docs/stable/generated/torch.load.html
+  - https://huggingface.co/docs/safetensors/index
+tags:
+  - attack.execution
+  - attack.t1204.002
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Legacy but legitimate checkpoints - many older HuggingFace repos still ship
+    pytorch_model.bin, so the load itself is normal. The rule only reports when the
+    same process instance also spawns a payload-shaped child within 5 minutes.
+  - Model conversion / quantisation / packaging pipelines that load a .bin or .ckpt
+    and then run 'chmod +x' or 'base64 -d' on a build artifact in the same job.
+  - torch.compile / Triton / DeepSpeed JIT toolchains that shell out during kernel
+    builds. Compiler invocations are deliberately NOT in the payload list, but a
+    build step that chmods its output can still match.
+  - CI/CD GPU runners that pull a model from a hub and, in the same process subtree,
+    run an installer one-liner such as 'curl ... | sh'.
+  - HuggingFace hub blob files are content-hash named with no extension, so a
+    safetensors blob read is counted as a pickle candidate. This widens detection
+    only; the payload-exec stage is still required.
+  - Degraded attribution (proc_instance returns None before the create row lands)
+    yields allow, so a genuine attack may be reported on the next payload exec
+    rather than the first.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── tunables (this rule's own window - never persisted) ────────────────────
+  WINDOW_NS        = 300000000000   # 5 min: checkpoint load -> payload execution
+  MAX_LOADER_PIDS  = 8
+  READ_LIMIT       = 2000
+  EXEC_LIMIT       = 3000
+  HTTP_LIMIT       = 200
+
+  # ── ML serving runtimes that call torch.load() ─────────────────────────────
+  ML_RUNTIME = [
+      r"\bpython[0-9.]*\b", r"\bvllm\b", r"\btorchrun\b", r"\bpt_main_thread\b",
+      r"\buvicorn\b", r"\bgunicorn\b", r"\bray\b", r"\bdeepspeed\b",
+      r"\bsglang\b", r"\btext-generation-", r"\btransformers\b",
+  ]
+
+  # ── high-specificity payload shapes an unpickled reduce() would spawn ──────
+  PAYLOAD = [
+      r"/dev/(tcp|udp)/",
+      r"\bnc(at)?\b[^\n|;]{0,80}\s-(e|c)\b",
+      r"\bsocat\b",
+      r"\b(ba|z|k)?sh\b\s+-i\b",
+      r"(?i:curl|wget)\b[^\n|]{0,300}\|\s*(sudo\s+)?(ba|z|k)?sh\b",
+      r"(?i:curl|wget)\b[^\n|]{0,300}\|\s*(python[0-9.]*|perl|ruby|node)\b",
+      r"\bbase64\b\s+(-d|-D|--decode)\b",
+      r"\bxxd\b\s+-r\b",
+      r"\bpython[0-9.]*\b\s+-c\b[^\n]{0,300}(socket|os\.system|pty\.spawn|exec\(|__import__)",
+      r"\bperl\b\s+-e\b[^\n]{0,300}(socket|exec)",
+      r"\bchmod\b\s+\+x\b",
+      r"\bchmod\b\s+7[0-7][0-7]\b",
+      r"\bmkfifo\b",
+      r"\bcrontab\b",
+      r"\blaunchctl\b\s+load\b",
+      r"\bsystemctl\b\s+enable\b",
+      r"authorized_keys",
+      r"(?i:powershell)[^\n]{0,80}\s-(e|enc|encodedcommand)\b",
+      r"\bosascript\b\s+-e\b",
+      r"\beval\b\s*\$\(",
+      r"\bunset\b\s+HISTFILE\b",
+      r"\bhistory\b\s+-c\b",
+      r"169\.254\.169\.254",
+      r"100\.100\.100\.200",
+  ]
+
+  # ── pickle-format checkpoint heuristics (detection only, no allowlisting) ──
+  PICKLE_EXT = [".bin", ".pt", ".pth", ".ckpt", ".pkl", ".pickle"]
+  CACHE_MARK = [
+      "models--", "/huggingface/", "/hf_hub", "/hub/checkpoints/",
+      "/torch/hub/", "pytorch_model", "diffusion_pytorch_model",
+      "consolidated.", "adapter_model", "/snapshots/", "/blobs/",
+      "checkpoint", "model_state", "/modelscope/",
+  ]
+  # model-distribution hosts, used ONLY to corroborate a fetch stage
+  HUB_HOSTS = ["huggingface.co", "hf.co", "cdn-lfs", "hf-mirror.com",
+               "modelscope.cn", "pytorch.org"]
+
+  def matches_any(s, pats):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def payload_hit(s):
+      for p in PAYLOAD:
+          if re.find(p, s) != None:
+              return p
+      return ""
+
+  def is_ml_runtime(p):
+      if p == "":
+          return False
+      return matches_any(p.lower(), ML_RUNTIME)
+
+  def is_unsafe_ckpt(p):
+      lp = p.lower()
+      if lp.endswith(".safetensors"):
+          return False
+      cached = False
+      for m in CACHE_MARK:
+          if m in lp:
+              cached = True
+      if not cached:
+          return False
+      for x in PICKLE_EXT:
+          if lp.endswith(x):
+              return True
+      # HF hub blobs are content-hash named with no extension; a non-safetensors
+      # blob inside a hub cache is still a pickle candidate.
+      if "models--" in lp and ("/blobs/" in lp or "/snapshots/" in lp):
+          return True
+      return False
+
+  # relevance gate: pure string checks on meta, no graph / log calls
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      return payload_hit(meta.get("content", "")) != ""
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  def short(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd        = meta.get("content", "")
+      hit        = payload_hit(cmd)
+      trigger_ts = int(meta.get("event_ts", "0"))
+      if trigger_ts <= 0:
+          return "allow"
+      win_start = trigger_ts - WINDOW_NS
+
+      # ── anchor on the exact triggering instance ────────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"            # degraded - never guess an owner
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── session = lineage up to the OUTERMOST ML runtime ancestor ──────────
+      anchor_idx = -1
+      for i in range(len(lineage)):
+          if is_ml_runtime(lineage[i].get("actor_path", "")):
+              anchor_idx = i
+      if anchor_idx < 0:
+          return "allow"            # not a model-serving process tree
+
+      session = lineage[:anchor_idx + 1]
+      members = {}
+      for x in session:
+          members[x["actor_pid"]] = {"start": x["actor_start"],
+                                     "path":  x.get("actor_path", "")}
+
+      # one bounded pass (repeated twice for grandchildren) over spawns in window
+      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
+                               until_ns=trigger_ts, limit=EXEC_LIMIT)
+      for _ in range(2):
+          for e in exec_rows:
+              pp = e.get("parent_pid", "")
+              if pp != "" and pp in members:
+                  members[e["actor_pid"]] = {"start": e.get("actor_start", "0"),
+                                             "path":  e.get("actor_path", "")}
+
+      loaders = []
+      for pid in members:
+          m = members[pid]
+          if is_ml_runtime(m["path"]):
+              loaders.append([pid, m])
+      if not loaders:
+          return "allow"
+      if len(loaders) > MAX_LOADER_PIDS:
+          loaders = loaders[:MAX_LOADER_PIDS]
+
+      # ── REQUIRED anchor stage: unsafe checkpoint read, before the exec ─────
+      ck_ev   = None
+      ck_path = ""
+      ck_proc = ""
+      for pair in loaders:
+          rows = query_events(kind="READ_FILE",
+                              actor_pid=int(pair[0]),
+                              actor_start=int(pair[1]["start"]),
+                              since_ns=win_start, until_ns=trigger_ts,
+                              limit=READ_LIMIT)
+          for r in rows:
+              p = r.get("path", "")
+              if p != "" and is_unsafe_ckpt(p):
+                  if ck_ev == None or int(r["ts"]) < int(ck_ev["ts"]):
+                      ck_ev   = r
+                      ck_path = p
+                      ck_proc = pair[1]["path"]
+          if ck_ev != None:
+              break
+      if ck_ev == None:
+          return "allow"
+
+      s0_ts = int(ck_ev["ts"])
+      if s0_ts > trigger_ts or (trigger_ts - s0_ts) > WINDOW_NS:
+          return "allow"            # not clustered - do not stitch unrelated work
+
+      # ── OPTIONAL corroboration: model-hub fetch by the same instance ───────
+      fetch_ev = None
+      for pair in loaders:
+          rows = query_events(kind="HTTP_REQUEST",
+                              actor_pid=int(pair[0]),
+                              actor_start=int(pair[1]["start"]),
+                              since_ns=win_start, until_ns=trigger_ts,
+                              limit=HTTP_LIMIT)
+          for r in rows:
+              h = r.get("host", "").lower()
+              for hh in HUB_HOSTS:
+                  if hh in h:
+                      if fetch_ev == None or int(r["ts"]) < int(fetch_ev["ts"]):
+                          fetch_ev = r
+          if fetch_ev != None:
+              break
+
+      # ── kill chain, rooted at the session owner ────────────────────────────
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      if fetch_ev != None:
+          chain.append(step(ev_edge(fetch_ev),
+                            stage_id="Model Fetch",
+                            stage_desc="model artifact fetched from hub: " +
+                                       fetch_ev.get("host", "?") +
+                                       fetch_ev.get("path", "")))
+
+      chain.append(step(ev_edge(ck_ev),
+                        stage_id="Unsafe Artifact Load",
+                        stage_desc="non-safetensors checkpoint deserialised by " +
+                                   ck_proc.split("/")[-1] + ": " + ck_path,
+                        activity={"path": ck_path, "ts": ck_ev["ts"]}))
+
+      actor_path  = inst.get("actor_path", "")
+      parent_path = actor_path
+      if len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", actor_path)
+      trig = {
+          "from":     "process://" + parent_path,
+          "to":       "process://" + actor_path,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+          "cmdline":  short(cmd, 400),
+      }
+      chain.append(step(trig,
+                        stage_id="Arbitrary Code Execution",
+                        stage_desc="payload process spawned by the loading runtime [" +
+                                   hit + "]: " + short(cmd, 200)))
+
+      names = []
+      for x in session:
+          names.append(x.get("actor_path", "").split("/")[-1])
+      lin_s = " <- ".join(names)
+      gap   = str((trigger_ts - s0_ts) / 1000000000)
+
+      print("pickle-weights RCE candidate: " + ck_path + " -> " + short(cmd, 160) +
+            " (+" + gap + "s, session " + lin_s + ")")
+
+      return {
+          "action": "report",
+          "reason": "Unsafe model weight deserialisation followed by payload execution " +
+                    "within " + gap + "s - loaded " + ck_path +
+                    " then spawned [" + hit + "] " + short(cmd, 160) +
+                    " | session: " + lin_s,
+          "chain":  chain,
+      }
+
+  result = run()
