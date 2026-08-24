@@ -1,88 +1,163 @@
-title: LLM API Endpoint or Auth Header Redirection
-id: 9e338173-4519-5c00-9fb6-d72b3cb0fd6f
+title: LLM API Endpoint Redirection via Base URL or Proxy Override
+id: 7b3f1c9e-2d64-4a58-b1e7-6c9f0a4d83b2
 status: experimental
+level: high
 description: |
-  Detects an agent's LLM traffic being pointed at a non-canonical endpoint, or a
-  provider API key being sent to a host that is not that provider. Redirecting
-  ANTHROPIC_BASE_URL or OPENAI_BASE_URL to an attacker-controlled relay hands over
-  every subsequent prompt, response and API key while the agent keeps working
-  normally.
+  Detects attempts to redirect an AI agent's LLM API traffic to an attacker-controlled
+  endpoint by overriding base-URL configuration (ANTHROPIC_BASE_URL, OPENAI_BASE_URL,
+  OPENAI_API_BASE, baseURL, api_base, ...), by forcing an outbound proxy
+  (HTTP_PROXY/HTTPS_PROXY/ALL_PROXY) while provider credentials are in scope, or by
+  pointing the agent at a host that impersonates a provider domain
+  (api.anthropic.com.evil.tld, openai-com.attacker.net, https://api.openai.com@evil.tld,
+  punycode hosts).
 
-  Ported from sigma-ai, where every selection was dead: upstream matched
-  `event_type` values config_load / env_set / file_write / outbound_request and the
-  fields `request.headers` and `destination.host`, none of which any AgentShield
-  producer emits.
-
-  Netzilo does not need to infer the redirection from a config write — it sees the
-  request itself. `llm_request` carries the real provider and host, and HTTP
-  contexts expose individual request headers as header_<name>, so "an API key
-  going somewhere it should not" is a direct observation. The config-write arm is
-  kept as an early-warning signal at the tool_call layer.
+  This is a single-event content rule. It never fires on a base-URL override alone:
+  every branch requires a second, high-specificity indicator in the SAME event —
+  a provider-impersonating hostname, TLS-verification being disabled, or a live
+  provider API key. The rule contains no host, domain or path allowlist; the
+  impersonation patterns are structural (a provider label appearing as a non-terminal
+  DNS label, as URL userinfo, or hyphen-flattened) so a new attacker domain needs no
+  rule change to be caught.
+author: Selhan
+date: "2026-03-01"
 references:
-  - https://attack.mitre.org/techniques/T1556/
+  - https://attack.mitre.org/techniques/T1557/
   - https://attack.mitre.org/techniques/T1090/
-author: AgentShield (ported to Netzilo)
-date: "2026-03-23"
-modified: "2026-08-03"
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://genai.owasp.org/llmrisk/llm022025-sensitive-information-disclosure/
 tags:
   - attack.credential-access
-  - attack.t1556
+  - attack.t1557
   - attack.command-and-control
   - attack.t1090
-  - atlas.aml.t0083
-  - atlas.aml.t0055
-  - owasp.asi01
+  - attack.defense-evasion
+  - attack.t1562.001
   - owasp.llm02
+falsepositives:
+  - Enterprise rollout of an internal OpenAI-compatible gateway whose hostname embeds a
+    provider token (e.g. an internal host named openai-api.<corp>.<tld>) configured with
+    a self-signed certificate, so base_url and rejectUnauthorized/verify=false appear in
+    the same file or command.
+  - Corporate MITM/TLS-inspection bootstrap scripts that export HTTPS_PROXY together with
+    certificate-bundle or verification settings in a shell that also carries
+    ANTHROPIC_API_KEY / OPENAI_API_KEY.
+  - Local development against a mock or record-replay LLM server (verify=False,
+    NODE_TLS_REJECT_UNAUTHORIZED=0) combined with a base_url override.
+  - Security training material, detection-engineering content, phishing-awareness docs or
+    threat reports that quote look-alike provider domains; partially suppressed by
+    filter_security_doc.
+  - Tool output (tool_response / llm_tool_result) from a fetched web page or issue tracker
+    that reproduces this attack as an example.
 logsource:
   product: ai_agent
   category: agent_events
 detection:
-  # ── Arm 1: the agent writing an endpoint override ─────────────────────────
-  # Visible at the tool_call layer whether written as an env assignment, a shell
-  # export, or a JSON config body.
-  sel_base_url_override:
-    event_type: tool_call
-    content|re: '(?i)(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|OPENAI_BASE_URL|OPENAI_API_BASE|AZURE_OPENAI_ENDPOINT|GEMINI_API_BASE|baseURL|base_url|apiBase)\s*[:=]\s*"?https?://'
-  filter_canonical_base_url:
-    # The same assignment pointing at the provider's real API. Keep this list in
-    # step with the provider set the tenant actually uses — a missing entry here
-    # turns every legitimate configuration into an alert.
-    event_type: tool_call
-    content|re: '(?i)(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|OPENAI_BASE_URL|OPENAI_API_BASE|AZURE_OPENAI_ENDPOINT|GEMINI_API_BASE|baseURL|base_url|apiBase)\s*[:=]\s*"?https?://([a-z0-9-]+\.)*(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|bedrock[a-z0-9.-]*\.amazonaws\.com|localhost|127\.0\.0\.1)([:/"]|$)'
-  # ── Arm 2: an LLM request already going to a non-canonical host ───────────
-  # Netzilo resolves provider and host on every intercepted LLM call, so this is
-  # the redirection itself rather than a prediction of it.
-  sel_llm_request_any:
-    event_type: llm_request
-    host|re: '(?i).'
-  filter_canonical_llm_host:
-    event_type: llm_request
-    host|re: '(?i)(^|\.)(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|amazonaws\.com|githubcopilot\.com|localhost)$'
-  filter_loopback_llm_host:
-    # Local model servers (ollama, llama.cpp, vLLM) are a normal deployment.
-    event_type: llm_request
-    host|re: '(?i)^(127\.0\.0\.1|::1|localhost|host\.docker\.internal)$'
-  # ── Arm 3: a provider API key leaving to a third-party host ───────────────
-  # header_* is populated for HTTP contexts only; the key prefixes are the
-  # provider-issued formats.
-  sel_provider_key_header:
+
+  # ── Branch inputs ────────────────────────────────────────────────────────────
+  # Base-URL / API-endpoint configuration key being ASSIGNED a value.
+  sel_baseurl_key:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re: '(?i)\b(?:ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|ANTHROPIC_API_BASE|OPENAI_BASE_URL|OPENAI_API_BASE|OPENAI_API_HOST|OPENAI_PROXY|AZURE_OPENAI_ENDPOINT|AZURE_OPENAI_BASE_URL|GEMINI_BASE_URL|GOOGLE_GEMINI_BASE_URL|MISTRAL_BASE_URL|LLM_BASE_URL|apiBase|api_base|baseURL|base_url|api_endpoint|llm_endpoint)[\x22\x27\s]{0,4}(?:=>|[:=])[\s\x22\x27]{0,4}(?:https?://)?[a-z0-9]'
+
+  # Structural impersonation of a provider domain (no allowlist involved).
+  sel_impersonate:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re:
+      # provider domain appears as a NON-TERMINAL label: api.anthropic.com.evil.tld
+      - '(?i)https?://[a-z0-9.\-]{0,120}(?:anthropic|openai|googleapis|azure|mistral|cohere)\.(?:com|ai|net|io|dev)\.[a-z0-9\-]{1,63}\.[a-z]{2,24}\b'
+      # userinfo confusion: https://api.anthropic.com@evil.tld/v1
+      - '(?i)https?://[^/\s\x22\x27]{0,120}(?:anthropic|openai|googleapis|azure)\.(?:com|ai)[^/\s\x22\x27]{0,120}@'
+      # hyphen-flattened look-alike: api-anthropic-com.evil.tld / openai-api.attacker.net
+      - '(?i)\b(?:api[\-_])?(?:anthropic|openai)[\-_](?:com|api|ai)[\-_.][a-z0-9\-]{1,63}\.[a-z]{2,24}\b'
+      # punycode/homograph endpoint
+      - '(?i)https?://[a-z0-9.\-]{0,60}xn--[a-z0-9\-]{2,60}\.[a-z]{2,24}'
+
+  # TLS verification being switched off — required to intercept a TLS endpoint.
+  sel_tls_off:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re:
+      - '(?i)\bNODE_TLS_REJECT_UNAUTHORIZED[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}0\b'
+      - '(?i)\brejectUnauthorized[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}false\b'
+      - '(?i)\bPYTHONHTTPSVERIFY[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}0\b'
+      - '(?i)\bssl[_\-]?verify[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}(?:false|0|none)\b'
+      - '(?i)\bverify[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}(?:false|0)\b'
+
+  # Forced outbound proxy for all HTTP(S) traffic.
+  sel_proxy_env:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re: '(?i)\b(?:https?_proxy|all_proxy)[\x22\x27\s]{0,3}[:=][\s\x22\x27]{0,3}(?:https?|socks[45]?)://'
+
+  # LLM-provider context — proves the proxy override is aimed at model traffic.
+  sel_llm_ctx:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re:
+      - '(?i)\b(?:ANTHROPIC_API_KEY|OPENAI_API_KEY|AZURE_OPENAI_API_KEY|ANTHROPIC_BASE_URL|OPENAI_BASE_URL|OPENAI_API_BASE)\b'
+      - '(?i)\bapi\.(?:anthropic|openai)\.com\b'
+
+  # A real provider credential present in the same event.
+  sel_apikey:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+    content|re:
+      - '\bsk-ant-[A-Za-z0-9_\-]{16,}'
+      - '\bsk-(?:proj-)?[A-Za-z0-9]{32,}\b'
+      - '\bAIza[0-9A-Za-z_\-]{35}\b'
+
+  # The redirection actually happening on the wire: outbound request whose HOST is a
+  # structural look-alike of a provider domain.
+  sel_host_lookalike:
     event_type: http_request
-    header_authorization|re: '(?i)Bearer\s+(sk-|sk-ant-|xai-)'
-  sel_provider_key_apikey:
-    event_type: http_request
-    header_x-api-key|re: '(?i)^(sk-|sk-ant-)'
-  filter_canonical_http_host:
-    event_type: http_request
-    host|re: '(?i)(^|\.)(anthropic\.com|openai\.com|openai\.azure\.com|googleapis\.com|mistral\.ai|cohere\.com|x\.ai|amazonaws\.com|githubcopilot\.com|localhost)$'
+    host|re: '(?i)^(?:[a-z0-9\-]{1,63}\.)*(?:anthropic|openai|googleapis|azure|mistral|cohere)\.(?:com|ai|net|io|dev)\.[a-z0-9\-]{1,63}\.[a-z]{2,24}\.?$'
+
+  # ── Suppressions (no host/domain/path is trusted here) ───────────────────────
+  filter_placeholder:
+    content|re: '(?i)(?:\$\{[a-z0-9_]{2,40}\}|\{\{[a-z0-9_.\- ]{2,40}\}\}|<your[ _\-]|\byour[_\-](?:proxy|gateway|endpoint|domain|host|server)\b|\bplaceholder\b|\bchangeme\b|\bredacted\b|x{6,})'
+
+  filter_security_doc:
+    content|re:
+      - '(?i)\b(?:typosquat\w*|homograph|look-?alike domain|domain impersonation|phishing (?:domain|example)|sigma rule|detection rule|proof[ \-]of[ \-]concept)\b'
+      - '(?i)\b(?:conftest\.py|__tests__|\.spec\.(?:ts|js)|\.test\.(?:ts|js)|mock(?:ed)?[_\-]?(?:server|llm|api))\b'
+
   condition: >
-    (sel_base_url_override and not filter_canonical_base_url) or
-    (sel_llm_request_any and not filter_canonical_llm_host and not filter_loopback_llm_host) or
-    ((sel_provider_key_header or sel_provider_key_apikey) and not filter_canonical_http_host)
-falsepositives:
-  - An approved LLM gateway or proxy (LiteLLM, Portkey, Helicone, an internal
-    relay) — add its host to the three filter selections before enabling, or this
-    rule will fire on every request
-  - Self-hosted inference on a LAN address rather than loopback
-  - A provider adding a new API domain not yet in the allowlists
-  - Developers testing against a mock LLM server on a non-loopback interface
-level: critical
+    ((sel_baseurl_key and sel_impersonate) or
+    (sel_baseurl_key and sel_tls_off) or
+    (sel_proxy_env and sel_tls_off and sel_llm_ctx) or
+    (sel_impersonate and sel_apikey) or
+    sel_host_lookalike)
+    and not (filter_placeholder or filter_security_doc)
+action: report
