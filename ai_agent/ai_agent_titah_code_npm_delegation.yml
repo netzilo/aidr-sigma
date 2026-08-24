@@ -1,0 +1,124 @@
+title: Supply Chain Titah-Code NPM Agent Delegation CLI
+id: 4e1c8f2d-9a6b-4c73-b1f0-2d7a5e46c918
+status: experimental
+level: medium
+description: |
+  Observability rule for the `titah-code` npm package, a CLI that delegates coding
+  tasks (and therefore user prompts, repository context and downstream API
+  credentials) to third-party AI agent editors such as Claude and opencode.
+
+  This rule makes NO claim that the package is malicious. There is no confirmed
+  payload or IOC for it, and the engine exposes no CODE_EXFILTRATION,
+  API_CREDENTIAL_ACCESS or PROMPT_INJECTION signal that could evidence the
+  hypothesised behaviour. The only observable is `execute_process`. The rule is
+  therefore scoped to a single, highly specific package identifier and is
+  report-only: it produces an inventory of where this dependency is acquired and
+  invoked so that a human can decide whether the delegation path is acceptable.
+
+  Two tiers of evidence are matched, both report-only:
+
+    Tier 1 (acquisition / invocation) - the literal token `titah-code` appearing
+    as the argument of an npm/pnpm/yarn/bun install-or-execute verb, of an
+    npx/pnpx/bunx runner, or as argv[0] of a spawned process. Mere mention of the
+    string by inspection tooling is filtered out.
+
+    Tier 2 (lifecycle escape) - a process whose command line shows execution
+    originating from inside `node_modules/titah-code` combined with a shell,
+    network-fetch, interpreter-eval or base64-decode invocation. This is the
+    classic postinstall supply-chain escape and is the only branch that carries
+    genuine malicious weight; it is still report-only because a legitimate
+    postinstall can shell out.
+
+  Deliberately NOT a block rule: generic delegation telemetry cannot distinguish
+  the hypothesised attack from ordinary use of the tool, and blocking on a package
+  name with no confirmed IOC is a product failure, not a detection.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059
+  - owasp.a08_2021
+  - owasp.a06_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # ── Tier 1 ────────────────────────────────────────────────────────────────
+  # The package identifier as a standalone token. Separator classes (not \b)
+  # so that `my-titah-code-fork` and `titah-coder` do not match, while JSON
+  # argv arrays, quoted args and `--flag=titah-code@1.2.3` do.
+  sel_pkg_token:
+    content|re: '(?i)(^|[\s\x{22}\x{27}=:,/\\\[{])titah-code([\s\x{22}\x{27}@,;:)\]}]|$)'
+
+  sel_pm_install:
+    content|re: '(?i)(^|[\s\x{22}\x{27}/\\])(npm|pnpm|yarn|bun)(\.cmd|\.exe)?\s+(install|link|exec|create|dlx|add|in|i|x)\b'
+
+  sel_pm_runner:
+    content|re: '(?i)(^|[\s\x{22}\x{27}/\\])(npx|pnpx|bunx)(\.cmd|\.exe)?[\s\x{22}\x{27}]'
+
+  # argv[0] is the package binary, with or without a resolved path prefix.
+  sel_direct_invoke:
+    content|re: '(?i)(^|[\s\x{22}\x{27}])([^\s\x{22}\x{27}]*[/\\])?titah-code(\.js|\.cjs|\.mjs|\.cmd|\.exe)?([\s\x{22}\x{27}]|$)'
+
+  # ── Tier 2 ────────────────────────────────────────────────────────────────
+  sel_pkg_dir:
+    content|re: '(?i)node_modules[/\\]titah-code[/\\]'
+
+  sel_danger:
+    content|re:
+      - '(?i)(^|[\s\x{22}\x{27}/\\;&|`$(])(curl|wget|fetch)[\s\x{22}\x{27}]'
+      - '(?i)(^|[\s\x{22}\x{27}/\\;&|`$(])(bash|sh|zsh|dash|ksh)[\s\x{22}\x{27}]+-[a-z]*c\b'
+      - '(?i)(^|[\s\x{22}\x{27}/\\;&|`$(])(python3?|perl|ruby|node|deno)[\s\x{22}\x{27}]+-(c|e|eval)\b'
+      - '(?i)\bbase64\s+(-d|-D|--decode)\b'
+      - '(?i)(^|[\s\x{22}\x{27}/\\;&|`$(])(osascript|nc|ncat|socat)[\s\x{22}\x{27}]'
+      - '(?i)(^|[\s\x{22}\x{27}/\\;&|`$(])(powershell|pwsh)(\.exe)?\s+-[a-z]*(e|enc|encodedcommand|c|command)\b'
+
+  # ── Filters: benign appearances of the same literal string ────────────────
+  # Read-only inspection of an already-declared or already-installed dependency.
+  filter_inspect:
+    content|re: '(?i)(^|[\s\x{22}\x{27}/\\])(npm|pnpm|yarn|bun)(\.cmd|\.exe)?\s+(view|info|show|search|audit|why|ls|list|outdated|uninstall|unlink|remove|rm|un|deprecate|dist-tag|pack|owner|dedupe|explain)\b'
+
+  # Text tooling that merely prints, greps or diffs the package name - lockfile
+  # review, changelog reading, `echo`-based build logging, git history search.
+  filter_readonly:
+    content|re:
+      - '(?i)(^|[\s\x{22}\x{27}/\\])(grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|strings|jq|yq|diff|comm|sort|uniq|wc|echo|printf|man|which|whereis|type)([\s\x{22}\x{27}]|$)'
+      - '(?i)(^|[\s\x{22}\x{27}/\\])git(\.exe)?\s+(log|grep|show|diff|blame|status|stash)\b'
+
+  # Dependency and vulnerability scanners naming the package as a scan target.
+  filter_scanner:
+    content|re: '(?i)(^|[\s\x{22}\x{27}/\\])(snyk|trivy|grype|syft|osv-scanner|semgrep|socket|npq|retire|audit-ci|depcheck|license-checker|renovate|dependabot)([\s\x{22}\x{27}]|$)'
+
+  condition: >
+    sel_event and
+    ((sel_pkg_dir and sel_danger) or
+     sel_direct_invoke or
+     (sel_pkg_token and (sel_pm_install or sel_pm_runner)))
+    and not (filter_inspect or filter_readonly or filter_scanner)
+
+action: report
+
+falsepositives:
+  - A developer who has deliberately adopted titah-code as an approved coding CLI - every
+    legitimate invocation of the tool fires Tier 1. This rule is an inventory of the
+    dependency, not an accusation; expect one event per real use.
+  - CI/CD jobs that install the package as a declared dependency (`npm install titah-code`,
+    `pnpm add titah-code`) during image build or test setup.
+  - One-shot trial runs via `npx titah-code ...` by an engineer evaluating the tool.
+  - Security researchers or an internal supply-chain review detonating the package in a
+    sandbox; only the grep/npm-view/scanner forms are filtered, a real execution is not.
+  - The package's own legitimate postinstall or bin shim shelling out - `node -e` and
+    `sh -c` in a lifecycle script are common in benign npm packages, so Tier 2 is
+    suspicious but not conclusive and remains report-only.
+  - Build scripts, Makefiles or wrapper CLIs that pass the literal string `titah-code`
+    as an argument to a spawned process.
