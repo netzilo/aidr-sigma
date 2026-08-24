@@ -1,0 +1,115 @@
+title: Agent Subprocess DNS Exfiltration and Instruction-File Worm Propagation
+id: 7f3c9a12-4d6e-4b58-9a21-c0e5f8d47b93
+status: experimental
+level: high
+description: |
+  Single-event content detection over child-process command lines spawned by monitored
+  AI agents, covering the three techniques from the "Month of AI Bugs" series that are
+  actually observable at the execute_process layer:
+
+    1. DNS-tunnelled exfiltration - a resolver client (dig / drill / nslookup / host)
+       invoked with a query name whose leftmost label is a 26+ character continuous
+       alphanumeric run (base16/base32/base64url-encoded payload smuggled into the
+       query name), inside a single command segment.
+    2. AgentHopper-style self-propagation - a command line that names an agent
+       instruction/configuration artefact (CLAUDE.md, AGENTS.md, GEMINI.md,
+       .cursorrules, .clinerules, .windsurfrules, copilot-instructions.md,
+       claude_desktop_config.json, .mcp.json, .codex/config.toml, .aider.conf.yml)
+       AND a network-fetch or decode primitive AND a write primitive. That triple is
+       the write-back step by which a poisoned agent re-infects the next agent that
+       reads the repository.
+    3. Invisible prompt injection carriers - Unicode Tag characters (U+E0000 block) or
+       bidirectional embedding/override controls smuggled into an argv string, the
+       Trojan-Source-style carrier used to hide instructions from human review.
+
+  Report-only: this is a newly deployed heuristic over a high-volume event stream and
+  its false-positive rate has not yet been measured in this estate.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1071/004/
+  - https://attack.mitre.org/techniques/T1048/003/
+  - https://attack.mitre.org/techniques/T1027/
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  # 1. Resolver client invoked as a command word, with an encoded payload label.
+  #    Leading class prevents matches on --host= / --hostname / JSON key names.
+  #    Payload label is continuous alphanumeric (no hyphen/underscore) so that
+  #    hyphenated Kubernetes pod names and cloud endpoint labels do not match.
+  sel_dns_exfil:
+    content|re: '(?i)(?:^|[\s"`;&|(])(?:dig|drill|nslookup|host)\s+[^\n;&|]{0,120}\b[A-Za-z0-9]{26,}\.[A-Za-z0-9-]{1,63}\.[A-Za-z]{2,24}\b'
+
+  # 3. Unicode Tag block + bidi embedding/override controls in an argv string.
+  #    U+200B-U+200D and U+200E/U+200F are deliberately excluded: emoji ZWJ
+  #    sequences and LRM/RLM appear in legitimate commit messages and filenames.
+  sel_hidden_unicode:
+    content|re: '[\x{202a}-\x{202e}\x{2066}-\x{2069}\x{e0001}\x{e0020}-\x{e007f}]'
+
+  # 2a. The propagation target: an agent instruction / MCP configuration artefact.
+  sel_worm_target:
+    content|re: '(?i)(CLAUDE\.md|AGENTS\.md|GEMINI\.md|\.cursorrules|\.clinerules|\.windsurfrules|copilot-instructions\.md|claude_desktop_config\.json|\.mcp\.json|\.codex/config\.toml|\.aider\.conf\.yml)'
+
+  # 2b. A write primitive.
+  sel_worm_write:
+    content|re: '(?i)(>|\btee\b|\bsed\s+-i\b|\s-[oO]\s|\bdd\s+[^\n]{0,40}of=|\bcp\s|\bmv\s|\binstall\s+-m\b|\bpatch\s+-)'
+
+  # 2c. A network-fetch or decode primitive supplying the written content.
+  sel_worm_fetch:
+    content|re: '(?i)(\bcurl\b|\bwget\b|\bbase64\s+(-d|-D|--decode)\b|\bxxd\s+-r\b|\bopenssl\s+enc\b[^\n]{0,40}\s-d\b|\bpython[23]?\b[^\n]{0,120}(urllib|requests|b64decode)|\bnc\s+-[a-z]{0,4}\s)'
+
+  # Reverse lookups and DNSSEC/zone diagnostics legitimately carry long hash-like
+  # labels. Matched structurally on flags and RR types only - no host, domain or
+  # path is trusted here.
+  filter_dns_diagnostics:
+    content|re: '(?i)\b(dig|drill|nslookup|host)\b[^\n]{0,100}(\s-x\s|\+trace\b|\+dnssec\b|\btype=ptr\b|\bPTR\b|\bDNSKEY\b|\bRRSIG\b|\bNSEC3?\b|\bAXFR\b|\bSSHFP\b|\bTLSA\b)'
+
+  # Templated / placeholder command strings echoed by scaffolding and docs tooling.
+  filter_placeholder:
+    content|re: '(?i)(<[a-z][a-z0-9_-]{1,20}>|your[_-]?(domain|token|key|host)|placeholder|changeme|x{10,})'
+
+  # Help and version probes, which print long synopsis text containing tool names.
+  filter_help:
+    content|re: '(?i)\s--(help|version|usage)\b'
+
+  condition: >
+    sel_exec
+    and (sel_dns_exfil or sel_hidden_unicode or
+         (sel_worm_target and sel_worm_write and sel_worm_fetch))
+    and not (filter_dns_diagnostics or filter_placeholder or filter_help)
+tags:
+  - attack.exfiltration
+  - attack.t1048.003
+  - attack.t1071.004
+  - attack.persistence
+  - attack.t1027
+  - atlas.aml.t0051
+  - atlas.aml.t0025
+  - owasp.llm01
+  - owasp.llm02
+falsepositives:
+  - Hash-based blocklist or reputation lookups, where a 32-character hex digest is
+    the leftmost label of the query name. These are structurally identical to DNS
+    tunnelling and are not filtered, because filtering them would require trusting a
+    third-party domain.
+  - DNS canary, RUM or measurement probes that embed a de-hyphenated UUID in the
+    query name (32 continuous alphanumerics).
+  - Content-addressed hostnames from object stores or ephemeral preview environments
+    resolved with dig during troubleshooting, when the generated label happens to be
+    26 or more characters with no separators.
+  - A developer or agent legitimately updating repository agent guidance in one
+    shell line that also contains curl or base64 - for example fetching a
+    team-standard AGENTS.md template and writing it into the repo during onboarding
+    or CI bootstrap. This is the dominant expected false positive for the worm
+    selection and the reason the rule is report-only.
+  - Provisioning scripts that render claude_desktop_config.json or .mcp.json from a
+    downloaded template with curl -o.
+  - Command lines that legitimately carry bidirectional control characters when
+    handling right-to-left filenames, translated strings or commit messages.
+  - Red-team reproductions and detection-engineering test fixtures replaying the
+    Month of AI Bugs techniques in a lab.
+action: report
