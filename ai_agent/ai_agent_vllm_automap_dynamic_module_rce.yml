@@ -1,0 +1,285 @@
+title: vLLM auto_map Dynamic Module RCE
+id: 7b3d1c9e-4a52-4f18-9c60-2d8ea1f47b53
+status: experimental
+level: high
+description: |
+  Detects the execution half of the vLLM auto_map dynamic-module RCE: a model
+  server process (or one of its ancestors in the same session) reads a Hugging
+  Face remote-code module from the transformers_modules dynamic-module cache and,
+  within the same session and time window, spawns a shell / inline interpreter /
+  egress or temp-directory binary.
+
+  vLLM resolves Hugging Face `auto_map` entries via try_get_class_from_dynamic_module
+  during model initialisation without honouring the trust_remote_code gate. The
+  Transformers loader materialises the attacker-controlled Python under
+  ~/.cache/huggingface/modules/transformers_modules/<repo>/ and imports it, executing
+  it with the server's privileges before any API request is handled. The only
+  externally observable artefacts are the READ of that materialised module and the
+  process the payload then spawns.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), walks proc_lineage() for the owning session,
+  and queries the event log scoped to those exact (pid, start) instances only. No
+  cross-session attribution is possible. The triggering exec is taken from `meta`
+  (never re-queried) because the just-fired event races async ingest.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://huggingface.co/docs/transformers/main/en/custom_models
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Models that legitimately require trust_remote_code (many community architectures)
+    do read transformers_modules/*.py. The rule only reports when the same session
+    also spawns a shell, inline interpreter, egress tool, or a binary from a temp
+    directory within 10 minutes - but a legitimate remote-code model whose init path
+    shells out (e.g. a custom tokenizer wrapper calling `sh -c`) will match.
+  - torch cpp_extension / custom CUDA kernel JIT builds spawn ninja, nvcc, cmake and
+    compiler drivers. These are excluded by command-token filter, but a wrapper shell
+    script that invokes the toolchain can still match.
+  - vLLM engine-core and multiprocessing workers spawn `python -c` (spawn_main,
+    resource_tracker, forkserver). These specific invocations are excluded explicitly.
+  - Multi-node Ray/vLLM deployments that launch workers over `ssh` from the same
+    process that loaded the model.
+  - CI pipelines that deliberately evaluate remote-code model repositories and run
+    shell health checks or artifact uploads in the same initialisation window.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants ──────────────────────────────────────────────────────────────
+  WINDOW_NS     = 600000000000   # 10 min: module resolution -> payload exec
+  READ_LIMIT    = 800            # READ_FILE is high volume - always pid-scoped
+  MAX_ANCESTORS = 12
+  DYN_DIR       = "transformers_modules"
+
+  # Payload shapes a dynamic-module import would produce. Detection-widening only.
+  SUSPICIOUS = [
+      r"(?:^|/|\s)(?:ba|z|da|k)?sh\s+-c\b",
+      r"\bcurl\s", r"\bwget\s", r"\bnc\s+-", r"\bncat\s", r"\bsocat\s",
+      r"\bpython[23]?(?:\.[0-9]+)?\s+-c\b", r"\bperl\s+-e\b", r"\bruby\s+-e\b",
+      r"\bnode\s+-e\b", r"\bbase64\s+(?:-d|--decode)\b", r"\bxxd\s+-r\b",
+      r"\bopenssl\s+enc\b", r"\bchmod\s+\+x\b", r"\bssh\s", r"\bscp\s",
+      r"\bcrontab\b", r"\bpowershell\b", r"/dev/tcp/", r"\beval\s+\$\(",
+      r"/tmp/", r"/var/tmp/", r"/dev/shm/",
+  ]
+
+  # Framework/build internals a healthy vLLM start-up spawns. Command tokens only.
+  BENIGN_CTX = [
+      r"\bmultiprocessing\b", r"resource_tracker", r"spawn_main", r"forkserver",
+      r"\bninja\b", r"\bnvcc\b", r"\bcmake\b", r"\bcc1plus\b", r"\bnvidia-smi\b",
+      r"\bldconfig\b", r"pip\s+install", r"torch\.distributed",
+  ]
+
+  SERVER_HINTS = [r"\bvllm\b", r"vllm\.entrypoints", r"\bapi_server\b",
+                  r"\bengine_core\b", r"\benginecore\b"]
+
+  # ── Pure helpers (no graph / log calls) ────────────────────────────────────
+  def to_int(s):
+      if s == None:
+          return 0
+      if re.match(r"^[0-9]+$", s):
+          return int(s)
+      return 0
+
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def is_payload(cmd):
+      c = cmd.lower()
+      if matches_any(BENIGN_CTX, c):
+          return False
+      return matches_any(SUSPICIOUS, c)
+
+  def short(p):
+      if p == "":
+          return "?"
+      return p.split("/")[-1]
+
+  def lineage_names(l):
+      out = []
+      for x in l:
+          out.append(short(x.get("actor_path", "")))
+      return " -> ".join(out)
+
+  def spawn_target(cmd):
+      m = re.find(r"/[A-Za-z0-9._/+-]{2,}", cmd)
+      if m == None:
+          return "process://spawned-child"
+      return "process://" + m
+
+  def file_edge(actor_path, target_id, path, ts):
+      return {"from": "process://" + actor_path, "to": path, "kind": "READ_FILE",
+              "ts": ts, "first_ts": ts, "last_ts": ts, "count": "1",
+              "target_id": target_id}
+
+  # ── Relevance gate: pure string checks on meta, no traversal ───────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      if to_int(meta.get("caller_pid", "0")) == 0:
+          return False
+      return is_payload(meta.get("content", ""))
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd      = meta.get("content", "")
+      event_ts = to_int(meta.get("event_ts", "0"))
+      cp       = to_int(meta.get("caller_pid", "0"))
+
+      # ── Anchor on the exact triggering instance ────────────────────────────
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"          # degraded: create row not landed - re-fires later
+
+      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
+                             to_int(inst.get("actor_start", "0")))
+      if lineage == None or len(lineage) == 0:
+          lineage = [inst]
+
+      # ── Session scope: this caller instance and its ancestors ONLY ─────────
+      session = []
+      seen    = {}
+      for x in lineage:
+          k = x.get("actor_pid", "") + ":" + x.get("actor_start", "")
+          if k in seen:
+              continue
+          seen[k] = True
+          session.append(x)
+          if len(session) >= MAX_ANCESTORS:
+              break
+
+      since = event_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+
+      # ── Stage 1 (REQUIRED anchor): HF dynamic-module remote code read ──────
+      anchor       = None
+      anchor_actor = ""
+      modcount     = 0
+      cfg          = None
+      cfg_actor    = ""
+      attribution  = "instance"
+
+      for x in session:
+          pid = to_int(x.get("actor_pid", "0"))
+          st  = to_int(x.get("actor_start", "0"))
+          if pid == 0:
+              continue
+          rows = query_events(kind="READ_FILE", actor_pid=pid, actor_start=st,
+                              since_ns=since, until_ns=event_ts, limit=READ_LIMIT)
+          for r in rows:
+              p = r.get("path", "")
+              if p == "":
+                  continue
+              lp = p.lower()
+              if DYN_DIR in lp and lp.endswith(".py"):
+                  modcount += 1
+                  if anchor == None:
+                      anchor       = r
+                      anchor_actor = x.get("actor_path", "")
+              elif cfg == None:
+                  if lp.endswith("/config.json") or lp.endswith("/model_index.json"):
+                      cfg       = r
+                      cfg_actor = x.get("actor_path", "")
+
+      # Fallback: path-targeted activity lookup, still window- and session-bounded.
+      if anchor == None:
+          for x in session:
+              ap = x.get("actor_path", "")
+              if ap == "":
+                  continue
+              fsid = "filesystem://" + ap
+              if node(fsid) == None:
+                  continue
+              for ent in fs_activity(fsid, "READ", DYN_DIR):
+                  ts = to_int(ent.get("ts", "0"))
+                  pp = ent.get("path", "")
+                  if ts >= since and ts <= event_ts and pp.lower().endswith(".py"):
+                      anchor = {"ts": str(ts), "path": pp, "kind": "READ_FILE",
+                                "target_id": fsid, "actor_path": ap}
+                      anchor_actor = ap
+                      modcount    += 1
+                      attribution  = "path-aggregated"
+                      break
+              if anchor != None:
+                  break
+
+      if anchor == None:
+          return "allow"          # no remote-code load in this session - not our threat
+
+      # ── Ordering + window: the load must precede the spawn, closely ────────
+      a_ts = to_int(anchor.get("ts", "0"))
+      if a_ts == 0 or a_ts > event_ts:
+          return "allow"
+      if (event_ts - a_ts) > WINDOW_NS:
+          return "allow"
+
+      # ── Attribution detail ─────────────────────────────────────────────────
+      server_hint = ""
+      for x in session:
+          s = (x.get("actor_path", "") + " " + x.get("cmdline", "")).lower()
+          if matches_any(SERVER_HINTS, s):
+              server_hint = x.get("actor_path", "")
+
+      # ── Kill chain, rooted at the owning session process ───────────────────
+      root  = session[len(session) - 1]
+      chain = new_chain("process://" + root.get("actor_path",
+                                                inst.get("actor_path", "")))
+
+      if cfg != None:
+          chain.append(step(
+              file_edge(cfg_actor, cfg.get("target_id", ""), cfg.get("path", ""),
+                        cfg.get("ts", "0")),
+              stage_id="Model Config Read",
+              stage_desc="model configuration read (auto_map carrier): " + cfg.get("path", "")))
+
+      chain.append(step(
+          file_edge(anchor_actor, anchor.get("target_id", ""), anchor.get("path", ""),
+                    anchor.get("ts", "0")),
+          stage_id="Dynamic Module Load",
+          stage_desc="Hugging Face remote-code module imported without trust_remote_code gate: " +
+                     anchor.get("path", "")))
+
+      cmdshort = cmd[:200]
+      chain.append(step(
+          {"from": "process://" + inst.get("actor_path", ""),
+           "to": spawn_target(cmd), "kind": "EXECUTE_PROCESS",
+           "ts": str(event_ts), "first_ts": str(event_ts), "last_ts": str(event_ts),
+           "cmdline": cmdshort},
+          stage_id="Payload Execution",
+          stage_desc="model-init process spawned: " + cmdshort))
+
+      reason = ("vLLM auto_map remote-code load then process execution in one session - " +
+                str(modcount) + " dynamic module file(s) read from " + DYN_DIR +
+                ", first: " + anchor.get("path", "") +
+                " | spawn: " + cmdshort +
+                " | lineage: " + lineage_names(session) +
+                " | attribution: " + attribution)
+      if server_hint != "":
+          reason = reason + " | model server: " + short(server_hint)
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
