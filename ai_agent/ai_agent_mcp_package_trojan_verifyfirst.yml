@@ -1,0 +1,114 @@
+title: MCP Supply Chain - Trojanized verifyfirst-mcp Package Install or Launch
+id: 7f3c1a9e-24d6-4b58-9c07-af5e2d1b6e83
+status: experimental
+level: medium
+description: |
+  Detects an agent-spawned process that installs, resolves, or launches the PyPI
+  distribution 'verifyfirst-mcp' (and its normalized name variants
+  verifyfirst_mcp / verifyfirst.mcp).
+
+  The package is reported to ship an MCP server that subverts verification
+  semantics - maintaining a registry of software failures that are reported back
+  to the caller as successes. An agent wired to such a server will treat failed
+  builds, failed tests, failed signature checks and failed policy gates as
+  passing, which silently defeats every downstream control that trusts an exit
+  status or a tool result.
+
+  Detection scope and its limits (answering triage dissent):
+  The engine has no package_install event type and no INSTALLED_PACKAGE edge, so
+  this rule cannot observe package installation as a first-class event. It also
+  cannot observe the malicious behaviour itself - "always report success" is a
+  semantic property of the server's responses, not a distinguishable process or
+  network pattern. What IS observable, and what this rule binds to, is package
+  IDENTITY: the distribution name appears verbatim on the command line of the
+  process that installs it (pip / pipx / uv / uvx / poetry / pdm / conda /
+  mcp install) or that launches its console entry point or module. That is a
+  single-event, high-specificity IOC and nothing more is claimed for it. The
+  verdict is 'report' deliberately: this is an unconfirmed low-confidence
+  advisory with no CVE and no PoC, and an IOC-grade name match is an
+  investigation trigger, not grounds for blocking an engineer's install.
+
+  Both a package-name match AND an install/launch context are required, so the
+  rule does not fire on the name merely appearing in prose, in a log line, in an
+  advisory URL, or inside a detection rule being edited.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1204
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The IOC: the distribution name, in any of its normalized forms ──────────
+  sel_pkg_name:
+    event_type: execute_process
+    content|re: '(?i)\bverifyfirst[-_.]mcp\b'
+
+  # ── Context 1: a package manager is actually resolving/installing it ────────
+  sel_ctx_pkgmgr:
+    content|re:
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bpipx\b[^\n]{0,200}\b(install|run)\b'
+      - '(?i)\buv\b[^\n]{0,200}\b(pip install|tool install|tool run|add|run|sync)\b'
+      - '(?i)\buvx\b'
+      - '(?i)\bpoetry\b[^\n]{0,200}\badd\b'
+      - '(?i)\bpdm\b[^\n]{0,200}\badd\b'
+      - '(?i)\bconda\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bhatch\b[^\n]{0,200}\b(run|env create)\b'
+      - '(?i)\b(fast)?mcp\b[^\n]{0,120}\binstall\b'
+
+  # ── Context 2: launched as a Python module (server start-up) ────────────────
+  sel_ctx_module:
+    content|re: '(?i)\bpython[23]?(\.[0-9]{1,2})?\b[^\n]{0,160}\s-m\s'
+
+  # ── Context 3: launched via its installed console entry point ───────────────
+  sel_ctx_entrypoint:
+    content|re: '(?i)(^|[\s"\[,=/])verifyfirst[-_.]mcp(\.exe)?([\s"\],]|$)'
+
+  # ── FP suppression: analyst / IOC-hunting invocations ───────────────────────
+  filter_investigation:
+    content|re: '(?i)\b(grep|egrep|fgrep|zgrep|rg|ripgrep|ag|ack|find|locate|cat|head|tail|less|more|strings|awk|sed|jq|git grep|git log)\b'
+
+  # ── FP suppression: software-composition-analysis and scanning tooling ──────
+  filter_sca_tooling:
+    content|re: '(?i)\b(pip-audit|safety|osv-scanner|osv-detector|trivy|syft|grype|snyk|dependency-check|cyclonedx|bandit|semgrep|deps\.dev)\b'
+
+  # ── FP suppression: metadata-only queries that never fetch or execute code ──
+  filter_pkg_metadata_only:
+    content|re: '(?i)\b(pip[23]?|uv pip|conda)\b[^\n]{0,160}\b(show|index|list|search|inspect|check|freeze)\b'
+
+  # ── FP suppression: resolution rehearsals that install nothing ──────────────
+  filter_dry_run:
+    content|re: '(?i)(--dry-run|--no-install|--resolution-only|--print-only)'
+
+  condition: >
+    sel_pkg_name
+    and (sel_ctx_pkgmgr or sel_ctx_module or sel_ctx_entrypoint)
+    and not (filter_investigation or filter_sca_tooling
+             or filter_pkg_metadata_only or filter_dry_run)
+
+falsepositives:
+  - Malware analysis or threat-research work - an analyst deliberately installing
+    verifyfirst-mcp inside a disposable sandbox or container to reverse it. The
+    command line looks identical to a real compromise; only the operator's intent
+    differs, which is exactly why the action is report rather than block.
+  - Purple-team or detection-engineering validation deliberately reproducing this
+    IOC to confirm the rule fires.
+  - An unrelated internal or personal distribution that legitimately carries the
+    name verifyfirst-mcp (or a fork published under the same name after takedown
+    and re-registration of the PyPI name).
+  - A defensive re-publication of the name (name-squatting the malicious package
+    with a benign no-op stub) being installed by a dependency pin.
+  - Vulnerability-management tooling that shells out with the package name as an
+    argument in a form the filter_sca_tooling selection does not enumerate.
+action: report
