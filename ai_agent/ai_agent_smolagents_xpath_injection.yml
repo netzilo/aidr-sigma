@@ -1,0 +1,134 @@
+title: XPath Injection in Smolagents search_item_ctrl_f
+id: 7f3c9d21-4b8e-4a15-9c62-8d5f1e2a6b40
+status: experimental
+level: high
+description: |
+  Detects XPath injection against the vulnerable Hugging Face Smolagents 1.20.0
+  helper search_item_ctrl_f(), which builds its locator by direct f-string
+  concatenation:
+
+      driver.find_elements(By.XPATH, f"//*[contains(text(), '{text}')]")
+
+  Because the template is fixed, ANY well-formed use produces exactly
+  //*[contains(text(), '<TEXT>')] and nothing else. The only way to alter the
+  query is for <TEXT> to emit a single quote that terminates the string literal
+  early, after which XPath operators (or/and/|/[//=) or extra structure appear
+  outside the literal. This rule matches that structural deviation from the
+  fixed template - it does not try to enumerate payloads.
+
+  Observability (answering the triage objection): Selenium's find_elements() is
+  not an in-process call. Both local chromedriver/geckodriver and remote Grid
+  speak the W3C WebDriver protocol over HTTP, so the fully-rendered locator is
+  carried verbatim in the POST body of /session/<id>/elements as
+  {"using":"xpath","value":"//*[contains(text(), '...')]"}. That request is a
+  first-class http_request event and its body is in `content`. The same string
+  is visible in `content` for execute_process when a CodeAgent runs generated
+  Selenium/python on a command line. The rule therefore requires BOTH the
+  smolagents template shape AND a WebDriver/Selenium execution marker, so it
+  fires on an executed locator rather than on prose that merely discusses one.
+
+  Known blind spot, stated deliberately: if the agent applies the same XPath to
+  already-fetched HTML with in-process lxml/BeautifulSoup, no HTTP request and
+  no subprocess is produced and no event type in this engine observes the query
+  string. That path is not detectable today with any rule, scripted or static -
+  the engine has no INJECTION_ATTEMPT edge and no in-process query telemetry.
+  This rule covers the WebDriver-mediated path only and is scoped to report so
+  that the residual ambiguity never blocks browser automation.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://github.com/huggingface/smolagents
+  - https://cwe.mitre.org/data/definitions/643.html
+  - https://www.w3.org/TR/webdriver2/#find-elements
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Only the two event types verified to exist for this signal.
+  sel_event:
+    event_type:
+      - http_request
+      - execute_process
+
+  # The exact fixed template emitted by search_item_ctrl_f. Anchoring on the
+  # "//*[contains(text(), '" prefix (wildcard element + space after comma)
+  # scopes the rule to this generated locator rather than to hand-written
+  # //div[contains(text(),'x')] style selectors.
+  sel_ctrl_f_template:
+    content|contains: "//*[contains(text(), '"
+
+  # Proof the locator is being executed by a WebDriver/Selenium surface, not
+  # merely mentioned. "using":"xpath" is the mandatory W3C find-element field.
+  sel_xpath_surface:
+    content|re:
+      - '(?i)"using"\s*:\s*"xpath"'
+      - '(?i)\bBy\.XPATH\b'
+      - '(?i)\bfind_elements?_by_xpath\b'
+      - '(?i)\bsearch_item_ctrl_f\b'
+
+  # Structural breakout from the string literal. Three complementary shapes:
+  #  1. literal closed early, an XPath operator follows   -> ' or / ' and / '| / '[ / '/ / '=
+  #  2. predicate closed with ) but not ], operator next  -> ') or / ') and / ')|
+  #  3. template fully closed with )] and MORE follows    -> ')]|//  ')]/..  ')][  ')])
+  sel_literal_breakout:
+    content|re:
+      - '(?i)//\*\[contains\(text\(\)\s*,\s*''[^'']{0,300}''\s*(?:or\b|and\b|\||\[|/|=|<|>|!)'
+      - '(?i)//\*\[contains\(text\(\)\s*,\s*''[^'']{0,300}''\s*\)\s*(?:or\b|and\b|\||=|<|>)'
+      - '(?i)//\*\[contains\(text\(\)\s*,\s*''[^'']{0,300}''\s*\)\s*\]\s*(?:\||/|\[|\)|or\b|and\b)'
+
+  # Security reference material, cheat sheets and pentest write-ups that quote
+  # XPath injection payloads verbatim.
+  filter_reference_material:
+    content|contains:
+      - 'PayloadsAllTheThings'
+      - 'CWE-643'
+      - 'xpath injection'
+      - 'OWASP Testing Guide'
+      - 'proof-of-concept'
+
+  # Regression tests that deliberately exercise the escaping bug.
+  filter_test_code:
+    content|re:
+      - '(?i)\bdef\s+test_'
+      - '(?i)\bassertRaises\b'
+      - '(?i)\b(?:pytest|unittest|conftest)\b'
+
+  # The locator is inside a model-API chat body (agent asking an LLM to review
+  # or repair the selector), not inside an executed WebDriver command.
+  filter_llm_api_payload:
+    content|re:
+      - '"messages"\s*:\s*\['
+      - '"(?:max_tokens|max_output_tokens|tool_choice|anthropic_version)"\s*:'
+
+  condition: >
+    sel_event and sel_ctrl_f_template and sel_xpath_surface and
+    sel_literal_breakout and not (filter_reference_material or
+    filter_test_code or filter_llm_api_payload)
+falsepositives:
+  - A genuine page-text search whose term contains an apostrophe immediately
+    followed by an XPath keyword or operator - e.g. searching for "it' and
+    that", "rock 'n' roll/blues", "O'Brien | Ltd". This produces a structurally
+    identical malformed locator with no malicious intent. The bounded
+    [^']{0,300} span plus the requirement that an operator (not a letter) sit
+    directly after the closing quote keeps ordinary apostrophes such as
+    "don't", "boys'" and "O'Brien" from matching, but it cannot separate an
+    unlucky search string from a crafted one - hence action report.
+  - Hand-written Selenium locators that legitimately extend the same shape,
+    e.g. //*[contains(text(), 'Next') and @role='button'] or a union
+    //*[contains(text(), 'Next')]|//button[@id='next']. These are not produced
+    by search_item_ctrl_f but share the "//*[contains(text(), '" prefix. The
+    //* wildcard prefix requirement makes this uncommon (hand-written selectors
+    usually name a tag) but it is the main residual FP class.
+  - CI runs of the smolagents test suite or a security regression test that
+    asserts on the unsanitised locator - suppressed by filter_test_code.
+  - Security documentation, advisories, cheat sheets and pentest reports that
+    transit an HTTP request while quoting an XPath injection payload -
+    suppressed by filter_reference_material.
+  - An agent sending a Selenium snippet to a model API for review or repair,
+    where the payload rides in a chat completion body rather than a WebDriver
+    command - suppressed by filter_llm_api_payload.
+action: report
