@@ -1,0 +1,118 @@
+title: Malicious PyPI Package dazzle-claude-config
+id: 7f3c1e58-9a2d-4b61-8e04-6d5c2a7f91b3
+status: experimental
+level: high
+description: |
+  Single-event IoC detection for the malicious PyPI package `dazzle-claude-config`,
+  which advertises itself as a Claude Code configuration synchroniser but harvests
+  local Claude configuration, rewrites it, and bootstraps second-stage code from an
+  attacker-controlled GitHub payload repository.
+
+  Fires on two observable surfaces only:
+    1. execute_process - a command line that installs, fetches, clones or executes the
+       package (PyPI name normalisation covered: dazzle-claude-config,
+       dazzle_claude_config, dazzle.claude.config and mixed separators).
+    2. http_request - any outbound URL that carries the package identifier, i.e. the
+       simple-index lookup, the sdist/wheel artifact fetch, or the GitHub payload
+       repository bootstrap.
+
+  Two firing tiers are used. Tier 1 (installer/fetcher verb and the package name on the
+  same, unchained command segment) is deliberately filter-immune: no remediation or
+  audit tooling issues those commands. Tier 2 (package name alone) is suppressed when
+  the command is clearly read-only inspection, SCA scanning, or removal/remediation.
+author: Selhan
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://atlas.mitre.org/techniques/AML.T0011
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scoping ────────────────────────────────────────────────────────────
+  sel_evt_proc:
+    event_type: execute_process
+  sel_evt_http:
+    event_type: http_request
+
+  # ── TIER 1: installer / fetcher verb AND the package name on the same command
+  #            segment (no ; & | between them, so command chaining cannot stitch an
+  #            unrelated verb onto a mention of the name).
+  sel_install_cmd:
+    command|re:
+      - '(?i:\b(pip[23]?|uv|uvx|pipx|poetry|pdm|rye|hatch|conda|micromamba|easy_install|python[23]?(\.[0-9]+)?)\b)[^\n;&|]{0,160}?(?i:\b(install|add|sync|run|download|upgrade)\b|[ ]-m[ ]+|[ ]-c[ ]+)[^\n;&|]{0,160}?(?i:dazzle[-_.]+claude[-_.]+config)\b'
+      - '(?i:\bgit[ ]+clone\b|\bpip[23]?[ ]+install[ ]+git\+|\bcurl\b|\bwget\b)[^\n;&|]{0,200}?(?i:dazzle[-_.]+claude[-_.]+config)'
+  sel_install_content:
+    content|re:
+      - '(?i:\b(pip[23]?|uv|uvx|pipx|poetry|pdm|rye|hatch|conda|micromamba|easy_install|python[23]?(\.[0-9]+)?)\b)[^\n;&|]{0,160}?(?i:\b(install|add|sync|run|download|upgrade)\b|[ ]-m[ ]+|[ ]-c[ ]+)[^\n;&|]{0,160}?(?i:dazzle[-_.]+claude[-_.]+config)\b'
+      - '(?i:\bgit[ ]+clone\b|\bpip[23]?[ ]+install[ ]+git\+|\bcurl\b|\bwget\b)[^\n;&|]{0,200}?(?i:dazzle[-_.]+claude[-_.]+config)'
+
+  # ── TIER 2: the package identifier itself (unique, attacker-chosen string) ────
+  sel_pkg_cmd:
+    command|re: '(?i)\bdazzle[-_.]+claude[-_.]+config\b'
+  sel_pkg_content:
+    content|re: '(?i)\bdazzle[-_.]+claude[-_.]+config\b'
+
+  # ── HTTP surface: index lookup, artifact fetch, payload-repo bootstrap ───────
+  sel_pkg_url:
+    url.full|re: '(?i)dazzle[-_.]+claude[-_.]+config'
+
+  # ── suppressions: read-only inspection, SCA scanning, removal/remediation ────
+  filter_inspect_cmd:
+    command|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|find|locate|whereis|which|stat|tree)\b'
+      - '(?i)\b(uninstall|remove|purge)\b'
+      - '(?i)\b(pip-audit|safety|osv-scanner|trivy|grype|syft|snyk|semgrep|bandit|dependency-check)\b'
+      - '(?i)\bpip[23]?\b[^\n]{0,60}\b(list|freeze|show|index|cache)\b'
+  filter_inspect_content:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|find|locate|whereis|which|stat|tree)\b'
+      - '(?i)\b(uninstall|remove|purge)\b'
+      - '(?i)\b(pip-audit|safety|osv-scanner|trivy|grype|syft|snyk|semgrep|bandit|dependency-check)\b'
+      - '(?i)\bpip[23]?\b[^\n]{0,60}\b(list|freeze|show|index|cache)\b'
+
+  # Analyst web-search for the IoC: the name appears only as a search-query value,
+  # never as an index/artifact path component. Destination-agnostic - no host,
+  # domain or path is trusted by this filter.
+  filter_url_query:
+    url.full|re: '(?i)[?&](q|query|search|s|term|keywords|text|kw)=[^&#\n]{0,160}dazzle[-_.]+claude[-_.]+config'
+
+  condition: >
+    (sel_evt_proc and (sel_install_cmd or sel_install_content))
+    or (sel_evt_proc and (sel_pkg_cmd or sel_pkg_content)
+        and not (filter_inspect_cmd or filter_inspect_content))
+    or (sel_evt_http and sel_pkg_url and not filter_url_query)
+
+falsepositives:
+  - Incident responder or malware analyst deliberately installing the package inside a
+    sandbox to reproduce the behaviour - this is a true positive of the behaviour and an
+    intentional analyst action; triage by operator identity.
+  - Detection engineering work that names the package in a command line (writing a
+    blocklist, an allow/deny policy, or a YARA/Sigma rule) - Tier 2 only, and suppressed
+    when the command uses grep/find/rg or an SCA scanner.
+  - Remediation - pip/pipx/poetry uninstall or removal of the package directory during
+    cleanup; suppressed by filter_inspect_*.
+  - Software-composition-analysis or vulnerability scanners (pip-audit, safety, snyk,
+    osv-scanner, trivy, grype) emitting the package name on their command line;
+    suppressed by filter_inspect_*.
+  - An internal PyPI mirror or artifact cache performing a scheduled upstream sync that
+    pulls the artifact URL - this fires on the http_request branch and is a genuine
+    supply-chain event worth reviewing even when the sync itself is automated.
+  - Browsing the PyPI project page or a GitHub advisory page for the package via the
+    agent's HTTP fetch - not suppressed (no host/path is trusted), reported at level
+    high for analyst review.
+action: report
