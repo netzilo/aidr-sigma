@@ -1,0 +1,121 @@
+title: Path Traversal - llama_index ObsidianReader Hardlink Staging
+id: 7f3c2a94-1d6e-4b58-9a27-0c8d5e41b3f2
+status: experimental
+level: high
+description: |
+  Detects the two command-line-observable steps of hardlink-based path traversal
+  against the llama_index ObsidianReader (load_data() fails to distinguish a real
+  vault note from a link, so a link placed inside the vault is dereferenced and its
+  target read into the LLM context).
+
+  Branch A - link staging: an ln / link / cp -l / os.link() invocation whose command
+  line names BOTH a sensitive system credential path (/etc/passwd, /etc/shadow,
+  ~/.ssh/id_*, ~/.aws/credentials, ~/.kube/config, .netrc, .git-credentials,
+  /proc/self/environ) AND a markdown / Obsidian vault destination. Neither half is
+  suspicious alone; the conjunction is the attack primitive.
+
+  Branch B - reader invocation: an ObsidianReader load_data() call carried on a
+  command line that also contains directory-traversal sequences (../../, %2e%2e%2f)
+  or a sensitive absolute path as an argument.
+
+  This is a single-event content rule over execute_process command lines only. The
+  post-exploitation read itself surfaces as READ_FILE edges in the behaviour graph
+  and is intentionally out of scope here.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://cwe.mitre.org/data/definitions/59.html
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.collection
+  - attack.t1005
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec:
+    event_type: execute_process
+
+  # ── Branch A: link creation primitive ───────────────────────────────────────
+  sel_link_cmd:
+    content|re:
+      - '(?:^|[\s;&|(\[",])(?:/usr/bin/|/bin/)?(?i:ln|link)\s'
+      - '\bcp\b[^\n]{0,300}\s-{1,2}[a-zA-Z]*l[a-zA-Z=]*\s'
+      - '(?i:os\.(?:link|symlink)\s*\()'
+      - '(?i:hardlink_to\s*\()'
+
+  sel_link_target:
+    content|re:
+      - '/etc/(?:passwd|shadow|gshadow|sudoers|master\.passwd)\b'
+      - '/\.ssh/(?:id_[A-Za-z0-9]+|authorized_keys)\b'
+      - '/\.aws/credentials\b'
+      - '/\.kube/config\b'
+      - '/\.docker/config\.json\b'
+      - '/\.git-credentials\b'
+      - '/\.netrc\b'
+      - '/\.env\b'
+      - '/proc/self/environ\b'
+
+  sel_link_vault:
+    content|re:
+      - '(?i:\.md\b)'
+      - '(?i:\.markdown\b)'
+      - '(?i:obsidian)'
+      - '(?i:/vaults?/)'
+
+  # ── Branch B: reader invoked with traversal / sensitive argument ────────────
+  sel_reader_api:
+    content|contains: 'ObsidianReader'
+
+  sel_reader_load:
+    content|contains: 'load_data'
+
+  sel_reader_evidence:
+    content|re:
+      - '\.\./\.\./'
+      - '(?i:%2e%2e(?:%2f|/))'
+      - '/etc/(?:passwd|shadow)\b'
+      - '/\.ssh/id_'
+      - '/\.aws/credentials\b'
+      - '/proc/self/environ\b'
+
+  # ── Benign-context suppressors ──────────────────────────────────────────────
+  filter_help:
+    content|contains:
+      - '--help'
+      - '--version'
+      - 'info coreutils'
+
+  filter_manpage:
+    content|re: '(?i:\b(?:man|apropos|whatis|tldr)\s+(?:ln|link|cp)\b)'
+
+  filter_doc_search:
+    content|re: '(?:^|[\s;&|(\[",])(?:/[A-Za-z0-9_/.-]*)?(?i:grep|egrep|fgrep|rg|ripgrep|ag|ack|mdfind)\s'
+
+  condition: >
+    sel_exec
+    and (
+      (sel_link_cmd and sel_link_target and sel_link_vault)
+      or (sel_reader_api and sel_reader_load and sel_reader_evidence)
+    )
+    and not (filter_help or filter_manpage or filter_doc_search)
+
+falsepositives:
+  - Dotfile managers (GNU Stow, chezmoi, yadm) or personal sync scripts that link a
+    real configuration file such as ~/.env or ~/.ssh/config into a markdown notes
+    vault so it can be documented in place.
+  - Backup, migration or system-inventory scripts that hardlink /etc configuration
+    snapshots into a documentation directory that happens to contain .md files.
+  - Security research, CTF and CVE regression harnesses that intentionally reproduce
+    the ObsidianReader hardlink traversal against a scratch vault - these are true
+    detections of the technique and require analyst context to dismiss.
+  - Developer shells searching documentation that mentions both /etc/passwd and a
+    .md file in the same command line (suppressed by filter_doc_search).
+  - Reading `ln`/`cp` help or manual output while writing such a script
+    (suppressed by filter_help and filter_manpage).
+action: report
