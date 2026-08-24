@@ -1,0 +1,279 @@
+title: vLLM GroupCoordinator recv_object Pickle Deserialization RCE
+id: b7f4c2a1-9e63-4d0f-8a51-3c6d5e2f7b94
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation signature of the vLLM 0.6.0 unsafe deserialization
+  flaw in vllm.distributed.GroupCoordinator.recv_object(), which calls pickle.loads()
+  on object bytes received over the distributed-inference transport without any
+  validation. A hostile pickle executes arbitrary Python during __reduce__, which on
+  a real host materialises as the vLLM/torchrun worker process spawning a shell,
+  interpreter, or network tool.
+
+  The rule is instance-resolved. It anchors on meta["caller_pid"] of the
+  execute_process event, resolves the exact process instance with proc_instance(),
+  walks the spawn chain with proc_lineage(), and REQUIRES a vLLM / distributed-worker
+  instance inside that one lineage before considering anything. All corroborating
+  stages are queried from the event log scoped by (actor_pid, actor_start) and a
+  5-minute window around the trigger, so nothing is ever attributed across sessions
+  or across recycled PIDs. The triggering exec itself is taken from meta, never
+  re-queried, because the just-fired event races asynchronous ingest.
+
+  Weak payload shapes (bare `python -c`, `/bin/sh`) are only reported when a second
+  instance-scoped stage corroborates them: HTTP egress by a process spawned beneath
+  the payload, or a second payload-shaped exec in the same subtree.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://github.com/vllm-project/vllm/blob/main/vllm/distributed/parallel_state.py
+  - https://docs.vllm.ai/en/latest/serving/distributed_serving.html
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0050
+  - owasp.llm03
+falsepositives:
+  - Container entrypoint or launcher scripts that wrap the vLLM server and shell out
+    (`bash -c "..."`, `sh -c "exec vllm serve ..."`) — these appear as a payload-shaped
+    child of a lineage that already contains the vllm marker.
+  - Kubernetes liveness/readiness probes or sidecar health checks implemented as
+    `sh -c "curl -sf localhost:8000/health"` executed inside the vLLM pod.
+  - Model-fetch helpers spawned by the serving stack (`curl`/`wget`/`huggingface-cli`
+    pulling weights) during first start-up of a distributed worker.
+  - Benchmark, profiling and CI harnesses that launch vLLM under torchrun and then run
+    `python -c` probes or `nvidia-smi` wrappers in the same process subtree.
+  - Ray worker bootstrap under tensor parallelism, which re-execs Python and may make
+    HTTP calls to the Ray dashboard/GCS from processes below the worker.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_payload_shape:
+    content|re:
+      - '(?i)\b(?:ba|z|da|k)?sh\b\s+-c\b'
+      - '(?i)\bpython[0-9.]*\s+-c\b'
+      - '(?i)\b(?:curl|wget|nc|ncat|netcat|socat)\b'
+      - '(?i)\bbase64\b[^\n]{0,24}--?d'
+      - '(?i)(?:__reduce__|pickle\.loads|os\.system\(|subprocess\.(?:Popen|run|call|check_output))'
+      - '(?i)/dev/tcp/'
+      - '(?i)\bchmod\b[^\n]{0,24}\+x'
+  condition: sel_exec and sel_payload_shape
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── constants ────────────────────────────────────────────────────────────────
+  WINDOW_NS = 300000000000   # 5 minutes — this rule's own clustering window
+
+  # REQUIRED anchor: the caller lineage must contain a vLLM / distributed worker.
+  VLLM_MARKERS = [
+      r"(?i)\bvllm\b",
+      r"(?i)vllm[./\\](?:distributed|entrypoints|worker|engine|executor)",
+      r"(?i)GroupCoordinator",
+      r"(?i)\btorchrun\b",
+      r"(?i)torch\.distributed\.(?:run|launch)",
+  ]
+
+  # High-specificity payload shapes produced by a hostile pickle __reduce__.
+  PAYLOAD_STRONG = [
+      r"(?i)\b(?:ba|z|da|k)?sh\b\s+-c\b",
+      r"(?i)\b(?:curl|wget)\b",
+      r"(?i)\b(?:nc|ncat|netcat|socat)\b",
+      r"(?i)\bbase64\b[^\n]{0,24}--?d",
+      r"(?i)\bchmod\b[^\n]{0,24}\+x",
+      r"(?i)\b(?:perl|ruby|node)\b\s+-e\b",
+      r"(?i)os\.system\(",
+      r"(?i)subprocess\.(?:Popen|run|call|check_output)",
+      r"(?i)__reduce__",
+      r"(?i)(?:pickle\.loads|cPickle|_pickle)",
+      r"(?i)import\s+socket",
+      r"(?i)/dev/tcp/",
+      r"(?i)\bpowershell\b[^\n]{0,40}-enc",
+  ]
+
+  # Weaker shapes — only reported with a second instance-scoped stage.
+  PAYLOAD_WEAK = [
+      r"(?i)\bpython[0-9.]*\s+-c\b",
+      r"(?i)/bin/(?:ba|z|da|k)?sh\b",
+  ]
+
+  # ── pure helpers (no graph / log calls) ──────────────────────────────────────
+  def matches_any(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def proc_text(e):
+      return e.get("actor_path", "") + " " + e.get("cmdline", "") + " " + e.get("parent_path", "")
+
+  def short(p):
+      parts = p.split("/")
+      return parts[-1]
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  # ── relevance gate — pure string checks on meta only ─────────────────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if matches_any(PAYLOAD_STRONG, cmd):
+          return True
+      if matches_any(PAYLOAD_WEAK, cmd):
+          return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd    = meta.get("content", "")
+      strong = matches_any(PAYLOAD_STRONG, cmd)
+
+      # ── anchor on the exact triggering instance ──────────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # REQUIRED: a vLLM / distributed worker inside THIS lineage.
+      anchor = None
+      for x in lineage:
+          if matches_any(VLLM_MARKERS, proc_text(x)):
+              anchor = x
+              break
+      if anchor == None:
+          return "allow"
+
+      # ── window ───────────────────────────────────────────────────────────────
+      since = 0
+      until = 0
+      if event_ts > 0:
+          since = event_ts - WINDOW_NS
+          if since < 0:
+              since = 0
+          until = event_ts
+
+      # ── instance-exact subtree rooted at the triggering caller ───────────────
+      desc = {}
+      desc[inst["actor_pid"]] = inst["actor_start"]
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=until, limit=2000)
+      for i in range(3):
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              if pp in desc and desc[pp] == e.get("parent_start", ""):
+                  desc[e["actor_pid"]] = e["actor_start"]
+
+      # HTTP egress by the payload subtree. If the caller instance IS the vLLM
+      # worker itself, exclude it — a serving worker's own HTTP traffic is not
+      # evidence of anything.
+      http_scope = {}
+      for pid in desc:
+          http_scope[pid] = desc[pid]
+      if matches_any(VLLM_MARKERS, proc_text(inst)):
+          if inst["actor_pid"] in http_scope:
+              http_scope.pop(inst["actor_pid"])
+
+      http_ev = None
+      for pid in http_scope:
+          hits = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              actor_start=int(http_scope[pid]),
+                              since_ns=since, until_ns=until, limit=10)
+          if hits:
+              http_ev = hits[0]
+              break
+
+      # A second, earlier payload-shaped exec inside the same subtree.
+      follow = None
+      for e in rows:
+          pp = e.get("parent_pid", "")
+          if pp not in desc:
+              continue
+          if desc[pp] != e.get("parent_start", ""):
+              continue
+          if e.get("actor_pid", "") == inst["actor_pid"]:
+              continue
+          ts_ok = (event_ts == 0) or (int(e.get("ts", "0")) < event_ts)
+          if not ts_ok:
+              continue
+          if matches_any(PAYLOAD_STRONG, e.get("cmdline", "")):
+              follow = e
+              break
+
+      # Weak shape alone is not reportable.
+      if not strong and http_ev == None and follow == None:
+          return "allow"
+
+      # ── kill chain, rooted at the session owner ──────────────────────────────
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      path_str = " <- ".join(names)
+
+      chain.append(step(ev_edge(anchor),
+          stage_id="Vulnerable Worker",
+          stage_desc="vLLM/distributed worker in caller lineage: " +
+                     short(anchor.get("actor_path", "")) + " pid " + anchor.get("actor_pid", "?")))
+
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+          "cmdline":  cmd[:400],
+      }
+      shape = "strong" if strong else "weak+corroborated"
+      chain.append(step(trig,
+          stage_id="Deserialization Payload Execution",
+          stage_desc="payload-shaped exec (" + shape + ") beneath the worker: " + cmd[:200]))
+
+      stages = 2
+      if http_ev != None:
+          chain.append(step(ev_edge(http_ev),
+              stage_id="Payload Egress",
+              stage_desc="HTTP request by payload subtree process " +
+                         short(http_ev.get("actor_path", "")) + " to " +
+                         http_ev.get("host", "?") + http_ev.get("path", "")))
+          stages = stages + 1
+      if follow != None:
+          chain.append(step(ev_edge(follow),
+              stage_id="Follow-on Execution",
+              stage_desc="additional payload-shaped exec in same subtree: " +
+                         follow.get("cmdline", "")[:160]))
+          stages = stages + 1
+
+      reason = ("Possible vLLM GroupCoordinator.recv_object() pickle deserialization RCE — " +
+                str(stages) + " instance-scoped stages; lineage " + path_str +
+                "; spawned: " + cmd[:160])
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
