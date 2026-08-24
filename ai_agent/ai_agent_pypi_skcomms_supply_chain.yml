@@ -1,0 +1,108 @@
+title: Supply Chain PyPI skcomms Acquisition
+id: 7c1f4b2e-9a3d-4f68-b1c5-2e8d0a5f7364
+status: experimental
+level: medium
+description: |
+  Reports acquisition of the PyPI package 'skcomms' (reported malicious/unvetted at
+  version 0.2.15, advertised as multi-channel transport and addressing for AI agents)
+  by a monitored agent or one of its subprocesses.
+
+  Two independent single-event surfaces are covered, because the package-manager layer
+  itself is not observable by the engine (no package_install event type, no
+  INSTALLED_PACKAGE edge, and file_write has no live producer):
+
+    1. execute_process — a Python package-manager invocation (pip / pipx / uv / poetry /
+       pdm / hatch / rye / conda family) whose command line carries an install verb AND
+       the 'skcomms' distribution token (optionally with extras and a version specifier),
+       or the exact pin 'skcomms==0.2.15'.
+    2. http_request — an index or artifact fetch whose URL path is a package-index style
+       path AND names the skcomms distribution (e.g. /simple/skcomms/, /pypi/skcomms/json,
+       /packages/<hash>/skcomms-0.2.15-py3-none-any.whl). This catches installs driven by
+       requirements.txt / lockfiles, where the package name never appears on a command line.
+
+  This rule is deliberately ACTION: REPORT. The upstream report concedes it had no access
+  to the package source, no detonation results and no CVE — the maliciousness of skcomms is
+  unconfirmed. Acquisition of a named, unvetted distribution is a legitimate thing to record
+  and triage; it is not sufficient evidence to interrupt a developer's build. Escalate to a
+  blocking posture only after the artifact is confirmed malicious.
+author: Tanya
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://pypi.org/project/skcomms/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - owasp.a06_2021
+  - owasp.a08_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Surface 1: package-manager subprocess ─────────────────────────────────
+  sel_exec_install:
+    event_type: execute_process
+    content|re: '(?i)\b(?:pip|pip3|pipx|uv|poetry|pdm|hatch|rye|conda|mamba|micromamba)\b[^\n]{0,300}?\b(?:install|add|sync)\b'
+
+  # Distribution token with real boundaries: matches skcomms, skcomms[extra],
+  # skcomms==0.2.15, .../skcomms.git — but NOT myskcomms, skcommsx, skcomms-fork.
+  sel_pkg_token:
+    event_type: execute_process
+    content|re: '(?i)(?:^|[\s''"=/@])skcomms(?:\[[^\]\s]{1,64}\])?(?:[=<>!~]{1,2}[^\s''";]{1,40})?(?:$|[\s''";,.@\]\)])'
+
+  # Exact reported pin — unambiguous on its own, no install verb required.
+  sel_exec_pinned:
+    event_type: execute_process
+    content|re: '(?i)\bskcomms\s*==\s*0\.2\.15\b'
+
+  # ── Surface 2: index / artifact fetch ─────────────────────────────────────
+  sel_http_index:
+    event_type: http_request
+    url.full|re: '(?i)/(?:simple|pypi|packages|repository|api/pypi)/'
+
+  sel_http_pkg:
+    event_type: http_request
+    url.full|re: '(?i)/skcomms(?:[-/]|\.tar\.gz|\.whl|\.zip)'
+
+  # ── Filters — benign handling of the same string ──────────────────────────
+
+  # Removing the package is remediation, not acquisition.
+  filter_remediation:
+    content|re: '(?i)\b(?:pip|pip3|pipx|uv|poetry|pdm|conda|mamba|micromamba)\b[^\n]{0,200}\b(?:uninstall|remove|purge)\b'
+
+  # Read-only inspection, resolution previews and help text.
+  filter_inspection:
+    content|re:
+      - '(?i)\bpip3?\s+(?:show|list|freeze|index|cache|config|check|debug)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)\b(?:pip|pip3|uv|poetry|pdm)\b[^\n]{0,120}\s--help(?:\s|$)'
+
+  # Security tooling and text search that merely mention the distribution name.
+  filter_tooling:
+    content|re:
+      - '(?i)\b(?:pip-audit|safety|osv-scanner|osv-detector|trivy|grype|syft|snyk|dependency-check|bandit|semgrep|reuse|cyclonedx)\b'
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|awk|sed|cat|head|tail|less|more|diff)\b[^\n]{0,200}\bskcomms\b'
+
+  condition: >
+    (((sel_exec_install and sel_pkg_token) or sel_exec_pinned)
+     and not (filter_remediation or filter_inspection or filter_tooling))
+    or (sel_http_index and sel_http_pkg)
+
+falsepositives:
+  - Malware analyst or supply-chain researcher deliberately installing skcomms==0.2.15 inside
+    an isolated sandbox to obtain the source for review — the exact behaviour this rule reports.
+  - An internal or private-index distribution that happens to share the name 'skcomms';
+    the rule cannot distinguish index origin from the command line alone.
+  - CI or vendoring jobs that mirror large portions of the PyPI simple index, producing
+    /simple/skcomms/ fetches with no intent to install.
+  - A README, runbook or tutorial command line echoed, printed or pasted into a terminal
+    (mitigated for grep/cat/sed-style inspection by filter_tooling, not for bare `echo`).
+  - Dependency-resolution dry runs and lockfile refreshes that resolve but never install
+    (mitigated by filter_inspection for --dry-run and pip show/list/freeze).
+action: report
