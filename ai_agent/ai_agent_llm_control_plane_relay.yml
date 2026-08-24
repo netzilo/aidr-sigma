@@ -1,0 +1,256 @@
+title: LLM Control Plane Relay (Duplicated Vendor API Surface)
+id: 7c1d5f2a-9b64-4f0e-8a37-2e6d4c81b9af
+status: experimental
+level: high
+description: |
+  Detects the only network-observable consequence of an adversary "hook client"
+  (e.g. the PyPI package 'zwischen') inserting itself between Claude Code / Codex
+  and the model vendor: the same VENDOR-PROPRIETARY LLM control-plane path being
+  served by more than one distinct endpoint for a single monitored agent inside a
+  one-hour window.
+
+  A hook client cannot hijack a coding agent's model traffic without either
+  rewriting the base URL or mirroring calls to a second endpoint. Either way the
+  proprietary request shape (Anthropic /v1/messages, /v1/complete, the ChatGPT
+  Codex /backend-api/codex/* surface, Gemini /v1beta/models/<m>:<op>) appears on
+  an endpoint that is not the single vendor endpoint the agent normally uses.
+  Unlike /v1/chat/completions, these shapes are single-vendor by construction, so
+  duplication across endpoints is the anomaly - not the traffic itself.
+
+  Scope honesty (answers the triage dissent): the schema exposes no
+  package_install, module_import or api_call event and no INSTALLED_PACKAGE or
+  API_INTERCEPT edge, so this rule CANNOT confirm that 'zwischen' was installed,
+  that an import-time hook was registered, or that any specific package is
+  responsible. It detects the effect (a second control plane for the agent's
+  model traffic) from HTTP_REQUEST edges plus the instance-resolved event log,
+  attributes it to one monitored agent, and reports for human triage. It is
+  deliberately action: report because a sanctioned enterprise LLM gateway is
+  network-indistinguishable from an unsanctioned relay.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1557/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.collection
+  - attack.t1557
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - atlas.aml.t0025
+  - owasp.llm03
+  - owasp.llm02
+falsepositives:
+  - Sanctioned enterprise LLM gateway (LiteLLM, Portkey, Helicone, an internal
+    Bedrock/Vertex bridge) that re-exposes the Anthropic Messages or Codex
+    backend surface while the same agent also reaches the vendor directly. This
+    is a legitimate man-in-the-middle and is not distinguishable from a malicious
+    one on network shape alone - triage by asking whether the second endpoint is
+    an approved gateway.
+  - Developer running a local or self-hosted Anthropic-compatible endpoint
+    (claude-code-router, litellm, a proxy on 127.0.0.1) alongside direct vendor
+    access.
+  - Agent switched between staging and production endpoints of the same vendor,
+    or between a vendor host and a regional / enterprise alias, inside the same
+    hour.
+  - Deliberate traffic capture or replay tooling (mitmproxy, VCR-style fixtures)
+    used during development of the agent itself.
+  - Multiple agents on one host collapsing onto the same path-keyed Process node;
+    mitigated by requiring both endpoints on that agent's own HTTP_REQUEST edges.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_vendor_control_plane:
+    event_type: http_request
+    path|re: '(?i)^/(v1/(messages|complete)|backend-api/(codex|conversation)|v1beta/models/)'
+  condition: sel_vendor_control_plane
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # Path shapes that IDENTIFY a vendor LLM control plane. These are detection
+  # signatures for "this request has shape X" - matching one permits nothing, and
+  # no host, domain or path below is trusted or exempted anywhere in this rule.
+  VENDOR = [
+      "^/v1/messages",
+      "^/v1/complete",
+      "^/backend-api/codex",
+      "^/backend-api/conversation",
+      "^/v1beta/models/[^/]+:",
+  ]
+  GENERIC = [
+      "^/v1/chat/completions",
+      "^/v1/completions",
+      "^/v1/responses",
+      "^/openai/deployments/[^/]+/",
+      "^/api/generate",
+      "^/api/chat",
+  ]
+
+  WINDOW_NS   = 3600000000000    # 1h - endpoints must co-occur to be one session
+  REFRESH_NS  = 60000000000      # 60s - store write throttle
+  SUPPRESS_NS = 21600000000000   # 6h - re-report the same duplication at most this often
+
+  def fam(p):
+      if p == "":
+          return ""
+      q = p.lower()
+      for r in VENDOR:
+          if re.match(r, q):
+              return "vendor" + r
+      for r in GENERIC:
+          if re.match(r, q):
+              return "generic" + r
+      return ""
+
+  def run():
+      # ---- 1. Relevance gate: pure string work on meta, no graph, no log. ----
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      tpath = meta.get("path", "")
+      tfam  = fam(tpath)
+      if not tfam.startswith("vendor"):
+          return "allow"
+      thost = meta.get("host", "")
+      now   = int(meta.get("event_ts", "0"))
+
+      # ---- 2. Cheap fast path: remember which endpoints served this vendor
+      #         control plane. One store read on the overwhelmingly common
+      #         single-endpoint case, then out - no traversal at all.
+      fam_hosts = {}
+      if now > 0:
+          book  = store_get("fam_hosts") or {}
+          known = book.get(tfam, {})
+          fresh = {}
+          for h in known:
+              if now - int(known[h]) < WINDOW_NS:
+                  fresh[h] = known[h]
+          changed = False
+          if thost != "":
+              if thost not in fresh:
+                  fresh[thost] = now
+                  changed = True
+              elif now - int(fresh[thost]) > REFRESH_NS:
+                  fresh[thost] = now
+                  changed = True
+          if changed and store_usage()["free"] > 8192:
+              book[tfam] = fresh
+              store_set("fam_hosts", book)
+          for h in fresh:
+              fam_hosts[h] = True
+          if len(fam_hosts) < 2:
+              return "allow"
+      elif thost != "":
+          fam_hosts[thost] = True
+
+      # ---- 3. Corroborate from the instance-resolved event log (exact paths)
+      #         and measure how wide the relay surface is.
+      since = 0
+      if now > WINDOW_NS:
+          since = now - WINDOW_NS
+      gen_hosts = {}
+      for ev in query_events(kind="HTTP_REQUEST", since_ns=since, limit=2000):
+          h = ev.get("host", "")
+          if h == "":
+              continue
+          f = fam(ev.get("path", ""))
+          if f == tfam:
+              fam_hosts[h] = True
+          elif f.startswith("generic"):
+              gen_hosts[h] = True
+      if len(fam_hosts) < 2:
+          return "allow"
+
+      # ---- 4. Which of the duplicated endpoints are on the public internet?
+      #         (engine-computed property, not an author-supplied host list)
+      public = {}
+      for u in graph(type="URL"):
+          uh = u.get("host", "")
+          if uh in fam_hosts and u.get("is_ztna_host", "0") == "0":
+              public[uh] = True
+
+      # ---- 5. Attribute the duplicated surface to ONE monitored agent via its
+      #         own HTTP_REQUEST edges. No cross-agent stitching.
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+          hit = {}
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              h = u.get("host", "")
+              if h == "" or h not in fam_hosts:
+                  continue
+              if h not in hit:
+                  hit[h] = e
+          if len(hit) < 1:
+              continue
+
+          names = []
+          for h in hit:
+              names.append(h)
+          trigger_new = False
+          if thost != "" and thost not in hit:
+              names.append(thost)
+              trigger_new = True
+          total = len(names)
+          if total < 2:
+              continue
+          # Reachable attacker infrastructure is a precondition of the threat;
+          # a wider fan-out (3+ endpoints) is reported regardless of placement.
+          if len(public) < 1 and total < 3:
+              continue
+
+          key  = aid + "|" + tfam + "|" + ",".join(sorted(names))
+          seen = store_get("reported") or {}
+          last = seen.get(key, 0)
+          if now > 0 and last != 0 and now - int(last) < SUPPRESS_NS:
+              return "allow"
+
+          chain = new_chain(aid)
+          order = []
+          for h in hit:
+              order.append((int(hit[h].get("first_ts", "0")), h))
+          for pair in sorted(order):
+              h  = pair[1]
+              e  = hit[h]
+              u  = node(e["to"])
+              zt = "public"
+              if u != None and u.get("is_ztna_host", "0") == "1":
+                  zt = "internal/ztna"
+              chain.append(step(e, stage_id="Duplicated Control Plane",
+                                stage_desc="agent sent vendor LLM API calls (" + tpath +
+                                           " shape) to " + h + " [" + zt + ", " +
+                                           e.get("count", "1") + " requests]"))
+          if trigger_new:
+              synth = {
+                  "from": aid, "to": "https://" + thost, "kind": "HTTP_REQUEST",
+                  "ts": str(now), "first_ts": str(now), "last_ts": str(now),
+                  "count": "1", "method": meta.get("method", ""),
+              }
+              chain.append(step(synth, stage_id="Divergent Endpoint",
+                                stage_desc="current request routes the same vendor path " +
+                                           tpath + " to a second endpoint: " + thost))
+
+          reason = ("Vendor LLM control plane (" + tpath + ") served by " + str(total) +
+                    " distinct endpoints for one agent: " + ", ".join(sorted(names)) +
+                    " - consistent with an interposed hook/relay client rewriting or " +
+                    "mirroring Claude Code / Codex model traffic")
+          if len(gen_hosts) > 1:
+              reason = reason + "; " + str(len(gen_hosts)) + \
+                       " endpoints also serving generic completion APIs"
+          if len(public) < 1:
+              reason = reason + "; all endpoints internal/ztna - verify gateway topology"
+          print(reason)
+
+          if now > 0 and store_usage()["free"] > 4096:
+              seen[key] = now
+              store_set("reported", seen)
+
+          return {"action": "report", "reason": reason, "chain": chain}
+      return "allow"
+
+  result = run()
