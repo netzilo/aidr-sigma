@@ -1,0 +1,126 @@
+title: LangChain PAL Math Prompt RCE Payload
+id: 7c1f3a2e-9b64-4d1a-8f57-2c0b6ad91e34
+status: experimental
+level: high
+description: |
+  Detects exploitation of CVE-2023-29374 in LangChain <= 0.0.194, where
+  PALChain.from_math_prompt() and PALChain.from_colored_object_prompt()
+  hand LLM-generated Python straight to eval()/exec() without sanitisation.
+
+  Because the vulnerable sink evaluates an *expression*, the canonical payload
+  cannot use an `import` statement -- it must smuggle the module in via
+  __import__('os').system(...), getattr(__import__(...)), __builtins__ lookup,
+  or a __class__.__subclasses__ sandbox walk. That shape is the anchor of this
+  rule.
+
+  Two single-event surfaces are covered:
+    * execute_process -- the command line of the interpreter/child process that
+      actually carries the eval-expression escape payload.
+    * http_request    -- the outbound request body that carries the PAL /
+      LLMMath chain surface (from_math_prompt, from_colored_object_prompt,
+      `def solution():` scaffolding, numexpr.evaluate) together with an OS
+      command-execution or credential-harvesting primitive in the same body.
+
+  On the http_request surface the LangChain chain marker AND a code-execution
+  primitive must both be present in the same event; the PAL few-shot template
+  alone never fires.
+author: Tanya
+date: "2025-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-29374
+  - https://github.com/langchain-ai/langchain/issues/5872
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1203
+  - atlas.aml.t0050
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_evt_exec:
+    event_type: execute_process
+
+  sel_evt_http:
+    event_type: http_request
+
+  # LangChain PAL / LLMMath attack surface markers
+  sel_pal_surface:
+    content|re:
+      - '(?i)\bfrom_math_prompt\b'
+      - '(?i)\bfrom_colored_object_prompt\b'
+      - '(?i)\bcolored_objects?_prompt\b'
+      - '(?i)\b(PALChain|LLMMathChain|LLMSymbolicMathChain)\b'
+      - '(?i)\blangchain[A-Za-z0-9_.]{0,40}\.pal\b'
+      - '(?i)\bdef\s+solution\s*\(\s*\)\s*:'
+      - '(?i)\bnumexpr\s*\.\s*evaluate\s*\('
+
+  # eval()-expression escape primitives -- the CVE-2023-29374 payload shape.
+  # An `import` statement is impossible inside eval(), so the exploit must use
+  # one of these forms. Legitimate code writes `import os` instead.
+  sel_eval_escape:
+    content|re:
+      - '__import__\s*\(\s*[\x27"]os[\x27"]\s*\)\s*\.\s*(system|popen|exec[lv][a-z]{0,3}|spawn[a-z]{0,3}|environ|remove|unlink|kill|fork|setuid|putenv)\b'
+      - '__import__\s*\(\s*[\x27"](subprocess|pty|socket|ctypes|importlib)[\x27"]\s*\)\s*\.\s*[A-Za-z_]'
+      - '(?i)\bgetattr\s*\(\s*__import__\s*\(\s*[\x27"](os|subprocess|builtins)[\x27"]'
+      - '(?i)__builtins__\s*(\[|\.\s*get\s*\(|\.\s*__getitem__\s*\()[^\n]{0,40}(eval|exec|__import__|open)'
+      - '\.__class__\s*\.\s*__(bases|mro|subclasses)__'
+      - '(?i)\bexec\s*\(\s*(compile\s*\(|__import__\s*\(|base64\b|bytes\s*\.\s*fromhex)'
+
+  # Direct OS command execution / credential harvesting primitives
+  sel_os_exec:
+    content|re:
+      - '(?i)\bos\s*\.\s*(system|popen|execv?[lpe]{0,3}|spawn[lv][pe]{0,2})\s*\('
+      - '(?i)\bsubprocess\s*\.\s*(Popen|run|call|check_output|check_call|getoutput|getstatusoutput)\s*\('
+      - '(?i)\bpty\s*\.\s*spawn\s*\('
+      - '(?i)\bsocket\s*\.\s*socket\s*\([^\n]{0,80}\bconnect\s*\('
+      - '(?i)\bos\s*\.\s*environ\b[^\n]{0,60}\b(API[_-]?KEY|SECRET[_-]?(KEY|ACCESS)?|ACCESS[_-]?KEY|SESSION[_-]?TOKEN|PASSWORD)\b'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+
+  # Vulnerability advisories, SBOM / dependency-scanner output, pinned deps
+  filter_advisory:
+    content|re:
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\bGHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}\b'
+      - '(?i)\b(pip-audit|safety\s+check|dependabot|snyk|trivy|grype|osv-scanner|renovate\[bot\])\b'
+      - '(?m)^\s*langchain(-[a-z]+)?\s*[<>=!~]='
+      - '(?i)\bpip\s+(install|download)\b[^\n]{0,80}\blangchain\b'
+      - '(?i)\b(security\s+(advisory|bulletin|training)|responsible\s+disclosure|vulnerability\s+(report|disclosure|write[- ]?up)|patched\s+in\s+version)\b'
+
+  # Test harnesses that intentionally exercise the vulnerable code path
+  filter_test_harness:
+    content|re:
+      - '(?i)\b(pytest|unittest|conftest\.py|@pytest\.mark|def\s+test_[a-z0-9_]{2,40}\s*\()'
+      - '(?i)/tests?(_unit|/unit_tests)?/[A-Za-z0-9_./-]{0,60}(pal|math|colored)[A-Za-z0-9_./-]{0,20}\.py\b'
+
+  # LangChain's own guardrail / validation internals being read or executed
+  filter_lc_internals:
+    content|re:
+      - '(?i)\b(PALValidation|forbidden_imports|solution_expression_name|solution_expression_type|validate_code)\b'
+
+  condition: >
+    (
+      (sel_evt_exec and sel_eval_escape) or
+      (sel_evt_exec and sel_pal_surface and sel_os_exec) or
+      (sel_evt_http and sel_pal_surface and sel_eval_escape) or
+      (sel_evt_http and sel_pal_surface and sel_os_exec)
+    ) and not (filter_advisory or filter_test_harness or filter_lc_internals)
+
+falsepositives:
+  - Security researchers or SOC analysts pasting the CVE-2023-29374 proof-of-concept
+    into an agent session; suppressed when the CVE/GHSA identifier or advisory
+    language is present in the same payload.
+  - LangChain's own unit tests (tests/unit_tests/chains/test_pal.py and similar)
+    exercising PALValidation and the forbidden-import guardrails.
+  - DevOps and CI one-liners of the form python -c "__import__('os').system(...)";
+    rare but real, and the reason this rule reports rather than blocks.
+  - Dependency and container scanners emitting advisory text that quotes the
+    vulnerable function names alongside the exploit snippet.
+  - Documentation, blog posts or training material about the vulnerability that an
+    agent fetched and forwarded to an LLM endpoint.
+
+action: report
