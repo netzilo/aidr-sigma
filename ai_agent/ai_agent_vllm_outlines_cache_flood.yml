@@ -1,0 +1,287 @@
+title: vLLM Structured-Decoding Grammar Cache Flood
+id: 7b3c1f9e-4d2a-4f6b-9c81-2e5a6d0f38b4
+status: experimental
+level: high
+description: |
+  Detects the vLLM / outlines unbounded on-disk grammar cache denial-of-service
+  pattern: a client streams structured-output (guided decoding) requests at an
+  inference endpoint where every request carries a NEW, unique schema/grammar,
+  so every request compiles and persists a fresh FSM/grammar artefact into the
+  outlines filesystem cache until the volume fills.
+
+  The engine exposes no disk-utilisation or cache-size event, and file_write is
+  replay-only, so the volumetric signal is synthesised inside the script from
+  two live sources:
+
+    1. Per-host distinct-schema cardinality over a sliding 10 minute window.
+       Each guided-decoding request body is fingerprinted (FNV-1a over the
+       extracted guided_json / json_schema / guided_grammar / guided_regex /
+       guided_choice fragment) and the fingerprint set is kept in this rule's
+       private store. Normal structured-output clients reuse a handful of
+       schemas; a cache-flood attacker by definition never repeats one.
+       That cardinality IS the volumetric semantic the raw HTTP_REQUEST edge
+       lacks.
+    2. Graph corroboration once the cardinality anchor trips: the HTTP_REQUEST
+       edge to the target host is pulled from the behaviour graph for
+       attribution, and WRITE_FILE edges are walked with fs_activity() to
+       resolve grammar/FSM cache paths (outlines / grammar cache / fsm cache)
+       written inside the same window. The cumulative WRITE_FILE edge count is
+       diffed against the previously stored value so monotonic, unbounded cache
+       growth is reported as a delta rather than an absolute.
+
+  When the vLLM server is remote the write stage is absent; the rule still
+  reports on the schema-cardinality anchor alone and says so in the reason.
+  Verdict is report only - this is a capacity-abuse signal, not a payload.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://atlas.mitre.org/techniques/AML.T0029
+  - https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.001
+  - atlas.aml.t0029
+  - owasp.llm10
+falsepositives:
+  - Model-evaluation or benchmark harnesses that generate a per-item JSON schema
+    (e.g. one schema per test row) and fire hundreds of guided-decoding requests
+    in a burst. Mitigated by the 10 minute window, the 25-unique-schema floor,
+    the 15 minute per-host report cooldown and report-only enforcement.
+  - Agent frameworks that inline a dynamically built tool/response schema on
+    every call, so each request body differs. These usually reuse the same small
+    set of tool schemas, which collapses to few fingerprints; only genuinely
+    novel schemas per request accumulate.
+  - Fuzzing or conformance test suites that intentionally mutate guided_json /
+    guided_grammar payloads against a staging inference server.
+  - Load or soak testing of a structured-output endpoint with randomised schemas.
+  - A shared multi-tenant inference host serving many unrelated applications,
+    where the aggregate distinct-schema count is high without any single abuser.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_structured:
+    content|contains:
+      - 'guided_json'
+      - 'guided_grammar'
+      - 'guided_regex'
+      - 'guided_choice'
+      - 'guided_decoding_backend'
+      - 'json_schema'
+  condition: sel_http and sel_structured
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── vLLM / outlines unbounded grammar-cache flood ───────────────────────────
+  WINDOW_NS       = 600000000000   # 10 minutes
+  REPORT_COOLDOWN = 900000000000   # 15 minutes, per host
+  DISTINCT_MIN    = 25             # unique schemas per window
+  DISTINCT_MIN_OL = 12             # lower floor once outlines backend is named
+  MAX_FPS         = 400            # fingerprints tracked per host
+  MAX_HOSTS       = 8
+  FP_INPUT_MAX    = 2000
+  MAX_WRITE_STEPS = 4
+
+  STRUCT_MARKERS = ["guided_json", "guided_grammar", "guided_regex",
+                    "guided_choice", "guided_decoding_backend", "json_schema"]
+
+  SCHEMA_PATTERNS = [r'"guided_json"[\s\S]{0,2000}',
+                     r'"json_schema"[\s\S]{0,2000}',
+                     r'"guided_grammar"[\s\S]{0,1500}',
+                     r'"guided_regex"[\s\S]{0,1000}',
+                     r'"guided_choice"[\s\S]{0,1000}']
+
+  # fs_activity path filter: every whitespace token must appear in the path
+  CACHE_PATTERNS = ["outlines", "cache outlines", "grammar cache", "cache fsm"]
+
+  # ── pure helpers (no graph / log / store calls) ─────────────────────────────
+  def is_structured(body):
+      low = body.lower()
+      for m in STRUCT_MARKERS:
+          if m in low:
+              return True
+      return False
+
+  def names_outlines(body):
+      return "outlines" in body.lower()
+
+  def fnv(s):
+      h = 2166136261
+      for c in s[:FP_INPUT_MAX].elem_ords():
+          h = ((h ^ c) * 16777619) % 4294967296
+      return "%x" % h
+
+  def schema_fp(body):
+      for pat in SCHEMA_PATTERNS:
+          m = re.find(pat, body)
+          if m != None:
+              return fnv(m)
+      return None
+
+  # ── store housekeeping ─────────────────────────────────────────────────────
+  def make_room(key):
+      keys = store_keys()
+      if key in keys:
+          return
+      hostkeys = [k for k in keys if k.startswith("h:")]
+      if len(hostkeys) < MAX_HOSTS:
+          return
+      oldest = ""
+      oldest_ts = 0
+      for k in hostkeys:
+          st = store_get(k) or {}
+          t = int(st.get("last", 0))
+          if oldest == "" or t < oldest_ts:
+              oldest = k
+              oldest_ts = t
+      if oldest != "":
+          store_delete(oldest)
+
+  def save(key, st):
+      if store_usage()["free"] > 16384:
+          store_set(key, st)
+
+  # ── graph corroboration (only reached after the cardinality anchor) ─────────
+  def http_evidence(host):
+      best = None
+      for p in graph(type="Process"):
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None or u.get("host", "") != host:
+                  continue
+              if p.get("agent", "0") == "1":
+                  return [p["id"], e]
+              if best == None:
+                  best = [p["id"], e]
+      return best
+
+  def cache_writes(now):
+      hits = []
+      for p in graph(type="Process"):
+          for e in edges(p["id"], dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              for pat in CACHE_PATTERNS:
+                  ents = fs_activity(fs["id"], "WRITE", pat)
+                  if not ents:
+                      continue
+                  recent = None
+                  for en in ents[:5]:
+                      if now - int(en["ts"]) <= WINDOW_NS:
+                          recent = en
+                          break
+                  if recent == None:
+                      continue
+                  cnt = int(e.get("count", "0"))
+                  wkey = "w:" + fs["id"]
+                  prev = store_get(wkey)
+                  delta = cnt
+                  if prev != None:
+                      delta = cnt - int(prev)
+                  if store_usage()["free"] > 8192:
+                      store_set(wkey, cnt)
+                  if delta <= 0:
+                      delta = cnt
+                  hits.append([e, recent, delta])
+                  break
+              if len(hits) >= MAX_WRITE_STEPS:
+                  break
+          if len(hits) >= MAX_WRITE_STEPS:
+              break
+      return hits
+
+  def run():
+      # 1. relevance gate - pure string checks on meta only
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      body = meta.get("content", "")
+      host = meta.get("host", "")
+      now  = int(meta.get("event_ts", "0"))
+      if body == "" or host == "" or now == 0:
+          return "allow"
+      if not is_structured(body):
+          return "allow"
+      fp = schema_fp(body)
+      if fp == None:
+          return "allow"
+
+      # 2. keep the private store inside quota (never let store_set raise)
+      if store_usage()["free"] < 65536:
+          store_reset()
+
+      # 3. sliding-window distinct-schema cardinality per destination host
+      key = "h:" + host
+      make_room(key)
+      old = store_get(key) or {}
+      fps = {}
+      for k, v in old.get("fps", {}).items():
+          if now - int(v) <= WINDOW_NS:
+              fps[k] = int(v)
+      if len(fps) < MAX_FPS:
+          fps[fp] = now
+      ol = 0
+      if int(old.get("outlines", 0)) == 1 or names_outlines(body):
+          ol = 1
+      rep = int(old.get("reported", 0))
+      st = {"fps": fps, "outlines": ol, "reported": rep, "last": now}
+      save(key, st)
+
+      distinct = len(fps)
+      limit = DISTINCT_MIN
+      if ol == 1:
+          limit = DISTINCT_MIN_OL
+      if distinct < limit:
+          return "allow"
+      if rep > 0 and now - rep < REPORT_COOLDOWN:
+          return "allow"   # already reported this host in this window
+
+      # 4. anchor tripped - now (and only now) touch the graph
+      ev     = http_evidence(host)
+      writes = cache_writes(now)
+
+      root = ""
+      if ev != None:
+          root = ev[0]
+      if root == "":
+          ap = meta.get("agent_name", "")
+          if ap == "":
+              root = "process://unknown"
+          else:
+              root = "process://" + ap
+
+      chain = new_chain(root)
+      if ev != None:
+          chain.append(step(ev[1], stage_id="Schema Flood",
+                            stage_desc="guided-decoding requests to " + host +
+                                       " carrying " + str(distinct) +
+                                       " unique schemas within 10m"))
+      growth = 0
+      for w in writes:
+          chain.append(step(w[0], stage_id="Grammar Cache Growth",
+                            stage_desc="grammar/FSM cache write: " + w[1]["path"] +
+                                       " (+" + str(w[2]) + " writes)",
+                            activity=w[1]))
+          growth += 1
+
+      reason = ("vLLM/outlines grammar-cache flood: " + str(distinct) +
+                " unique guided-decoding schemas sent to " + host + " in 10m")
+      if ol == 1:
+          reason = reason + " (outlines backend named in request)"
+      if growth > 0:
+          reason = reason + "; " + str(growth) + " grammar-cache path(s) growing on disk"
+      else:
+          reason = reason + "; no local cache writes observed (inference host likely remote)"
+
+      st = {"fps": fps, "outlines": ol, "reported": now, "last": now}
+      save(key, st)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
