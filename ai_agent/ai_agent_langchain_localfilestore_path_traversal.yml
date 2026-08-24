@@ -1,0 +1,112 @@
+title: LangChain LocalFileStore Path Traversal Invocation
+id: 6f1a7c92-3d84-4e05-9b7c-2a5f0c1d84e3
+status: experimental
+level: high
+description: |
+  Detects a process being spawned whose command line simultaneously references the
+  LangChain LocalFileStore key/value backend, one of its unsanitised accessor methods
+  (mset / mget / mdelete / yield_keys), and a directory-traversal sequence.
+
+  LocalFileStore joins caller-supplied keys onto its root directory without normalising
+  the result, so a key such as "../../../etc/cron.d/payload" escapes the intended cache
+  root and lets an attacker read or write arbitrary files with the privileges of the
+  agent process. In an agent deployment this is typically reached through an inline
+  interpreter invocation (python -c / python3 -c) emitted by a tool call, which surfaces
+  as an execute_process event carrying the full payload on the command line.
+
+  Single-event content rule: it inspects only the spawned command line. It does not
+  attempt to prove the write landed - the READ_FILE / WRITE_FILE graph edges are the
+  corroborating signal for a follow-up behavioural rule.
+
+  Mapped to OWASP Top 10 A01:2021 (Broken Access Control) and A03:2021 (Injection).
+  No MITRE ATLAS technique applies - this is a library input-validation flaw in an AI
+  framework, not an ML-specific adversary technique - and no OWASP LLM/ASI identifier
+  fits, so those tag namespaces are deliberately omitted rather than guessed.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://python.langchain.com/docs/integrations/stores/file_system/
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.execution
+  - attack.t1059.006
+  - cwe.cwe-22
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: only child-process spawn events carry a full command line.
+  sel_event:
+    event_type: execute_process
+
+  # Anchor 1 - the vulnerable component must be named on the command line.
+  sel_localfilestore:
+    content|re:
+      - '(?i)\bLocalFileStore\s*\('
+      - '(?i)\bfrom\s+langchain[A-Za-z0-9_.]*\.storage[A-Za-z0-9_.]*\s+import\b'
+      - '(?i)\blangchain[A-Za-z0-9_.]*\.storage\.file_system\b'
+
+  # Anchor 2 - one of the accessor methods that performs the unsafe path join.
+  sel_kv_accessor:
+    content|re:
+      - '(?i)\b(?:mset|mget|mdelete)\s*\('
+      - '(?i)\byield_keys\s*\('
+
+  # Anchor 3 - an actual traversal payload. A single "../" is far too common in
+  # ordinary relative paths, so require either multi-level traversal, an encoded
+  # traversal, or a single hop that lands directly on a sensitive target.
+  sel_traversal:
+    content|re:
+      - '(?:\.\./){2,}'
+      - '\.\./\.\.'
+      - '(?:\.\.\\){2,}'
+      - '(?i)(?:%2e%2e|%252e%252e)(?:%2f|%5c|/|\\)'
+      - '(?i)\.\.%2f'
+      - '\.\.[\\/](?:etc|root|proc|sys|boot|var|home|Users|usr)[\\/]'
+      - '(?i)\.\.[\\/][^\s"]{0,120}(?:passwd|shadow|authorized_keys|id_rsa|id_ed25519|crontab|cron\.d|\.bashrc|\.zshrc|\.profile|\.env|\.aws|\.kube)\b'
+
+  # ── Aggressive benign-context suppression ───────────────────────────────────
+  # None of these widen a host/domain/path trust boundary; they describe the
+  # *nature of the invocation* (test runner, packaging, read-only inspection,
+  # documentation placeholder), which is where every observed FP comes from.
+
+  filter_dev_tooling:
+    content|re:
+      - '(?i)\b(?:pytest|py\.test|unittest|tox|nox|nosetests|hypothesis|mypy|ruff|flake8|pylint|black|isort|pre-commit|sphinx-build|mkdocs)\b'
+      - '(?i)\bcoverage\s+run\b'
+
+  filter_package_ops:
+    content|re:
+      - '(?i)\b(?:pip3?|uv|poetry|conda|pipenv|pdm|hatch)\s+(?:install|add|sync|lock|download|update|upgrade|remove|build)\b'
+      - '(?i)\bsetup\.py\s+(?:install|develop|build|bdist_wheel|sdist)\b'
+
+  filter_readonly_inspection:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|fd|wc|diff|less|more|nbconvert)\b'
+
+  filter_doc_placeholders:
+    content|re:
+      - '(?i)\.\./\.\./(?:path/to|your[_-]?(?:path|dir|root)|example|placeholder|dummy|foo/bar)\b'
+      - '(?i)<(?:path[^>\n]{0,30}|your[^>\n]{0,30})>'
+
+  condition: sel_event and sel_localfilestore and sel_kv_accessor and sel_traversal and not 1 of filter_*
+
+falsepositives:
+  - Developer or CI job running a LangChain example, notebook export, or ad-hoc
+    one-liner that points LocalFileStore at a relative cache root such as
+    ../../.cache and immediately calls mset/mget. Partially suppressed by the
+    test-runner and packaging filters, and by requiring multi-level or
+    sensitive-target traversal rather than any single "../".
+  - Deliberate CVE reproduction or red-team validation of this exact issue in a
+    sandbox. This is a true positive by pattern and is intentionally reported.
+  - Security tooling or code search that prints a vulnerable snippet containing all
+    three anchors on one command line - suppressed by filter_readonly_inspection.
+  - Documentation or scaffold generators emitting template paths such as
+    ../../path/to/cache - suppressed by filter_doc_placeholders.
+
+action: report
