@@ -1,0 +1,311 @@
+title: vLLM MediaConnector SSRF to Internal Endpoint
+id: 7c1f2b64-9d3a-4e5b-8a07-3f6d21c4be91
+status: experimental
+level: high
+description: |
+  Detects Server-Side Request Forgery originating from a vLLM inference server
+  process (MediaConnector.load_from_url / load_from_url_async). An attacker-supplied
+  media URL coerces the server into issuing outbound HTTP requests to internal,
+  loopback, link-local or cluster-internal addresses.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"] of the triggering
+  http_request, resolves the exact process instance with proc_instance(), walks the
+  spawn chain with proc_lineage(), and scopes every corroborating query_events()
+  lookup to that one session (lineage plus its children). It never attributes across
+  sessions and never walks path-keyed graph nodes.
+
+  Required anchor: the acting session is an inference-server context (vllm /
+  api_server / mediaconnector in an actor path or cmdline) AND the triggering request
+  targets an internal address taken directly from meta (never re-queried, to avoid the
+  async-ingest race).
+
+  Corroboration (score >= 2 required): internal fan-out across >= 3 distinct internal
+  endpoints in the window (+2), a sensitive management/metadata target such as the
+  cloud metadata IP, the Kubernetes API, or an /actuator, /admin, /debug, /containers/json
+  path or a control-plane port (+2), a preceding external media fetch by the same
+  session (+1), and >= 2 internal endpoints touched (+1).
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://github.com/vllm-project/vllm
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.discovery
+  - attack.t1046
+  - atlas.aml.t0049
+  - owasp.llm06
+falsepositives:
+  - Distributed vLLM or Ray multi-node serving where the API server legitimately calls
+    sibling pods on 10.0.0.0/8 or *.svc.cluster.local (mitigated by requiring a sensitive
+    target, wide fan-out, or an external precursor fetch within a 120s window).
+  - Sidecar or service-mesh health and metric scraping performed outbound by the inference
+    container itself (single fixed endpoint scores 0 and does not fire).
+  - Internal MinIO / S3-compatible object store or an internal image CDN on a private
+    address serving legitimate multimodal media inputs.
+  - Local development running vLLM against localhost test fixtures and a local mock media
+    server (will fire only if three or more distinct localhost endpoints are hit in 120s).
+  - Internal model registry or tokenizer mirror on a .internal / .corp hostname fetched at
+    server start-up.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule's own window — never persisted) ─────────────────────
+  WINDOW_NS  = 120000000000   # 120 seconds
+  FANOUT_MIN = 3              # distinct internal endpoints => scanning
+  MAX_PIDS   = 48
+  MAX_ROWS   = 200
+
+  INTERNAL_PREFIX = ["10.", "127.", "192.168.", "169.254.", "100.64.", "0.",
+                     "172.16.", "172.17.", "172.18.", "172.19.", "172.20.",
+                     "172.21.", "172.22.", "172.23.", "172.24.", "172.25.",
+                     "172.26.", "172.27.", "172.28.", "172.29.", "172.30.",
+                     "172.31."]
+  INTERNAL_SUFFIX = [".svc", ".cluster.local", ".internal", ".local",
+                     ".localdomain", ".intranet", ".corp", ".lan"]
+  INTERNAL_NAME   = ["localhost", "ip6-localhost", "kubernetes", "kubernetes.default"]
+
+  SERVER_PAT = [r"\bvllm\b", r"vllm[./]entrypoints", r"\bapi_server\b",
+                r"\bmediaconnector\b", r"\bvllm[-_]serve\b",
+                r"\bmodel[-_]server\b", r"\bopenai_api_server\b"]
+
+  SENSITIVE_PATH = [r"/internal", r"/admin", r"/actuator", r"/metrics", r"/debug",
+                    r"/latest/meta-data", r"/computemetadata", r"/v1/agent",
+                    r"/api/v1/namespaces", r"/containers/json", r"/v2/keys",
+                    r"/shutdown", r"/manage", r"/console", r"/env\b", r"/_cluster"]
+  SENSITIVE_HOST = ["169.254.169.254", "100.100.100.200", "metadata.google.internal",
+                    "kubernetes.default", "kubernetes.default.svc"]
+  SENSITIVE_PORT = [":2375", ":2379", ":6443", ":10250", ":8500", ":9200",
+                    ":5984", ":11211", ":6379", ":8001", ":8081"]
+
+  # ── Pure helpers (no graph / log calls) ─────────────────────────────────────
+  def norm_host(raw):
+      h = raw.lower()
+      if h.startswith("["):
+          idx = h.find("]")
+          if idx > 0:
+              return h[1:idx]
+      parts = h.split(":")
+      if len(parts) == 2:
+          return parts[0]
+      return h
+
+  def is_internal(raw):
+      h = norm_host(raw)
+      if h == "":
+          return False
+      for n in INTERNAL_NAME:
+          if h == n:
+              return True
+      if ":" in h:
+          if h.startswith("::1") or h.startswith("fd") or h.startswith("fe80"):
+              return True
+      for p in INTERNAL_PREFIX:
+          if h.startswith(p):
+              return True
+      for s in INTERNAL_SUFFIX:
+          if h.endswith(s):
+              return True
+      return False
+
+  def inference_ctx(s):
+      if s == "":
+          return False
+      ls = s.lower()
+      for p in SERVER_PAT:
+          if re.find(p, ls) != None:
+              return True
+      return False
+
+  def sensitive_target(h, path, url):
+      nh = norm_host(h)
+      for sh in SENSITIVE_HOST:
+          if nh == sh:
+              return True
+      lp = path.lower()
+      for sp in SENSITIVE_PATH:
+          if re.find(sp, lp) != None:
+              return True
+      lu = url.lower()
+      for port in SENSITIVE_PORT:
+          if port in lu:
+              return True
+      return False
+
+  def ev_edge(e):
+      to = e.get("target_id", "")
+      if to == "":
+          hh = e.get("host", "")
+          if hh != "":
+              to = "https://" + hh + e.get("path", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       to,
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  def run():
+      # 1. RELEVANCE GATE — pure string checks on meta only.
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      host = meta.get("host", "")
+      if host == "":
+          return "allow"
+      if not is_internal(host):
+          return "allow"
+
+      # 2. ANCHOR on the exact triggering instance.
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      trigger_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"          # degraded attribution — never guess
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # 3. REQUIRED ANCHOR — the acting session is an inference-server context.
+      server_row = None
+      for x in lineage:
+          if inference_ctx(x.get("actor_path", "")):
+              server_row = x
+              break
+          if inference_ctx(x.get("cmdline", "")):
+              server_row = x
+              break
+          if inference_ctx(x.get("parent_path", "")):
+              server_row = x
+              break
+      if server_row == None:
+          if not inference_ctx(meta.get("agent_name", "")):
+              return "allow"
+          server_row = lineage[0]
+
+      # 4. SESSION SCOPE — lineage plus children spawned by lineage members.
+      since = trigger_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+      pids   = []
+      starts = {}
+      for x in lineage:
+          p = x.get("actor_pid", "")
+          if p != "" and p not in starts:
+              starts[p] = x.get("actor_start", "")
+              pids.append(p)
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+          pp = e.get("parent_pid", "")
+          ap = e.get("actor_pid", "")
+          if pp in starts and ap not in starts and len(pids) < MAX_PIDS:
+              starts[ap] = e.get("actor_start", "")
+              pids.append(ap)
+
+      # 5. PRIOR STAGES — scoped by instance, windowed, ordered before the trigger.
+      targets   = {}
+      order     = []
+      precursor = None
+      for p in pids:
+          st = starts.get(p, "")
+          rows = query_events(kind="HTTP_REQUEST",
+                              actor_pid=int(p),
+                              actor_start=int(st) if st != "" else 0,
+                              since_ns=since,
+                              until_ns=trigger_ts,
+                              limit=MAX_ROWS)
+          for r in rows:
+              h = r.get("host", "")
+              if h == "":
+                  continue
+              if is_internal(h):
+                  key = norm_host(h) + "|" + r.get("path", "")
+                  if key not in targets:
+                      targets[key] = r
+                      order.append(key)
+              else:
+                  if precursor == None:
+                      precursor = r
+
+      tkey  = norm_host(host) + "|" + meta.get("path", "")
+      total = len(targets)
+      if tkey not in targets:
+          total = total + 1
+
+      # 6. SCORE — anchor is mandatory, corroboration must reach 2.
+      url = meta.get("url", "")
+      if url == "":
+          url = "http://" + host + meta.get("path", "")
+      c_sensitive = sensitive_target(host, meta.get("path", ""), url)
+      score = 0
+      if total >= FANOUT_MIN:
+          score = score + 2
+      if c_sensitive:
+          score = score + 2
+      if precursor != None:
+          score = score + 1
+      if total >= 2:
+          score = score + 1
+      if score < 2:
+          return "allow"
+
+      # 7. KILL CHAIN — rooted at the session owner, evidence from event rows.
+      names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+
+      chain.append(step(ev_edge(server_row),
+                        stage_id="Inference Server Context",
+                        stage_desc="vLLM/MediaConnector serving process in session: " + names))
+
+      if precursor != None:
+          chain.append(step(ev_edge(precursor),
+                            stage_id="Media URL Fetch",
+                            stage_desc="external media fetch preceding internal pivot: " +
+                                       precursor.get("host", "") + precursor.get("path", "")))
+
+      shown = 0
+      for key in order:
+          if shown >= 3:
+              break
+          r = targets[key]
+          chain.append(step(ev_edge(r),
+                            stage_id="Internal Probe",
+                            stage_desc="session request to internal endpoint: " +
+                                       r.get("method", "") + " " + key))
+          shown = shown + 1
+
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       url,
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+          "method":   meta.get("method", ""),
+      }
+      desc = "SSRF target " + meta.get("method", "GET") + " " + url
+      if c_sensitive:
+          desc = desc + " (management/metadata endpoint)"
+      chain.append(step(trig, stage_id="SSRF Internal Request", stage_desc=desc))
+
+      reason = ("vLLM MediaConnector SSRF — " + str(total) +
+                " internal endpoint(s) in " + str(WINDOW_NS / 1000000000) +
+                "s by " + names + "; trigger " + url +
+                "; score=" + str(score))
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
