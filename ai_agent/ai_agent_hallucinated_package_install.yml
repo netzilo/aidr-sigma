@@ -1,0 +1,411 @@
+title: Hallucinated Package Install In Agent Session
+id: 4f3b9c21-8d6e-4a05-9b17-2c7e5d0a6f84
+status: experimental
+level: medium
+description: |
+  Detects an AI coding agent materialising a FABRICATED software dependency:
+  an ad-hoc, named package install (pip/uv/pipx/poetry/npm/pnpm/yarn/bun/gem/cargo)
+  whose package name (a) was emitted verbatim by an LLM in an indexed model RESPONSE
+  body, and (b) does not exist in that ecosystem's authoritative public registry.
+
+  KNOWN OBSERVABILITY LIMIT (this rule is built around it, not in denial of it):
+  the engine has no generation-time event ('generate_text' is unknown) and no
+  GENERATED_CODE / EXTERNAL_DEPENDENCY_REFERENCE edge kind, so the literal chain
+  "model wrote import X" -> "X does not exist" -> "user ran code importing X"
+  cannot be reconstructed from telemetry. Rather than proxy the whole threat with
+  execute_process alone -- which the triage dissent correctly calls indistinguishable
+  from typos, deprecations and network errors -- this rule substitutes three
+  independently weak signals that are only jointly explainable by hallucination:
+
+    1. ANCHOR (required, from meta): the triggering execute_process is an ad-hoc
+       install of an EXPLICIT package name. Manifest/lockfile-driven installs
+       (-r requirements.txt, npm ci, poetry install, pip install .) are excluded --
+       a name read from a file did not come from a model. This is what makes the
+       install command evidence rather than a proxy.
+    2. GENERATION LINK (required, FTS + graph): the exact name appears in an indexed
+       llmres:// document (a model RESPONSE, never a user prompt), and the matching
+       LLM_RESPONSE edge's ts is resolved via its request_id and required to precede
+       the install inside the rule window. This is the closest available substitute
+       for the missing generation event -- it rules out human typos, which never
+       appear in a model response.
+    3. NON-EXISTENCE (required, external lookup): an authoritative registry lookup
+       returns 404 for the name. This is the discriminator the dissent says is
+       missing. If the lookup cannot be performed (offline, rate-limited, replay
+       stub, non-200/404 status) the rule DOES NOT FIRE -- absence of proof is not
+       treated as proof.
+
+  Optional corroborators (raise the reported confidence, never sufficient alone):
+  a prior interpreter run by the same session inside the window (the
+  ModuleNotFoundError loop) and repeated ad-hoc installs by the session.
+
+  Attribution is instance-resolved: anchored on meta['caller_pid'], resolved through
+  proc_instance -> proc_lineage, expanded to sibling instances spawned by the same
+  session, and every prior stage is scoped to that session and window. No
+  cross-session attribution is possible.
+
+  Action is report only. A hallucinated dependency is a slopsquatting exposure to
+  triage, not traffic to sever.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://genai.owasp.org/llmrisk/llm09-misinformation/
+  - https://arxiv.org/abs/2406.10279
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - owasp.llm09
+  - owasp.llm02
+falsepositives:
+  - Internal or private packages installed from a corporate index. The public
+    registry legitimately returns 404 for them. Mitigated by refusing to evaluate
+    any install command that carries an alternate index/registry/find-links flag,
+    and by reporting rather than blocking.
+  - A package that existed when the model was trained but has since been yanked,
+    renamed or deleted from the registry. Indistinguishable from a fabrication by
+    registry lookup alone; this is a genuine residual FP and the reason the action
+    is report.
+  - A brand-new package published minutes ago and not yet visible via the registry
+    API, or a registry serving 5xx/403 under rate limiting. The latter yields an
+    'unknown' status and suppresses the finding entirely.
+  - Human-typed install typos at a terminal inside an agent session. Suppressed by
+    requiring the exact name to appear in an indexed LLM response document.
+  - Workspace/monorepo local packages and VCS installs (git+, file:, ./path,
+    workspace:) -- these tokens contain '/' or ':' and are never parsed as names.
+  - Repeat installs of the same missing name during a debugging loop. Suppressed by
+    a one-hour per-package cooldown held in the rule store.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_pkg_manager:
+    content|re: '(?i)\b(?:pip[0-9]*|pipx|uv|poetry|npm|pnpm|yarn|bun|gem|cargo)\b'
+  condition: sel_exec and sel_pkg_manager
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ---------------------------------------------------------------- constants
+  WINDOW_NS   = 900000000000      # 15 minutes -- generation -> install window
+  COOLDOWN_NS = 3600000000000     # 1 hour per-package report cooldown
+  MAX_NAMES   = 3                 # bound registry lookups per event
+
+  MGRS = [
+      ["pypi",   r"\bpip[0-9]*\s+install\b"],
+      ["pypi",   r"\buv\s+pip\s+install\b"],
+      ["pypi",   r"\buv\s+add\b"],
+      ["pypi",   r"\bpipx\s+install\b"],
+      ["pypi",   r"\bpoetry\s+add\b"],
+      ["npm",    r"\bnpm\s+(?:install|i|add)\b"],
+      ["npm",    r"\b(?:pnpm|yarn|bun)\s+add\b"],
+      ["gem",    r"\bgem\s+install\b"],
+      ["crates", r"\bcargo\s+(?:install|add)\b"],
+  ]
+
+  # A manifest-driven install carries no model-authored name -- not evaluable.
+  MANIFEST_FLAGS = ["-r ", "--requirement", "-e ", "--editable", "--frozen",
+                    "frozen-lockfile", "--no-save", "requirements.txt"]
+
+  # An alternate index makes a public-registry 404 meaningless. Shape-based,
+  # names no host: presence of any of these suppresses the lookup entirely.
+  ALT_INDEX = ["--index-url", "--extra-index-url", "--index ", "--index=",
+               "--registry", "--default-index", "--find-links", "--trusted-host",
+               "--repository", "--scope"]
+
+  REGISTRY = {
+      "pypi":   "https://pypi.org/pypi/%s/json",
+      "npm":    "https://registry.npmjs.org/%s",
+      "gem":    "https://rubygems.org/api/v1/gems/%s.json",
+      "crates": "https://crates.io/api/v1/crates/%s",
+  }
+
+  INTERP = [r"\bpython[0-9.]*\b", r"\bnode\b", r"\bts-node\b", r"\btsx\b",
+            r"\bdeno\b", r"\bruby\b", r"\bpytest\b", r"\bjupyter\b",
+            r"\bcargo\s+run\b", r"\bgo\s+run\b"]
+
+  # ------------------------------------------------------------- pure helpers
+  def clip(s, n):
+      return s[:n] + "..." if len(s) > n else s
+
+  def normalize(c):
+      out = c
+      for ch in ['"', "'", "{", "}", "[", "]", ",", "\\"]:
+          out = out.replace(ch, " ")
+      return out
+
+  def cut_chain(s):
+      idx = len(s)
+      for sep in ["&&", "||", ";", "|", "\n", ">", "<"]:
+          p = s.find(sep)
+          if p >= 0 and p < idx:
+              idx = p
+      return s[:idx]
+
+  def parse_names(args):
+      names = []
+      for raw in re.split(r"\s+", args):
+          t = raw.strip()
+          if t == "" or t.startswith("-") or t.startswith(".") or t.startswith("@"):
+              continue
+          if t.find("/") >= 0 or t.find("://") >= 0 or t.startswith("git+"):
+              continue
+          for sep in ["==", ">=", "<=", "~=", "!=", ">", "<", "@", ";", "="]:
+              p = t.find(sep)
+              if p > 0:
+                  t = t[:p]
+          if t.endswith(".txt") or t.endswith(".whl") or t.endswith(".tgz"):
+              continue
+          if not re.match(r"^[A-Za-z][A-Za-z0-9._-]{3,63}$", t):
+              continue
+          already = False
+          for n in names:
+              if n.lower() == t.lower():
+                  already = True
+          if not already:
+              names.append(t)
+          if len(names) >= MAX_NAMES:
+              return names
+      return names
+
+  def parse_install(cmd):
+      n = normalize(cmd)
+      for m in MGRS:
+          hit = re.find("(?i)" + m[1], n)
+          if hit == None:
+              continue
+          p = n.find(hit)
+          args = cut_chain(n[p + len(hit):])
+          la = args.lower()
+          for f in MANIFEST_FLAGS:
+              if la.find(f) >= 0:
+                  return ["", []]
+          for f in ALT_INDEX:
+              if la.find(f) >= 0:
+                  return ["", []]
+          return [m[0], parse_names(args)]
+      return ["", []]
+
+  def is_interpreter(cl):
+      for pat in INTERP:
+          if re.find("(?i)" + pat, cl) != None:
+              return True
+      return False
+
+  def ev_edge(e):
+      pp = e.get("parent_path", "")
+      if pp == "":
+          pp = e.get("actor_path", "")
+      return {
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "from":     "process://" + pp,
+          "to":       "process://" + e.get("actor_path", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  # ------------------------------------------- generation link (FTS + graph)
+  def llm_edge_for(src):
+      p = src.find("#")
+      if p < 0:
+          return None
+      rid = src[p + 1:]
+      if rid == "":
+          return None
+      for l in graph(type="LLM"):
+          for e in edges(l["id"], dir="out", kind="LLM_RESPONSE"):
+              if e.get("request_id", "") == rid:
+                  return e
+      return None
+
+  def model_emitted(pkg, trig_ts):
+      # [edge_or_None, source_label] -- source_label "" means: no model emission.
+      degraded_src = ""
+      for h in search(pkg, topK=20):
+          src = h.get("source", "")
+          if not src.startswith("llmres://"):
+              continue                       # a user prompt is not a fabrication
+          if not search_in(src, pkg):
+              continue
+          e = llm_edge_for(src)
+          if e == None:
+              if degraded_src == "":
+                  degraded_src = src         # cannot time-bound; keep as fallback
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts > 0 and trig_ts > 0:
+              if ts > trig_ts:
+                  continue
+              if (trig_ts - ts) > WINDOW_NS:
+                  continue
+          return [e, src]
+      if degraded_src != "":
+          return [None, degraded_src]
+      return [None, ""]
+
+  # --------------------------------------------- non-existence (external API)
+  def registry_status(eco, pkg):
+      cache = store_get("reg") or {}
+      key = eco + ":" + pkg.lower()
+      v = cache.get(key, "")
+      if v == "missing" or v == "present":
+          return v
+      tpl = REGISTRY.get(eco, "")
+      if tpl == "":
+          return "unknown"
+      r = http("GET", tpl % pkg, "",
+               {"User-Agent": "netzilo-rule/1.0", "Accept": "application/json"},
+               4000)
+      if r.get("error", "") != "":
+          return "unknown"                   # offline / replay stub -> never fire
+      st = str(r.get("status", ""))
+      res = "unknown"
+      if st == "404":
+          res = "missing"
+      elif st == "200":
+          res = "present"
+      if res != "unknown":
+          if len(cache) > 400:
+              cache = {}
+          if store_usage()["free"] > 8192:
+              cache[key] = res
+              store_set("reg", cache)
+      return res
+
+  # ------------------------------------------------------------------- main
+  def run():
+      # 1. relevance gate -- pure string checks on meta, no graph/log/network
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      if re.find(r"(?i)\b(?:pip[0-9]*|pipx|uv|poetry|npm|pnpm|yarn|bun|gem|cargo)\b", cmd) == None:
+          return "allow"
+      parsed = parse_install(cmd)
+      eco   = parsed[0]
+      names = parsed[1]
+      if eco == "" or len(names) == 0:
+          return "allow"                     # manifest install / alt index / no name
+
+      # 2. anchor on the triggering instance
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"                     # degraded attribution -- never guess
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lineage) == 0:
+          return "allow"
+
+      # 3. scope strictly to this session (lineage + its descendants in window)
+      since = 0
+      if trig_ts > WINDOW_NS:
+          since = trig_ts - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = True
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000)
+      for i in range(2):
+          for e in rows:
+              if e.get("parent_pid", "") in session:
+                  session[e["actor_pid"]] = True
+
+      # 4. optional corroborators, session-scoped and ordered before the trigger
+      interp_ev   = None
+      other_inst  = 0
+      for e in rows:
+          if e.get("actor_pid", "") not in session:
+              continue
+          if e.get("actor_pid", "") == inst.get("actor_pid", ""):
+              if e.get("actor_start", "") == inst.get("actor_start", ""):
+                  continue                   # the trigger's own exec row
+          ts = int(e.get("ts", "0"))
+          if ts <= 0 or ts > trig_ts:
+              continue
+          cl = e.get("cmdline", "")
+          if cl == "":
+              cl = e.get("actor_path", "")
+          pi = parse_install(cl)
+          if pi[0] != "" and len(pi[1]) > 0:
+              other_inst += 1
+              continue
+          if interp_ev == None and is_interpreter(cl):
+              interp_ev = e
+
+      # 5. per-name evaluation: generation link, then registry non-existence
+      reported = store_get("reported") or {}
+      parent_path = inst.get("actor_path", "")
+      if len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", parent_path)
+      trig_edge = {
+          "kind":     "EXECUTE_PROCESS",
+          "from":     "process://" + parent_path,
+          "to":       "process://" + inst.get("actor_path", ""),
+          "ts":       str(trig_ts),
+          "first_ts": str(trig_ts),
+          "last_ts":  str(trig_ts),
+          "cmdline":  clip(cmd, 300),
+      }
+
+      for pkg in names:
+          key = eco + ":" + pkg.lower()
+          last = int(reported.get(key, 0))
+          if last > 0 and trig_ts > 0 and (trig_ts - last) < COOLDOWN_NS:
+              continue
+          me = model_emitted(pkg, trig_ts)
+          if me[1] == "":
+              continue                       # no model response emitted this name
+          if registry_status(eco, pkg) != "missing":
+              continue                       # exists, or lookup unavailable
+
+          names_path = []
+          for x in lineage:
+              names_path.append(x.get("actor_path", "").split("/")[-1])
+          who = " -> ".join(names_path)
+
+          chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+          if me[0] != None:
+              chain.append(step(me[0],
+                  stage_id="Fabricated Dependency Emitted",
+                  stage_desc="LLM response referenced package '" + pkg +
+                             "' (" + clip(me[1], 120) + ")"))
+          if interp_ev != None:
+              chain.append(step(ev_edge(interp_ev),
+                  stage_id="Generated Code Executed",
+                  stage_desc="session ran interpreter before install: " +
+                             clip(interp_ev.get("cmdline", interp_ev.get("actor_path", "")), 200)))
+          chain.append(step(trig_edge,
+              stage_id="Hallucinated Dependency Install",
+              stage_desc="ad-hoc install of '" + pkg + "' -- absent from the " +
+                         eco + " registry (404): " + clip(cmd, 200)))
+
+          conf = "generation-linked + registry-absent"
+          if me[0] == None:
+              conf = conf + "; emission not time-bound"
+          if interp_ev != None:
+              conf = conf + "; prior interpreter run"
+          if other_inst >= 1:
+              conf = conf + "; " + str(other_inst) + " prior ad-hoc install(s)"
+
+          reason = ("Package hallucination: '" + pkg + "' does not exist in the " +
+                    eco + " registry but was emitted by an LLM response and then " +
+                    "installed by " + who + " (" + conf + ")")
+          print(reason)
+
+          if store_usage()["free"] > 4096:
+              if len(reported) > 300:
+                  reported = {}
+              reported[key] = trig_ts
+              store_set("reported", reported)
+
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
