@@ -1,0 +1,108 @@
+title: SQL Injection Stacked Statement in LLM-Generated Query Execution
+id: 7f3c1d2e-9b4a-4a61-8f0d-2c5e7a9b6d31
+status: experimental
+level: medium
+description: |
+  Detects an agent-spawned database client (or a Vanna harness invoked via python -c)
+  being handed an inline SQL string that contains a stacked statement -- a semicolon
+  followed by a state-changing or file/OS-reaching SQL command.
+
+  This is the observable tail of CVE-2024-7764 (Vanna-ai <= 0.6.2): a semicolon placed
+  between a data field and an attacker command causes extract_sql() to discard the
+  LLM-generated SELECT and return the attacker's statement, which then passes
+  is_sql_valid() and is executed against the database.
+
+  COVERAGE LIMIT (explicit): the exploit itself is entirely in-process -- extract_sql()
+  parses a string and hands it to a DB driver's execute(). The engine has no sql_query
+  event type and no EXECUTE_SQL / INJECT_PAYLOAD edge, so that path is NOT observable
+  and this rule does not claim to see it. The only live primitive is execute_process,
+  so this rule is scoped exactly to the deployments where the extracted SQL does cross
+  the process boundary: Vanna run_sql wired to a CLI client, an agent shelling out to
+  psql/mysql/sqlite3/duckdb to run the generated query, or a python -c harness driving
+  vn.run_sql/generate_sql. Anything executed only through an in-process DB driver is a
+  known blind spot, which is why this ships as report rather than an enforcement rule.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-7764
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1190
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec:
+    event_type: execute_process
+
+  # --- Branch A: a SQL CLI client is the spawned process --------------------
+  sel_sql_cli:
+    content|re: '(?i:\b(psql|mysql|mariadb|mysqlsh|sqlite3|sqlcmd|clickhouse-client|duckdb|snowsql|trino|presto|impala-shell|usql)\b)'
+
+  # ...and the SQL is supplied inline (not from a reviewed .sql file).
+  # Flag letters are matched case-sensitively on purpose: -c/-e/-q/-Q/--query
+  # execute SQL, while -C/-E/-D are unrelated psql/mysql options.
+  sel_inline_query_flag:
+    content|re:
+      - '\s-{1,2}(c|e|q|Q|query|command|execute)[ =]'
+      - '(?i:\b(sqlite3|duckdb)\b)\s+\S{1,200}\s+["'']'
+
+  # --- Branch B: the Vanna text-to-SQL harness itself ------------------------
+  sel_python_inline:
+    content|re: '(?i:\bpython[0-9.]{0,4}\b)[^\n]{0,300}\s-c[\s"'']'
+  sel_vanna_symbol:
+    content|re: '(?i)\b(vanna|vn\.(run_sql|generate_sql|ask|connect_to_[a-z_]{2,20})|extract_sql|generate_sql)\b'
+
+  # --- The injection signature itself: statement stacking after a semicolon --
+  sel_stacked_write:
+    content|re:
+      - '(?i);[\s]{0,20}(drop\s|delete\s+from|update\s|insert\s+into|alter\s+(table|user|role|system)|create\s+(table|user|role|function|extension|database)|truncate\s|grant\s|revoke\s|attach\s+database|copy\s|call\s|exec(ute)?\s|merge\s+into|load\s+data|set\s+role)'
+      - '(?i);[^;]{0,300}(xp_cmdshell|pg_read_file|pg_ls_dir|pg_sleep\s*\(|load_file\s*\(|into\s+(outfile|dumpfile)|to\s+program|readfile\s*\(|writefile\s*\(|information_schema\.(tables|columns)|pg_shadow|mysql\.user)'
+
+  # --- Aggressive benign suppression ----------------------------------------
+  filter_help_version:
+    content|re: '\s-{1,2}(help|version)\b'
+
+  # Fixture / teardown one-liners that drop scratch objects.
+  filter_temp_cleanup:
+    content|re: '(?i);[\s]{0,20}drop\s+(table|view|index|schema)\s+if\s+exists\s+["`'']?(tmp|temp|test|staging|scratch|_)'
+
+  # Templated commands the agent has not yet filled in.
+  filter_placeholder:
+    content|re: '(?i)(<[a-z_]{2,24}>|\{\{[a-z_. ]{2,32}\}\}|\$\{[A-Z_]{2,32}\}|YOUR_[A-Z_]{2,24}|<your[ _-])'
+
+  # Documentation / training material that quotes the payload shape.
+  filter_doc_reference:
+    content|contains:
+      - 'CVE-2024-7764'
+      - 'sql injection example'
+      - 'example of sql injection'
+      - 'owasp top'
+      - 'lorem ipsum'
+
+  # Explicitly transaction-wrapped migration: BEGIN; ... ; COMMIT;
+  filter_txn_begin:
+    content|re: '(?i)\b(begin|start\s+transaction)\s*;'
+  filter_txn_commit:
+    content|re: '(?i)\bcommit\s*;'
+
+  condition: >
+    sel_exec and
+    ((sel_sql_cli and sel_inline_query_flag and sel_stacked_write) or
+     (sel_python_inline and sel_vanna_symbol and sel_stacked_write))
+    and not (filter_help_version or filter_temp_cleanup or filter_placeholder or
+             filter_doc_reference or (filter_txn_begin and filter_txn_commit))
+
+falsepositives:
+  - Database migrations run as one-liners, e.g. psql -c "ALTER TABLE x ...; UPDATE y ..." -- suppressed only when explicitly wrapped in BEGIN; ... COMMIT;, so unwrapped migration one-liners will still report.
+  - Test-suite setup and teardown that drops or recreates scratch objects; suppressed when the object name starts with tmp/temp/test/staging/scratch/underscore, but non-conforming naming conventions will report.
+  - ETL and bulk-load jobs using COPY / LOAD DATA after a preparatory statement in the same inline string.
+  - Analytics work in duckdb or sqlite3 where an operator legitimately stacks CREATE TABLE AS ... ; SELECT ... in a single -c argument.
+  - dbt, Flyway, Liquibase or Alembic wrappers that shell out to a CLI client with multi-statement SQL.
+  - Authorised database penetration testing or a red-team exercise executed through the agent.
+
+action: report
