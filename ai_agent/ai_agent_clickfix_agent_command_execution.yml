@@ -1,0 +1,125 @@
+title: ClickFix Verification Lure Drives Agent Command Execution
+id: 7c1e4b52-9a3d-4f68-b0c1-2d5e8a4f16b3
+status: experimental
+level: high
+description: |
+  Detects the AI ClickFix technique: a computer-use agent is socially engineered by a
+  fake "verification", "CAPTCHA", "human check" or "broken/needs-fixing" notification
+  into opening a terminal and executing an attacker-supplied command.
+
+  The rule fires on a single execute_process event whose command line carries BOTH:
+    (a) a ClickFix social-engineering lure string (verification / CAPTCHA / not-a-robot /
+        Ray ID / Win+R paste instruction / checkmark-verification banner), which the
+        attacker embeds so the pasted line looks legitimate in the run dialog or terminal, AND
+    (b) a syntax-anchored remote-payload execution primitive (iex(, | iex, irm/iwr <scheme>://,
+        DownloadString(, FromBase64String(, hidden/encoded PowerShell, mshta with a remote or
+        script URI, certutil -urlcache, bitsadmin /transfer, msiexec /i http, curl|wget piped
+        to a shell, base64 -d piped to a shell, osascript do-shell-script, cmd /c invoking a
+        downloader, or an explicit terminal-emulator spawn).
+
+  A second, independent branch fires on conhost.exe --headless wrapping a shell or downloader:
+  an undocumented window-hiding wrapper that is overwhelmingly ClickFix-associated.
+
+  Neither half alone is actionable - a lure string is just text, and a download-and-execute
+  primitive is routine in installers. Their co-occurrence on one spawned command line is the
+  ClickFix signature. Execution primitives are syntax-anchored (require a call paren, pipe or
+  URI scheme) so prose that merely discusses the payload does not match.
+author: Haibo
+date: "2026-06-18"
+modified: "2026-06-18"
+references:
+  - https://attack.mitre.org/techniques/T1204/004/
+  - https://attack.mitre.org/techniques/T1059/001/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.001
+  - attack.t1204.004
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Detection engineers or malware analysts reproducing a ClickFix payload from an agent-driven
+    terminal in a lab; the security-vocabulary filter suppresses the common triage variants but
+    a bare reproduction of the live payload will still report (this is intended).
+  - Security-awareness simulations that deliver a real ClickFix lure to a monitored agent.
+  - Anti-bot / CAPTCHA integration work where a pipe-to-shell installer runs on a command line
+    that also names a CAPTCHA product; the package-manager filter covers the install form, and
+    the CAPTCHA lure pattern additionally requires a verification word within 80 characters.
+  - IT self-service "paste this to fix it" remediation one-liners that fetch a remote installer;
+    these are genuine copy-paste-to-terminal workflows and are indistinguishable from the attack
+    by content alone, which is why the action is report rather than block.
+  - An agent writing threat-intel notes containing a quoted ClickFix payload into a document;
+    the detection-content filter suppresses the analyst-notes vocabulary.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # (a) ClickFix social-engineering lure embedded in the pasted command line
+  sel_lure:
+    content|re:
+      - '(?i)\bnot\s+a\s+robot\b'
+      - '(?i)\bhuman\s+verification\b'
+      - '(?i)\b(verify|verifying|confirm|prove)\b[^\n]{0,24}\b(you\s+are\s+)?human\b'
+      - '(?i)\bverification\s+(id|code|token|hash|key|check|step|required|complete)\b'
+      - '(?i)\b(re|h)?captcha\b[^\n]{0,80}\b(verif\w*|human|robot|challenge|complete|passed|failed)\b'
+      - '(?i)\b(verif\w*|human|robot|challenge|complete)\b[^\n]{0,80}\b(re|h)?captcha\b'
+      - '(?i)\bray\s*id\b'
+      - '(?i)\bchecking\s+your\s+browser\b'
+      - '(?i)\bpress\s+(win|windows|cmd|command|ctrl)\s*\+\s*r\b'
+      - '(?i)\b(win|windows)\s*\+\s*r\b[^\n]{0,60}\b(paste|ctrl\s*\+\s*v|enter)\b'
+      - '(?i)\b(to\s+)?(fix|repair|restore|resolve|continue|proceed|unlock)\b[^\n]{0,60}\b(paste|copy)\b[^\n]{0,60}\b(terminal|powershell|run\s+dialog|command\s+prompt|console)\b'
+      - '(?i)[\x{2705}\x{2714}\x{2611}][^\n]{0,60}\b(verif\w*|human|robot|captcha)'
+      - '(?i)\bsecurity\s+(check|challenge|verification)\b[^\n]{0,60}\b(complete|required|failed|passed)\b'
+      - '(?i)\berror\s+code\s*:?\s*[A-Z]{2}-?\d{3,6}\b[^\n]{0,60}\b(fix|repair|resolve|verify)\b'
+
+  # (b) syntax-anchored remote-payload execution primitive on the same command line
+  sel_exec:
+    content|re:
+      - '(?i)\b(iex|invoke-expression)\s*\('
+      - '(?i)\|\s*(iex|invoke-expression)\b'
+      - '(?i)\b(irm|iwr|invoke-restmethod|invoke-webrequest)\s+[a-z]{3,6}://'
+      - '(?i)\.(downloadstring|downloadfile)\s*\('
+      - '(?i)\bfrombase64string\s*\('
+      - '(?i)\b(powershell|pwsh)(\.exe)?\b[^\n]{0,200}\s-(w|windowstyle)\s+h(idden)?\b'
+      - '(?i)\b(powershell|pwsh)(\.exe)?\b[^\n]{0,200}\s-(e|ec|enc|encodedcommand)\s+[A-Za-z0-9+/=]{24,}'
+      - '(?i)\bconhost(\.exe)?\s+--headless\b'
+      - '(?i)\bmshta(\.exe)?\b[^\n]{0,80}(https?:|javascript:|vbscript:)'
+      - '(?i)\bcertutil(\.exe)?\b[^\n]{0,200}\s-(urlcache|decode)\b'
+      - '(?i)\bbitsadmin(\.exe)?\b[^\n]{0,200}/transfer\b'
+      - '(?i)\bmsiexec(\.exe)?\b[^\n]{0,120}\s/i\s+https?:'
+      - '(?i)\b(curl|wget)\b[^|\n]{0,300}\|\s*(sudo\s+)?(bash|sh|zsh|dash|python3?|perl|ruby|node)\b'
+      - '(?i)\bbase64\s+(--decode|-d|-D)\b[^\n]{0,200}\|\s*(sudo\s+)?(bash|sh|zsh|python3?|perl)\b'
+      - '(?i)\bosascript\b[^\n]{0,300}\bdo\s+shell\s+script\b'
+      - '(?i)\bcmd(\.exe)?\s+/c\b[^\n]{0,300}\b(curl|powershell|pwsh|mshta|bitsadmin|certutil)\b'
+      - '(?i)\bopen\s+-a\s+[^\n]{0,24}terminal\b'
+      - '(?i)\b(gnome-terminal|konsole|xterm|x-terminal-emulator)\b[^\n]{0,120}\s--?e(xecute)?\b'
+
+  # standalone ClickFix window-hiding wrapper - no lure required
+  sel_conhost_headless:
+    content|re: '(?i)\bconhost(\.exe)?\s+--headless\b[^\n]{0,200}\b(powershell|pwsh|cmd|mshta|curl|wget|bitsadmin|certutil)\b'
+
+  # analyst / detection-engineering material quoting the payload
+  filter_detection_content:
+    content|re:
+      - '(?i)\b(sigma|yara|snort|suricata)\s+rules?\b'
+      - '(?i)\bfalse\s*positives?\b'
+      - '(?i)\bmitre\b'
+      - '(?i)\battack\.t\d{4}\b'
+      - '(?i)\baml\.t\d{4}\b'
+      - '(?i)\bthreat\s+(report|intel|intelligence|advisory|hunting)\b'
+      - '(?i)\bclickfix\b[^\n]{0,60}\b(detection|rule|report|analysis|writeup|indicator)\b'
+
+  # CAPTCHA product named as a package-manager argument, not as a lure
+  filter_package_install_captcha:
+    content|re: '(?i)\b(npm|yarn|pnpm|pip3?|poetry|gem|cargo|composer|go)\s+(install|add|get|require)\b[^\n]{0,140}\b(re|h)?captcha\b'
+
+  condition: >
+    sel_event and
+    ((sel_lure and sel_exec) or sel_conhost_headless) and
+    not (filter_detection_content or filter_package_install_captcha)
+
+action: report
