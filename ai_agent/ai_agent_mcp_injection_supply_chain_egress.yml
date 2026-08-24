@@ -1,0 +1,393 @@
+title: MCP Content Injection Supply Chain Egress Chain
+id: 7f3c1d2a-9b64-4e58-a1c7-5d0e2b8f4a36
+status: experimental
+level: high
+description: |
+  Instance-resolved detection of the only part of the "MCP content injection /
+  supply-chain / tool-poisoning" threat that this engine can actually observe.
+
+  The narrative asks for data-provenance and tool-integrity primitives
+  (RECEIVES_DATA, TOOL_INVOCATION, INJECTION, POISONED_TOOL,
+  DATA_EXFILTRATION, PRIVILEGE_ESCALATION edges; read_file / write_file /
+  tool_invocation event types). None of those exist in the schema, so this rule
+  makes NO claim to see "which data flowed into which tool call" or "which MCP
+  server binary was tampered with". It detects the observable footprint that
+  every one of those attacks must eventually produce on this telemetry:
+
+    Stage 1 (booster)  Content Ingress  - a non-body-bearing HTTP_REQUEST by an
+                       instance in THIS session pulls external content (the
+                       carrier for injected instructions or a poisoned tool
+                       description) from a host that is NOT the later egress host.
+    Stage 2 (REQUIRED) Tool Execution   - the same session spawns an
+                       egress-capable subprocess (curl/wget with a body or upload
+                       flag, an interpreter with an inline network module, nc /
+                       socat / /dev/tcp, scp/rsync to a remote). This is the
+                       discriminating anchor; without it the rule returns allow.
+    Stage 3 (trigger)  Data Egress      - a body-bearing outbound request
+                       (POST/PUT/PATCH) taken from meta, ordered AFTER the anchor
+                       and inside the same 5-minute window.
+
+  A booster is mandatory: credential/config material named in the spawn
+  arguments or present in the outbound body, a file-sourced or encoded payload,
+  or a cross-system ingress->egress pivot. Anchor + egress alone (an agent that
+  simply POSTs with curl) is deliberately allowed.
+
+  Overlap with the shell-metacharacter MCP rule is avoided by construction: this
+  rule never looks at metacharacters in tool arguments; it requires an actual
+  network egress destination and an ordered, session-scoped sequence.
+
+  Attribution is instance-exact: anchored on meta[caller_pid] ->
+  proc_instance -> proc_lineage, session membership expanded only through
+  EXECUTE_PROCESS parent links inside the window. Nothing is ever attributed
+  across sessions. If proc_instance cannot resolve the caller yet, the rule
+  returns allow and re-fires on the next event rather than guessing.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://modelcontextprotocol.io/specification
+  - https://attack.mitre.org/techniques/T1567/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.execution
+  - attack.t1059
+  - attack.t1195
+  - atlas.aml.t0010
+  - atlas.aml.t0051
+  - atlas.aml.t0053
+  - atlas.aml.t0025
+  - owasp.llm01
+  - owasp.llm02
+  - owasp.llm03
+falsepositives:
+  - Agent legitimately publishing a build artifact or log bundle after reading a
+    spec from a docs host - e.g. "curl -T dist/app.tgz https://uploads.example"
+    following a GET of the release notes. Fires only if the upload flag booster
+    is present; triaged by inspecting the Tool Execution stage cmdline.
+  - CI / deployment helpers driven by the agent that base64-encode or gzip a
+    payload before POSTing it (backup uploaders, crash reporters, telemetry
+    shippers). The encoding booster matches these; scope them out by process
+    lineage during triage, not by adding hosts to this rule.
+  - Secret-management workflows where the agent is intentionally asked to push a
+    .env or credentials file to a vault/secret store with curl -d @file. This is
+    a genuine credential-in-flight event and is worth an audit record even when
+    authorised.
+  - npm/pip publish flows that reference .npmrc or a token path on the command
+    line while POSTing a package to a registry.
+  - MCP servers that fetch documentation from one host and then post usage
+    telemetry to a different vendor host inside the same five minutes (the
+    cross-system pivot booster). Report-only; recurrent pairs should be
+    characterised by lineage, not by widening this rule.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_events:
+    event_type:
+      - http_request
+      - execute_process
+  condition: sel_events
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------- constants
+  WINDOW_NS = 300000000000        # 5 minutes - one MCP interaction burst
+  MAX_SEEN  = 300                 # dedupe ring size in the rule store
+
+  # Cheap pre-filter so we never run the full pattern list on every cmdline.
+  QUICK = ["curl", "wget", "python", "node", "perl", "ruby", "nc", "ncat",
+           "socat", "openssl", "scp", "rsync", "sftp", "/dev/tcp"]
+
+  # REQUIRED anchor: a spawn that is capable of pushing data outbound.
+  EGRESS_SPAWN = [
+      r"(?i:curl)\b[^\n]{0,300}\s-d[ =@]",
+      r"(?i:curl)\b[^\n]{0,300}\s--data",
+      r"(?i:curl)\b[^\n]{0,300}\s-F[ =@]",
+      r"(?i:curl)\b[^\n]{0,300}\s--form",
+      r"(?i:curl)\b[^\n]{0,300}\s-T[ =@]",
+      r"(?i:curl)\b[^\n]{0,300}\s--upload-file",
+      r"(?i:wget)\b[^\n]{0,300}\s--post-(?:data|file)",
+      r"(?i)\bpython[23]?\b[^\n]{0,300}\s-c\b[^\n]{0,400}(?:urllib|requests|httpx|socket|smtplib|ftplib)",
+      r"(?i)\bnode\b[^\n]{0,300}\s-e\b[^\n]{0,400}(?:https?:|net\.|fetch\()",
+      r"(?i)\b(?:perl|ruby)\b[^\n]{0,300}\s-e\b[^\n]{0,400}(?:socket|net::|http)",
+      r"(?i)\b(?:nc|ncat)\b\s+[^\s]{3,}\s+\d{2,5}\b",
+      r"(?i)\bsocat\b[^\n]{0,200}(?:tcp|openssl)",
+      r">\s*/dev/(?:tcp|udp)/",
+      r"(?i)\bopenssl\b\s+s_client",
+      r"(?i)\b(?:scp|rsync|sftp)\b[^\n]{0,200}\s[^\s@]+@[^\s:]+:",
+  ]
+
+  # Booster: credential / agent-config material named on the wire.
+  SENSITIVE = [
+      r"(?i)/\.aws/",
+      r"(?i)/\.ssh/",
+      r"(?i)\bid_rsa\b",
+      r"(?i)\bid_ed25519\b",
+      r"(?i)(?:^|[\s/=@])\.env\b",
+      r"(?i)\bcredentials\b",
+      r"(?i)/\.kube/",
+      r"(?i)\.netrc\b",
+      r"(?i)\.git-credentials\b",
+      r"(?i)\.npmrc\b",
+      r"(?i)/etc/(?:shadow|passwd)\b",
+      r"(?i)\bmcp\.json\b",
+      r"(?i)\bclaude_desktop_config\.json\b",
+      r"\bAKIA[0-9A-Z]{16}\b",
+      r"\bsk-[A-Za-z0-9]{24,}\b",
+      r"(?i)\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}\b",
+      r"(?i)\bxox[baprs]-[A-Za-z0-9-]{10,}\b",
+      r"-----BEGIN\s+(?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+  ]
+
+  # Booster: the payload is a file or is encoded/obfuscated before leaving.
+  EXFIL_BODY = [
+      r"\s-d\s*@",
+      r"--data(?:-binary|-raw|-urlencode)?\s*@",
+      r"\s-T\s",
+      r"--upload-file",
+      r"(?i)\bbase64\b",
+      r"(?i)\bxxd\b",
+      r"(?i)\bgzip\b[^\n]{0,40}\|",
+      r"(?i)\btar\b\s+-?c[^\n]{0,40}\|",
+      r"(?i)\bopenssl\b\s+enc\b",
+      r"\|\s*(?:bash|sh|zsh)\b",
+  ]
+
+  # ------------------------------------------------------------------ helpers
+  def quick_hit(s):
+      ls = s.lower()
+      for q in QUICK:
+          if q in ls:
+              return True
+      return False
+
+  def find_any(pats, s):
+      if s == "":
+          return None
+      for p in pats:
+          if re.find(p, s) != None:
+              return p
+      return None
+
+  def url_host(s):
+      m = re.find(r"(?i)https?://[A-Za-z0-9._~%:@-]+", s)
+      if m == None:
+          return ""
+      i = m.find("://")
+      h = m[i+3:]
+      at = h.find("@")
+      if at >= 0:
+          h = h[at+1:]
+      c = h.find(":")
+      if c >= 0:
+          h = h[:c]
+      return h.lower()
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+      }
+
+  def mk_edge(kind, frm, to, ts):
+      return {
+          "from":     frm,
+          "to":       to,
+          "kind":     kind,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  def seen_before(key, ts):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if key in seen:
+          return True
+      if len(seen) > MAX_SEEN:
+          seen = {}
+      seen[key] = str(ts)
+      if store_usage()["free"] > 8192:
+          store_set("reported", seen)
+      return False
+
+  # --------------------------------------------------------------------- main
+  def run():
+      # 1. RELEVANCE GATE - pure string checks on meta, no graph/log calls.
+      ct = meta.get("context_type", "")
+      if ct != "http_request" and ct != "execute_process":
+          return "allow"
+
+      trigger_body = meta.get("content", "")
+      method       = ""
+      egress_host  = ""
+
+      if ct == "http_request":
+          method = meta.get("method", "").upper()
+          if method != "POST" and method != "PUT" and method != "PATCH":
+              return "allow"                       # ingress only - not an egress trigger
+          egress_host = meta.get("host", "").lower()
+          if egress_host == "":
+              return "allow"
+      else:
+          if not quick_hit(trigger_body):
+              return "allow"
+          if find_any(EGRESS_SPAWN, trigger_body) == None:
+              return "allow"
+          egress_host = url_host(trigger_body)
+          if egress_host == "":
+              return "allow"                       # no explicit destination in the spawn
+
+      # 2. ANCHOR on the exact triggering instance.
+      cp     = int(meta.get("caller_pid", "0"))
+      ts_now = int(meta.get("event_ts", "0"))
+      if cp == 0 or ts_now == 0:
+          return "allow"
+      since = ts_now - WINDOW_NS
+
+      inst = proc_instance(cp, ts_now)
+      if inst == None:
+          return "allow"                           # degraded - re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if lineage == None or len(lineage) == 0:
+          return "allow"
+
+      # 3. SESSION SCOPE - lineage plus descendants spawned inside the window.
+      session = {}
+      for x in lineage:
+          p = x.get("actor_pid", "")
+          if p != "":
+              session[p] = True
+
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ts_now, limit=3000)
+      if execs == None:
+          execs = []
+      for i in range(2):
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in session:
+                  session[ap] = True
+
+      # 4. STAGE 2 (REQUIRED ANCHOR) - egress-capable spawn by this session.
+      anchor     = None
+      anchor_ts  = 0
+      anchor_cmd = ""
+      if ct == "execute_process":
+          anchor_ts  = ts_now                      # the trigger IS the spawn (from meta)
+          anchor_cmd = trigger_body
+      else:
+          for e in execs:
+              ap = e.get("actor_pid", "")
+              if ap == "" or ap not in session:
+                  continue
+              t = int(e.get("ts", "0"))
+              if t < since or t > ts_now:
+                  continue
+              c = e.get("cmdline", "")
+              if not quick_hit(c):
+                  continue
+              if find_any(EGRESS_SPAWN, c) == None:
+                  continue
+              if t >= anchor_ts:
+                  anchor     = e
+                  anchor_ts  = t
+                  anchor_cmd = c
+          if anchor == None:
+              return "allow"                       # no anchor -> no detection, by design
+
+      # 5. STAGE 1 (booster) - content ingress before the anchor, different host.
+      ingress = None
+      reqs = query_events(kind="HTTP_REQUEST", since_ns=since, until_ns=anchor_ts, limit=2000)
+      if reqs == None:
+          reqs = []
+      for e in reqs:
+          ap = e.get("actor_pid", "")
+          if ap == "" or ap not in session:
+              continue
+          m = e.get("method", "").upper()
+          if m == "POST" or m == "PUT" or m == "PATCH":
+              continue
+          h = e.get("host", "").lower()
+          if h == "" or h == egress_host:
+              continue
+          if ingress == None or int(e.get("ts", "0")) > int(ingress.get("ts", "0")):
+              ingress = e
+
+      # 6. BOOSTERS - at least one is mandatory.
+      boosters = []
+      if find_any(SENSITIVE, anchor_cmd) != None:
+          boosters.append("credential/agent-config material named in the spawned command")
+      if ct == "http_request":
+          if find_any(SENSITIVE, trigger_body[:8000]) != None:
+              boosters.append("credential material inside the outbound request body")
+      if find_any(EXFIL_BODY, anchor_cmd) != None:
+          boosters.append("file-sourced or encoded payload on the egress command")
+      if ingress != None:
+          boosters.append("cross-system pivot: ingress " + ingress.get("host", "?") +
+                          " then egress " + egress_host)
+      if len(boosters) == 0:
+          return "allow"
+
+      # 7. DEDUPE per (session root, anchor, destination).
+      root = lineage[len(lineage) - 1]
+      key  = (root.get("actor_pid", "") + ":" + root.get("actor_start", "") + ":" +
+              str(anchor_ts) + ":" + egress_host)
+      if seen_before(key, ts_now):
+          return "allow"
+
+      # 8. KILL CHAIN built from instance-resolved event rows.
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      if ingress != None:
+          chain.append(step(ev_edge(ingress),
+                            stage_id="Content Ingress",
+                            stage_desc="session pulled external content: " +
+                                       ingress.get("method", "GET") + " " +
+                                       ingress.get("host", "?") + ingress.get("path", "")))
+
+      if anchor != None:
+          chain.append(step(ev_edge(anchor),
+                            stage_id="Tool Execution",
+                            stage_desc="egress-capable subprocess spawned: " + anchor_cmd[:200]))
+      else:
+          chain.append(step(mk_edge("EXECUTE_PROCESS",
+                                    "process://" + inst.get("actor_path", ""),
+                                    "process://" + inst.get("actor_path", ""),
+                                    ts_now),
+                            stage_id="Tool Execution",
+                            stage_desc="egress-capable subprocess spawned toward " +
+                                       egress_host + ": " + anchor_cmd[:200]))
+
+      if ct == "http_request":
+          chain.append(step(mk_edge("HTTP_REQUEST",
+                                    "process://" + lineage[0].get("actor_path", ""),
+                                    "https://" + egress_host,
+                                    ts_now),
+                            stage_id="Data Egress",
+                            stage_desc=method + " " + egress_host + meta.get("path", "") +
+                                       " (body-bearing outbound request)"))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[-1])
+      lin = " -> ".join(names)
+
+      degraded = ""
+      if len(lineage) < 2:
+          degraded = " [attribution: degraded - lineage truncated]"
+
+      reason = ("MCP content-injection / supply-chain egress chain in session " + lin +
+                " -> " + egress_host + ": " + "; ".join(boosters) + degraded)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
