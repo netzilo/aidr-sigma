@@ -1,0 +1,133 @@
+title: Supply Chain - Malicious PyPI Package claude-multirepo-sync / Claude Config Exfil
+id: 9c2b7d14-6a3f-4b58-9e07-2f1d84c5a3be
+status: experimental
+level: high
+description: |
+  Single-event content detection on process-exec command lines for two tightly
+  scoped conditions:
+
+  (A) Acquisition or execution of the malicious PyPI package
+      "claude-multirepo-sync" (and its normalised / concatenated name variants).
+      The package name alone is not enough - it must appear together with a
+      package-manager acquisition verb, a PyPI/pythonhosted download URL, a
+      sdist/wheel filename, a `python -m` / import invocation, or an invocation of
+      the installed console-script entrypoint. This keeps IOC hunting, blocklist
+      authoring and log greps out of the alert stream.
+
+  (B) The generic behaviour the package exists to perform: a single command line
+      that both references a Claude Code credential/config artifact on disk
+      (~/.claude/.credentials.json, ~/.claude.json, ~/.claude/settings*.json,
+      macOS keychain lookup for Claude) AND carries a data-bearing egress
+      primitive (curl -d/-F/-T/--data*, wget --post-*, requests/httpx post,
+      urllib.urlopen, raw socket, nc to a port). Either half alone is benign;
+      both in one command line is exfiltration of Claude Code secrets regardless
+      of which package produced it.
+
+  Env-var names (ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN) are deliberately NOT
+  used as the credential half of (B): a normal `curl -H "x-api-key: $ANTHROPIC_API_KEY"
+  -d @body.json` API call would otherwise match. Only on-disk credential artifacts
+  qualify.
+
+  Report-only while the false-positive rate is measured.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1552/001/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.exfiltration
+  - attack.t1041
+  - owasp.a06.2021
+  - owasp.a08.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # ---- (A) the named malicious package -------------------------------------
+  sel_pkg_name:
+    content|re:
+      - '(?i)claude[-_.]{0,2}multi[-_.]{0,2}repo[-_.]{0,2}sync'
+
+  sel_pkg_acquire_or_run:
+    content|re:
+      # package manager + acquisition verb (\binstall\b does NOT match "uninstall")
+      - '(?i)\b(?:pip[0-9.]*|pipx|uv|poetry|pdm|conda|mamba|easy_install)\b[^\n]{0,400}?\b(?:install|add|download|sync)\b'
+      # direct fetch of the distribution from the index
+      - '(?i)pypi\.org/(?:project|simple)/'
+      - '(?i)files\.pythonhosted\.org/'
+      # sdist / wheel artifact on the command line
+      - '(?i)claude[-_.]{0,2}multi[-_.]{0,2}repo[-_.]{0,2}sync[^\n]{0,60}\.(?:whl|tar\.gz|zip)\b'
+      # module / import execution of the package
+      - '(?i)\bpython[0-9.]*\s+-m\s+claude'
+      - '(?i)\b(?:import|from)\s+claude[-_.]{0,2}multi'
+      # installed console-script entrypoint invoked as a command
+      - '(?i)(?:^|[\s";&|/])claude[-_.]{0,2}multi[-_.]{0,2}repo[-_.]{0,2}sync(?:[\s";&|]|$)'
+
+  # ---- (B) Claude Code secret on disk + data-bearing egress ----------------
+  sel_claude_secret_artifact:
+    content|re:
+      - '(?i)\.claude/\.credentials(?:\.json)?\b'
+      - '(?i)\.claude/settings(?:\.local)?\.json'
+      - '(?i)[\s"=~/]\.claude\.json\b'
+      - '(?i)library/application support/claude'
+      - '(?i)\bfind-generic-password\b[^\n]{0,160}claude'
+
+  sel_data_egress:
+    content|re:
+      # curl: only the data/upload flags, case-folded on the binary name only so
+      # that -d (data) is not confused with -D (dump-header)
+      - '(?i:curl)\b[^\n]{0,300}\s-(?:d|F|T)[\s=@]'
+      - '(?i:curl)\b[^\n]{0,300}\s--(?:data|data-binary|data-raw|data-urlencode|form|upload-file)[\s=@]'
+      - '(?i:wget)\b[^\n]{0,300}\s--post-(?:data|file)[\s=]'
+      - '(?i)\b(?:requests|httpx)\.(?:post|put|patch)\s*\('
+      - '(?i)\burllib(?:\.request)?\.(?:urlopen|Request)\s*\('
+      - '(?i)\bhttp\.client\.HTTPS?Connection\s*\('
+      - '(?i)\bsocket\.(?:socket|create_connection)\s*\('
+      - '(?i)(?:^|[\s"|;&/])(?:nc|ncat|netcat)\s+[^\n]{0,120}\s\d{2,5}(?:[\s"]|$)'
+
+  # ---- aggressive benign suppression ---------------------------------------
+  filter_remediation_and_inspection:
+    content|re:
+      - '(?i)\bpip[0-9.]*\s+(?:uninstall|show|list|freeze|index|cache|check)\b'
+      - '(?i)\b(?:pipx|uv|poetry|pdm|conda|mamba)\s+(?:uninstall|remove|list|show|tree|search)\b'
+      - '(?i)\s--dry-run\b'
+      - '(?i)\s(?:-h|--help)(?:[\s"]|$)'
+      - '(?i)\b(?:pip-audit|safety|osv-scanner|trivy|syft|grype|bandit|semgrep)\b'
+
+  filter_hunting_and_authoring:
+    content|re:
+      - '(?i)(?:^|[\s"|;&/])(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|fd)\s'
+      - '(?i)(?:^|[\s"|;&/])(?:vim|vi|nvim|nano|emacs|subl|code)\s'
+      - '(?i)(?:^|[\s"|;&/])(?:man|which|whereis)\s'
+      - '(?i)\bplaceholder\b'
+      - '(?i)\breplace_me\b'
+      - '(?i)\byour_[a-z_]{3,}\b'
+      - '(?i)<your[- ]?[a-z]{0,12}>'
+
+  condition: >
+    sel_event
+    and (
+      (sel_pkg_name and sel_pkg_acquire_or_run)
+      or (sel_claude_secret_artifact and sel_data_egress)
+    )
+    and not (filter_remediation_and_inspection or filter_hunting_and_authoring)
+
+falsepositives:
+  - Malware analyst or IR responder deliberately detonating the package in a sandbox (pip download / pip install of the IOC) - a true positive by content, benign by intent.
+  - Remediation runs such as "pip uninstall claude-multirepo-sync" - suppressed by filter_remediation_and_inspection.
+  - IOC hunting with grep/rg across logs or lockfiles, and editing blocklists or detection content that names the package - suppressed by filter_hunting_and_authoring.
+  - Internal support-bundle or diagnostics tooling that curls/posts a collected archive whose command line also names ~/.claude.json or ~/.claude/settings.json.
+  - Personal dotfile backup scripts that upload a Claude Code config file with "curl -T" or "curl --upload-file" to a private endpoint.
+  - Dependency resolution logs replayed onto a command line (e.g. a wrapper script echoing a resolved requirement set) that includes the package name alongside an install verb.
+
+action: report
