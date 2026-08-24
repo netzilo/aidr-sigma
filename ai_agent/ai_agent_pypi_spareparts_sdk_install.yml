@@ -1,0 +1,98 @@
+title: Supply Chain PyPI spareparts-sdk Adoption
+id: 9f4a1c62-8b7d-4e35-a1c9-3d0f6e2b47ac
+status: experimental
+level: medium
+description: |
+  Single-event content detection for agent-issued adoption of the PyPI package
+  "spareparts-sdk" (an LLM tracing / OpenTelemetry shim that, by design, sees every
+  prompt, response and API key that passes through the instrumented client).
+
+  Scope note (deliberate, and a direct answer to triage dissent): there is NO live
+  telemetry path for package installation. The engine has no package_install or
+  network_connection event type, no INSTALLED_PACKAGE or ACQUIRED_CREDENTIAL edge,
+  and file_write is replay-only. Install-time code execution and credential theft
+  therefore CANNOT be observed. This rule makes no claim that spareparts-sdk is
+  malicious — there is no CVE and no confirmed compromise. It detects the one thing
+  that IS observable on a live client: the agent typing/emitting the package name in
+  an install command, a dependency pin, or an import statement. That is an inventory
+  and adoption signal for a component that sits in the LLM data path, which is why
+  the action is report and the level is medium, not block/critical.
+
+  Blocking is explicitly out of scope: installing a published observability SDK is
+  ordinary developer work, and a block here would stop legitimate builds while still
+  not observing the alleged attack step.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── Trigger surfaces: what the agent asked to run / write ──────────────────
+  sel_event:
+    event_type:
+      - tool_call
+      - execute_process
+      - llm_tool_call
+
+  # A package manager install/add naming the exact package, on one line.
+  sel_pkg_install:
+    content|re: '(?i)\b(pip|pip3|pipx|pipenv|uv|poetry|conda|mamba|pdm|rye|hatch|easy_install)\b[^\n]{0,120}\b(install|add)\b[^\n]{0,120}\bspareparts[-_]sdk\b'
+
+  # A dependency declaration / pin in requirements.txt, pyproject, lock or constraints.
+  sel_dep_pin:
+    content|re:
+      - '(?i)\bspareparts[-_]sdk\b(\[[a-z0-9,._-]{1,40}\])?\s*(==|>=|<=|~=|!=)\s*[0-9]'
+      - '(?i)\bspareparts[-_]sdk\b\s*@\s*(git\+|https?:)'
+
+  # Runtime wiring: the tracer is actually imported into application code.
+  sel_runtime_import:
+    content|re: '(?i)\b(import\s+spareparts_sdk|from\s+spareparts_sdk(\.[a-z0-9_]+)*\s+import)\b'
+
+  # ── Filters: benign text that necessarily names the same package ───────────
+  # Removal / rollback of the package is the opposite of adoption.
+  filter_removal:
+    content|re: '(?i)\b(pip|pip3|pipx|uv|poetry|conda|mamba|pdm)\b[^\n]{0,80}\b(uninstall|remove)\b[^\n]{0,120}\bspareparts[-_]sdk\b'
+
+  # Read-only inspection of the environment, not an install.
+  filter_inspect:
+    content|re: '(?i)\b(pip|pip3)\s+(show|list|freeze|index|search|download|check)\b'
+
+  # Explicitly non-executing invocations.
+  filter_dry_run:
+    content|re: '(?i)(--dry-run\b|--help\b)'
+
+  # Dependency/supply-chain scanners legitimately enumerate package names.
+  filter_audit_tooling:
+    content|re: '(?i)\b(pip-audit|safety\s+(check|scan)|osv-scanner|snyk\s+(test|monitor)|grype|syft|trivy|bandit|dependabot|renovate\.json|sbom|cyclonedx|spdx)\b'
+
+  # Security prose, advisories and remediation notes about the package.
+  filter_advisory_prose:
+    content|re: '(?i)(do\s+not\s+install|malicious\s+package|typosquat|supply[-\s]chain\s+(risk|attack|compromise)|security\s+advisory|CVE-[0-9]{4}-[0-9]{4,7}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|yanked|blocklist|deny\s?list|quarantine|incident\s+report|threat\s+model)'
+
+  # Test fixtures and mocks that reference the package name.
+  filter_test_fixture:
+    content|re: '(?i)(test_[a-z0-9_]{0,40}spareparts|spareparts[-_]sdk[^\n]{0,40}(fixture|mock|stub|monkeypatch))'
+
+  condition: >
+    sel_event and (sel_pkg_install or sel_dep_pin or sel_runtime_import)
+    and not (filter_removal or filter_inspect or filter_dry_run
+    or filter_audit_tooling or filter_advisory_prose or filter_test_fixture)
+
+falsepositives:
+  - Developer or agent deliberately adopting spareparts-sdk for LLM observability — this is the expected common case and the reason the action is report, not block.
+  - CI/CD or container build steps replaying a pinned requirements.txt, poetry.lock, uv.lock or constraints file that already contains the package.
+  - Lockfile or SBOM regeneration echoing the dependency name back into tool arguments.
+  - Editing or refactoring application code that already imports spareparts_sdk (rename, formatting, type-annotation passes).
+  - Security researchers or IR staff reproducing the install in a sandbox — partially suppressed by the advisory-prose and audit-tooling filters.
+  - Documentation, README or changelog authoring that shows the install command verbatim.
+
+action: report
