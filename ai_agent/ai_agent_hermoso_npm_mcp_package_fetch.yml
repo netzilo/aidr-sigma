@@ -1,0 +1,109 @@
+title: Supply Chain — hermoso npm MCP Package Fetch
+id: 3f0c9a41-6d2e-4b7a-9c58-1e84b2df70a5
+status: experimental
+level: medium
+description: |
+  Reports outbound HTTP requests that resolve or download the unscoped npm package
+  "hermoso" — an unvetted MCP server that registers ~681 tools into an agent's tool
+  surface.
+
+  Scope and honesty about the threat: there is no confirmed malicious code, CVE, or
+  observed campaign attached to hermoso. The risk is tool-surface inflation — hundreds
+  of tool descriptions become part of every agent prompt, each one an untrusted
+  instruction-bearing surface, and any one of them can be invoked by a hijacked model.
+  That is an inventory/attack-surface concern, not a proven exploit, which is exactly
+  why this rule is action: report and never blocks.
+
+  Answering the triage objections directly:
+    * The engine has no package_install or tool_invocation event type, and no
+      INSTALLED_PACKAGE or INVOKED_TOOL edge kind. This rule therefore claims none of
+      them. It detects the ONE thing that is genuinely observable on the live wire:
+      the npm registry metadata GET and the tarball GET, both of which are ordinary
+      http_request events with a package-specific, structurally unambiguous path.
+    * It does NOT attempt to score "large tool count" — that is not observable here.
+    * It does NOT overlap the prompt-injection scanner rule (a7f3c891); that rule
+      inspects payload text for injection phrasing, this one inspects a registry URL
+      path for one specific package coordinate.
+
+  Detection is anchored to npm's on-disk registry path grammar:
+    - metadata/version:  GET <registry>/hermoso  or  /hermoso/<version|dist-tag>
+    - tarball:           GET <any mirror>/hermoso/-/hermoso-<semver>.tgz
+  The tarball branch is host-independent on purpose so that Artifactory, Verdaccio,
+  Nexus and GitHub Packages mirrors are still seen — narrowing detection, never
+  widening trust.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+  - https://docs.npmjs.com/cli/v10/using-npm/registry
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+
+  # Branch 1 — the npm tarball coordinate. This path grammar
+  # (/<pkg>/-/<pkg>-<semver>.tgz) is emitted only by npm-compatible registries and
+  # mirrors, so it is safe to evaluate without pinning a host.
+  sel_tarball_url:
+    url.full|re: '(?i)/hermoso/-/hermoso-[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*\.tgz([?#]|$)'
+
+  # Branch 2 — same coordinate appearing inside a request body (proxy resolution
+  # payloads, CI package manifests, MCP server-config pushes).
+  sel_tarball_body:
+    content|re: '(?i)/hermoso/-/hermoso-[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+-]*\.tgz'
+
+  # Branch 3 — registry metadata / version resolution for the exact unscoped package.
+  # Both keys must match (AND within a selection).
+  sel_registry_host:
+    host|re: '(?i)^(registry\.npmjs\.(org|com)|registry\.yarnpkg\.com|npm\.pkg\.github\.com)$'
+  sel_registry_path:
+    path|re: '(?i)^/hermoso(/[A-Za-z0-9._-]+)?$'
+
+  # ── Filters: benign lookups that mention the name without fetching the artifact ──
+  # Free-text search / autocomplete. "hermoso" is a common Spanish adjective and shows
+  # up in registry search, translation APIs and CMS slugs.
+  filter_search_query:
+    url.full|re: '(?i)[?&](text|q|query|search|term|keywords)='
+  # npm search and security-advisory/audit endpoints — these enumerate names, they do
+  # not install anything.
+  filter_registry_service_endpoints:
+    path|re: '(?i)^/-/(v1/search|npm/v1/security|npm/v1/user|whoami)'
+  # Human browsing of the package page or docs mirrors (npmjs.com web UI, unpkg file
+  # listing, jsdelivr browse) rather than a dependency resolution.
+  filter_web_browse:
+    path|re: '(?i)^/(package|browse|docs|advisories)/'
+  # Word-boundary safety: a longer package name that merely starts with the string
+  # (hermoso-ui, hermoso.js) or a scoped package (@vendor/hermoso) is a different
+  # artifact and is already excluded by the anchors above; this catches encoded scopes.
+  filter_scoped_package:
+    path|re: '(?i)^/%40'
+  condition: >
+    sel_event
+    and (sel_tarball_url or sel_tarball_body or (sel_registry_host and sel_registry_path))
+    and not (filter_search_query or filter_registry_service_endpoints
+             or filter_web_browse or filter_scoped_package)
+falsepositives:
+  - A developer or marketing engineer deliberately evaluating or installing hermoso for
+    approved ad/campaign work. The event is a true fetch, but not an incident — triage
+    is "was this install sanctioned and was the 681-tool surface reviewed?", which is
+    the entire point of reporting rather than blocking.
+  - Internal npm mirrors and caching proxies (Artifactory, Verdaccio, Nexus, Cloudsmith)
+    replicating or cache-warming the public registry. The tarball branch is intentionally
+    host-independent, so mirror sync traffic will surface here and may repeat on a
+    schedule.
+  - CI/CD pipelines restoring a lockfile on every build, producing one identical event
+    per job. High count, single root cause — dedupe on url.full before escalating.
+  - Software-composition-analysis scanners, dependency-confusion researchers and malware
+    analysts pulling the tarball on purpose for inspection.
+  - Spanish-language content containing the word "hermoso" in a URL, slug or request
+    body. Mitigated by requiring npm's exact package-path grammar plus the semver
+    tarball form, and by the free-text-search and web-browse filters.
+action: report
