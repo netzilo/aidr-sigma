@@ -1,0 +1,86 @@
+title: LangChain PAL Chain Arbitrary Code Execution
+id: 7c1f4a92-3d6b-4e8a-9b5c-0af2d7e61b34
+status: experimental
+level: high
+description: |
+  Detects exploitation of CVE-2023-36258 / CVE-2023-36095 — arbitrary code execution via
+  LangChain's PALChain `from_math_prompt` and `from_colored_object_prompt` helpers
+  (LangChain < 0.0.236). Attacker-controlled question text is turned into a Python program
+  that PALChain executes without a safe sandbox, so the injected payload runs with the
+  agent's privileges.
+
+  This is a single-event content detection on `execute_process`. It fires only when a
+  spawned process command line carries BOTH of:
+    (a) a reference to the vulnerable PAL API (`from_math_prompt`,
+        `from_colored_object_prompt`, `PALChain`, `pal_chain`) OR the PAL-generated program
+        skeleton (`def solution():`) inside an inline `python -c` invocation, and
+    (b) a concrete code-execution / shell-escape primitive (os.system, os.popen,
+        subprocess.*, __import__('os'|'subprocess'|'pty'|'socket'), pty.spawn,
+        socket.socket, eval(, exec(, shutil.rmtree).
+
+  Neither half alone is conclusive; the conjunction is the exploit. Read-only source
+  inspection, package management and test-runner invocations are filtered out because they
+  legitimately carry the vulnerable symbol names on the command line.
+author: Tanya
+date: "2026-03-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36258
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36095
+  - https://github.com/langchain-ai/langchain/releases/tag/v0.0.236
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - atlas.aml.t0050
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # (a1) the vulnerable LangChain PAL surface named on the command line
+  sel_pal_api:
+    content|re: '(?i)\b(from_math_prompt|from_colored_object_prompt|palchain|pal_chain)\b'
+
+  # (a2) the PAL-generated program skeleton, carried inline
+  sel_inline_python:
+    content|re: '(?i)\bpython[0-9.]*\b[^\n]{0,120}\s-c(\s|[''"])'
+  sel_pal_solution:
+    content|re: 'def\s+solution\s*\(\s*\)\s*:'
+
+  # (b) a real execution / shell-escape primitive in the same command line
+  sel_exec_primitive:
+    content|re: '(?i)(\bos\.(system|popen|execl[pe]{0,2}|execv[pe]{0,2}|spawn[a-z]*)\s*\(|\bsubprocess\.(run|call|check_call|check_output|popen|getoutput)\s*\(|\b__import__\s*\(\s*[''"](os|subprocess|pty|socket|shutil)|\bpty\.spawn\s*\(|\bsocket\.socket\s*\(|\bshutil\.rmtree\s*\(|\bcommands\.getoutput\s*\(|\bexec\s*\(|\beval\s*\()'
+
+  # ── filters: leading-binary anchored so an in-payload word cannot suppress the rule ──
+  filter_code_search:
+    command|re: '^(\S*/)?(grep|egrep|fgrep|rg|ripgrep|ack|ag|fd|find|cat|bat|less|more|head|tail|wc|diff|git)\b'
+  filter_package_ops:
+    command|re: '^(\S*/)?(pip[0-9.]*|pipx|poetry|uv|conda|mamba|pdm|hatch|pip-audit|safety|osv-scanner|trivy|grype|syft|semgrep|bandit)\b'
+  filter_test_runner:
+    command|re: '^(\S*/)?(pytest|py\.test|tox|nox)\b'
+
+  condition: >
+    sel_event
+    and (sel_pal_api or (sel_inline_python and sel_pal_solution))
+    and sel_exec_primitive
+    and not (filter_code_search or filter_package_ops or filter_test_runner)
+falsepositives:
+  - Security researchers or red teams reproducing the documented CVE-2023-36258 proof of
+    concept (`PALChain.from_math_prompt` with an `import os; os.system(...)` question) on a
+    pinned vulnerable LangChain build. This is a true positive for the pattern and an
+    intentional report.
+  - LangChain maintainers or a dependency-upgrade agent running the langchain_experimental
+    PAL test suite — suppressed when the process is launched through pytest/tox/nox.
+  - A developer grepping the repository or reading a security advisory that quotes the
+    vulnerable function names — suppressed by the leading-binary code-search filter.
+  - Vulnerability scanners and SBOM tooling that echo the affected symbol or module path —
+    suppressed by the package-ops filter.
+  - A one-off `python -c` coding-challenge snippet that defines `def solution():` and also
+    shells out; rare, and requires all three conditions to coincide, hence report only.
+action: report
