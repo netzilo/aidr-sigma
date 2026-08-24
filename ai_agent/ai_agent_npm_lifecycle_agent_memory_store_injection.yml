@@ -1,0 +1,303 @@
+title: Package Lifecycle Script Writes Agent Memory/Instruction Store
+id: 7c3f1d2a-9b64-4e18-a5d7-2f0c6b81e4a3
+status: experimental
+level: high
+description: |
+  Detects the DSH/"memory plugin" supply-chain pattern: a package-manager
+  lifecycle process (npm/npx/pnpm/yarn/bun install, or a binary executed from
+  node_modules) spawns a subtree that synchronises files into an AI agent's
+  memory / instruction / skill store (e.g. ~/.local/share/\u5FC6\u65F6, ~/.claude/skills,
+  ~/.codex, ~/.gemini, *.mcp.json) and registers new capabilities such as
+  "memocap" without explicit user authorisation. Content dropped into those
+  stores is re-read as instructions on every later agent invocation, so this is
+  persistence + instruction injection delivered through the software supply
+  chain.
+
+  DIFFERENTIATION FROM 043f4e6f-5354-5bc0-8046-ac279b2763ca (Agent Persistent
+  Memory Poisoning via Behavioural Modifier Injection): that rule keys off the
+  WRITE_FILE target path/content pattern alone and is delivery-agnostic. This
+  rule's REQUIRED anchor is instance-resolved provenance -- the writing process
+  must be inside the spawn subtree of a package-manager lifecycle invocation,
+  resolved via caller_pid -> proc_instance -> proc_lineage and the on-disk event
+  log. A path/content rule cannot express "this write was performed by a
+  postinstall script", and a lineage rule cannot be evaded by renaming the store
+  directory. The two rules are complementary, not duplicative: if there is no
+  package-manager provenance in the session lineage this rule returns allow and
+  defers entirely to the content-keyed rule.
+
+  Only WRITE_FILE is used as the behavioural primitive -- SYNC_FILES,
+  INJECT_INSTRUCTIONS, REGISTER_CAPABILITY, capability_registration and
+  file_sync are not known to the engine, and the file_write context has no live
+  client producer, so file writes are read from the instance-resolved event log
+  via query_events(kind="WRITE_FILE", actor_pid=..., actor_start=...).
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.persistence
+  - atlas.aml.t0010
+  - owasp.llm03
+  - owasp.llm04
+falsepositives:
+  - Legitimate, user-approved agent plugin packages installed from npm that
+    intentionally write skills or prompt files into ~/.claude/skills,
+    ~/.codex or ~/.gemini as part of their documented setup step. These will be
+    reported once per install burst; triage by confirming the package name in
+    the Supply-Chain Delivery stage command line.
+  - An MCP server package whose postinstall step writes or patches a
+    .mcp.json / mcp_settings.json entry during a deliberate developer install.
+  - A monorepo bootstrap (pnpm install / yarn install) that runs a workspace
+    prepare script which copies documentation markdown into a shared user data
+    directory whose path happens to contain a memory/prompt/skill token.
+  - Reinstall or upgrade of an already-trusted agent toolkit, which repeats the
+    same fan-out of markdown files into the agent store.
+  - Security research or detection-engineering work that intentionally installs
+    the malicious package in a lab to reproduce the behaviour.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - execute_process
+      - tool_call
+      - tool_response
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Constants ─────────────────────────────────────────────────────────────
+  WINDOW_NS   = 300000000000   # 5 min: install burst -> memory-store sync
+  MAX_SESSION = 48             # pid fan-out cap (cost bound)
+  WRITE_LIMIT = 300            # per-instance WRITE_FILE rows (scoped, never broad)
+
+  # Package-specific memory-store markers (\u5FC6\u65F6 == "yishi", the DSH store dir).
+  MEM_MARKERS = ["\u5FC6\u65F6", "memocap", "dsh-yishi", "dsh_yishi", "dshyishi", "yishi"]
+
+  # Directories that hold agent instruction / memory / skill state.
+  AGENT_STORE = ["/.claude/", "/.codex/", "/.gemini/", "/.cursor/", "/.continue/",
+                 "/.aider/", "/.agents/", "/.config/", "/.local/share/"]
+
+  # A write inside AGENT_STORE only counts when the path also looks like an
+  # instruction/memory/skill artefact -- positive requirement, no exclusions.
+  INSTR_TOKENS = ["memor", "memocap", "skill", "prompt", "instruction", "persona",
+                  "agents.md", "claude.md", "gemini.md", "mcp.json", "mcp_settings",
+                  "mcpservers", "/commands/", "/rules/", "system.md"]
+
+  PKG_MGR_RE = r"\b(npm|npx|pnpm|yarn|bun|corepack)\b"
+  INSTALL_RE = r"\b(install|add|ci|postinstall|preinstall|prepare|rebuild|link|exec|dlx)\b"
+
+  # ── Pure helpers (no graph / log calls) ───────────────────────────────────
+  def to_int(v):
+      if v == None:
+          return 0
+      if type(v) == "int":
+          return v
+      m = re.find(r"^[0-9]+", str(v))
+      if m == None:
+          return 0
+      return int(m)
+
+  def is_pkg_install(cmd, path):
+      s = (cmd + " " + path).lower()
+      if "/node_modules/" in s or "node_modules/.bin" in s:
+          return True
+      if re.find(PKG_MGR_RE, s) == None:
+          return False
+      return re.find(INSTALL_RE, s) != None
+
+  def path_class(p):
+      lp = p.lower()
+      for m in MEM_MARKERS:
+          if m in lp:
+              return "marker"
+      in_store = False
+      for d in AGENT_STORE:
+          if d in lp:
+              in_store = True
+      if not in_store:
+          return ""
+      for t in INSTR_TOKENS:
+          if t in lp:
+              return "store"
+      return ""
+
+  def is_capability(p):
+      lp = p.lower()
+      if "memocap" in lp:
+          return True
+      if "/skills/" in lp or lp.endswith("skill.json") or lp.endswith("skills.json"):
+          return True
+      if "mcp.json" in lp or "mcp_settings" in lp or "mcpservers" in lp:
+          return True
+      return False
+
+  def ev_edge(e, kind, target):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       target,
+          "kind":     kind,
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── Relevance gate: pure string checks on meta, no traversal ──────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      c  = meta.get("content", "")
+      lc = c.lower()
+      if ct == "execute_process":
+          return is_pkg_install(c, "")
+      if ct == "tool_input" or ct == "tool_output":
+          if re.find(PKG_MGR_RE, lc) != None and re.find(INSTALL_RE, lc) != None:
+              return True
+          for m in MEM_MARKERS:
+              if m in lc:
+                  return True
+          return False
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = to_int(meta.get("event_ts", "0"))
+      cp  = to_int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      # ── Anchor on the exact triggering instance ───────────────────────────
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"          # degraded: create row not landed -- re-fires later
+      lineage = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── Session scope: lineage + descendants spawned inside the window ────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=now - WINDOW_NS,
+                           until_ns=now, limit=4000)
+      for _r in range(4):
+          added = 0
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap not in session and len(session) < MAX_SESSION:
+                  session[ap] = e.get("actor_start", "0")
+                  added += 1
+          if added == 0:
+              break
+
+      # ── Stage 1 (REQUIRED anchor): package lifecycle provenance ───────────
+      install_ev = None
+      for x in lineage:
+          if is_pkg_install(x.get("cmdline", ""), x.get("actor_path", "")):
+              install_ev = x
+              break
+      if install_ev == None:
+          for e in execs:        # newest-first -> loop ends on the earliest in-window
+              ap = e.get("actor_pid", "")
+              pp = e.get("parent_pid", "")
+              if ap not in session and pp not in session:
+                  continue
+              if is_pkg_install(e.get("cmdline", ""), e.get("actor_path", "")):
+                  install_ev = e
+      if install_ev == None:
+          return "allow"          # no supply-chain provenance -> not this rule's threat
+
+      s0_ts = to_int(install_ev.get("ts", "0"))
+      if s0_ts == 0:
+          s0_ts = to_int(install_ev.get("actor_start", "0"))
+      if s0_ts == 0 or (now - s0_ts) > WINDOW_NS:
+          return "allow"          # stale -- never stitch an old install to a new write
+      since = max(s0_ts, now - WINDOW_NS)
+
+      # ── Stage 2: memory/instruction store writes by session instances ─────
+      marker_w = []
+      store_w  = []
+      cap_w    = []
+      seen     = {}
+      for pid in session:
+          rows = query_events(kind="WRITE_FILE", actor_pid=to_int(pid),
+                              actor_start=to_int(session[pid]),
+                              since_ns=since, until_ns=now, limit=WRITE_LIMIT)
+          for e in rows:
+              p = e.get("path", "")
+              if p == "" or p in seen:
+                  continue
+              seen[p] = True
+              k = path_class(p)
+              if k == "marker":
+                  marker_w.append(e)
+              elif k == "store":
+                  store_w.append(e)
+              if k != "" and is_capability(p):
+                  cap_w.append(e)
+
+      fanout = len(marker_w) + len(store_w)
+      if fanout == 0:
+          return "allow"
+
+      score = 0
+      if marker_w:
+          score += 2            # package-specific store (\u5FC6\u65F6 / memocap / dsh-yishi)
+      if store_w:
+          score += 1            # generic agent instruction store
+      if fanout >= 3:
+          score += 1            # docs/scripts bulk sync signature
+      if cap_w:
+          score += 1            # skill / MCP capability manifest touched
+      if score < 2:
+          return "allow"
+
+      # ── Kill chain, built from instance-resolved event rows ───────────────
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lname = " -> ".join(names)
+
+      chain.append(step(ev_edge(install_ev, "EXECUTE_PROCESS",
+                                "process://" + install_ev.get("actor_path", "")),
+                        stage_id="Supply-Chain Delivery",
+                        stage_desc="package-manager lifecycle process: " +
+                                   install_ev.get("cmdline", install_ev.get("actor_path", "?"))))
+
+      first = marker_w[0] if marker_w else store_w[0]
+      chain.append(step(ev_edge(first, "WRITE_FILE", first.get("path", "")),
+                        stage_id="Memory Store Write",
+                        stage_desc="agent memory/instruction store written by install subtree: " +
+                                   first.get("path", "")))
+
+      if fanout >= 3:
+          for e in (marker_w + store_w)[1:4]:
+              chain.append(step(ev_edge(e, "WRITE_FILE", e.get("path", "")),
+                                stage_id="Instruction Store Fan-Out",
+                                stage_desc="bulk sync into agent store: " + e.get("path", "")))
+
+      if cap_w:
+          c0 = cap_w[0]
+          chain.append(step(ev_edge(c0, "WRITE_FILE", c0.get("path", "")),
+                            stage_id="Capability Registration",
+                            stage_desc="skill/capability manifest written: " + c0.get("path", "")))
+
+      reason = ("Package lifecycle subtree wrote " + str(fanout) +
+                " file(s) into the agent memory/instruction store via " + lname +
+                " (marker_writes=" + str(len(marker_w)) +
+                ", capability_writes=" + str(len(cap_w)) +
+                ", score=" + str(score) + ")")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
