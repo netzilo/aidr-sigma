@@ -1,0 +1,326 @@
+title: MCP Supply Chain - kairos-core-mcp Descendant Executes High-Risk Child Process
+id: 6f3a1c92-8e47-4b0d-9c15-2a7de4f0b833
+status: experimental
+level: medium
+description: |
+  Instance-resolved supply-chain rule for the shared PyPI MCP server package
+  `kairos-core-mcp`, which runs as a stdio subprocess inside Kairos agent
+  environments.
+
+  The install/acquisition and stdio-handshake stages of the narrative have NO
+  telemetry in this engine (event types package_install / stdio_communication /
+  subprocess_create and edge kinds ACQUIRED_DEPENDENCY / STDIO_COMMUNICATION are
+  all unknown to the schema). This rule therefore deliberately does NOT attempt
+  to detect "a PyPI package was installed" or "a compromised package exists".
+  It detects the only stage that is actually observable: EXECUTE_PROCESS.
+
+  To avoid firing on "any benign MCP server invocation" (the triage objection),
+  the rule requires ALL of the following, in order:
+    1. ANCHOR - the triggering process instance must resolve, via
+       proc_instance() -> proc_lineage(), to an ancestor whose executable path
+       or command line identifies the kairos-core-mcp package (site-packages
+       path, console-script, or `python -m kairos_core_mcp`). Merely running the
+       server, serving stdio, or spawning ordinary children produces nothing.
+    2. DISCRIMINATOR - the child process spawned under that anchor must match a
+       high-specificity execution primitive: network egress binaries
+       (curl/wget/nc/socat/scp), reverse-shell primitives (mkfifo), inline code
+       interpreters (python -c, node -e, perl/ruby -e, php -r, osascript -e,
+       powershell -enc), payload decoders (base64 -d, xxd -r, openssl enc,
+       eval $(...)), persistence (crontab, launchctl load) or keychain reads.
+       A stdio MCP server performing its documented function spawns none of
+       these.
+    3. SCOPE - corroborating activity is gathered ONLY from the process subtree
+       rooted at that exact (pid, start) anchor instance, inside the rule's own
+       10-minute window. No cross-session attribution, no path-keyed graph walk,
+       no `for agent in graph(type="Process")`.
+
+  The verdict is report-only. The rule is evidence for an investigation into a
+  specific package instance, not an assertion that kairos-core-mcp is malicious.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - A kairos-core-mcp tool that legitimately shells out to curl or wget to fetch
+    a document, schema or artefact as part of its advertised tool surface. The
+    kill chain shows the exact command line so this is triaged in seconds.
+  - Editable / source installs where the package is executed straight from a
+    checkout and its own build or test tooling spawns `python -c`, `chmod +x`
+    or `base64 -d` during a first-run compile step.
+  - Developers debugging the server interactively (for example
+    `python -m kairos_core_mcp` in a terminal, then invoking curl from a shell
+    that the server itself spawned).
+  - A CI runner executing the packaged server where the surrounding job spawns
+    scp/sftp for artefact upload from inside the server's process subtree.
+  - Any future rename of the distribution that keeps the module name will still
+    match on `kairos_core_mcp`; a genuinely unrelated project using that module
+    name would be attributed to this rule.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Constants ─────────────────────────────────────────────────────────────
+  WINDOW_NS = 600000000000        # 10 minutes - this rule's own window
+  MAX_ROWS  = 2000
+  MAX_PRIOR = 3
+  DEDUP_CAP = 400
+
+  # Identity of the package under investigation. This is an ANCHOR (it narrows
+  # detection to one distribution); it is not an allowlist and grants nothing.
+  PKG_MARKERS = [
+      "kairos-core-mcp",
+      "kairos_core_mcp",
+      "kairos-core_mcp",
+      "kairos_core-mcp",
+      "kairos.core.mcp",
+  ]
+
+  # Tier A - high-specificity execution primitives. A stdio MCP server doing its
+  # documented job spawns none of these. Trigger MUST be Tier A.
+  TIER_A = [
+      [r"\bcurl\b", "curl"],
+      [r"\bwget\b", "wget"],
+      [r"\b(nc|ncat|netcat|socat)\b", "netcat/socat"],
+      [r"\bmkfifo\b", "mkfifo (reverse-shell primitive)"],
+      [r"\b(scp|sftp)\b", "scp/sftp"],
+      [r"\bpython[0-9.]*[^\n]{0,160}\s-c(\s|$)", "python inline code"],
+      [r"\bnode\b[^\n]{0,160}\s(-e|--eval)(\s|$)", "node inline code"],
+      [r"\b(perl|ruby)\b[^\n]{0,160}\s-e(\s|$)", "perl/ruby inline code"],
+      [r"\bphp\b[^\n]{0,160}\s-r(\s|$)", "php inline code"],
+      [r"\bosascript\b[^\n]{0,160}\s-e(\s|$)", "osascript inline code"],
+      [r"\b(powershell|pwsh)\b[^\n]{0,160}\s-e(nc|ncodedcommand)?(\s|$)", "powershell encoded command"],
+      [r"\bbase64\b[^\n]{0,80}\s-{1,2}d(ecode)?(\s|$)", "base64 decode"],
+      [r"\bxxd\b[^\n]{0,60}\s-r(\s|$)", "xxd reverse"],
+      [r"\bopenssl\b[^\n]{0,60}\benc\b", "openssl enc"],
+      [r"\beval\s+\$\(", "eval $(...)"],
+      [r"\bcrontab\b", "crontab persistence"],
+      [r"\blaunchctl\b[^\n]{0,80}\b(load|bootstrap|submit)\b", "launchctl persistence"],
+      [r"\bsecurity\b[^\n]{0,80}\bfind-(generic|internet)-password\b", "keychain credential read"],
+  ]
+
+  # Tier B - generic. Corroboration only; never triggers on its own.
+  TIER_B = [
+      [r"\b(bash|sh|zsh|dash)\s+-c(\s|$)", "shell -c"],
+      [r"\bchmod\s+[0-7+augo]*x", "chmod +x"],
+      [r"\bnohup\b", "nohup"],
+      [r"\b(cat|head|tail)\s[^\n]{0,80}(\.ssh|\.aws|\.env|id_rsa|credentials)", "sensitive file read via shell"],
+  ]
+
+  # ── Pure helpers (no graph / no log calls) ────────────────────────────────
+  def norm(s):
+      if s == "":
+          return ""
+      s = s.lower()
+      # execute_process content is JSON-ish; flatten punctuation so the
+      # whitespace-anchored patterns above behave on both argv arrays and
+      # plain command lines.
+      s = re.replace(r"[\"',\[\]{}]", s, " ")
+      return s
+
+  def match_tier(s, tiers):
+      for t in tiers:
+          if re.find(t[0], s) != None:
+              return t[1]
+      return ""
+
+  def has_marker(s):
+      for m in PKG_MARKERS:
+          if m in s:
+              return True
+      return False
+
+  def trunc(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("parent_path", "?"),
+          "to":       "process://" + e.get("actor_path", "?"),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  # ── Relevance gate - pure string checks on meta only ──────────────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      if match_tier(norm(meta.get("content", "")), TIER_A) == "":
+          return False
+      return True
+
+  # ── Log-backed helper (bounded: lineage is short) ─────────────────────────
+  def inst_cmdline(x):
+      c = x.get("cmdline", "")
+      if c != "":
+          return c
+      rows = query_events(kind="EXECUTE_PROCESS",
+                          actor_pid=int(x.get("actor_pid", "0")),
+                          actor_start=int(x.get("actor_start", "0")),
+                          limit=2)
+      if rows:
+          return rows[0].get("cmdline", "")
+      return ""
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd_raw = meta.get("content", "")
+      label   = match_tier(norm(cmd_raw), TIER_A)
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"                      # periodic run or unresolved PID
+      ev_ts = int(meta.get("event_ts", "0"))
+
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          return "allow"                      # degraded - never guess attribution
+
+      lineage = proc_lineage(int(inst.get("actor_pid", "0")),
+                             int(inst.get("actor_start", "0")))
+      if not lineage:
+          return "allow"
+
+      # ANCHOR: is any ancestor (or the caller itself) the kairos-core-mcp server?
+      anchor = None
+      for x in lineage:
+          if has_marker(x.get("actor_path", "").lower()):
+              anchor = x
+              break
+          if has_marker(norm(inst_cmdline(x))):
+              anchor = x
+              break
+      if anchor == None:
+          return "allow"                      # not a kairos-core-mcp descendant
+
+      anchor_key = anchor.get("actor_pid", "") + ":" + anchor.get("actor_start", "")
+      anchor_ts  = int(anchor.get("ts", "0"))
+      anchor_cmd = inst_cmdline(anchor)
+      if anchor_cmd == "":
+          anchor_cmd = anchor.get("actor_path", "?")
+
+      # Dedupe: one report per (anchor instance, primitive) per window.
+      dkey = anchor_key + "|" + label
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      prev = int(seen.get(dkey, "0"))
+      if prev > 0 and ev_ts > 0 and (ev_ts - prev) < WINDOW_NS:
+          return "allow"
+
+      # SCOPE: the process subtree rooted at this exact anchor instance,
+      # inside this rule's own window. Never cross-session.
+      since = ev_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                          until_ns=ev_ts, limit=MAX_ROWS)
+
+      sess = {}
+      sess[anchor_key] = True
+      for i in range(5):
+          for e in rows:
+              pk = e.get("parent_pid", "") + ":" + e.get("parent_start", "")
+              if pk in sess:
+                  sess[e.get("actor_pid", "") + ":" + e.get("actor_start", "")] = True
+
+      trig_key = inst.get("actor_pid", "") + ":" + inst.get("actor_start", "")
+      prior = []
+      for e in rows:
+          k = e.get("actor_pid", "") + ":" + e.get("actor_start", "")
+          if k not in sess or k == anchor_key or k == trig_key:
+              continue
+          if anchor_ts > 0 and int(e.get("ts", "0")) < anchor_ts:
+              continue                        # ordering: after the package started
+          ec  = norm(e.get("cmdline", "") + " " + e.get("actor_path", ""))
+          lab = match_tier(ec, TIER_A)
+          if lab == "":
+              lab = match_tier(ec, TIER_B)
+          if lab == "":
+              continue
+          prior.append([e, lab])
+          if len(prior) >= MAX_PRIOR:
+              break
+
+      # ── Kill chain, built from event-log rows (instance-accurate) ─────────
+      chain = new_chain("process://" + anchor.get("actor_path", "?"))
+      chain.append(step(ev_edge(anchor),
+                        stage_id="Supply Chain Package",
+                        stage_desc="kairos-core-mcp MCP server instance (pid " +
+                                   anchor.get("actor_pid", "?") + "): " +
+                                   trunc(anchor_cmd, 200)))
+
+      for i in range(len(prior) - 1, -1, -1):
+          pe  = prior[i][0]
+          pl  = prior[i][1]
+          chain.append(step(ev_edge(pe),
+                            stage_id="Session Activity",
+                            stage_desc="same-subtree child (" + pl + "): " +
+                                       trunc(pe.get("cmdline", ""), 160)))
+
+      # Trigger stage comes from meta - never re-queried (async ingest race).
+      tedge = {
+          "from":     "process://" + anchor.get("actor_path", "?"),
+          "to":       "process://" + inst.get("actor_path", "?"),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ev_ts),
+          "first_ts": str(ev_ts),
+          "last_ts":  str(ev_ts),
+          "cmdline":  trunc(cmd_raw, 300),
+      }
+      chain.append(step(tedge,
+                        stage_id="Code Execution",
+                        stage_desc="descendant of kairos-core-mcp executed " +
+                                   label + ": " + trunc(cmd_raw, 200)))
+
+      # Persist dedupe state (quota-guarded; a raise here would fail the rule).
+      fresh = {}
+      for k in seen:
+          v = int(seen[k])
+          if ev_ts == 0 or (ev_ts - v) < (2 * WINDOW_NS):
+              fresh[k] = str(v)
+      fresh[dkey] = str(ev_ts)
+      if len(fresh) > DEDUP_CAP:
+          store_reset()
+      else:
+          u = store_usage()
+          if u["free"] > 16384:
+              store_set("reported", fresh)
+          else:
+              store_reset()
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+
+      reason = ("kairos-core-mcp (PyPI MCP server) subtree executed " + label +
+                " - lineage: " + " -> ".join(names) +
+                " | corroborating same-subtree children: " + str(len(prior)) +
+                " | cmd: " + trunc(cmd_raw, 200))
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
