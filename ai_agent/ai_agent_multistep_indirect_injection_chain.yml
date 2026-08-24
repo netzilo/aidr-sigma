@@ -1,0 +1,397 @@
+title: Multi-Step Indirect Prompt Injection Navigation Chain
+id: b7e3f1a4-2c9d-4f68-9a51-6d0c8e37b214
+status: experimental
+level: medium
+description: |
+  Detection candidate for StepJack-style multi-step indirect prompt injection against
+  computer-use agents: an adversarial objective decomposed across a chain of
+  cross-referencing web pages, each innocuous in isolation.
+
+  HONEST LIMITATION (see falsepositives and the triage dissent this rule answers):
+  the defining signal of this attack is semantic -- the agent parsing page DOM,
+  extracting instructions and following them across hops. The engine exposes no
+  page_load, text_extraction or execute_instruction event, and no READ_DOM /
+  FOLLOWS_LINK / EXECUTES_INSTRUCTION edge. There is therefore NO telemetry that
+  proves instruction-following occurred. This rule does not claim to. It reconstructs
+  the only observable half of the attack -- a contiguous, instance-scoped, cross-host
+  page-navigation burst -- and then requires independent CONTENT corroboration from
+  the full-text index that agent-addressed imperative text was actually present in the
+  bodies of at least two distinct pages of that same chain. Structure alone is
+  ordinary browsing and is never reported.
+
+  It is deliberately report-only and experimental: it produces an investigation lead
+  with a reconstructed hop chain, not an enforcement verdict.
+
+  Attribution is instance-resolved. The rule anchors on meta["caller_pid"], resolves
+  the exact process instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), and queries only that session's instances via query_events(). Page
+  hops are never attributed across sessions, and the triggering fetch is taken from
+  meta (never re-looked-up) because the just-fired event races async ingest.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0047
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1189/
+tags:
+  - attack.initial-access
+  - attack.t1189
+  - atlas.aml.t0047
+  - owasp.llm01
+falsepositives:
+  - Security research or red-team browsing. An agent reading blog posts, papers or
+    benchmark write-ups about prompt injection will fetch pages whose bodies literally
+    contain agent-addressed strings. Mitigated by requiring the marked pages to be part
+    of one contiguous cross-host navigation burst by a single process instance, and by
+    reporting only (no enforcement). Expect this to be the dominant true-benign hit.
+  - Prompt-injection benchmark harnesses and CI evaluation suites (StepJack, AgentDojo
+    and similar) that intentionally serve injected pages. Same signature by design;
+    triage by lineage -- the root process will be a test runner.
+  - Tutorial and documentation walkthroughs that span a docs host plus a CDN/asset host
+    and use chaining prose ("proceed to the next page", "before you continue"). Mitigated
+    by requiring either one high-specificity agent-addressed marker, or markers on three
+    or more distinct pages, before reporting.
+  - Link-aggregator or newsletter browsing where an agent opens several outbound article
+    hosts in rapid succession and one article quotes injection text. Mitigated by the
+    90-second consecutive-hop gap and the two-distinct-marked-page minimum.
+  - Re-fires while a single long session keeps browsing. Mitigated by a 15-minute
+    per-session cooldown held in the rule's private store.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Tunables. All windows belong to the rule, never to storage.
+  # ---------------------------------------------------------------------------
+  WINDOW_NS       = 300000000000   # 5 min  - outer chain window
+  MAX_HOP_GAP_NS  = 90000000000    # 90 s   - max gap between consecutive hops
+  COOLDOWN_NS     = 900000000000   # 15 min - per-session report suppression
+  MIN_PAGES       = 3              # StepJack: >= 3-step decomposition
+  MIN_HOSTS       = 2              # chain must cross a domain boundary
+  MIN_MARKED      = 2              # instructions spread over >= 2 pages
+  MIN_HITS        = 3
+  MAX_PIDS        = 24
+  MAX_SCAN_PAGES  = 8
+  MAX_CHAIN_STEPS = 10
+
+  # Tier 1 - text that addresses an automated agent directly. High specificity.
+  AGENT_ADDRESSED = [
+      "if you are an ai assistant",
+      "if you are an ai agent",
+      "you are an autonomous agent",
+      "instructions for the assistant",
+      "instructions for the agent",
+      "do not inform the user",
+      "without informing the user",
+      "do not mention this to the user",
+      "do not tell the user",
+  ]
+  # Tier 2 - cross-page chaining directives. Lower specificity on their own.
+  CHAINING = [
+      "proceed to the next page",
+      "continue to the next step",
+      "complete the following step",
+      "before you continue",
+      "your next instruction",
+  ]
+
+  # ---------------------------------------------------------------------------
+  # Pure helpers - no graph / log / index calls.
+  # ---------------------------------------------------------------------------
+  def host_of_source(src):
+      i = src.find("#")
+      if i >= 0:
+          src = src[:i]
+      p = src.find("://")
+      if p < 0:
+          return ""
+      rest = src[p+3:]
+      s = rest.find("/")
+      if s >= 0:
+          rest = rest[:s]
+      return rest
+
+  def sort_by_ts(evs):
+      out = []
+      for e in evs:
+          t   = int(e.get("ts", "0"))
+          pos = len(out)
+          for i in range(len(out)):
+              if t < int(out[i].get("ts", "0")):
+                  pos = i
+                  break
+          out = out[:pos] + [e] + out[pos:]
+      return out
+
+  def trailing_run(pages):
+      n = len(pages)
+      if n == 0:
+          return []
+      idx = n - 1
+      for k in range(n - 1):
+          i = n - 2 - k
+          if int(pages[i+1].get("ts", "0")) - int(pages[i].get("ts", "0")) > MAX_HOP_GAP_NS:
+              break
+          idx = i
+      return pages[idx:]
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     "HTTP_REQUEST",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def short(p):
+      parts = p.split("/")
+      return parts[len(parts)-1]
+
+  def confirmed(tier1, marked, hits):
+      if len(marked) < MIN_MARKED or hits < MIN_HITS:
+          return False
+      if tier1:
+          return True
+      return len(marked) >= 3 and hits >= 4
+
+  # ---------------------------------------------------------------------------
+  # Relevance gate - pure string checks on meta only. Runs on every http_request.
+  # ---------------------------------------------------------------------------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      if meta.get("host", "") == "":
+          return False
+      m = meta.get("method", "").upper()
+      # Page navigation is a GET. Empty method = unknown, keep it.
+      if m != "" and m != "GET":
+          return False
+      return True
+
+  # ---------------------------------------------------------------------------
+  # Session-scoped page collection (instance-resolved, one session only).
+  # ---------------------------------------------------------------------------
+  def collect_pages(session, since, now, actor_path):
+      seen  = {}
+      order = []
+      pids  = []
+      for pid in session:
+          pids.append(pid)
+      for i in range(len(pids)):
+          if i >= MAX_PIDS:
+              break
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pids[i]),
+                                since_ns=since, until_ns=now, limit=100):
+              h = e.get("host", "")
+              if h == "":
+                  continue
+              mth = e.get("method", "").upper()
+              if mth != "" and mth != "GET":
+                  continue
+              k    = h + "|" + e.get("path", "")
+              prev = seen.get(k, None)
+              if prev == None:
+                  seen[k] = e
+                  order.append(k)
+              elif int(e.get("ts", "0")) > int(prev.get("ts", "0")):
+                  seen[k] = e
+
+      # The TRIGGERING fetch comes from meta, never from a log lookup: it is the
+      # newest event of all and races async ingest.
+      thost = meta.get("host", "")
+      tpath = meta.get("path", "")
+      tk    = thost + "|" + tpath
+      cid   = ""
+      old   = seen.get(tk, None)
+      if old != None:
+          cid = old.get("content_id", "")
+      else:
+          order.append(tk)
+      seen[tk] = {
+          "kind":       "HTTP_REQUEST",
+          "ts":         str(now),
+          "actor_pid":  meta.get("caller_pid", ""),
+          "actor_path": actor_path,
+          "host":       thost,
+          "path":       tpath,
+          "target_id":  "https://" + thost,
+          "content_id": cid,
+      }
+
+      out = []
+      for k in order:
+          out.append(seen[k])
+      return sort_by_ts(out)
+
+  # ---------------------------------------------------------------------------
+  # Content corroboration - the only evidence that these hops carried
+  # agent-directed instruction text. Runs LAST, only on a structural candidate.
+  # ---------------------------------------------------------------------------
+  def gather_evidence(pages, page_hosts):
+      marked = {}
+      hits   = 0
+      tier1  = False
+
+      # (a) per-document, exact: the indexed body of this specific hop.
+      for i in range(len(pages)):
+          if i >= MAX_SCAN_PAGES:
+              break
+          e   = pages[i]
+          cid = e.get("content_id", "")
+          h   = e.get("host", "")
+          if cid == "" or h == "" or h in marked:
+              continue
+          for p in AGENT_ADDRESSED:
+              if search_in(cid, p):
+                  marked[h] = True
+                  hits      = hits + 1
+                  tier1     = True
+                  break
+          if h in marked:
+              continue
+          for p in CHAINING:
+              if search_in(cid, p):
+                  marked[h] = True
+                  hits      = hits + 1
+                  break
+
+      # (b) index-wide fallback, intersected with THIS chain's hosts only.
+      if len(marked) < MIN_MARKED:
+          for p in AGENT_ADDRESSED:
+              for r in search(p, topK=10):
+                  h = host_of_source(r.get("source", ""))
+                  if h != "" and h in page_hosts and h not in marked:
+                      marked[h] = True
+                      hits      = hits + 1
+                      tier1     = True
+      if len(marked) < MIN_MARKED:
+          for p in CHAINING:
+              for r in search(p, topK=10):
+                  h = host_of_source(r.get("source", ""))
+                  if h != "" and h in page_hosts and h not in marked:
+                      marked[h] = True
+                      hits      = hits + 1
+
+      return tier1, marked, hits
+
+  # ---------------------------------------------------------------------------
+  def cooldown_state(skey, now):
+      cd   = store_get("cooldown") or {}
+      last = cd.get(skey, "0")
+      if int(last) > 0 and now - int(last) < COOLDOWN_NS:
+          return False, cd
+      return True, cd
+
+  def remember(cd, skey, now):
+      cd[skey] = str(now)
+      fresh = {}
+      for k in cd:
+          if now - int(cd[k]) < 2 * COOLDOWN_NS:
+              fresh[k] = cd[k]
+      if store_usage()["free"] > 8192:
+          store_set("cooldown", fresh)
+
+  # ---------------------------------------------------------------------------
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if now == 0 or cp == 0:
+          return "allow"
+
+      # Anchor on the exact triggering instance. Degraded => allow, never guess.
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+      root = lineage[len(lineage)-1]
+      skey = root.get("actor_pid", "") + ":" + root.get("actor_start", "")
+
+      fresh_ok, cd = cooldown_state(skey, now)
+      if not fresh_ok:
+          return "allow"
+
+      since   = now - WINDOW_NS
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = True
+
+      apath = inst.get("actor_path", "")
+      pages = trailing_run(collect_pages(session, since, now, apath))
+
+      # Only widen to sibling instances of the SAME session if the lineage alone
+      # is not already a chain. Keeps the common case at ~3 scoped queries.
+      if len(pages) < MIN_PAGES:
+          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = True
+          pages = trailing_run(collect_pages(session, since, now, apath))
+
+      if len(pages) < MIN_PAGES:
+          return "allow"
+
+      page_hosts = {}
+      for e in pages:
+          h = e.get("host", "")
+          if h != "":
+              page_hosts[h] = True
+      if len(page_hosts) < MIN_HOSTS:
+          return "allow"
+
+      tier1, marked, hits = gather_evidence(pages, page_hosts)
+      if not confirmed(tier1, marked, hits):
+          return "allow"
+
+      # ---- kill chain, rooted at the session owner ---------------------------
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      n     = 0
+      for e in pages:
+          if n >= MAX_CHAIN_STEPS:
+              break
+          n = n + 1
+          h    = e.get("host", "")
+          note = "page hop " + str(n) + ": " + h + e.get("path", "")
+          if h in marked:
+              note = note + "  [agent-directed instruction text present in body]"
+          chain.append(step(ev_edge(e),
+                            stage_id="Hop " + str(n),
+                            stage_desc=note))
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      hostlist = []
+      for h in marked:
+          if len(hostlist) < 5:
+              hostlist.append(h)
+
+      attrib = "instance-resolved"
+      if len(lineage) < 2:
+          attrib = "degraded (lineage truncated)"
+
+      reason = ("Multi-step indirect prompt injection candidate: " +
+                str(len(pages)) + "-page contiguous navigation chain across " +
+                str(len(page_hosts)) + " hosts by " + " -> ".join(names) +
+                "; agent-directed instruction text on " + str(len(marked)) +
+                " pages (" + ", ".join(hostlist) + "), " + str(hits) +
+                " markers. Instruction-following is NOT observable - review required. " +
+                "Attribution: " + attrib + ".")
+      print(reason)
+      remember(cd, skey, now)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
