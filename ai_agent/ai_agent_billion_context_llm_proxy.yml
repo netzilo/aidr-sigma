@@ -1,0 +1,136 @@
+title: Supply Chain Billion-Context LLM Proxy Middleware
+id: 9f4b2c17-6d3e-4a58-b0c9-1e7d84af52b3
+status: experimental
+level: high
+description: |
+  Detects outbound HTTP requests that indicate the 'billion-context' npm package --
+  a self-described context-compression proxy that intercepts and rewrites Anthropic
+  and OpenAI API streams -- is being fetched, declared as a dependency, wired in
+  front of a model API, or is already stamping itself into agent traffic.
+
+  A middleware that sits between a coding agent and its model provider sees every
+  system prompt, every tool result and every model response in cleartext, and can
+  rewrite them before either side observes the change. Presence of this component
+  in the agent's request path is therefore a supply-chain and prompt-disclosure
+  exposure regardless of the maintainer's intent.
+
+  Single-event, content-only detection scoped to http_request. Four independent
+  evidence classes are accepted:
+    1. registry / CDN URL for the package itself (acquisition),
+    2. manifest or lockfile declaration of the dependency (installed),
+    3. runtime artefacts -- x-billion-context header, versioned user-agent,
+       BILLION_CONTEXT_* env var, require/import, npx/npm exec (executing),
+    4. the package name together with an Anthropic/OpenAI base-URL override,
+       i.e. the model endpoint is being repointed at the proxy (interception).
+
+  Also relates to OWASP Top 10 A06:2021 -- Vulnerable and Outdated Components.
+author: Haibo
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1557/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.collection
+  - attack.t1557
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type: http_request
+
+  # 1. Acquisition -- registry metadata, tarball, or CDN path for the package.
+  sel_pkg_url:
+    url.full|re:
+      - '(?i)/billion-context/-/billion-context-[0-9][^/]{0,60}\.tgz'
+      - '(?i)/(?:-/package/)?billion-context(?:/[0-9][^/?]{0,40})?(?:/|\?|$)'
+      - '(?i)/billion-context@[0-9~^*x]'
+
+  # 2. Installed -- dependency declaration in a manifest, lockfile or publish body.
+  sel_manifest_dep:
+    content|re:
+      - '"billion-context"\s{0,4}:\s{0,4}"[~^>=<* 0-9]'
+      - '"name"\s{0,4}:\s{0,4}"billion-context"'
+      - '"resolved"\s{0,4}:\s{0,4}"[^"]{0,200}/billion-context/-/billion-context-'
+      - '(?im)^\s{0,8}"?billion-context@[~^>=<*0-9]'
+
+  # 3. Executing -- proxy runtime artefacts stamped into the request.
+  sel_proxy_runtime:
+    content|re:
+      - '(?i)x-billion-context'
+      - '(?i)\bbillion-context/[0-9]{1,4}\.[0-9]{1,4}'
+      - '(?i)\bBILLION_CONTEXT_[A-Z0-9_]{2,32}'
+      - '(?i)\brequire\(\s{0,4}["\x27]billion-context'
+      - '(?i)\b(?:import|from)\s{1,4}["\x27]billion-context["\x27]'
+      - '(?i)\bnpx\s{1,4}(?:-y\s{1,4}|--yes\s{1,4})?billion-context\b'
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\s{1,4}(?:i|install|add|exec|dlx|x)\b[^\n]{0,120}\bbillion-context\b'
+
+  # 4a. Weak token -- only ever used AND-ed with sel_api_base_override.
+  sel_bc_token:
+    content|re: '(?i)\bbillion[-_]context\b'
+
+  # 4b. Model endpoint being repointed away from the provider default.
+  sel_api_base_override:
+    content|re:
+      - '(?i)\bANTHROPIC_(?:BASE_URL|API_URL|BASE_URI)\b'
+      - '(?i)\bOPENAI_(?:BASE_URL|API_BASE|API_HOST)\b'
+      - '(?i)["\x27]?base_?url["\x27]?\s{0,4}[:=]\s{0,4}["\x27]https?://'
+
+  # ── Filters ────────────────────────────────────────────────────────────────
+  # Remediation: uninstall/remove is the desired outcome, not the threat.
+  filter_removal:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\s{1,4}(?:uninstall|remove|rm)\b[^\n]{0,120}\bbillion-context\b'
+      - '(?i)\bpip\s{1,4}uninstall\b[^\n]{0,120}\bbillion-context\b'
+
+  # Security research / advisory traffic: BOTH an advisory identifier and
+  # analysis vocabulary must be present before the event is suppressed.
+  filter_advisory:
+    content|re:
+      - '\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b'
+      - '\bCVE-[0-9]{4}-[0-9]{4,7}\b'
+      - '\bOSV-[0-9]{4}-[0-9]{1,8}\b'
+      - '\bMAL-[0-9]{4}-[0-9]{1,8}\b'
+  filter_analysis:
+    content|contains:
+      - 'security advisory'
+      - 'malware analysis'
+      - 'vulnerability report'
+      - 'indicators of compromise'
+      - 'threat intelligence'
+      - 'incident report'
+      - 'supply chain attack'
+      - 'do not install'
+
+  condition: >
+    sel_scope
+    and (sel_pkg_url or sel_manifest_dep or sel_proxy_runtime
+         or (sel_bc_token and sel_api_base_override))
+    and not (filter_removal or (filter_advisory and filter_analysis))
+
+falsepositives:
+  - A developer deliberately evaluating or installing billion-context. The registry
+    metadata fetch and tarball download will fire. This is intended -- treat it as
+    an inventory/approval signal for a component that terminates model API traffic.
+  - A security researcher or an agent browsing the package page or a source
+    repository whose path ends in /billion-context. Partially suppressed by the
+    advisory+analysis filter pair; report-only action bounds the impact.
+  - A repository that already depends on billion-context being synced, mirrored or
+    published over HTTP -- every request carrying the package.json, package-lock.json,
+    yarn.lock or pnpm-lock.yaml will re-fire sel_manifest_dep. Expect repeat alerts
+    from the same peer until the dependency is removed or approved.
+  - Blog posts, changelogs or READMEs that quote an `npx billion-context` install
+    line being fetched or posted by an agent. Only partially suppressed; the
+    documentation must also carry advisory vocabulary to be filtered.
+  - Unrelated software that happens to define a JSON/JS `baseUrl` next to the
+    literal string billion-context in the same body. The AND of sel_bc_token and
+    sel_api_base_override makes this unlikely but not impossible.
+action: report
