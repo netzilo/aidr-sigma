@@ -1,0 +1,265 @@
+title: AI Session Supervisor Dashboard Control-Plane Abuse
+id: 7b3c1e2a-9d54-4f61-8a2f-5c9d0e4b71af
+status: experimental
+level: medium
+description: |
+  Behavioural detection for abuse of a self-hosted AI-session supervision dashboard
+  (pylumbergh-class: a web UI that lists, attaches to, sends keys into and kills
+  Claude Code sessions running under tmux).
+
+  The narrative for this threat asserts no specific vulnerability class, so this rule
+  does NOT look for an exploit payload. It looks for the one behaviour that is
+  structurally wrong regardless of the vulnerability used: a monitored AI agent
+  process driving the control plane that is supposed to supervise it, or hammering
+  that control plane's authentication surface.
+
+  Detected sequence (all stages attributed to the same agent process, HTTP_REQUEST
+  edges only):
+    ANCHOR (required, one of)
+      A. a state-changing request (POST/PUT/PATCH/DELETE) to a session-supervisor
+         control path (/api/sessions, send-keys, attach, kill-session, approve, ...)
+      B. >= 25 requests to an authentication path on that host inside 3 minutes
+         (credential-stuffing / token-guessing signature against the dashboard)
+    CORROBORATION (required for anchor A, >= 1 of)
+      - >= 8 aggregated requests to the same supervisor host (enumeration/recon)
+      - a second internal host whose first observed path is also a supervisor or
+         auth surface (horizontal scanning for other dashboards)
+      - an HTTP request to a public (non-ZTNA) host inside the same 10-minute
+         window (candidate relay of harvested session state / operator commands)
+
+  Report-only. It surfaces an attributed kill chain for triage; it never blocks the
+  operator's own dashboard.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://github.com/topics/tmux-dashboard
+  - https://attack.mitre.org/techniques/T1110/
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.discovery
+  - attack.t1046
+  - attack.credential-access
+  - attack.t1110
+  - attack.lateral-movement
+  - attack.t1078
+falsepositives:
+  - An operator or engineer legitimately driving the supervision dashboard from a
+    monitored agent shell (for example asking the agent to restart a wedged tmux
+    session with curl). This produces the mutating-verb anchor and will be reported
+    once per host per 15 minutes.
+  - Health-check or polling automation running inside an agent process that GETs
+    /api/sessions on a loop. GET alone is never an anchor; it only counts as the
+    enumeration corroboration stage.
+  - The dashboard's own integration/e2e test suite executed by an agent, which can
+    generate both auth requests and mutating control calls in a burst.
+  - A single agent that both talks to the internal dashboard and legitimately calls a
+    public API (docs, package registry, model provider) in the same window - the
+    public-egress stage is corroboration only and can never fire on its own.
+  - Browser-driven dashboard use is normally NOT attributed to a monitored agent
+    process and therefore does not reach the detection at all.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── tunables (this rule's own windows - never read from storage) ────────────
+  WINDOW_NS   = 600000000000   # 10 min - stage clustering window
+  BURST_NS    = 180000000000   # 3 min  - auth burst window
+  SUPPRESS_NS = 900000000000   # 15 min - one finding per supervisor host
+  RECON_MIN   = 8              # aggregated requests = enumeration of the dashboard
+  BRUTE_MIN   = 25             # aggregated auth requests in BURST_NS = stuffing
+
+  # Control-plane surface of a tmux AI-session supervisor dashboard.
+  SUPERVISOR_PATHS = [
+      r"(?i)/api/v?[0-9]*/?sessions?\b",
+      r"(?i)/api/(panes?|windows?|tmux|agents?|workers?|supervisor)\b",
+      r"(?i)/(send[-_]?keys|attach|detach|respawn|interrupt)\b",
+      r"(?i)/kill[-_]?(session|pane|window|agent|worker)\b",
+      r"(?i)/sessions?/[^/]+/(input|keys|command|exec|stdin|prompt|kill)\b",
+      r"(?i)/api/[^/]+/(approve|deny|reject|permission)\b",
+      r"(?i)/(pylumbergh|supervise|supervisor)\b",
+  ]
+  AUTH_PATHS = [
+      r"(?i)/(login|signin|sign[-_]in|logon|authenticate)\b",
+      r"(?i)/api/(auth|login|token)\b",
+      r"(?i)/oauth2?/(token|authorize)\b",
+  ]
+  MUTATING = ["POST", "PUT", "PATCH", "DELETE"]
+
+  def num(v):
+      if v == None:
+          return 0
+      if v == "":
+          return 0
+      return int(v)
+
+  def match_any(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # ── relevance gate: pure string checks on meta, no graph calls ──────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      p = meta.get("path", "")
+      if p == "":
+          return False
+      if match_any(SUPERVISOR_PATHS, p):
+          return True
+      if match_any(AUTH_PATHS, p):
+          return True
+      return False
+
+  # The triggering request is taken from meta (never re-looked-up) so the anchor
+  # stage is race-free against async graph ingest.
+  def trigger_edge(aid, host, ts, method):
+      return {
+          "from":     aid,
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "method":   method,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+          "count":    "1",
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      host = meta.get("host", "")
+      if host == "":
+          return "allow"
+      path   = meta.get("path", "")
+      method = meta.get("method", "").upper()
+      ev_ts  = num(meta.get("event_ts", "0"))
+
+      sup      = match_any(SUPERVISOR_PATHS, path)
+      auth     = match_any(AUTH_PATHS, path)
+      mutating = False
+      if method in MUTATING:
+          mutating = True
+
+      # noise control: at most one finding per supervisor host per SUPPRESS_NS
+      fired = store_get("fired:" + host)
+      if fired != None:
+          if ev_ts > 0 and (ev_ts - num(fired)) < SUPPRESS_NS:
+              return "allow"
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+
+          dash_edge   = None
+          egress_edge = None
+          egress_host = ""
+          scan_edges  = []
+
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              uh = u.get("host", "")
+              if uh == host:
+                  dash_edge = e
+              elif u.get("is_ztna_host", "0") == "1":
+                  # another internal endpoint whose first path is a supervisor or
+                  # auth surface -> horizontal scanning for sibling dashboards
+                  if match_any(SUPERVISOR_PATHS, u.get("path", "")):
+                      scan_edges.append(e)
+                  elif match_any(AUTH_PATHS, u.get("path", "")):
+                      scan_edges.append(e)
+              else:
+                  if egress_edge == None:
+                      lt = num(e.get("last_ts", "0"))
+                      if ev_ts == 0 or lt == 0 or lt >= ev_ts - WINDOW_NS:
+                          egress_edge = e
+                          egress_host = uh
+
+          # attribution requirement: this agent must already own traffic to the
+          # supervisor host. If not, the next request re-fires with the edge present.
+          if dash_edge == None:
+              continue
+
+          cnt   = num(dash_edge.get("count", "0"))
+          span  = num(dash_edge.get("last_ts", "0")) - num(dash_edge.get("first_ts", "0"))
+          recon = cnt >= RECON_MIN
+          brute = False
+          if auth and cnt >= BRUTE_MIN and span <= BURST_NS:
+              brute = True
+
+          anchor = ""
+          if brute:
+              anchor = "Credential Stuffing"
+          elif sup and mutating:
+              anchor = "Supervisor Control Command"
+          if anchor == "":
+              continue
+
+          corr = 0
+          if recon:
+              corr = corr + 1
+          if egress_edge != None:
+              corr = corr + 1
+          if len(scan_edges) > 0:
+              corr = corr + 1
+          if anchor == "Supervisor Control Command" and corr < 1:
+              continue
+
+          chain  = new_chain(aid)
+          stages = []
+
+          if recon:
+              chain.append(step(dash_edge,
+                  stage_id="Dashboard Enumeration",
+                  stage_desc=str(cnt) + " HTTP requests to AI-session supervisor host " + host))
+              stages.append("enumeration(" + str(cnt) + ")")
+
+          desc = method + " " + path + " on session-supervisor host " + host
+          if anchor == "Credential Stuffing":
+              desc = str(cnt) + " auth requests in " + str(span / 1000000000) + "s - " + desc
+          chain.append(step(trigger_edge(aid, host, ev_ts, method),
+              stage_id=anchor, stage_desc=desc))
+          stages.append(anchor)
+
+          if len(scan_edges) > 0:
+              su = node(scan_edges[0]["to"])
+              sh = "?"
+              if su != None:
+                  sh = su.get("host", "?")
+              chain.append(step(scan_edges[0],
+                  stage_id="Adjacent Supervisor Surface",
+                  stage_desc="second internal supervisor/auth surface touched: " + sh))
+              stages.append("multi-dashboard")
+
+          if egress_edge != None:
+              chain.append(step(egress_edge,
+                  stage_id="External Relay",
+                  stage_desc="public host contacted in same window: " + egress_host))
+              stages.append("egress(" + egress_host + ")")
+
+          if store_usage()["free"] > 4096:
+              store_set("fired:" + host, str(ev_ts))
+
+          print("AI-session supervisor dashboard abuse on " + host + ": " + ", ".join(stages))
+          return {
+              "action": "report",
+              "reason": "AI-session supervisor control-plane abuse on " + host + " - " + ", ".join(stages),
+              "chain":  chain,
+          }
+
+      return "allow"
+
+  result = run()
