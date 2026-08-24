@@ -1,0 +1,103 @@
+title: vLLM Guided Decoding Invalid JSON Schema DoS
+id: 7b1e4c92-6a3f-4d58-9c41-0e2a7f5b8d63
+status: experimental
+level: high
+description: |
+  Detects an HTTP POST to a vLLM completions endpoint (/v1/completions,
+  /v1/chat/completions, /generate) whose body carries a guided decoding schema
+  (guided_json / json_schema) containing a structurally invalid JSON Schema
+  "type" value. vLLM hands the schema to xgrammar for grammar compilation; an
+  unrecognised type token raises an unhandled RuntimeError that propagates out of
+  the engine core and terminates the server process, dropping every pending and
+  future request (denial of service).
+
+  The rule matches four classes of invalid type token, all of which xgrammar
+  rejects:
+    1. non-JSON-Schema type vocabulary borrowed from programming languages
+       ("str", "int", "bool", "dict", "datetime", ...)
+    2. misspellings of the seven legal types ("stsring", "intger", "objct", ...)
+    3. correctly spelled but wrongly cased types ("String", "INTEGER", ...)
+    4. a type value that is not a non-empty string at all (bare literal,
+       number, empty string, empty array)
+
+  Every pattern is anchored to the guided_json / json_schema key and must occur
+  within 600 characters of it, and all quotes in the pattern are UNESCAPED --
+  so a broken schema pasted inside a prompt or message string (where JSON
+  requires \" escaping) can never match. Only a schema at the structural level
+  of the request body triggers this rule.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://cwe.mitre.org/data/definitions/20.html
+  - https://docs.vllm.ai/en/latest/features/structured_outputs.html
+  - https://attack.mitre.org/techniques/T1499/004/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - owasp.improper_input_validation
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── endpoint scoping: only POSTs to a vLLM inference endpoint ───────────────
+  sel_endpoint_path:
+    event_type: http_request
+    method: POST
+    path|contains:
+      - '/completions'
+      - '/generate'
+  sel_endpoint_url:
+    event_type: http_request
+    method: POST
+    url.full|contains:
+      - '/completions'
+      - '/generate'
+
+  # ── invalid schema type: foreign type vocabulary ────────────────────────────
+  sel_bad_type_vocab:
+    content|re: '"(?:guided_json|guided_decoding_json|json_schema)"\s*:\s*[\s\S]{0,600}?"type"\s*:\s*"(?i:str|int|float|double|bool|dict|list|tuple|set|bytes|char|long|decimal|none|nonetype|any|date|datetime|timestamp|uuid|varchar|struct)"'
+
+  # ── invalid schema type: misspelled legal type ──────────────────────────────
+  sel_bad_type_typo:
+    content|re: '"(?:guided_json|guided_decoding_json|json_schema)"\s*:\s*[\s\S]{0,600}?"type"\s*:\s*"(?i:stsring|strring|stringg|strig|striing|strng|sting|srting|sring|intger|interger|integar|integr|intiger|inteter|integerr|numer|nubmer|nummber|numbr|numbber|objct|obejct|ojbect|objectt|obect|aray|arary|arrray|arry|arrey|bolean|booleen|boolian|boolen|booolean|nul|nulll|nill)"'
+
+  # ── invalid schema type: wrong case (RE2 is case-sensitive here by design) ──
+  sel_bad_type_case:
+    content|re: '"(?:guided_json|guided_decoding_json|json_schema)"\s*:\s*[\s\S]{0,600}?"type"\s*:\s*"(?:String|Integer|Number|Boolean|Object|Array|Null|STRING|INTEGER|NUMBER|BOOLEAN|OBJECT|ARRAY|NULL)"'
+
+  # ── invalid schema type: value is not a non-empty string ────────────────────
+  #   matches "type": ""  |  "type": []  |  "type": 3  |  "type": true/null/bareword
+  sel_type_not_string:
+    content|re: '"(?:guided_json|guided_decoding_json|json_schema)"\s*:\s*[\s\S]{0,600}?"type"\s*:\s*(?:""|\[\s*\]|-?[0-9]|[A-Za-z_])'
+
+  # ── benign-case suppression ─────────────────────────────────────────────────
+  # Self-identified test / fuzzing traffic that intentionally posts bad schemas.
+  filter_test_harness:
+    content|re: '(?i)"(?:user|metadata|client|request_source|x_request_source)"\s*:\s*"[^"]{0,120}(?:pytest|unit-?test|integration-?test|regression|conformance|schema-?lint|fuzz)'
+  # A human asking the model to repair a broken schema they pasted in.
+  filter_prompt_repair:
+    content|re: '(?i)"(?:prompt|content|text|instruction)"\s*:\s*"[^"]{0,800}(?:invalid|malformed|broken|typo|misspelled|fix|correct|debug)[^"]{0,300}(?:schema|guided_json|json_schema)'
+
+  condition: >
+    (sel_endpoint_path or sel_endpoint_url)
+    and (sel_bad_type_vocab or sel_bad_type_typo or sel_bad_type_case or sel_type_not_string)
+    and not (filter_test_harness or filter_prompt_repair)
+action: report
+falsepositives:
+  - Developer iterating on a guided decoding schema who introduces a genuine
+    typo. The request still crashes or errors the inference server, so it is
+    worth surfacing, but it is not an attack.
+  - vLLM CI / integration suites and schema fuzzing harnesses that deliberately
+    post malformed schemas against a staging endpoint. Partially suppressed by
+    filter_test_harness when the client self-identifies in user/metadata.
+  - A user pasting a broken JSON Schema into the prompt and asking the model to
+    fix it. Structurally impossible to match (in-string JSON must escape its
+    quotes and the patterns require unescaped quotes); filter_prompt_repair is a
+    second line of defence for oddly encoded bodies.
+  - Clients that intentionally send loose type vocabulary such as "int" or
+    "bool" to a gateway that normalises the schema before forwarding to vLLM;
+    those requests never reach xgrammar in their invalid form.
+  - Non-vLLM services that happen to expose a path containing "/completions" or
+    "/generate" and accept a json_schema field with non-standard type tokens.
