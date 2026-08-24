@@ -1,0 +1,122 @@
+title: Supply Chain Named IOC - PyPI fabric-dw Package Acquisition or Execution
+id: b7f3a1d2-9c4e-4a58-8e1b-6d2f0c9a5e34
+status: experimental
+level: high
+description: |
+  Named-IOC detection for the third-party PyPI package `fabric-dw`, which masquerades as
+  official Microsoft Fabric tooling and registers itself as an MCP server, placing an
+  attacker-controlled tool surface directly inside an AI agent's capability set.
+
+  Three single-event surfaces are covered, all on event types the engine actually emits
+  (execute_process, http_request):
+    1. Acquisition  - a Python package manager (pip/uv/uvx/pipx/poetry/conda/pdm/rye/hatch)
+                      invoked on a command line that names fabric-dw / fabric_dw.
+    2. Execution    - the console script or module executed directly (e.g. `fabric-dw --stdio`,
+                      `python -m fabric_dw`, `/usr/local/bin/fabric-dw`), i.e. the MCP server
+                      actually starting.
+    3. Artifact fetch - an HTTP request whose URL or path is the PyPI simple/JSON index entry
+                      for the project, or a versioned sdist/wheel filename for it.
+
+  Relationship to the generic typosquat heuristic (c6e0b534-7d4f-4e1c-c6e5-0d3f8e5c4a27):
+  that rule is a lookalike *heuristic* scoped to install commands only. It cannot attribute a
+  hit to this specific advisory, and it is silent on the two post-install surfaces that matter
+  most here - the package being *run* as an MCP server (uvx / console script / `python -m`,
+  no install verb present) and the artifact being pulled by a resolver, vendoring job, or
+  requirements-file-driven install where the package name never appears in an install command.
+  This rule is the high-fidelity IOC companion: it is narrower (one exact project name, not a
+  distance heuristic), so it can be triaged as a confirmed indicator rather than a guess, and
+  it is broader in event surface, so it still fires when the install step happened outside
+  telemetry and only the runtime invocation is visible.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scoping ────────────────────────────────────────────────────────────
+  sel_exec:
+    event_type: execute_process
+  sel_http:
+    event_type: http_request
+
+  # ── surface 1: package-manager acquisition of the named project ─────────────
+  sel_install_cmd:
+    command|re: '(?i)\b(?:pip|pip3|pipx|uv|uvx|poetry|conda|mamba|micromamba|pdm|rye|hatch|easy_install)\b[^\n]{0,200}\bfabric[-_]dw\b'
+  sel_install_content:
+    content|re: '(?i)\b(?:pip|pip3|pipx|uv|uvx|poetry|conda|mamba|micromamba|pdm|rye|hatch|easy_install)\b[^\n]{0,200}\bfabric[-_]dw\b'
+
+  # ── surface 2: the package executed (console script or -m module) ───────────
+  sel_invoke_cmd:
+    command|re:
+      - '(?i)(?:^|[\s;&|(=/"])fabric[-_]dw(?:$|[\s"),;&|])'
+      - '(?i)\bpython3?(?:\.\d+)?\s+-m\s+fabric[-_]dw\b'
+  sel_invoke_content:
+    content|re:
+      - '(?i)(?:^|[\s;&|(=/"])fabric[-_]dw(?:$|[\s"),;&|])'
+      - '(?i)\bpython3?(?:\.\d+)?\s+-m\s+fabric[-_]dw\b'
+
+  # ── surface 3: artifact / index fetch for the named project ─────────────────
+  sel_http_url:
+    url.full|re:
+      - '(?i)/(?:simple|pypi)/fabric[-_]dw(?:[/?#.]|$)'
+      - '(?i)/fabric[-_]dw-\d[A-Za-z0-9._-]*\.(?:whl|tar\.gz|zip|egg)(?:$|[?#])'
+  sel_http_path:
+    path|re:
+      - '(?i)/(?:simple|pypi)/fabric[-_]dw(?:[/?#.]|$)'
+      - '(?i)/fabric[-_]dw-\d[A-Za-z0-9._-]*\.(?:whl|tar\.gz|zip|egg)(?:$|[?#])'
+
+  # ── filters: remediation, inspection and research context ───────────────────
+  # None of these reference a host, domain or path - they suppress only on the
+  # *verb* or the *discussion context*, never on where the traffic is going.
+  filter_removal:
+    command|re: '(?i)\b(?:pip3?|uv|pipx|poetry|conda|mamba|micromamba|pdm|rye)\s+(?:pip\s+)?(?:uninstall|remove|rm)\b'
+  filter_inspection:
+    command|re:
+      - '(?i)\b(?:pip3?|uv|pipx|poetry|conda|mamba|micromamba|pdm|rye|hatch)\s+(?:pip\s+)?(?:show|index|list|info|search|cache|tree|why)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)--report\s'
+  filter_research:
+    content|re: '(?i)(?:typosquat|typo-squat|dependency confusion|malicious package|supply[ -]chain (?:advisory|attack|risk|review)|security advisory|indicator of compromise|\bGHSA-[0-9a-z]{4}|\bCVE-\d{4}-\d{4,}|osv\.dev)'
+  # Text-processing tools naming the IOC (grep/sed/etc) are investigation, not
+  # acquisition - suppressed ONLY on the bare-invocation branch so that a
+  # chained "grep x; pip install fabric-dw" still reports via the install branch.
+  filter_search_tools:
+    command|re: '(?i)(?:^|[\s;&|(])(?:grep|egrep|fgrep|rg|ag|ack|find|locate|awk|sed|cat|less|more|head|tail|strings|jq|echo|printf|diff|comm|wc|sort|uniq)\b'
+
+  condition: >
+    (
+      (sel_exec and (sel_install_cmd or sel_install_content))
+      or (sel_exec and (sel_invoke_cmd or sel_invoke_content) and not filter_search_tools)
+      or (sel_http and (sel_http_url or sel_http_path))
+    )
+    and not (filter_removal or filter_inspection or filter_research)
+
+action: report
+
+falsepositives:
+  - Incident responders or an agent working the advisory - `pip uninstall fabric-dw`,
+    `pip show fabric-dw`, `grep -r fabric-dw requirements*.txt` - suppressed by
+    filter_removal / filter_inspection / filter_search_tools.
+  - Security research, rule authoring, or advisory reading where the package name appears
+    alongside CVE/GHSA/typosquat wording - suppressed by filter_research.
+  - An internal or private distribution genuinely named fabric-dw, or a local project module
+    `fabric_dw` started with `python -m fabric_dw`. This fires and is intentional - a report
+    confirming which internal component owns the name is the desired outcome.
+  - Full-mirror or vendoring pipelines that pull every project from an upstream index into an
+    internal proxy will trip the artifact-fetch branch once per sync. Expected to be a small,
+    identifiable set of hosts in triage; the rule reports rather than blocks for this reason.
+  - A post-review, deliberately pinned install of the package in CI after an internal exception
+    was granted - still reported by design, so the exception stays visible.
