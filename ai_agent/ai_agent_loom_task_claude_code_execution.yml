@@ -1,0 +1,340 @@
+title: Supply Chain Claude Code Launch via LOOM_TASK Binding
+id: b7f3c1d4-9a25-4e6b-8f10-2c4d5e6a7b91
+status: experimental
+level: high
+description: |
+  Detects the @lamemind/loom-deck npm supply-chain pattern: a package installed in a
+  project reads attacker-supplied task definitions (tasks.md) and spawns Claude Code
+  sessions bound through the LOOM_TASK environment variable, turning the agent into an
+  arbitrary-code-execution primitive under attacker control.
+
+  The rule is instance-resolved. It anchors on meta["caller_pid"] of the triggering
+  execute_process event, resolves the exact process instance with proc_instance(),
+  walks the real spawn chain with proc_lineage(), and expands the session with two
+  bounded query_events(kind="EXECUTE_PROCESS") passes. Attribution never crosses a
+  session boundary and never walks path-keyed graph nodes.
+
+  Required stages (ordered, session-scoped):
+    1. Supply Chain Binding  - a loom-deck / LOOM_TASK / @lamemind marker in the
+       cmdline or executable path of the triggering instance, one of its ancestors,
+       or a sibling spawned by the same session. This is the high-specificity anchor;
+       without it the rule returns allow.
+    2. Agent Launch          - a claude / claude-code process spawned by the same
+       session at or after the anchor timestamp and no later than the trigger.
+  Optional corroboration:
+    3. Task Definition Read  - an instance-scoped READ_FILE of a path containing
+       tasks.md by one of the probed session instances.
+
+  Action is report only: the package may be deliberately installed by a developer, and
+  interrupting a Claude Code session on a heuristic would be worse than surfacing it.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://www.npmjs.com/package/@lamemind/loom-deck
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059
+  - owasp.llm03
+falsepositives:
+  - A developer who deliberately installed @lamemind/loom-deck and is running it as an
+    intended task orchestrator. The chain is identical to the attack; only intent
+    differs, which is exactly why this rule reports instead of blocking.
+  - A local repository, worktree or scratch directory whose path contains "loom-deck"
+    or "loom_task" while an unrelated Claude Code session is launched from it.
+  - A CI or test harness that exports LOOM_TASK to exercise the package, then invokes
+    the claude CLI in the same shell session.
+  - Internal wrapper scripts named loom-deck that launch claude for legitimate batch
+    work; these will report once per launch and should be triaged by lineage, not
+    silenced by widening the pattern.
+  - A tasks.md file that exists for unrelated project reasons and is read by a session
+    instance within the window; this only ever adds the optional third stage and never
+    causes a report on its own.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec_loom:
+    event_type: execute_process
+    content|re: '(?i)(LOOM_TASK|loom[-_]deck|loomdeck|lamemind/loom)'
+  sel_exec_claude:
+    event_type: execute_process
+    content|re: '(?i)(^|[\s/=])claude(-code|\.js)?($|[\s",}])'
+  condition: sel_exec_loom or sel_exec_claude
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── constants (this rule's own window; nothing is baked into storage) ───────
+  WINDOW_NS   = 300000000000   # 5 minutes — stages must cluster here
+  MAX_SESSION = 64             # bound on session pid expansion
+  MAX_PROBE   = 8              # bound on per-instance READ_FILE probes
+  READ_LIMIT  = 300            # READ_FILE is high volume — always scoped + capped
+
+  LOOM_MARKERS = ["loom_task", "loom-deck", "loom_deck", "loomdeck", "lamemind/loom"]
+  CLAUDE_RE    = r'(^|[\s/=])claude(-code|\.js)?($|[\s",}])'
+  TASK_FILE    = "tasks.md"
+
+  # ── pure helpers — no graph / log / fs calls ────────────────────────────────
+  def clip(s, n):
+      if len(s) <= n:
+          return s
+      return s[:n] + "..."
+
+  def has_loom(s):
+      t = s.lower()
+      for m in LOOM_MARKERS:
+          if m in t:
+              return True
+      return False
+
+  def has_claude(s):
+      return re.find(CLAUDE_RE, s.lower()) != None
+
+  def exec_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = "pid:" + e.get("parent_pid", "0")
+      return {
+          "from":     "process://" + frm,
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def trigger_edge(inst, ts, cmd):
+      frm = inst.get("parent_path", "")
+      if frm == "":
+          frm = "pid:" + inst.get("parent_pid", "0")
+      return {
+          "from":     "process://" + frm,
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+          "cmdline":  cmd,
+      }
+
+  def file_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = e.get("path", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     "READ_FILE",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no traversal ─────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+
+      cmd = meta.get("content", "")
+      if cmd == "":
+          cmd = meta.get("command", "")
+      trig_loom   = has_loom(cmd)
+      trig_claude = has_claude(cmd)
+      if not trig_loom and not trig_claude:
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if now <= 0 or cp == 0:
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ──────────────────────────
+      inst = proc_instance(cp, now)
+      if inst == None:
+          # degraded: the create row has not landed yet. Never guess — the next
+          # event in this session re-fires with full attribution.
+          return "allow"
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # ── 3. session scope: lineage + what it spawned (2 bounded passes) ──────
+      session = {}
+      for x in lineage:
+          pidv = x.get("actor_pid", "")
+          if pidv != "":
+              session[pidv] = x
+
+      since = now - WINDOW_NS
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now, limit=2000)
+
+      for i in range(2):
+          for e in execs:
+              if len(session) >= MAX_SESSION:
+                  break
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in session and ap not in session:
+                  session[ap] = e
+
+      # ── 4. REQUIRED anchor: loom-deck / LOOM_TASK binding in THIS session ───
+      anchor        = None
+      anchor_ts     = 0
+      anchor_txt    = ""
+      anchor_pid    = ""
+      anchor_is_trig = False
+
+      if trig_loom:
+          anchor         = trigger_edge(inst, now, cmd)
+          anchor_ts      = now
+          anchor_txt     = clip(cmd, 220)
+          anchor_pid     = inst.get("actor_pid", "")
+          anchor_is_trig = True
+
+      # ancestors: parent-child relation is inherently session-scoped, so an
+      # ancestor started before the window is still a valid anchor.
+      for x in lineage:
+          blob = x.get("cmdline", "") + " " + x.get("actor_path", "")
+          if not has_loom(blob):
+              continue
+          ts = int(x.get("ts", "0"))
+          if ts > now:
+              continue
+          if anchor == None or ts < anchor_ts:
+              anchor         = exec_edge(x)
+              anchor_ts      = ts
+              anchor_txt     = clip(x.get("cmdline", "") + " " + x.get("actor_path", ""), 220)
+              anchor_pid     = x.get("actor_pid", "")
+              anchor_is_trig = False
+
+      # siblings spawned by the same session, inside the window
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          blob = e.get("cmdline", "") + " " + e.get("actor_path", "")
+          if not has_loom(blob):
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < since or ts > now:
+              continue
+          if anchor == None or ts < anchor_ts:
+              anchor         = exec_edge(e)
+              anchor_ts      = ts
+              anchor_txt     = clip(e.get("cmdline", ""), 220)
+              anchor_pid     = e.get("actor_pid", "")
+              anchor_is_trig = False
+
+      if anchor == None:
+          return "allow"          # no loom binding — a plain claude spawn is benign
+
+      # ── 5. REQUIRED stage: Claude Code launched at/after the anchor ─────────
+      launch        = None
+      launch_ts     = 0
+      launch_txt    = ""
+      launch_pid    = ""
+      launch_is_trig = False
+
+      if trig_claude and now >= anchor_ts:
+          launch         = trigger_edge(inst, now, cmd)
+          launch_ts      = now
+          launch_txt     = clip(cmd, 220)
+          launch_pid     = inst.get("actor_pid", "")
+          launch_is_trig = True
+
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          blob = e.get("cmdline", "") + " " + e.get("actor_path", "")
+          if not has_claude(blob):
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < anchor_ts or ts > now:
+              continue
+          if launch == None or ts < launch_ts:
+              launch         = exec_edge(e)
+              launch_ts      = ts
+              launch_txt     = clip(e.get("cmdline", ""), 220)
+              launch_pid     = e.get("actor_pid", "")
+              launch_is_trig = False
+
+      if launch == None:
+          return "allow"
+
+      # window clustering: the launch must be recent relative to the trigger
+      if now - launch_ts > WINDOW_NS:
+          return "allow"
+
+      # ── 6. OPTIONAL corroboration: tasks.md read, instance-scoped only ──────
+      probe = []
+      for pidv in [launch_pid, anchor_pid, inst.get("actor_pid", "")]:
+          if pidv != "" and pidv not in probe:
+              probe.append(pidv)
+      for x in lineage:
+          pidv = x.get("actor_pid", "")
+          if pidv != "" and pidv not in probe:
+              probe.append(pidv)
+
+      read_ev   = None
+      read_path = ""
+      for pidv in probe[:MAX_PROBE]:
+          rows = query_events(kind="READ_FILE", actor_pid=int(pidv),
+                              since_ns=since, until_ns=now, limit=READ_LIMIT)
+          for r in rows:
+              p = r.get("path", "")
+              if p == "":
+                  p = r.get("target_id", "")
+              if TASK_FILE in p.lower():
+                  read_ev   = r
+                  read_path = p
+                  break
+          if read_ev != None:
+              break
+
+      # ── 7. verdict + kill chain built from instance-resolved event rows ─────
+      names = []
+      for x in lineage:
+          ap = x.get("actor_path", "")
+          parts = ap.split("/")
+          names.append(parts[len(parts) - 1])
+      lin_txt = " -> ".join(names)
+      if lin_txt == "":
+          lin_txt = "pid " + str(cp)
+      if len(lineage) < 2:
+          lin_txt = lin_txt + " (attribution degraded: short lineage)"
+
+      root_path = lineage[len(lineage) - 1].get("actor_path", "")
+      chain = new_chain("process://" + root_path)
+
+      if anchor_is_trig and launch_is_trig:
+          chain.append(step(anchor, stage_id="Loom Task Binding",
+                            stage_desc="Claude Code spawned with loom-deck/LOOM_TASK binding: " + anchor_txt))
+      else:
+          chain.append(step(anchor, stage_id="Loom Task Binding",
+                            stage_desc="loom-deck / LOOM_TASK task binding in session: " + anchor_txt))
+          chain.append(step(launch, stage_id="Agent Launch",
+                            stage_desc="Claude Code session spawned under that binding: " + launch_txt))
+
+      conf = "2 ordered stages"
+      if read_ev != None:
+          chain.append(step(file_edge(read_ev), stage_id="Task Definition Read",
+                            stage_desc="task definition file read by session instance: " + read_path))
+          conf = "3 ordered stages (tasks.md read confirmed)"
+
+      print("loom-deck LOOM_TASK Claude Code launch — " + lin_txt + " — " + conf)
+
+      return {
+          "action": "report",
+          "reason": "Claude Code launched under LOOM_TASK / @lamemind loom-deck binding — session " +
+                    lin_txt + " — " + conf,
+          "chain":  chain,
+      }
+
+  result = run()
