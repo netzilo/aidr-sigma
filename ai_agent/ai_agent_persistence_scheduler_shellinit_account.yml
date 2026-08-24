@@ -1,0 +1,179 @@
+title: Agent Persistence via Scheduler, Shell Init or Account Manipulation
+id: 3f0c8a1e-6b24-4d97-9c5f-2a71e8d4b063
+status: experimental
+level: high
+description: |
+  Detects a single AI-agent action that establishes host persistence:
+    * installing or replacing a crontab / cron.d / cron spool entry (or a Windows
+      scheduled task),
+    * writing, loading or bootstrapping a launchd agent or daemon,
+    * enabling or linking a systemd unit, or writing a unit file,
+    * writing init.d / rc.local / rc.d scripts,
+    * appending an executable payload to a shell initialisation file
+      (.bashrc/.zshrc/.bash_profile/.profile/profile.d),
+    * creating a local user account or adding one to an administrative group.
+
+  The command-based selections match the engine-extracted `command` field, which is
+  populated from the `command`/`cmd` tool argument (tool_call) and from the spawned
+  process command line (execute_process). Prose that merely mentions these commands --
+  README bodies, chat text, LLM answers -- never populates `command`, so this rule does
+  not fire on documentation or security-training content.
+
+  The file-write selections require a persistence path in a path-style argument AND a
+  content-bearing argument key, which distinguishes a Write/Edit from a Read of the same
+  file. User shell rc files are the noisiest surface, so a write to one is only reported
+  when the payload also carries a download/execution indicator (curl, wget, /dev/tcp,
+  base64 -d, chmod +x, interpreter -c, raw-IP URL).
+author: Egemen
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1053/003/
+  - https://attack.mitre.org/techniques/T1053/004/
+  - https://attack.mitre.org/techniques/T1543/002/
+  - https://attack.mitre.org/techniques/T1546/004/
+  - https://attack.mitre.org/techniques/T1136/001/
+tags:
+  - attack.persistence
+  - attack.privilege-escalation
+  - attack.t1053.003
+  - attack.t1053.004
+  - attack.t1543.002
+  - attack.t1546.004
+  - attack.t1136.001
+  - atlas.aml.t0050
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # -- scope --------------------------------------------------------------------
+  sel_scope:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # -- scheduled execution ------------------------------------------------------
+  sel_cmd_cron:
+    command|re:
+      - '(?i:crontab)\s+(?:-u\s+[A-Za-z0-9_.-]{1,32}\s+)?(?:-e\b|-r\b|-\s*(?:$|[;&|])|[/~.$][^\s]*)'
+      - '(?i)(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+|\bsed\s+-i\S*\s+(?:-e\s+)?\S+\s+)\s*[^\s;|&]*(?:/etc/cron|/var/spool/cron)'
+      - '(?i)\bschtasks(?:\.exe)?\s+/create\b'
+      - '(?i)\bRegister-ScheduledTask\b'
+
+  # -- launchd (macOS) ----------------------------------------------------------
+  sel_cmd_launchd:
+    command|re:
+      - '(?i:launchctl)\s+(?:-\S+\s+)*(?:load|bootstrap|enable|submit)\b'
+      - '(?i)(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+|\bsed\s+-i\S*\s+(?:-e\s+)?\S+\s+)\s*[^\s;|&]*/Library/Launch(?:Agents|Daemons)/'
+
+  # -- systemd ------------------------------------------------------------------
+  sel_cmd_systemd:
+    command|re:
+      - '(?i:systemctl)\s+(?:--[A-Za-z-]+(?:=\S+)?\s+)*(?:enable|link|preset)\b'
+      - '(?i)(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+|\bsed\s+-i\S*\s+(?:-e\s+)?\S+\s+)\s*[^\s;|&]*(?:/etc/systemd/system/|/lib/systemd/system/|/usr/lib/systemd/system/|/\.config/systemd/user/)'
+
+  # -- SysV init / rc -----------------------------------------------------------
+  sel_cmd_init:
+    command|re: '(?i)(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+|\bsed\s+-i\S*\s+(?:-e\s+)?\S+\s+)\s*[^\s;|&]*(?:/etc/init\.d/|/etc/rc\.local|/etc/rc\.d/)'
+
+  # -- shell initialisation files (payload indicator required, see condition) ---
+  sel_cmd_shellrc:
+    command|re:
+      - '(?i)(?:>>?|\btee\s+(?:-a\s+)?|\b(?:cp|mv|install|ln)\s+(?:-\S+\s+)*\S+\s+|\bsed\s+-i\S*\s+(?:-e\s+)?\S+\s+)\s*[^\s;|&]*(?:\.bashrc|\.zshrc|\.zshenv|\.zlogin|\.zprofile|\.bash_profile|\.bash_login|\.kshrc|/etc/profile\.d/|/etc/bash\.bashrc|/etc/zsh/|/\.config/fish/config\.fish)'
+      - '(?i)(?:>>?|\btee\s+(?:-a\s+)?)\s*[^\s;|&]*\.profile(?:$|[\s;&|])'
+
+  # -- local account creation / privilege group manipulation --------------------
+  sel_cmd_account:
+    command|re:
+      - '(?:^|[\s;&|(])(?i:useradd|adduser)\s+\S'
+      - '(?i:dscl)\s+\S+\s+-create\s+/Users/'
+      - '(?i:sysadminctl)\s+(?:-\S+\s+)*-addUser\b'
+      - '(?i:usermod)\s+(?:-\S+\s+)*-a?G\s+(?:sudo|wheel|admin|root|staff|docker)\b'
+      - '(?i)\bnet(?:\.exe)?\s+(?:user|localgroup)\s+\S+[^;&|]{0,120}\s/add\b'
+      - '(?i)\bNew-LocalUser\b'
+
+  # -- write-tool form: persistence path in a path-style argument ---------------
+  sel_tool_path_system:
+    content|re: '(?i)"(?:file_path|filepath|path|filename|file|target_file|notebook_path|destination)"\s*:\s*"[^"]{0,300}(?:/etc/cron|/var/spool/cron|/Library/LaunchAgents/|/Library/LaunchDaemons/|/etc/systemd/system/|/lib/systemd/system/|/usr/lib/systemd/system/|/\.config/systemd/user/|/etc/init\.d/|/etc/rc\.local|/etc/rc\.d/|/etc/profile\.d/|/etc/bash\.bashrc|/etc/zsh/)'
+
+  sel_tool_path_userrc:
+    content|re: '(?i)"(?:file_path|filepath|path|filename|file|target_file|notebook_path|destination)"\s*:\s*"[^"]{0,300}(?:/\.bashrc|/\.zshrc|/\.zshenv|/\.zlogin|/\.zprofile|/\.bash_profile|/\.bash_login|/\.profile|/\.kshrc|/\.config/fish/config\.fish)'
+
+  sel_tool_write_payload:
+    content|re: '(?i)"(?:content|contents|file_text|text|body|data|new_string|new_str|newText|old_string|patch|edits|lines)"\s*:'
+
+  sel_payload_exec:
+    content|re:
+      - '(?i)\b(?:curl|wget|nc|ncat|netcat|socat)\b'
+      - '(?i)/dev/tcp/'
+      - '(?i)\b(?:python[23]?|perl|ruby|php|node)\s+-(?:c|e)\b'
+      - '(?i)\bbase64\s+(?:-{1,2}d|--decode)\b'
+      - '(?i)\b(?:osascript|powershell|pwsh|wscript|cscript)\b'
+      - '(?i)\bchmod\s+\+?[0-7]*x\b'
+      - '(?i)\bnohup\b'
+      - '(?i)\bbash\s+-i\b'
+      - '(?i)https?://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}'
+
+  # -- false-positive suppression -----------------------------------------------
+  # Every filter is anchored to a single, unchained, non-redirecting command so a
+  # compound line such as `cat <<EOF > /etc/cron.d/x` is never suppressed.
+  filter_readonly:
+    command|re:
+      - '(?i)^\s*(?:sudo\s+)?crontab\s+(?:-u\s+\S+\s+)?-l\s*$'
+      - '(?i)^\s*(?:sudo\s+)?launchctl\s+(?:list|print|dumpstate|blame)\b[^;&|>]*$'
+      - '(?i)^\s*(?:sudo\s+)?systemctl\s+(?:--user\s+)?(?:status|cat|show|list-units|list-unit-files|is-enabled|is-active)\b[^;&|>]*$'
+
+  filter_search_cmd:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:grep|egrep|fgrep|rg|ag|ack|find|awk|strings|diff|cat|bat|head|tail|less|more|wc|stat|file|git)\b[^;&|>]*$'
+
+  filter_help:
+    command|re:
+      - '(?i)\b(?:man|apropos|whatis|whereis|which|type)\s+(?:-\S+\s+)*(?:useradd|adduser|usermod|crontab|launchctl|systemctl|schtasks|sysadminctl|dscl)\b'
+      - '(?i)\b(?:useradd|adduser|usermod|crontab|launchctl|systemctl|schtasks|sysadminctl)\b[^;&|]{0,20}(?:--help|--version|-h\b)'
+
+  filter_pkg_install:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:apt|apt-get|aptitude|yum|dnf|apk|brew|pacman|zypper|snap|port)\s+(?:-\S+\s+)*(?:install|add|reinstall)\s[^;&|>]*$'
+
+  filter_echo_only:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:echo|printf)\s+[^;&|>]*$'
+
+  filter_placeholder:
+    command|re:
+      - '(?i)\b(?:useradd|adduser|usermod|crontab|dscl|sysadminctl|schtasks)\b[^;&|]{0,40}<[A-Za-z_][A-Za-z0-9_ .-]{1,24}>'
+      - '(?i)\b(?:useradd|adduser|usermod|crontab|dscl|sysadminctl)\b[^;&|]{0,40}\{\{[^}]{1,40}\}\}'
+
+  filter_doc_target:
+    content|re: '(?i)"(?:file_path|filepath|path|filename|file|target_file|notebook_path|destination)"\s*:\s*"[^"]{0,300}\.(?:md|mdx|markdown|rst|txt|adoc|ipynb)"'
+
+  condition: >
+    sel_scope and (
+    sel_cmd_cron or sel_cmd_launchd or sel_cmd_systemd or sel_cmd_init or
+    sel_cmd_account or
+    (sel_cmd_shellrc and sel_payload_exec) or
+    (sel_tool_path_system and sel_tool_write_payload) or
+    (sel_tool_path_userrc and sel_tool_write_payload and sel_payload_exec)
+    ) and not (
+    filter_readonly or filter_search_cmd or filter_help or filter_pkg_install or
+    filter_echo_only or filter_placeholder or filter_doc_target
+    )
+
+falsepositives:
+  - DevOps/SRE agents provisioning infrastructure - systemctl enable <unit> and cron.d
+    drop-in installation are the normal way to deploy a daemon. Expect this on any
+    server-configuration or deployment agent; scope the rule to developer workstations
+    or tune per-agent before escalating past report.
+  - Dotfile and environment-bootstrap agents that append PATH/nvm/pyenv/rbenv init lines
+    to .zshrc or .bashrc. Suppressed unless the appended payload also carries a
+    download or execution indicator, but a bootstrap script that legitimately runs
+    curl to install a version manager will still match.
+  - Configuration-management tooling driven through the agent (Ansible, Chef, Puppet,
+    Salt, Terraform local-exec) that creates service accounts with useradd or manages
+    unit files as part of a normal converge run.
+  - Container image build steps executed through the agent - Dockerfile RUN lines
+    frequently contain useradd/adduser to create a non-root runtime user.
+  - Writing launchd plists or systemd units for a developer's own local service
+    (a test daemon, a local queue worker, a scheduled backup job).
+  - Security-research or red-team lab work where the operator is intentionally building
+    persistence artefacts for testing.
+action: report
