@@ -1,0 +1,144 @@
+title: Supply Chain — Minecraft MCP Server npm Package Masquerade
+id: 7b3d9c42-5f18-4a6e-9c07-2d81e4f5ab93
+status: experimental
+level: medium
+description: |
+  Detects an AI agent installing, executing, or fetching an npm package whose name
+  combines a "minecraft" token with an "mcp" / "modelcontextprotocol" token — the
+  naming convention used by a package masquerading as a legitimate Minecraft MCP
+  server distribution, including its Windows x64 prebuilt-binary sub-package
+  (e.g. minecraft-mcp-server-win32-x64).
+
+  DETECTION-GAP NOTE (answers triage dissent): the engine has no package_installed
+  or binary_executed event type and no SUPPLY_CHAIN_DEPENDENCY / TROJANIZED_PACKAGE
+  edge kind, and the one live edge kind (EXECUTE_PROCESS) carries no npm registry
+  provenance. The impersonation itself therefore cannot be observed at install time.
+  What IS observable as a single event is the *invocation string* that performs the
+  install/exec — present in the extracted `command` field of tool_call and
+  execute_process events, in the `input=` payload of an llm_tool_call, and in the
+  registry tarball path of the resulting http_request. This rule matches only those
+  three surfaces. It is deliberately report-only: it evidences the acquisition
+  attempt for triage, it does not claim to prove trojanization.
+
+  Precision design: the package-manager verb and the package name must be adjacent
+  within the same shell segment (the gap class excludes & | ; and newline), and the
+  "minecraft" and "mcp" tokens must be joined only by package-name characters (no
+  whitespace). This is what stops `npm install minecraft-protocol mcp-sdk` and
+  `npm info minecraft-mcp && npm install lodash` from matching.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - owasp.a06.2021
+  - owasp.a08.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scoping ───────────────────────────────────────────────────────────
+  sel_event_exec:
+    event_type:
+      - tool_call
+      - execute_process
+
+  sel_event_llm_tool:
+    event_type: llm_tool_call
+
+  # ── package-manager install / exec of a minecraft+mcp named package ────────
+  # Adjacency-bounded: the name must follow the verb inside the same shell segment.
+  sel_cmd_install:
+    command|re:
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|in|install|add|exec|create|dlx)\s[^&|;\n]{0,60}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|in|install|add|exec|create|dlx)\s[^&|;\n]{0,60}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+      - '(?i)\byarn\s+(?:add|dlx|install)\s[^&|;\n]{0,60}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\byarn\s+(?:add|dlx|install)\s[^&|;\n]{0,60}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+      - '(?i)\b(?:npx|bunx|pnpx)\s+[^&|;\n]{0,40}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\b(?:npx|bunx|pnpx)\s+[^&|;\n]{0,40}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+
+  # Same six patterns against the raw payload — covers llm_tool_call, where the
+  # command lives inside the tool_use input JSON and is not extracted to `command`.
+  sel_content_install:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|in|install|add|exec|create|dlx)\s[^&|;\n]{0,60}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|in|install|add|exec|create|dlx)\s[^&|;\n]{0,60}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+      - '(?i)\byarn\s+(?:add|dlx|install)\s[^&|;\n]{0,60}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\byarn\s+(?:add|dlx|install)\s[^&|;\n]{0,60}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+      - '(?i)\b(?:npx|bunx|pnpx)\s+[^&|;\n]{0,40}\bminecraft[a-z0-9._@/-]{0,24}(?:mcp|modelcontextprotocol)'
+      - '(?i)\b(?:npx|bunx|pnpx)\s+[^&|;\n]{0,40}\b(?:mcp|modelcontextprotocol)[a-z0-9._@/-]{0,24}minecraft'
+
+  # ── the reported IOC shape: Windows x64 prebuilt-binary sub-package name ───
+  # Highly specific triple-token construction; safe to match anywhere in payload.
+  sel_content_winpkg:
+    content|re:
+      - '(?i)\bminecraft[a-z0-9._-]{0,24}(?:mcp|modelcontextprotocol)[a-z0-9._-]{0,24}[-_](?:win32|windows|win)[-_](?:x64|amd64|x86_64)\b'
+      - '(?i)\b(?:mcp|modelcontextprotocol)[a-z0-9._-]{0,24}minecraft[a-z0-9._-]{0,24}[-_](?:win32|windows|win)[-_](?:x64|amd64|x86_64)\b'
+
+  # ── the install actually reaching a registry: tarball GET ───────────────────
+  sel_registry_fetch:
+    event_type: http_request
+    path|re:
+      - '(?i)/[@a-z0-9._%-]{0,30}minecraft[a-z0-9._%-]{0,24}(?:mcp|modelcontextprotocol)[a-z0-9._%-]{0,40}\.tgz'
+      - '(?i)/[@a-z0-9._%-]{0,30}(?:mcp|modelcontextprotocol)[a-z0-9._%-]{0,24}minecraft[a-z0-9._%-]{0,40}\.tgz'
+
+  # ── false-positive suppression ──────────────────────────────────────────────
+  # Resolution-only run; nothing is fetched or executed.
+  filter_dry_run:
+    content|contains:
+      - '--dry-run'
+      - '--package-lock-only'
+
+  # Local/workspace source — a developer building their own Minecraft MCP server,
+  # not an acquisition from the public registry.
+  filter_local_source:
+    content|re: '(?i)(?:\bfile:|\bnpm\s+link\b|\byarn\s+link\b|--workspace)'
+
+  # Remediation: removing the package. Bound to the package name so an unrelated
+  # uninstall elsewhere in a compound command cannot mask a real install.
+  filter_uninstall:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:uninstall|remove|rm|un)\s[^&|;\n]{0,60}minecraft'
+
+  # Research/inspection tools — reading, grepping or searching for the package
+  # name is triage activity, not acquisition.
+  filter_readonly_tools:
+    event_type: tool_call
+    tool_name|re: '(?i)^(?:read|grep|glob|ls|search|websearch|webfetch|notebookread|list_dir|file_search|grep_search|codebase_search)$'
+
+  filter_llm_readonly_tools:
+    event_type: llm_tool_call
+    content|re: '(?i)tool_name=(?:read|grep|glob|ls|search|websearch|webfetch|notebookread|list_dir|file_search|grep_search|codebase_search)\b'
+
+  condition: >
+    (
+      (sel_event_exec and (sel_cmd_install or sel_content_winpkg))
+      or (sel_event_llm_tool and (sel_content_install or sel_content_winpkg))
+      or sel_registry_fetch
+    )
+    and not (
+      filter_dry_run or filter_local_source or filter_uninstall
+      or filter_readonly_tools or filter_llm_readonly_tools
+    )
+
+falsepositives:
+  - A developer legitimately authoring or testing their own Minecraft MCP server
+    package and installing it from the public registry rather than a local path
+    (local/workspace installs are already suppressed by filter_local_source).
+  - Incident-response or malware-analysis work reproducing this IOC in a sandbox —
+    the analyst deliberately runs `npm pack` / `npm install` against the package.
+  - An unrelated, genuinely benign package whose name happens to contain both a
+    "minecraft" and an "mcp" token (name collision); the rule cannot distinguish
+    reputation, only naming shape, which is why it reports rather than blocks.
+  - A registry mirror, artifact-proxy warm-up, or offline-bundle job fetching the
+    tarball for archival rather than execution (matches sel_registry_fetch only).
+  - An agent pasting the install command into a shell tool while quoting a security
+    advisory verbatim; suppressed for read-only/search tools but not for a Bash
+    invocation, which is intentional — a shell invocation is an execution attempt.
+
+action: report
