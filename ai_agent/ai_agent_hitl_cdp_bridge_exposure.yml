@@ -1,0 +1,426 @@
+title: HITL CDP Browser Bridge Exposure
+id: 3f7c1e94-2a58-4b6d-9c81-5e0d7a44b312
+status: experimental
+level: high
+author: Haibo
+date: "2026-03-14"
+description: |
+  Detects an off-host Chrome DevTools Protocol (CDP) control surface being reached by
+  an agent host - the exposure condition created by hitl-cdp-browser-provider style
+  bridges that publish a human-in-the-loop browser session over HTTP/WebSocket.
+
+  Answering the triage objection directly: the engine has no WEBSOCKET_CONNECT edge,
+  no ACQUIRED_CAPABILITY edge and no websocket_connection event, so the CDP command
+  channel itself (Runtime.evaluate / Page.navigate over WS) is NOT observable here.
+  This rule therefore does not claim to see session takeover. It detects the only
+  thing that is observable and that is still decision-relevant: that a CDP
+  control/discovery surface exists on a network interface other than loopback, that
+  it was contacted, and that its usage pattern goes beyond a single readiness probe.
+  Every CDP WebSocket session is preceded by an HTTP GET on /json/version, /json/list
+  or /devtools/(browser|page)/<targetId> (the upgrade handshake is an HTTP request),
+  and CDP discovery responses are uniquely fingerprinted by the webSocketDebuggerUrl
+  and devtoolsFrontendUrl fields. That handshake surface is the highest-fidelity
+  proxy available for "a bridge is exposed and something is attaching to it".
+
+  Because the control channel is unobservable, the rule is report-only and its reason
+  string states the coverage gap explicitly so a triager never over-reads the finding.
+
+  Detection logic (all of 1 and 2, plus at least one of 3):
+    1. ANCHOR - a CDP control/discovery surface is present on a URL node, proven by a
+       DevTools path or by an indexed response carrying webSocketDebuggerUrl /
+       devtoolsFrontendUrl.
+    2. EXPOSURE - the endpoint is not on the loopback interface. This is the threat
+       definition (a bridge that is not exposed is not this threat), not a trust
+       decision: no host, domain, path, port or is_ztna_host value is exempted.
+       Private, internal and ZTNA-reachable bridges are fully in scope.
+    3. CORROBORATION - discovery-to-control handoff, two or more attached targets,
+       two or more distinct client processes on one bridge, sustained control traffic,
+       or a publicly routable bridge.
+
+  OWASP mapping is Web Top 10 (A01:2021 Broken Access Control, A06:2021 Vulnerable
+  and Outdated Components); those identifiers are not valid under the owasp. tag
+  prefix (which accepts only LLM01-LLM10 / ASI01-ASI10) and no MITRE ATLAS technique
+  describes an unauthenticated debug-bridge exposure, so no atlas./owasp. tag is
+  asserted rather than inventing one.
+references:
+  - https://chromedevtools.github.io/devtools-protocol/
+  - https://attack.mitre.org/techniques/T1185/
+  - https://attack.mitre.org/techniques/T1046/
+tags:
+  - attack.collection
+  - attack.t1185
+  - attack.discovery
+  - attack.t1046
+falsepositives:
+  - Remote or containerised browser farms (browserless, Selenium Grid, chrome-in-docker,
+    host.docker.internal) that are legitimately driven over a network interface. These
+    match by design; the 30-minute per-endpoint cooldown keeps them to one finding per
+    endpoint per window and the action is report, so no automation is interrupted.
+  - A genuine human-in-the-loop session where the operator's viewer and the agent are
+    both attached to the same bridge - this satisfies the "concurrent bridge clients"
+    corroborator and is exactly the state the rule is meant to surface for review.
+  - CI or provisioning jobs that poll /json/version on a remote container until the
+    browser is ready, producing high request counts (sustained-traffic corroborator).
+  - An engineer running Chrome with --remote-debugging-address on a LAN address and
+    attaching DevTools from another machine.
+  - Local-only Puppeteer/Playwright/Selenium automation is out of scope by construction
+    (loopback endpoints carry no exposure), so the most common benign CDP pattern does
+    not fire at all.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_events:
+    event_type:
+      - http_request
+      - connects
+  condition: sel_events
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables ──────────────────────────────────────────────────────────────
+  LOOK_BACK_NS   = 900000000000      # 15 min - evidence must be recent
+  COOLDOWN_NS    = 1800000000000     # 30 min - one report per endpoint
+  POLL_THRESHOLD = 8                 # sustained control traffic
+  STORE_CAP      = 64
+
+  CDP_PORTS    = {str(p): True for p in range(9222, 9240)}
+  EXTRA_PORTS  = {"9229": True, "9333": True, "21222": True}
+  FINGERPRINTS = ["webSocketDebuggerUrl", "devtoolsFrontendUrl"]
+
+  # ── Pure helpers (no graph / no search) ──────────────────────────────────
+  def to_int(s):
+      if s == None:
+          return 0
+      t = str(s)
+      if t == "":
+          return 0
+      if re.find(r"^[0-9]+$", t) == None:
+          return 0
+      return int(t)
+
+  def split_hostport(h):
+      if h == "":
+          return ["", ""]
+      if h.startswith("["):
+          i = h.find("]")
+          if i < 0:
+              return [h, ""]
+          rest = h[i + 1:]
+          if rest.startswith(":"):
+              return [h[1:i], rest[1:]]
+          return [h[1:i], ""]
+      parts = h.split(":")
+      if len(parts) == 2:
+          return [parts[0], parts[1]]
+      return [h, ""]
+
+  def is_cdp_port(p):
+      if p == "":
+          return False
+      if p in CDP_PORTS:
+          return True
+      if p in EXTRA_PORTS:
+          return True
+      return False
+
+  def is_loopback(h):
+      if h == "":
+          return False
+      x = h.lower()
+      if x == "localhost":
+          return True
+      if x.endswith(".localhost"):
+          return True
+      if x == "::1" or x == "0:0:0:0:0:0:0:1":
+          return True
+      return x.startswith("127.")
+
+  def is_ctrl_path(p):
+      if p == "":
+          return False
+      return re.find(r"(?i)/devtools/(browser|page|worker|inspector)/", p) != None
+
+  def is_disc_path(p):
+      if p == "":
+          return False
+      return re.find(r"(?i)^/json(/(list|version|new|activate|close|protocol))?/?(\?.*)?$", p) != None
+
+  def is_cdp_path(p):
+      if is_ctrl_path(p):
+          return True
+      return is_disc_path(p)
+
+  def path_of_url(u):
+      i = u.find("://")
+      if i >= 0:
+          u = u[i + 3:]
+      s = u.find("/")
+      if s < 0:
+          return ""
+      q = u[s:]
+      j = q.find("#")
+      if j >= 0:
+          q = q[:j]
+      return q
+
+  def node_id_from_source(src):
+      i = src.find("#")
+      if i >= 0:
+          src = src[:i]
+      p = src.find("://")
+      if p < 0:
+          return src
+      rest = src[p + 3:]
+      s = rest.find("/")
+      if s >= 0:
+          rest = rest[:s]
+      return src[:p + 3] + rest
+
+  def path_from_source(src):
+      i = src.find("#")
+      if i >= 0:
+          src = src[:i]
+      return path_of_url(src)
+
+  def target_key(p):
+      m = re.find(r"(?i)/devtools/(browser|page|worker)/[A-Za-z0-9._:-]+", p)
+      if m == None:
+          return ""
+      return m.lower()
+
+  # ── Relevance gate: pure string checks on meta, no traversal ─────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          p = meta.get("path", "")
+          if p == "":
+              p = path_of_url(meta.get("url", ""))
+          if is_cdp_path(p):
+              return True
+          if is_cdp_port(split_hostport(meta.get("host", ""))[1]):
+              return True
+          return False
+      if ct == "connects":
+          return is_cdp_port(meta.get("port", ""))
+      return False
+
+  # ── Graph + FTS collection of candidate CDP endpoints ───────────────────
+  def collect():
+      recs = {}
+      for n in graph(type="URL"):
+          hp = split_hostport(n.get("host", ""))
+          p  = n.get("path", "")
+          hit = False
+          if is_cdp_path(p):
+              hit = True
+          if is_cdp_port(hp[1]):
+              hit = True
+          if not hit:
+              continue
+          recs[n["id"]] = {"node": n, "paths": {}, "fts": False}
+          if p != "":
+              recs[n["id"]]["paths"][p] = True
+      for q in FINGERPRINTS:
+          for h in search(q, topK=25):
+              src = h.get("source", "")
+              if src == "":
+                  continue
+              nid = node_id_from_source(src)
+              n   = node(nid)
+              if n == None:
+                  continue
+              if n.get("_type", "") != "URL":
+                  continue
+              if nid not in recs:
+                  recs[nid] = {"node": n, "paths": {}, "fts": False}
+              recs[nid]["fts"] = True
+              pp = path_from_source(src)
+              if pp != "":
+                  recs[nid]["paths"][pp] = True
+      return recs
+
+  # ── Per-endpoint assessment ─────────────────────────────────────────────
+  def assess(nid, rec, now):
+      n  = rec["node"]
+      hp = split_hostport(n.get("host", ""))
+      host = hp[0]
+      port = hp[1]
+
+      # EXPOSURE (required): a bridge confined to loopback is not this threat.
+      if host == "" or is_loopback(host):
+          return None
+
+      # ANCHOR (required): a real CDP control/discovery surface.
+      cdp_paths = []
+      targets   = {}
+      has_disc  = False
+      for p in rec["paths"]:
+          if not is_cdp_path(p):
+              continue
+          cdp_paths.append(p)
+          if is_disc_path(p):
+              has_disc = True
+          tk = target_key(p)
+          if tk != "":
+              targets[tk] = True
+      if len(cdp_paths) == 0 and not rec["fts"]:
+          return None
+      if rec["fts"]:
+          has_disc = True
+
+      clients = {}
+      total   = 0
+      recent  = 0
+      ev      = []
+      for e in edges(nid, dir="in", kind="HTTP_REQUEST"):
+          frm = e.get("from", "")
+          if frm != "":
+              clients[frm] = True
+          c = to_int(e.get("count", ""))
+          if c == 0:
+              c = 1
+          total = total + c
+          lt = to_int(e.get("last_ts", ""))
+          if lt > recent:
+              recent = lt
+          ev.append(e)
+      if len(ev) == 0 and meta.get("context_type", "") != "http_request":
+          return None
+      if recent == 0:
+          recent = to_int(n.get("last_seen", ""))
+      if now > 0 and recent > 0 and now - recent > LOOK_BACK_NS:
+          return None
+
+      corro = []
+      if has_disc and len(targets) >= 1:
+          corro.append("discovery-to-control handoff on the same bridge")
+      if len(targets) >= 2:
+          corro.append(str(len(targets)) + " distinct CDP targets attached")
+      if len(clients) >= 2:
+          corro.append(str(len(clients)) + " distinct client processes on one bridge")
+      if total >= POLL_THRESHOLD:
+          corro.append("sustained control traffic (" + str(total) + " requests)")
+      if n.get("is_ztna_host", "") == "0":
+          corro.append("bridge is publicly routable")
+      if len(corro) == 0:
+          return None
+
+      return {"host": host, "port": port, "paths": cdp_paths, "targets": targets,
+              "clients": clients, "total": total, "edges": ev, "corro": corro}
+
+  # ── Per-endpoint report suppression ─────────────────────────────────────
+  def already_reported(nid, now):
+      seen = store_get("reported")
+      if seen == None:
+          return False
+      t = to_int(seen.get(nid, ""))
+      if t > 0 and now > 0 and now - t < COOLDOWN_NS:
+          return True
+      return False
+
+  def mark_reported(nid, now):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if len(seen) > STORE_CAP:
+          seen = {}
+      seen[nid] = str(now)
+      if store_usage()["free"] > 4096:
+          store_set("reported", seen)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now  = to_int(meta.get("event_ts", ""))
+      recs = collect()
+      if len(recs) == 0:
+          return "allow"
+
+      trig_host = split_hostport(meta.get("host", ""))[0]
+      pri  = []
+      rest = []
+      for nid in sorted(recs):
+          h = split_hostport(recs[nid]["node"].get("host", ""))[0]
+          if trig_host != "" and h == trig_host:
+              pri.append(nid)
+          else:
+              rest.append(nid)
+
+      for nid in pri + rest:
+          f = assess(nid, recs[nid], now)
+          if f == None:
+              continue
+          if already_reported(nid, now):
+              continue
+
+          root = ""
+          for e in f["edges"]:
+              pn = node(e.get("from", ""))
+              if pn != None and pn.get("_type", "") == "Process":
+                  root = pn["id"]
+                  break
+          if root == "":
+              root = "process://" + meta.get("agent_name", "")
+
+          chain  = new_chain(root)
+          steps  = 0
+          target = f["host"] + ":" + f["port"]
+
+          if meta.get("context_type", "") == "http_request":
+              tp = meta.get("path", "")
+              if tp == "":
+                  tp = path_of_url(meta.get("url", ""))
+              trig = {"from": root, "to": nid, "kind": "HTTP_REQUEST",
+                      "ts": str(now), "first_ts": str(now), "last_ts": str(now),
+                      "method": meta.get("method", ""), "count": "1",
+                      "risk_context": ""}
+              chain.append(step(trig, stage_id="Bridge Contact",
+                  stage_desc="CDP handshake/discovery request to off-host bridge " +
+                             target + " " + tp))
+              steps = steps + 1
+
+          shown = 0
+          for e in f["edges"]:
+              if shown >= 3:
+                  break
+              cn    = node(e.get("from", ""))
+              cname = e.get("from", "?")
+              if cn != None:
+                  cname = cn.get("name", cname)
+              cnt = to_int(e.get("count", ""))
+              if cnt == 0:
+                  cnt = 1
+              chain.append(step(e, stage_id="Control Plane Access",
+                  stage_desc="client " + cname + " issued " + str(cnt) +
+                             " HTTP request(s) to the CDP control surface on " + target))
+              shown = shown + 1
+              steps = steps + 1
+
+          if steps == 0:
+              continue
+
+          if len(f["edges"]) > 0:
+              chain.append(step(f["edges"][0], stage_id="Bridge Exposure",
+                  stage_desc="CDP bridge reachable off the loopback interface - " +
+                             "; ".join(f["corro"])))
+
+          reason = ("HITL CDP browser bridge exposed off-host at " + target +
+                    " - " + "; ".join(f["corro"]) +
+                    " | control-surface paths: " + ", ".join(f["paths"][:3]) +
+                    " | clients: " + str(len(f["clients"])) +
+                    " | requests: " + str(f["total"]) +
+                    " | COVERAGE NOTE: the WebSocket CDP command channel is not" +
+                    " observable to this engine (no WEBSOCKET_CONNECT edge); this" +
+                    " finding evidences an exposed and actively contacted control" +
+                    " surface, not a confirmed session takeover.")
+
+          print(reason)
+          mark_reported(nid, now)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
