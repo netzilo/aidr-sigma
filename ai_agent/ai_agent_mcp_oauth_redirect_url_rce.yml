@@ -1,0 +1,335 @@
+title: MCP StreamableHttp OAuth Redirect URL Command Injection
+id: 7f3c1e94-2b6a-4d58-9c07-e1a5d84b6f21
+status: experimental
+level: high
+description: |
+  Behavioural detection for the Cherry Studio (<= 1.5.1) class of remote code
+  execution in which an MCP client connects to a streamableHttp MCP server,
+  receives an OAuth authorization / redirection endpoint URL, and passes that
+  URL to a spawned process without sanitising it.
+
+  The rule does not look for a payload string. It looks for the SEQUENCE:
+
+    1. HTTP_REQUEST  - the monitored agent (or one of its direct children, e.g.
+       an MCP client helper) fetched a remote host.
+    2. EXECUTE_PROCESS - the agent then spawned a process whose command line
+       carries a URL / OAuth redirect marker together with shell injection
+       syntax (metacharacter + downloader/interpreter, $(), backticks,
+       percent-encoded CRLF, a raw newline, or eval/IEX), AND the command line
+       contains the exact hostname the agent just contacted.
+    3. HTTP_REQUEST  - optionally, the process born from that command line
+       itself reaches out (second-stage retrieval).
+
+  Stage 2 alone is never reported: the rule stays silent unless the injected
+  command line can be tied back through the graph to a host the agent actually
+  fetched (stage 1) or the spawned binary made its own outbound request
+  (stage 3). That correlation is what separates the exploit from a developer
+  typing an OAuth curl one-liner.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://github.com/CherryHQ/cherry-studio
+  - https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1059
+  - attack.t1203
+  - owasp.a03-2021
+  - owasp.a06-2021
+falsepositives:
+  - Developer or CI shell one-liners that legitimately chain an OAuth/token
+    endpoint call with another command (for example "curl https://host/oauth/token
+    && curl https://host/mcp"). The host will appear in the command line and the
+    agent will have fetched it, so this pattern can satisfy the correlation.
+  - Reproduction of this CVE during authorised security research or regression
+    testing of the MCP OAuth flow.
+  - MCP server bootstrap scripts that pass a callback/redirect URL to "bash -c",
+    "cmd /c start" or "osascript -e" as part of a normal browser-based consent
+    flow, where the URL happens to contain a percent-encoded newline or a
+    backtick from an over-eager template.
+  - Agent-driven token debugging that pipes an OAuth response through base64 or
+    a shell interpreter in the same command line.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_urlish:
+    content|contains:
+      - 'http://'
+      - 'https://'
+      - 'redirect_uri'
+      - 'redirect_url'
+      - 'oauth'
+      - 'client_id'
+      - 'code_challenge'
+      - 'code_verifier'
+      - '/callback'
+      - '/authorize'
+  condition: sel_exec and sel_urlish
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── MCP streamableHttp OAuth redirect-URL command injection ────────────────
+  # Sequence detected (graph, not payload):
+  #   HTTP_REQUEST (agent -> MCP/OAuth host)
+  #     -> EXECUTE_PROCESS (spawn carrying that host + shell injection syntax)
+  #        -> HTTP_REQUEST (optional second stage by the spawned binary)
+
+  WINDOW_NS    = 900000000000   # 15 min  fetch <-> spawn correlation window
+  LOOK_BACK_NS = 300000000000   #  5 min  only reason about a fresh spawn edge
+  DEDUP_NS     = 600000000000   # 10 min  suppress duplicate reports
+
+  URL_MARKERS = ["http://", "https://"]
+
+  OAUTH_MARKERS = ["redirect_uri", "redirect_url", "oauth", "/authorize",
+                   "/callback", "code_challenge", "code_verifier",
+                   "client_id", "grant_type", "well-known/oauth",
+                   "auth/callback", "access_token"]
+
+  MCP_PATH_MARKERS = ["/mcp", "/sse", "/stream", "/oauth", "/authorize",
+                      "/.well-known", "/register", "/token", "/callback"]
+
+  # shell-injection syntax. Deliberately excludes bare '&' query-string
+  # delimiters and short tokens that collide with URL parameter names.
+  INJECT = [
+      r"[;&|]{1,2}\s*(?i:curl|wget|bash|sh|zsh|python[23]?|node|perl|ruby|php|osascript|powershell|pwsh|cmd|nc|ncat|socat|chmod|base64|eval|certutil|bitsadmin|mshta|rundll32|regsvr32)(?:\s|$|/|\.exe)",
+      r"\$\([^)]{1,200}\)",
+      r"`[^`]{1,200}`",
+      r"(?i:%0a|%0d%0a|%26%26|%7c%7c|%60)",
+      r"\n\s*\S",
+      r"(?i:\beval\b|\bInvoke-Expression\b|\bIEX\b)",
+  ]
+
+  # interpreter invoked with inline code - the classic sink for an unsanitised URL
+  INLINE_EXEC = [
+      r"\b(?i:bash|sh|zsh|dash|ksh)\b\s+-[A-Za-z]*c\b",
+      r"\b(?i:python)[0-9.]*\b\s+-c\b",
+      r"\b(?i:node)\b\s+(?:-e|--eval)\b",
+      r"\b(?i:powershell|pwsh)(?i:\.exe)?\b[^\n]{0,200}\s-(?i:e|ec|enc|encodedcommand|command)\b",
+      r"\b(?i:cmd)(?i:\.exe)?\b\s+/(?i:c|k)\b",
+      r"\b(?i:osascript)\b\s+-e\b",
+      r"\b(?i:perl|ruby|php)\b\s+-e\b",
+  ]
+
+  def has_any(s, needles):
+      for n in needles:
+          if n in s:
+              return True
+      return False
+
+  def match_any(s, pats):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def urlish(low):
+      if has_any(low, URL_MARKERS):
+          return True
+      return has_any(low, OAUTH_MARKERS)
+
+  def injected(raw):
+      low = raw.lower()
+      if not urlish(low):
+          return False
+      if match_any(raw, INJECT):
+          return True
+      return match_any(raw, INLINE_EXEC)
+
+  def trunc(s, n):
+      if len(s) <= n:
+          return s
+      return s[:n] + "..."
+
+  def ts_of(e, keys):
+      for k in keys:
+          v = e.get(k, "")
+          if v != "":
+              return int(v)
+      return 0
+
+  def host_in_cmd(host, low):
+      if host == "":
+          return False
+      h = host.lower()
+      if len(h) < 5:
+          return False
+      if h.find(".") < 0 and h != "localhost":
+          return False
+      return h in low
+
+  def overlap(a, b):
+      x = a.lower()
+      y = b.lower()
+      if len(x) >= 24 and x[:200] in y:
+          return True
+      if len(y) >= 24 and y[:200] in x:
+          return True
+      return False
+
+  def fresh(key, now_ns):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      prev = 0
+      if key in seen:
+          prev = int(seen[key])
+      if prev > 0 and now_ns > 0 and (now_ns - prev) < DEDUP_NS:
+          return False
+      keep = {}
+      for k in seen:
+          v = int(seen[k])
+          if now_ns == 0 or (now_ns - v) < DEDUP_NS:
+              keep[k] = v
+      keep[key] = now_ns
+      if store_usage()["free"] > 8192:
+          store_set("reported", keep)
+      return True
+
+  def run():
+      # ── relevance gate: pure string work on meta, no graph calls ───────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      raw = meta.get("content", "")
+      if len(raw) > 20000:
+          raw = raw[:20000]
+      if raw == "":
+          return "allow"
+      if not injected(raw):
+          return "allow"
+
+      low = raw.lower()
+      ets = meta.get("event_ts", "0")
+      if ets == "":
+          ets = "0"
+      event_ts = int(ets)
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid   = agent["id"]
+          chain = new_chain(aid)
+
+          # ── stage 2: the spawn carrying the unsanitised redirect URL ───────
+          cands = []
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              cands.append(e)
+              for e2 in edges(e["to"], dir="out", kind="EXECUTE_PROCESS"):
+                  cands.append(e2)
+
+          spawn_edge  = None
+          spawn_child = None
+          for prefer_current in [True, False]:
+              for e in cands:
+                  c = e.get("cmdline", "")
+                  if c == "":
+                      continue
+                  if not injected(c):
+                      continue
+                  ts = ts_of(e, ["ts", "first_ts", "last_ts"])
+                  if event_ts > 0 and ts > 0 and (event_ts - ts) > LOOK_BACK_NS:
+                      continue
+                  if prefer_current and not overlap(c, raw):
+                      continue
+                  spawn_edge  = e
+                  spawn_child = node(e["to"])
+                  break
+              if spawn_edge != None:
+                  break
+
+          # ── stage 1: the streamableHttp / OAuth fetch that supplied the URL ─
+          sources = [aid]
+          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              sources.append(e["to"])
+
+          http_edge = None
+          http_host = ""
+          http_path = ""
+          for src in sources:
+              for e in edges(src, dir="out", kind="HTTP_REQUEST"):
+                  u = node(e["to"])
+                  if u == None:
+                      continue
+                  h = u.get("host", "")
+                  if not host_in_cmd(h, low):
+                      continue
+                  hts = ts_of(e, ["last_ts", "first_ts"])
+                  if event_ts > 0 and hts > 0 and (event_ts - hts) > WINDOW_NS:
+                      continue
+                  http_edge = e
+                  http_host = h
+                  http_path = u.get("path", "")
+                  break
+              if http_edge != None:
+                  break
+
+          # ── stage 3 (optional): second stage fetched by the spawned binary ─
+          second = None
+          if spawn_child != None:
+              for e in edges(spawn_child["id"], dir="out", kind="HTTP_REQUEST"):
+                  u = node(e["to"])
+                  if u == None:
+                      continue
+                  ts2 = ts_of(e, ["first_ts", "last_ts"])
+                  if event_ts > 0 and ts2 > 0 and (event_ts - ts2) > WINDOW_NS:
+                      continue
+                  second = e
+                  break
+
+          # injection syntax alone is never reported - correlation is required
+          if http_edge == None and second == None:
+              continue
+
+          key = http_host + "|" + trunc(low, 160)
+          if not fresh(key, event_ts):
+              return "allow"
+
+          stages = []
+          if http_edge != None:
+              d = "MCP client fetched " + http_host + http_path
+              if has_any(http_path.lower(), MCP_PATH_MARKERS):
+                  d = d + " (streamableHttp / OAuth endpoint)"
+              d = d + " - this host is embedded in the spawned command line"
+              chain.append(step(http_edge, stage_id="MCP OAuth Endpoint", stage_desc=d))
+              stages.append("fetch:" + http_host)
+
+          if spawn_edge != None:
+              chain.append(step(spawn_edge,
+                                stage_id="Unsanitised Redirect URL Executed",
+                                stage_desc="spawned with OAuth/redirect URL plus shell injection syntax: " +
+                                           trunc(spawn_edge.get("cmdline", ""), 240)))
+              stages.append("spawn")
+          else:
+              stages.append("spawn(live event, edge not yet in graph)")
+
+          if second != None:
+              u2 = node(second["to"])
+              hh = "?"
+              if u2 != None:
+                  hh = u2.get("host", "?")
+              chain.append(step(second, stage_id="Second Stage Fetch",
+                                stage_desc="process born from the redirect URL fetched: " + hh))
+              stages.append("stage2:" + hh)
+
+          client = agent.get("name", "?") + " (" + agent.get("path", "?") + ")"
+          hint = ""
+          if has_any(low, OAUTH_MARKERS):
+              hint = " OAuth redirect markers present in the command line."
+
+          print("MCP OAuth redirect injection: " + client + " | " + ", ".join(stages))
+          return {
+              "action": "report",
+              "reason": "Possible MCP streamableHttp OAuth redirect-URL command injection " +
+                        "(Cherry Studio <=1.5.1 class RCE): " + client + " - " +
+                        ", ".join(stages) + "." + hint + " cmdline: " + trunc(raw, 300),
+              "chain":  chain,
+          }
+      return "allow"
+
+  result = run()
