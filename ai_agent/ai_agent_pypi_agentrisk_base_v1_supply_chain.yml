@@ -1,0 +1,139 @@
+title: Supply Chain Suspicious PyPI Package agentrisk-base-v1
+id: 7b3f1c2e-9d84-4a16-b0f5-3c8e21d47a95
+status: experimental
+level: medium
+description: |
+  Reports on the appearance of the PyPI distribution name `agentrisk-base-v1`
+  (and its PEP 503 normalisation variants `agentrisk_base_v1`, `agentrisk.base.v1`,
+  `agentriskbasev1`) in an acquisition context: a package-manager install command,
+  a dependency manifest, a PyPI/pythonhosted registry URL, or an outbound request
+  to the Python package index.
+
+  Scope note (answering triage dissent): the engine models no INSTALL_PACKAGE edge
+  and emits no `package_install` or `network_request` event type, so package
+  installation cannot be observed as a first-class behaviour. This rule therefore
+  makes no behavioural claim at all. It is a pure single-event *name-literal in
+  acquisition context* observation over event types the engine actually emits
+  (execute_process, tool_call, tool_response, http_request, llm_tool_call,
+  llm_tool_result). It does not assert the package is malicious; the advertised
+  capability (Base Network token risk scoring / honeypot detection) is dual-use
+  and the upstream report is speculative. Consequently the rule is report-only at
+  medium severity and exists to give an analyst a timestamped, attributable record
+  that an agent tried to pull this specific distribution into a workspace.
+
+  Two independent conditions must both hold in the same event: (1) the distinctive
+  distribution name, and (2) an acquisition context. Neither alone fires.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://peps.python.org/pep-0503/#normalized-names
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only event types the engine actually emits ──────────────────────
+  sel_scope:
+    event_type:
+      - execute_process
+      - tool_call
+      - tool_response
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+
+  # ── Condition 1: the distinctive distribution name (PEP 503 normalisation) ──
+  sel_name_content:
+    content|re: '(?i)\bagentrisk[-_.]?base[-_.]?v1\b'
+
+  sel_name_url:
+    url.full|re: '(?i)\bagentrisk[-_.]?base[-_.]?v1\b'
+
+  # ── Condition 2: an acquisition context (any one of these) ─────────────────
+  sel_ctx_install:
+    content|re:
+      - '(?i)\b(pip3?|pipx|uv|poetry|pdm|hatch|conda|mamba|micromamba)\b[^\n]{0,80}\b(install|add|sync|lock)\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\b[^\n]{0,80}\binstall\b'
+      - '(?i)--(index-url|extra-index-url|find-links)\b'
+
+  sel_ctx_manifest:
+    content|re: '(?i)\b(requirements[\w.-]*\.txt|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile(\.lock)?|setup\.py|setup\.cfg|environment\.ya?ml|constraints\.txt)\b'
+
+  sel_ctx_registry_body:
+    content|re: '(?i)(pypi\.org/(simple|project|pypi)/|files\.pythonhosted\.org/|\.(whl|tar\.gz)\b)'
+
+  sel_ctx_registry_host:
+    host|endswith:
+      - 'pypi.org'
+      - 'pythonhosted.org'
+
+  # ── Filters: benign appearances of the same literal ────────────────────────
+
+  # Remediation, not acquisition — uninstalling or pinning it out.
+  filter_remediation:
+    content|re: '(?i)\b(pip3?|pipx|uv|poetry|pdm|conda|mamba)\b[^\n]{0,80}\b(uninstall|remove|purge)\b'
+
+  # Security tooling output / advisory prose that quotes the install line.
+  filter_advisory:
+    content|contains:
+      - 'do not install'
+      - 'security advisory'
+      - 'malware advisory'
+      - 'malicious package report'
+      - 'indicators of compromise'
+      - 'threat intelligence'
+      - 'removed from pypi'
+      - 'yanked from pypi'
+      - 'pip-audit'
+      - 'osv-scanner'
+      - 'safety check'
+      - 'no known vulnerabilities'
+      - 'blocklist'
+      - 'blocked package'
+      - 'denylist'
+      - 'sigma rule'
+      - 'detection rule'
+      - 'falsepositives:'
+
+  # Index browsing / metadata lookup rather than retrieval.
+  filter_metadata_lookup:
+    content|re: '(?i)(pypi\.org/search\?|\bpip3?\s+(index|search|show|download\s+--no-deps\s+--no-binary)\b)'
+
+  # This rule's own text echoed back through an agent (report ingestion loop).
+  filter_self_reference:
+    content|contains:
+      - '7b3f1c2e-9d84-4a16-b0f5-3c8e21d47a95'
+      - 'Supply Chain Suspicious PyPI Package agentrisk-base-v1'
+
+  condition: >
+    sel_scope
+    and (sel_name_content or sel_name_url)
+    and (sel_ctx_install or sel_ctx_manifest or sel_ctx_registry_body or sel_ctx_registry_host)
+    and not (filter_remediation or filter_advisory or filter_metadata_lookup or filter_self_reference)
+
+falsepositives:
+  - A security analyst or threat-intel agent investigating this very advisory and
+    pasting the install command into a tool call to reproduce it. Partially
+    suppressed by filter_advisory and filter_metadata_lookup, but an analyst who
+    types a bare `pip install agentrisk-base-v1` with no advisory prose around it
+    will still be reported.
+  - Ingested vulnerability feeds, SBOM diffs, or vendor bulletins delivered as tool
+    output that quote the distribution name next to a requirements.txt fragment.
+    Suppressed by filter_advisory when standard advisory vocabulary is present.
+  - An internal deny-list, pip constraints file, or CI policy manifest that
+    enumerates the package name in order to forbid it. Suppressed by the
+    'blocklist' / 'denylist' / 'blocked package' terms in filter_advisory.
+  - A private-index package that legitimately normalises to the same PEP 503 name
+    (agentrisk_base_v1). Name collision is possible; the rule reports rather than
+    blocks precisely because it cannot distinguish index provenance.
+  - Uninstall or rollback tooling cleaning the package up after an incident.
+    Suppressed by filter_remediation.
+
+action: report
