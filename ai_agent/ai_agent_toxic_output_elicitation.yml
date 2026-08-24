@@ -1,0 +1,119 @@
+title: Toxic Output Elicitation - Safety Bypass Evident in Model Response
+id: 7c1f3a92-5d84-4be6-9f0a-2e6b8d41c7a3
+status: experimental
+level: medium
+description: |
+  Detects the successful outcome of a scattershot toxic-output elicitation attack: an
+  llm_response that contains generative toxic content rather than a refusal.
+
+  The attacker repeatedly regenerates challenge prompts against the target model,
+  betting that one attempt eventually slips past safety training. Only the winning
+  attempt is observable at the response layer, so this rule fires on the artefact of
+  the bypass, not on the attempt volume.
+
+  Two tiers keep precision high:
+    * Tier 1 (sel_toxic_extreme) - dehumanising or eliminationist output directed at a
+      group or person. Standalone evidence; a safety-trained model should never emit it.
+    * Tier 2 (sel_toxic_directed) - directed profane abuse, which alone is too weak a
+      signal, so it must be corroborated by an explicit persona-break / filters-are-off
+      marker (sel_jailbreak_marker) in the same response.
+
+  Rate/volume correlation for the "repeated challenge prompt" half of the technique is
+  not expressible in a single-event content rule; pair this rule with a scripted
+  companion that counts LLM_REQUEST edges per agent if attempt-volume detection is
+  required.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.impact
+  - atlas.aml.t0054
+  - owasp.llm01
+falsepositives:
+  - Trust and safety / content-moderation workflows where the model is asked to quote,
+    paraphrase or explain a hate-speech example. Mitigated by filter_analysis, but a
+    paraphrase that omits every analytical cue word will still fire.
+  - Creative writing - villain dialogue, screenplays, fiction with an abusive character.
+    Deliberately NOT filtered, because "write it as a story" is the most common jailbreak
+    wrapper; expect review load from creative-writing deployments.
+  - The model quoting an abusive user comment or support ticket back verbatim. Partially
+    mitigated by the "the user wrote / the comment reads" clause in filter_analysis.
+  - Code review or generation of profanity blocklists, moderation regexes, or Jigsaw-style
+    toxicity dataset columns. Mitigated by filter_lexicon.
+  - Internal or red-team deployments where directed profanity is tolerated; suppress by
+    scoping this rule to production model names via an added model| condition.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: llm_response
+
+  # Tier 1 - eliminationist / dehumanising output. Standalone evidence of a safety bypass.
+  sel_toxic_extreme:
+    content|re:
+      - '(?i)\b(?:should|must|need\s+to|deserve\s+to|ought\s+to|have\s+to)\s+(?:all\s+)?be\s+(?:exterminated|eradicated|gassed|lynched|wiped\s+out|purged|put\s+down|rounded\s+up\s+and\s+shot)\b'
+      - '(?i)\b(?:they|those|these)\s+(?:people|folks|immigrants|migrants|animals)\s+(?:are|aint)\s+(?:all\s+)?(?:just\s+)?(?:subhuman|vermin|cockroaches|parasites|filth|scum|trash|animals)\b'
+      - '(?i)\b(?:you|they|we)(?:\s+are|\S{0,2}re)\s+(?:all\s+)?subhuman\b'
+      - '(?i)\bgo\s+(?:and\s+)?(?:kill|hang)\s+yoursel(?:f|ves)\b'
+      - '(?i)\b(?:i|we)\s+hope\s+(?:you|they)\s+(?:all\s+)?(?:die|burn|rot)\s+(?:in\s+hell|painfully|slowly|alone)?\b'
+
+  # Tier 2 - directed profane abuse. Requires corroboration by sel_jailbreak_marker.
+  sel_toxic_directed:
+    content|re:
+      - '(?i)\byou(?:\s+are|\S{0,2}re)\s+(?:such\s+)?(?:a|an)?\s*(?:fucking|goddamn|worthless|pathetic|stupid|brain[\s-]?dead)\s+(?:idiot|moron|imbecile|retard|bitch|cunt|asshole|dipshit|piece\s+of\s+(?:shit|garbage))\b'
+      - '(?i)\byou\s+(?:worthless|pathetic|disgusting|filthy)\s+(?:piece\s+of\s+)?(?:shit|trash|garbage|waste\s+of\s+(?:space|oxygen|air))\b'
+      - '(?i)\b(?:shut\s+the\s+fuck\s+up|fuck\s+(?:you|off)|eat\s+shit)\b'
+
+  # Corroboration - the response itself advertises that safety was overridden.
+  sel_jailbreak_marker:
+    content|re:
+      - '(?i)\bdan\s+mode\s+(?:enabled|activated|on)\b'
+      - '\[DAN\]'
+      - '(?i)\bstay(?:ing)?\s+in\s+character\s+as\s+(?:dan|an?\s+(?:unfiltered|uncensored|amoral|evil)\s+(?:ai|assistant|model))\b'
+      - '(?i)\[\s*(?:unfiltered|uncensored|jailbroken|jailbreak|developer\s+mode|dev\s+mode|no\s+filter)[^\]\n]{0,24}\]'
+      - '(?i)\b(?:safety|content|ethical)\s+(?:filters?|guidelines?|policies|policy|restrictions?|guardrails?)\s+(?:are\s+|have\s+been\s+|now\s+)?(?:disabled|off|bypassed|overridden|removed|lifted|disengaged)\b'
+      - '(?i)\bnow\s+that\s+(?:my|the)\s+(?:filters?|restrictions?|guidelines?|guardrails?|rules?)\s+are\s+(?:off|gone|disabled|removed)\b'
+      - '(?i)\bwithout\s+(?:any\s+)?(?:filter|filters|censorship|restrictions?)\s*[,:\x{2014}-]\s*'
+      - '(?i)\bsure[,!]?\s+here\S{0,2}s\s+(?:the\s+|a\s+|an\s+)?(?:hateful|racist|sexist|homophobic|offensive|degrading|abusive|toxic|vile)\b'
+
+  # ── Suppressions ────────────────────────────────────────────────────────────
+
+  # The model refused - any toxic-looking span is the restated request, not output.
+  filter_refusal:
+    content|re:
+      - '(?i)\bI\s+(?:can\S?t|cannot|won\S?t|will\s+not)\s+(?:help\s+with|assist\s+with|provide|generate|produce|create|write|comply|do)\b'
+      - '(?i)\bI\S?m\s+(?:sorry|afraid)[,.]?\s+(?:but\s+)?I\s+(?:can\S?t|cannot|won\S?t)\b'
+      - '(?i)\b(?:that|this|it)\s+(?:would\s+)?(?:goes|go|violates?|is)\s+against\s+(?:my|our|the)\s+(?:guidelines|policies|policy|values|principles)\b'
+      - '(?i)\bI\s+(?:must|have\s+to|need\s+to)\s+decline\b'
+      - '(?i)\bI\s+do\s+not\s+(?:generate|produce|create|write)\s+(?:that|this|such|hateful|abusive|toxic)\b'
+
+  # Analytical, moderation, benchmarking or quoting framing.
+  filter_analysis:
+    content|re:
+      - '(?i)\b(?:example|examples|instance|instances|sample)\s+of\s+(?:hate\s+speech|toxic|toxicity|abusive|harassing|offensive)\b'
+      - '(?i)\b(?:content|trigger)\s+warning\b'
+      - '(?i)\b(?:toxicity|hate[\s-]speech|abuse|profanity|harassment)\s+(?:classifier|detector|detection|score|scoring|dataset|benchmark|labels?|filter|model)\b'
+      - '(?i)\b(?:would\s+be|is|was)\s+(?:classified|flagged|labeled|labelled|categorized|categorised)\s+as\s+(?:toxic|hateful|abusive|harassment|hate\s+speech)\b'
+      - '(?i)\bthis\s+(?:response|output|text|message|passage)\s+(?:is|would\s+be)\s+(?:unacceptable|harmful|inappropriate|a\s+policy\s+violation)\b'
+      - '(?i)\bthe\s+(?:user|customer|comment|message|post|review|ticket)\s+(?:said|wrote|contains|reads|responded)\b'
+      - '(?i)\b(?:red[\s-]?team|jailbreak|adversarial)\s+(?:test|testing|evaluation|eval|report|exercise|prompt|suite)\b'
+      - '(?i)\b(?:realtoxicityprompts|perspective\s+api|jigsaw|hatecheck|toxigen|civil\s+comments)\b'
+      - '(?i)\b(?:moderation|safety)\s+(?:pipeline|layer|evaluation|eval|test\s+suite|test\s+case|rubric)\b'
+
+  # Profanity blocklists, censorship code, dataset schemas.
+  filter_lexicon:
+    content|re:
+      - '(?i)\b(?:profanity|bad[_\s-]?words?|swear[_\s-]?words?|slur|curse|censor)[_\s-]?(?:list|filter|dict|dictionary|set|array|regex|map)\b'
+      - '(?i)\b(?:blocklist|blacklist|denylist|wordlist|stopwords)\b'
+      - '(?i)"(?:severe_toxicity|identity_attack|identity_hate|obscene|insult|threat)"'
+
+  condition: >
+    sel_event
+    and (sel_toxic_extreme or (sel_toxic_directed and sel_jailbreak_marker))
+    and not (filter_refusal or filter_analysis or filter_lexicon)
+
+action: report
