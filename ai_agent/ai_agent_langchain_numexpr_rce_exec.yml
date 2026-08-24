@@ -1,0 +1,300 @@
+title: LangChain numexpr Evaluate RCE - Interpreter Shell Escape
+id: 6f2b9c14-8d3a-4a17-9f5e-2c7b41ad0e93
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation artefact of CVE-2023-36258 (arbitrary code execution
+  through numexpr.evaluate() as reached by LangChain's LLMMathChain / PALChain).
+
+  The engine has no edge kind that models "untrusted string reached numexpr.evaluate()"
+  (EVAL_EXPRESSION / EXECUTE_CODE are not schema edge kinds and function_call is not an
+  event type), so the eval itself is unobservable. What IS observable is the only way the
+  exploit becomes materially harmful: the vulnerable interpreter process spawning an OS
+  command. This rule therefore refuses to fire on a bare process spawn and instead requires
+  an instance-resolved, single-session chain:
+
+    1. a Python-family interpreter instance (python/uvicorn/gunicorn/streamlit/chainlit/
+       celery/jupyter) is the spawning ancestor of the triggering process, AND
+    2. that exact interpreter instance read the numexpr module payload from disk between
+       its own process start and the spawn (proves the vulnerable code path is loaded in
+       THIS process instance, not merely installed on the host), AND
+    3. the spawned command line is shell-shaped AND carries a payload/egress indicator
+       (reverse-shell, base64 decode, chmod +x, curl/wget/nc/socat, pipe-to-shell,
+       __import__ / os.system, crontab, authorized_keys).
+
+  Attribution is anchored on meta.caller_pid -> proc_instance() -> proc_lineage(); every
+  corroborating query is scoped to that one interpreter instance (pid + start_ns) and to
+  the window between its start and the triggering spawn. Nothing is attributed across
+  sessions or across reused PIDs. The triggering spawn is read from meta (never re-queried
+  from the async event log).
+author: Selhan
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36258
+  - https://github.com/langchain-ai/langchain/issues/8363
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.t1059.006
+  - attack.t1203
+  - cve.2023-36258
+  - owasp.a03.2021
+falsepositives:
+  - Jupyter/IPython data-science sessions where numexpr is loaded transitively via
+    pandas/numpy and the analyst legitimately shells out ("!curl ...", "!chmod +x ...").
+    This is the single most likely benign match; the rule is report-only for this reason.
+  - Airflow/Celery/Prefect Python workers that import numexpr-backed libraries and then run
+    ETL steps through /bin/sh with curl, wget or base64 in the pipeline.
+  - Python build or packaging processes (pip wheel builds of numexpr itself) that spawn a
+    shell running chmod +x on freshly compiled artefacts.
+  - Security engineers reproducing the CVE-2023-36258 proof-of-concept in a lab.
+  - Streamlit/Chainlit demo apps that intentionally expose a shell tool to the operator.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_shell_shape:
+    content|re: '(?i)(/bin/(sh|bash|zsh|dash|ksh)|\bsh\b|\bbash\b|\bzsh\b|\bdash\b|\bcmd\.exe\b|\bpowershell(\.exe)?\b|\bosascript\b)'
+  sel_payload_shape:
+    content|re: '(?i)(/dev/tcp/|\bmkfifo\b|\bbase64\s+-{1,2}d\b|\bchmod\s+\+?x\b|__import__|\bos\.system\b|\bsubprocess\.(Popen|run|call|check_output)\b|\bcurl\b|\bwget\b|\bnc\b|\bncat\b|\bnetcat\b|\bsocat\b|\|\s*(sh|bash)\b|\bcrontab\b|\bauthorized_keys\b)'
+  condition: sel_exec and sel_shell_shape and sel_payload_shape
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Windows / thresholds (rule-owned, never stored) ────────────────────────
+  SPAWN_WINDOW_NS = 900000000000     # 15 min - sibling-spawn corroboration window
+  SUPPRESS_NS     = 60000000000      # 60 s  - per-interpreter-instance de-dup
+  PRUNE_NS        = 3600000000000    # 1 h   - de-dup table retention
+
+  # Python-family hosts that can reach numexpr.evaluate() through LangChain.
+  PY_HOSTS = [
+      r"(?i)^python[0-9.]*$", r"(?i)^pythonw[0-9.]*$", r"(?i)^uvicorn$",
+      r"(?i)^gunicorn$", r"(?i)^streamlit$", r"(?i)^chainlit$", r"(?i)^celery$",
+      r"(?i)^flask$", r"(?i)^ipython[0-9.]*$", r"(?i)^jupyter", r"(?i)^langserve$",
+  ]
+
+  SHELL_SPAWN = [
+      r"(?i)/bin/(sh|bash|zsh|dash|ksh)", r"(?i)\bsh\b", r"(?i)\bbash\b",
+      r"(?i)\bzsh\b", r"(?i)\bdash\b", r"(?i)\bcmd\.exe\b",
+      r"(?i)\bpowershell(\.exe)?\b", r"(?i)\bosascript\b",
+  ]
+
+  EGRESS_TOOLS = [
+      r"(?i)\bcurl\b", r"(?i)\bwget\b", r"(?i)\bnc\b", r"(?i)\bncat\b",
+      r"(?i)\bnetcat\b", r"(?i)\bsocat\b", r"(?i)\bscp\b", r"(?i)\bsftp\b",
+  ]
+
+  PAYLOAD_HINTS = [
+      r"/dev/tcp/", r"(?i)\bmkfifo\b", r"(?i)\bbase64\s+-{1,2}d\b",
+      r"(?i)\bchmod\s+\+?x\b", r"__import__", r"(?i)\bos\.system\b",
+      r"\bsubprocess\.(Popen|run|call|check_output)\b",
+      r"(?i)\|\s*(sh|bash)\b", r"(?i)\bcrontab\b", r"(?i)\bauthorized_keys\b",
+  ]
+
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def basename(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def is_py_host(path):
+      b = basename(path)
+      for p in PY_HOSTS:
+          if re.find(p, b) != None:
+              return True
+      return False
+
+  def spawn_target(cmd):
+      m = re.find(r"/[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)+", cmd)
+      if m != None:
+          return "process://" + m
+      toks = cmd.split(" ")
+      t = toks[0]
+      if t == "":
+          t = "spawned"
+      return "process://" + t
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  # Instance-scoped module-load evidence. fs_activity is path-targeted (cheap);
+  # the per-entry ts is used to keep the evidence inside THIS interpreter's life.
+  def module_read(py_path, py_pid, py_start, until_ts, token):
+      for ent in fs_activity("filesystem://" + py_path, "READ", token):
+          ts = int(ent.get("ts", "0"))
+          if ts >= py_start and ts <= until_ts:
+              return {"path": ent.get("path", ""), "ts": str(ts)}
+      rows = query_events(kind="READ_FILE", actor_pid=py_pid, actor_start=py_start,
+                          since_ns=py_start, until_ns=until_ts, limit=5000)
+      for r in rows:
+          p = r.get("path", "")
+          if token in p:
+              return {"path": p, "ts": r.get("ts", "0")}
+      return None
+
+  def run():
+      # ── 1. Relevance gate: pure string checks on meta, no traversal ─────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      if not matches_any(SHELL_SPAWN, cmd):
+          return "allow"
+      if not (matches_any(EGRESS_TOOLS, cmd) or matches_any(PAYLOAD_HINTS, cmd)):
+          return "allow"
+
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trig_ts == 0:
+          return "allow"
+
+      # ── 2. Anchor on the exact triggering instance ──────────────────────────
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"                       # degraded - never guess attribution
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── 3. Session scope: the nearest Python-family ancestor (<=4 hops) ─────
+      py    = None
+      depth = 0
+      for x in lineage:
+          if depth > 4:
+              break
+          if is_py_host(x.get("actor_path", "")):
+              py = x
+              break
+          depth = depth + 1
+      if py == None:
+          return "allow"
+
+      py_path  = py.get("actor_path", "")
+      py_pid   = int(py.get("actor_pid", "0"))
+      py_start = int(py.get("actor_start", "0"))
+      if py_pid == 0:
+          return "allow"
+
+      # ── 4. Per-instance de-duplication (payloads can spawn in a loop) ───────
+      key  = str(py_pid) + ":" + str(py_start)
+      seen = store_get("reported") or {}
+      last = 0
+      if key in seen:
+          last = int(seen[key])
+      if last > 0 and (trig_ts - last) < SUPPRESS_NS:
+          return "allow"
+
+      # ── 5. REQUIRED anchor: numexpr loaded by THIS interpreter instance ─────
+      nx = module_read(py_path, py_pid, py_start, trig_ts, "numexpr")
+      if nx == None:
+          return "allow"                       # no vulnerable code path in-process
+      lc = module_read(py_path, py_pid, py_start, trig_ts, "langchain")
+
+      # ── 6. Corroboration: other commands this interpreter spawned recently ──
+      sib = None
+      rows = query_events(kind="EXECUTE_PROCESS", actor_pid=py_pid,
+                          actor_start=py_start,
+                          since_ns=trig_ts - SPAWN_WINDOW_NS,
+                          until_ns=trig_ts, limit=100)
+      if rows:
+          sib = rows[0]
+
+      # ── 7. Kill chain rooted at the session owner ───────────────────────────
+      root  = lineage[len(lineage) - 1].get("actor_path", py_path)
+      chain = new_chain("process://" + root)
+
+      py_edge = {
+          "from":     "process://" + py.get("parent_path", root),
+          "to":       "process://" + py_path,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(py_start),
+          "first_ts": str(py_start),
+          "last_ts":  str(py_start),
+          "cmdline":  py.get("cmdline", ""),
+      }
+      chain.append(step(py_edge, stage_id="Vulnerable Host Process",
+                        stage_desc="LangChain-capable interpreter instance " +
+                                   basename(py_path) + " pid=" + str(py_pid)))
+
+      if lc != None:
+          lc_edge = {"from": "process://" + py_path,
+                     "to": "filesystem://" + py_path, "kind": "READ_FILE",
+                     "ts": lc["ts"], "first_ts": lc["ts"], "last_ts": lc["ts"]}
+          chain.append(step(lc_edge, stage_id="LangChain Loaded",
+                            stage_desc="langchain module read in-session: " + lc["path"],
+                            activity=lc))
+
+      nx_edge = {"from": "process://" + py_path,
+                 "to": "filesystem://" + py_path, "kind": "READ_FILE",
+                 "ts": nx["ts"], "first_ts": nx["ts"], "last_ts": nx["ts"]}
+      chain.append(step(nx_edge, stage_id="Vulnerable Dependency",
+                        stage_desc="numexpr (CVE-2023-36258 evaluate sink) loaded by this " +
+                                   "instance: " + nx["path"],
+                        activity=nx))
+
+      if sib != None:
+          chain.append(step(ev_edge(sib), stage_id="Interpreter Command Spawn",
+                            stage_desc="prior command spawned by same instance: " +
+                                       sib.get("cmdline", sib.get("target_id", "?"))[:160]))
+
+      trig_edge = {
+          "from":     "process://" + inst.get("actor_path", py_path),
+          "to":       spawn_target(cmd),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trig_ts),
+          "first_ts": str(trig_ts),
+          "last_ts":  str(trig_ts),
+          "cmdline":  cmd[:400],
+      }
+      chain.append(step(trig_edge, stage_id="Code Execution",
+                        stage_desc="shell command with payload/egress indicators: " + cmd[:200]))
+
+      # ── 8. Persist de-dup state (pruned, quota-guarded) ─────────────────────
+      pruned = {}
+      for k in seen:
+          v = int(seen[k])
+          if (trig_ts - v) < PRUNE_NS:
+              pruned[k] = v
+      if len(pruned) > 300:
+          pruned = {}
+      pruned[key] = trig_ts
+      if store_usage()["free"] > 65536:
+          store_set("reported", pruned)
+
+      names = " -> ".join([basename(x.get("actor_path", "")) for x in lineage])
+      degraded = ""
+      if len(lineage) < 2:
+          degraded = " (attribution: degraded - lineage truncated)"
+      print("CVE-2023-36258 candidate: " + names + " | numexpr=" + nx["path"] +
+            " | cmd=" + cmd[:200] + degraded)
+
+      return {
+          "action": "report",
+          "reason": "Possible LangChain numexpr.evaluate RCE (CVE-2023-36258): " +
+                    "interpreter instance " + basename(py_path) + " pid=" + str(py_pid) +
+                    " with numexpr loaded in-process spawned shell command '" +
+                    cmd[:160] + "' via " + names + degraded,
+          "chain":  chain,
+      }
+
+  result = run()
