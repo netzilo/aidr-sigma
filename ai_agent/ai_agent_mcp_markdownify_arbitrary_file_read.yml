@@ -1,0 +1,96 @@
+title: MCP Markdownify Arbitrary File Read via get-markdown-file
+id: 7f3c1d2a-8b64-4e19-9c0f-2d5a6b8e4713
+status: experimental
+level: high
+description: |
+  Detects exploitation of the unauthenticated path-handling flaw in
+  mcp-markdownify-server (< 1.0.0) get-markdown-file, where the file path argument
+  is passed to the converter without canonicalisation or workspace containment.
+
+  Fires on a single tool_call event when BOTH of the following are true in the same
+  event:
+    1. the call is addressed to the markdownify server or to a get-markdown-file /
+       get_markdown_file tool, AND
+    2. the path-bearing argument in the tool arguments JSON contains either
+       (a) a multi-segment or percent-encoded directory-traversal sequence, or
+       (b) an absolute path to a well-known credential / secret / process-memory
+           target that a markdown converter has no legitimate reason to open.
+
+  Either signal alone is deliberately insufficient: a single "../" is ordinary in
+  monorepo docs builds, and an absolute path alone is ordinary for a converter.
+  The conjunction of the vulnerable tool identity with a traversal or a credential
+  target is the exploitation signature.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1005/
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://github.com/zcaceres/markdownify-mcp
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.llm02
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type: tool_call
+
+  # ── vulnerable component identity (any one is sufficient) ──────────────────
+  sel_tool_name:
+    tool_name|re: '(?i)^get[-_ ]?markdown[-_ ]?file$'
+  sel_tool_in_args:
+    content|re: '(?i)"(?:name|tool|tool_name)"\s*:\s*"get[-_ ]?markdown[-_ ]?file"'
+  sel_server_markdownify:
+    server|re: '(?i)markdownify'
+
+  # ── directory traversal in a path-bearing argument ─────────────────────────
+  sel_traversal:
+    content|re:
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}(?:\.\./){2,}'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}(?:\.\.\\{1,2}){2,}'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}(?:%2e%2e|%252e%252e|\.\.)(?:%2f|%5c|%252f|%255c)'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}\.{4}[/\\]{2}'
+
+  # ── credential / secret / process-memory targets in a path-bearing argument ─
+  sel_sensitive_target:
+    content|re:
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"(?:file://)?(?:[^"]{0,256}/)?etc/(?:passwd|shadow|sudoers|master\.passwd)\b'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"(?:file://)?(?:[^"]{0,256}/)?proc/(?:self|[0-9]{1,7})/(?:environ|cmdline|maps|mem)\b'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"(?:file://)?(?:[^"]{0,256}/)?\.(?:ssh/id_|aws/credentials|aws/config|kube/config|docker/config\.json|netrc|npmrc|pypirc|git-credentials|gnupg/)'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}id_(?:rsa|dsa|ecdsa|ed25519)(?:\.pub)?"'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}\.(?:pem|p12|pfx|kdbx|ovpn|key)"'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,256}\.env(?:\.[a-z0-9_-]{1,16})?"'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[a-z]:[\\/]{1,2}(?:windows[\\/]{1,2}(?:win\.ini|system32)|users[\\/]{1,2}[^"]{0,128}[\\/]{1,2}(?:\.ssh|ntuser\.dat))'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"(?:[^"]{0,256}/)?(?:root/|home/[^"/]{1,64}/)\.(?:bash_history|zsh_history|bash_profile|zshrc|profile|netrc)\b'
+
+  # ── template / placeholder arguments (never a real filesystem target) ──────
+  filter_template_placeholder:
+    content|re:
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"[^"]{0,64}(?:\{\{|\$\{|%[A-Z_]{2,32}%)'
+      - '(?i)"(?:file_?path|filename|path|file|source|url|input|target)"\s*:\s*"<[a-z_ -]{1,32}>"'
+
+  condition: >
+    sel_scope
+    and (sel_tool_name or sel_tool_in_args or sel_server_markdownify)
+    and (sel_traversal or sel_sensitive_target)
+    and not filter_template_placeholder
+falsepositives:
+  - Authorised red-team or CVE-validation runs against a deliberately vulnerable
+    mcp-markdownify-server instance; the arguments are indistinguishable from a real
+    exploit and this rule will fire, which is the intended behaviour during testing.
+  - A documentation pipeline that legitimately converts a file two or more directory
+    levels above the workspace root (e.g. a monorepo packaging step passing
+    "../../shared/README.md"). This matches sel_traversal only; it does not touch a
+    credential target, and the report verdict leaves the conversion unaffected.
+  - An operator intentionally converting an infrastructure config file that happens to
+    live under a dotfile directory (for example rendering a committed ".aws/config"
+    sample into markdown for a runbook).
+  - A markdown source file whose name ends in ".key" or ".env" by local convention;
+    the pattern requires the extension to terminate the JSON string value, so
+    ".env.md" and "secrets.key.md" do not match.
+action: report
