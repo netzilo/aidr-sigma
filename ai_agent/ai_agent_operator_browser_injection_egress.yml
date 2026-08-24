@@ -1,0 +1,373 @@
+title: Browser Agent Injection-Driven Covert Egress
+id: 7c4e9a1d-3f2b-4d86-9a0e-52b7c1d84f63
+status: experimental
+level: high
+description: |
+  Detects the only reconstructible half of a ChatGPT-Operator-class prompt injection:
+  a vision/browser agent that, while pulling content from multiple third-party web
+  origins, emits a bulk-encoded payload in the URL of a FIRST-CONTACT destination
+  (a host the session has never navigated to), corroborated by at least one of:
+  instruction-shaped content loaded from a public origin, a network fetch utility
+  spawned out of the agent process tree, credential/session-token-shaped material in
+  the outbound request, or an oversized GET-borne payload.
+
+  The engine emits no PROMPT_INJECTION / MALICIOUS_INPUT / UNAUTHORIZED_ACTION /
+  DATA_EXFILTRATION edge, and no user_input or vision_analysis event, so the causal
+  link from injected page text to agent action cannot be observed. This rule therefore
+  does NOT claim to prove injection. It claims the structural signature that injected
+  Operator instructions must produce to be useful to an attacker: harvested data leaving
+  through a sink that was never part of the user's task. Ordinary Operator browsing is
+  excluded by three required conditions (bulk-encoded payload, first-contact sink,
+  multi-origin browsing context) plus a corroborator, and the verdict is report-only.
+author: Haibo
+date: "2026-06-08"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051.000
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1567/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - atlas.aml.t0051.000
+  - owasp.llm01
+falsepositives:
+  - Real-user-monitoring / analytics beacons whose first payload to a newly seen
+    collector host is a long base64 blob in the query string. Requires the extra
+    corroborator to fire; the oversized-GET corroborator is gated at 512 characters,
+    well above typical beacon size.
+  - First-time download from a presigned object URL (SigV4 / GCS signed URL). Excluded
+    by the X-Amz-Signature / X-Goog-Signature shape check, not by any host allowlist.
+  - OAuth / OIDC authorization-code and id_token callbacks, which legitimately carry
+    long base64url material in the URL. Excluded by the JWT triple-segment shape check
+    and the code+state pairing check.
+  - Content-hashed static assets and sourcemaps (long hex or base64url path segments).
+    Excluded by the static-asset extension shape check.
+  - A developer or red-teamer deliberately exercising exfil-shaped URLs from the same
+    machine while an agent session is open; the lineage/attribution string in the
+    reason field is how triage separates this from agent-originated egress.
+  - Session-replay or crash-reporting SDKs uploading their first batch. These are
+    normally POST bodies rather than URL-borne blobs and will not match the anchor.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_events:
+    event_type:
+      - http_request
+      - execute_process
+  sel_bulk_payload_in_url:
+    url.full|re:
+      - '[?&#/=][A-Za-z0-9+/_-]{64,}'
+      - '(%[0-9A-Fa-f]{2}){24,}'
+  sel_bulk_payload_in_cmdline:
+    content|re:
+      - 'https?://[^\s"]*[?&#/=][A-Za-z0-9+/_-]{64,}'
+      - 'https?://[^\s"]*(%[0-9A-Fa-f]{2}){24,}'
+  condition: sel_events and (sel_bulk_payload_in_url or sel_bulk_payload_in_cmdline)
+action: execute
+on_timeout: allow
+on_error:  allow
+script: |
+  # ── tunables (this rule's own window/thresholds — never stored) ─────────────
+  LOOK_BACK_NS      = 300000000000   # 5 minutes
+  MIN_OTHER_HOSTS   = 2              # multi-origin browsing context (injection surface)
+  MAX_PRIOR_FETCHES = 2              # "first-contact" sink: never navigated to before
+  OVERSIZED_BLOB    = 512            # GET-borne payload size that is not a beacon
+
+  BLOB_RE = [
+      r'[?&#/=][A-Za-z0-9+/_-]{64,}',
+      r'[?&#/=][A-Fa-f0-9]{64,}',
+      r'(%[0-9A-Fa-f]{2}){24,}',
+  ]
+
+  CRED_RE = [
+      r'\bAKIA[0-9A-Z]{16}\b',
+      r'\bsk-[A-Za-z0-9]{32,}\b',
+      r'\b(ghp|ghs|ghu|github_pat)_[A-Za-z0-9]{20,}',
+      r'-----BEGIN [A-Z ]{0,20}PRIVATE KEY-----',
+      r'(?i)\b(authorization|bearer|session[_-]?id|sessionid|csrf[_-]?token|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd)\b\s*[=:]',
+  ]
+
+  # network-fetch utilities: a click-and-type browser agent has no reason to shell out
+  FETCH_TOOLS = [
+      r'\bcurl\b', r'\bwget\b', r'\bncat?\b', r'\bsocat\b', r'\bhttpie\b',
+      r'\bpython[23]?\b[^\n]*\b(urllib|requests|http\.client|socket)\b',
+  ]
+
+  # ── pure helpers (no graph / log calls) ─────────────────────────────────────
+  def toi(v):
+      if v == None:
+          return 0
+      s = str(v)
+      if s == "":
+          return 0
+      if re.find(r'^[0-9]+$', s) == None:
+          return 0
+      return int(s)
+
+  def host_of(u):
+      p = u.find("://")
+      if p < 0:
+          return ""
+      rest = u[p+3:]
+      cut = rest.find("/")
+      if cut >= 0:
+          rest = rest[:cut]
+      cut = rest.find("?")
+      if cut >= 0:
+          rest = rest[:cut]
+      at = rest.find("@")
+      if at >= 0:
+          rest = rest[at+1:]
+      cut = rest.find(":")
+      if cut >= 0:
+          rest = rest[:cut]
+      return rest.lower()
+
+  def first_url(s):
+      m = re.find(r'https?://[^\s"<>]+', s)
+      if m == None:
+          return ""
+      return m
+
+  def blob_of(u):
+      for p in BLOB_RE:
+          m = re.find(p, u)
+          if m != None:
+              return m
+      return None
+
+  def benign_shape(u):
+      # SHAPE-based exclusions only — no host, domain or path is trusted anywhere
+      # in this rule.
+      if re.find(r'ey[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}', u) != None:
+          return True   # JWT / OIDC token carried in URL
+      if re.find(r'(?i)[?&]x-(amz|goog)-signature=', u) != None:
+          return True   # presigned object URL
+      if re.find(r'(?i)[?&]id_token=', u) != None:
+          return True
+      if re.find(r'(?i)[?&]code=', u) != None and re.find(r'(?i)[?&]state=', u) != None:
+          return True   # OAuth authorization-code callback
+      if re.find(r'(?i)\.(js|mjs|css|map|png|jpe?g|gif|svg|ico|woff2?|ttf|wasm)($|\?|#)', u) != None:
+          return True   # content-hashed static asset / sourcemap
+      return False
+
+  def creds_present(s):
+      for p in CRED_RE:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # ── graph helpers ──────────────────────────────────────────────────────────
+  def agent_candidates(lineage_paths):
+      prefer = []
+      other  = []
+      for p in graph(type="Process"):
+          path = p.get("path", "")
+          if p.get("agent", "0") == "1":
+              if path in lineage_paths:
+                  prefer.append(p["id"])
+              else:
+                  other.append(p["id"])
+          elif path in lineage_paths:
+              prefer.append(p["id"])
+      return sorted(prefer) + sorted(other)
+
+  def session_nodes(aid):
+      ids = {aid: True}
+      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          ids[e["to"]] = True
+      hop1 = [k for k in ids]
+      for nid in hop1:
+          for e in edges(nid, dir="out", kind="EXECUTE_PROCESS"):
+              ids[e["to"]] = True
+      return [k for k in ids]
+
+  def other_public_hosts(nids, ets, skip_host):
+      out = {}
+      for nid in nids:
+          for e in edges(nid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              if u.get("is_ztna_host", "0") == "1":
+                  continue
+              h = u.get("host", "").lower()
+              if h == "" or h == skip_host:
+                  continue
+              lt = toi(e.get("last_ts", ""))
+              if lt == 0:
+                  lt = toi(e.get("first_ts", ""))
+              if lt == 0:
+                  continue
+              if ets > 0 and (ets - lt) > LOOK_BACK_NS:
+                  continue          # stale browsing, not this task
+              if h not in out:
+                  out[h] = e
+      return out
+
+  def prior_fetches(dst):
+      total = 0
+      for u in graph(type="URL"):
+          if u.get("host", "").lower() != dst:
+              continue
+          total = total + toi(u.get("fetch_count", "0"))
+      return total
+
+  def fetch_tool_edge(nids, ets):
+      for nid in nids:
+          for e in edges(nid, dir="out", kind="EXECUTE_PROCESS"):
+              t = toi(e.get("ts", ""))
+              if ets > 0 and t > 0 and (ets - t) > LOOK_BACK_NS:
+                  continue
+              cmd = e.get("cmdline", "")
+              if cmd == "":
+                  p = node(e["to"])
+                  if p != None:
+                      cmd = p.get("cmdline", "")
+                      if cmd == "":
+                          cmd = p.get("path", "")
+              for pat in FETCH_TOOLS:
+                  if re.find(pat, cmd) != None:
+                      return e
+      return None
+
+  def public_skill_edge(nids, ets):
+      for nid in nids:
+          for e in edges(nid, dir="out", kind="ACQUIRED_SKILL"):
+              s = node(e["to"])
+              if s == None:
+                  continue
+              if s.get("is_ztna_host", "0") == "1":
+                  continue
+              t = toi(e.get("ts", ""))
+              if ets > 0 and t > 0 and (ets - t) > LOOK_BACK_NS:
+                  continue
+              return e
+      return None
+
+  def egress_edge(aid, dst, ets):
+      # Trigger stage is synthesised from meta, never re-looked-up in the log:
+      # the just-fired event races async ingest.
+      return {
+          "from":     aid,
+          "to":       "https://" + dst,
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+          "count":    "1",
+          "method":   meta.get("method", "GET"),
+          "risk_context": "",
+      }
+
+  # ── main ───────────────────────────────────────────────────────────────────
+  def run():
+      ct = meta.get("context_type", "")
+      if ct != "http_request" and ct != "execute_process":
+          return "allow"
+
+      # relevance gate — pure string work on meta, no traversal
+      url = ""
+      if ct == "http_request":
+          url = meta.get("url", "")
+          if url == "":
+              h = meta.get("host", "")
+              if h != "":
+                  url = "https://" + h + meta.get("path", "")
+      else:
+          url = first_url(meta.get("content", ""))
+      if url == "":
+          return "allow"
+      if benign_shape(url):
+          return "allow"
+      blob = blob_of(url)
+      if blob == None:
+          return "allow"
+      dst = host_of(url)
+      if dst == "":
+          return "allow"
+
+      ets = toi(meta.get("event_ts", "0"))
+
+      # REQUIRED 2 — the sink must be first-contact: no prior navigation to it.
+      # Kills beacons, CDNs, API hosts and anything already part of the task.
+      if prior_fetches(dst) > MAX_PRIOR_FETCHES:
+          return "allow"
+
+      # attribution (best effort; report-only so degraded is acceptable)
+      lineage_paths = {}
+      attrib = "degraded"
+      names  = ""
+      cp = toi(meta.get("caller_pid", "0"))
+      if cp > 0:
+          inst = proc_instance(cp, ets)
+          if inst != None:
+              lin = proc_lineage(toi(inst["actor_pid"]), toi(inst["actor_start"]))
+              if lin:
+                  attrib = "resolved"
+                  parts = []
+                  for x in lin:
+                      p = x.get("actor_path", "")
+                      lineage_paths[p] = True
+                      parts.append(p.split("/")[-1])
+                  names = " -> ".join(parts)
+
+      for aid in agent_candidates(lineage_paths):
+          nids = session_nodes(aid)
+
+          # REQUIRED 3 — multi-origin browsing context = the injection surface
+          others = other_public_hosts(nids, ets, dst)
+          if len(others) < MIN_OTHER_HOSTS:
+              continue
+
+          chain = new_chain(aid)
+          hostnames = sorted([h for h in others])
+          for h in hostnames[:2]:
+              chain.append(step(others[h], stage_id="Injection Surface",
+                                stage_desc="third-party web origin read during agent task: " + h))
+
+          opt = []
+          se = public_skill_edge(nids, ets)
+          if se != None:
+              s = node(se["to"])
+              hh = "?"
+              if s != None:
+                  hh = s.get("host", "?")
+              chain.append(step(se, stage_id="Instruction Load",
+                                stage_desc="instruction-shaped content loaded from public origin: " + hh))
+              opt.append("instruction-shaped content loaded")
+
+          te = fetch_tool_edge(nids, ets)
+          if te != None:
+              chain.append(step(te, stage_id="Tool Escape",
+                                stage_desc="network fetch utility spawned by browser agent tree: " + te.get("cmdline", "?")))
+              opt.append("fetch utility spawned")
+
+          if creds_present(url + " " + meta.get("content", "")):
+              opt.append("credential/session-token-shaped payload")
+
+          if ct == "http_request" and meta.get("method", "").upper() == "GET" and len(blob) >= OVERSIZED_BLOB:
+              opt.append("oversized GET-borne payload")
+
+          if not opt:
+              continue
+
+          chain.append(step(egress_edge(aid, dst, ets), stage_id="Covert Egress",
+                            stage_desc="first-contact sink received " + str(len(blob)) +
+                                       "-char encoded payload in URL: " + dst))
+
+          reason = ("Browser-agent covert egress: " + str(len(blob)) +
+                    "-char encoded payload sent to first-contact host " + dst +
+                    " after reading " + str(len(others)) + " third-party origins; corroborators: " +
+                    ", ".join(opt) + "; attribution: " + attrib)
+          if names != "":
+              reason = reason + " (" + names + ")"
+          print(reason)
+          print("NOTE: injection causality is not observable (no PROMPT_INJECTION/vision events); " +
+                "this is the egress signature only — triage the sink and the page content read before it.")
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
