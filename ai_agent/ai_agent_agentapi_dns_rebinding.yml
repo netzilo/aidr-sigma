@@ -1,0 +1,378 @@
+title: AgentAPI DNS Rebinding Localhost Access
+id: 7b3f1c94-2a6e-4d51-9c0f-8e42d5a1b6f3
+status: experimental
+level: high
+description: |
+  Detects client-side DNS rebinding against a localhost-bound AgentAPI instance
+  (versions <= 0.3.3 served over plain HTTP), which lets a remote web page read the
+  /messages endpoint and harvest local message history, secret keys and file content.
+
+  The rule is behavioural: it never inspects the exfiltrated payload. It correlates
+  HTTP_REQUEST edges in the behaviour graph to prove that the AgentAPI control plane
+  is being reached through an attacker-controlled *name* rather than through the
+  loopback literal, inside the same short session window in which the same host is
+  also being spoken to over loopback.
+
+  Anchors (any one is required):
+    A  AgentAPI endpoint (/messages, /message, /events, /status) fetched over plain
+       HTTP where the URL host is a DNS name and not a loopback literal - the
+       rebound name.
+    B  Loopback AgentAPI endpoint driven from a foreign http(s) Origin/Referer -
+       a remote page steering the local API.
+    C  Loopback URL whose Host header carries an external DNS name - the rebinding
+       Host/target mismatch.
+
+  Corroboration (graph): a process in the same window already speaks plain HTTP to a
+  loopback endpoint, i.e. the local AgentAPI control plane genuinely exists. Anchor A
+  is discarded without it, so a plain public API that merely exposes /messages does
+  not fire the rule.
+
+  Escalating evidence added to the chain when present: repeated fetches of the same
+  rebound name (harvesting rather than a single probe) and an outbound request to a
+  separate public host inside the window (candidate exfil hop).
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://en.wikipedia.org/wiki/DNS_rebinding
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  - https://attack.mitre.org/techniques/T1189/
+  - https://attack.mitre.org/techniques/T1005/
+tags:
+  - attack.initial-access
+  - attack.t1189
+  - attack.collection
+  - attack.t1005
+  - attack.exfiltration
+  - attack.t1567
+  - owasp.a04.2021
+  - owasp.a07.2021
+falsepositives:
+  - Developer maps a project-specific hostname to 127.0.0.1 in /etc/hosts and drives
+    AgentAPI through that name over plain HTTP; anchor A fires legitimately.
+  - Dev tunnelling or port-forwarding tools (ngrok-style tunnels, IDE port forwarding)
+    publish the local AgentAPI under a public DNS name during a demo, so the agent
+    reaches /messages through that name while also polling loopback.
+  - An internal self-hosted chat or queue service exposes /messages over plain HTTP on
+    a corporate DNS name while the same workstation runs an unrelated loopback HTTP
+    dev server, producing both stages without any rebinding.
+  - IDE webviews, browser extensions and local dashboards legitimately send an Origin
+    or Referer header when calling the localhost API, which satisfies anchor B.
+  - In replay, header_* meta keys are not stored in snapshots, so anchors B and C can
+    never fire there; only anchor A is reproducible offline.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_agentapi_path:
+    path|re: '(?i)^/(messages|message|events|status)(/|\?|$)'
+  sel_agentapi_url:
+    url.full|re: '(?i)://[^/\s]+/(messages|message|events|status)(/|\?|$)'
+  condition: sel_http and (sel_agentapi_path or sel_agentapi_url)
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Client-side DNS rebinding against a localhost-bound AgentAPI (<= 0.3.3) ──
+  WINDOW_NS      = 900000000000       # 15 minutes - stages must cluster
+  MIN_POLL_COUNT = 3                  # repeated fetches = harvesting, not a probe
+  AGENTAPI_PATHS = ["/messages", "/message", "/events", "/status"]
+  LOOPBACK_NAMES = ["127.0.0.1", "localhost", "::1", "[::1]", "0.0.0.0"]
+
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      if re.match(r"^[0-9]+$", s):
+          return int(s)
+      return 0
+
+  def strip_port(h):
+      hh = h.lower()
+      if hh.startswith("["):
+          i = hh.find("]")
+          if i >= 0:
+              return hh[:i + 1]
+          return hh
+      i = hh.find(":")
+      if i >= 0:
+          return hh[:i]
+      return hh
+
+  def is_loopback(h):
+      hh = strip_port(h)
+      if hh in LOOPBACK_NAMES:
+          return True
+      if hh.startswith("127."):
+          return True
+      if hh.endswith(".localhost"):
+          return True
+      return False
+
+  def is_ip_literal(h):
+      hh = strip_port(h)
+      if hh.startswith("["):
+          return True
+      return re.match(r"^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$", hh)
+
+  def is_dns_name(h):
+      hh = strip_port(h)
+      if hh == "":
+          return False
+      if hh.find(".") < 0:
+          return False
+      if is_ip_literal(hh):
+          return False
+      return re.find(r"[a-z]", hh) != None
+
+  def path_of(u):
+      s = u
+      p3 = s.find("://")
+      if p3 >= 0:
+          s = s[p3 + 3:]
+      i = s.find("/")
+      if i < 0:
+          return "/"
+      return s[i:]
+
+  def is_agentapi_path(p):
+      pl = p.lower()
+      q = pl.find("?")
+      if q >= 0:
+          pl = pl[:q]
+      if len(pl) > 1 and pl.endswith("/"):
+          pl = pl[:len(pl) - 1]
+      for a in AGENTAPI_PATHS:
+          if pl == a:
+              return True
+      return False
+
+  def origin_host(v):
+      s = v.lower()
+      if s.startswith("http://"):
+          s = s[7:]
+      elif s.startswith("https://"):
+          s = s[8:]
+      else:
+          return ""
+      i = s.find("/")
+      if i >= 0:
+          s = s[:i]
+      return strip_port(s)
+
+  def edge_ts(e):
+      v = e.get("last_ts", "")
+      if v == "":
+          v = e.get("ts", "")
+      if v == "":
+          v = e.get("first_ts", "")
+      return to_int(v)
+
+  def edge_count(e):
+      c = e.get("count", "")
+      if c == "":
+          return 1
+      return to_int(c)
+
+  def pick(pids_list, trig_map, local_map, need_trig, need_local, aname):
+      best = ""
+      for aid in sorted(pids_list):
+          if need_trig and aid not in trig_map:
+              continue
+          if need_local and aid not in local_map:
+              continue
+          n = node(aid)
+          if aname != "" and n != None and n.get("path", "") == aname:
+              return aid
+          if best == "":
+              best = aid
+      return best
+
+  def actor_label(event_ts, fallback):
+      cp = to_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return fallback
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return fallback
+      lin = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      if not lin:
+          return fallback
+      names = []
+      for x in lin:
+          names.append(x["actor_path"].split("/")[-1])
+      return " -> ".join(names)
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no graph work ─────────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      host = meta.get("host", "")
+      url  = meta.get("url", "")
+      path = meta.get("path", "")
+      if path == "" and url != "":
+          path = path_of(url)
+      if host == "" or not is_agentapi_path(path):
+          return "allow"
+
+      thost = strip_port(host)
+
+      # rebinding needs plain HTTP - an https name could not be served by the
+      # localhost AgentAPI. Unknown scheme is treated as http, never rejected.
+      is_https = url.lower().startswith("https://")
+
+      # foreign web origin driving the local API
+      foreign_origin = ""
+      for hk in ["header_origin", "header_referer"]:
+          ov = meta.get(hk, "")
+          if ov != "":
+              oh = origin_host(ov)
+              if oh != "" and not is_loopback(oh):
+                  foreign_origin = oh
+                  break
+
+      # Host header carrying an external name while the URL target is loopback
+      hdr_host = ""
+      hv = meta.get("header_host", "")
+      if hv != "":
+          hdr_host = strip_port(hv)
+
+      anchor  = ""
+      foreign = ""
+      if (not is_loopback(thost)) and is_dns_name(thost) and not is_https:
+          anchor  = "rebound-name"
+          foreign = thost
+      elif is_loopback(thost) and foreign_origin != "":
+          anchor  = "foreign-origin"
+          foreign = foreign_origin
+      elif is_loopback(thost) and hdr_host != "" and (not is_loopback(hdr_host)) and is_dns_name(hdr_host):
+          anchor  = "host-mismatch"
+          foreign = hdr_host
+      if anchor == "":
+          return "allow"
+
+      # ── 2. graph corroboration: HTTP_REQUEST edges inside the window ─────────
+      event_ts = to_int(meta.get("event_ts", "0"))
+      aname    = meta.get("agent_name", "")
+
+      local_by_pid = {}
+      trig_by_pid  = {}
+      poll_by_pid  = {}
+      pub_by_pid   = {}
+      pids         = []
+
+      for p in graph(type="Process"):
+          aid = p["id"]
+          for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              ts = edge_ts(e)
+              if event_ts > 0 and ts > 0 and (event_ts - ts) > WINDOW_NS:
+                  continue                      # stale - different session
+              uh = strip_port(u.get("host", ""))
+              if uh == "":
+                  continue
+              if is_loopback(uh) and u.get("scheme", "") != "https":
+                  if aid not in local_by_pid:
+                      local_by_pid[aid] = e
+                      if aid not in pids:
+                          pids.append(aid)
+              if uh == thost:
+                  if aid not in trig_by_pid:
+                      trig_by_pid[aid] = e
+                      if aid not in pids:
+                          pids.append(aid)
+                  c = edge_count(e)
+                  if c > poll_by_pid.get(aid, 0):
+                      poll_by_pid[aid] = c
+              if (not is_loopback(uh)) and uh != thost and u.get("is_ztna_host", "1") == "0":
+                  if aid not in pub_by_pid:
+                      pub_by_pid[aid] = e
+
+      chosen      = pick(pids, trig_by_pid, local_by_pid, True, True, aname)
+      attribution = "exact"
+      if chosen == "":
+          chosen      = pick(pids, trig_by_pid, local_by_pid, True, False, aname)
+          attribution = "no local-client edge on this process"
+      if chosen == "":
+          chosen      = pick(pids, trig_by_pid, local_by_pid, False, True, aname)
+          attribution = "trigger edge not yet ingested"
+      if chosen == "":
+          return "allow"                        # no graph evidence in the window
+
+      local_edge = local_by_pid.get(chosen, None)
+      if anchor == "rebound-name" and local_edge == None:
+          for aid in sorted(pids):
+              if aid in local_by_pid:
+                  local_edge  = local_by_pid[aid]
+                  attribution = "loopback client is a sibling process"
+                  break
+      if anchor == "rebound-name" and local_edge == None:
+          # no localhost HTTP service in play at all - a public /messages API,
+          # not a rebind. Stay silent.
+          return "allow"
+
+      trig_edge = trig_by_pid.get(chosen, None)
+      if trig_edge == None:
+          # the triggering request races async ingest - synthesise it from meta
+          trig_edge = {
+              "from":     chosen,
+              "to":       "http://" + thost,
+              "kind":     "HTTP_REQUEST",
+              "method":   meta.get("method", ""),
+              "ts":       str(event_ts),
+              "first_ts": str(event_ts),
+              "last_ts":  str(event_ts),
+              "count":    "1",
+          }
+
+      # ── 3. kill chain ────────────────────────────────────────────────────────
+      chain = new_chain(chosen)
+      if anchor == "rebound-name":
+          chain.append(step(local_edge,
+                            stage_id="Local API Client",
+                            stage_desc="plain-HTTP client of a loopback endpoint - AgentAPI control plane present in this window"))
+          chain.append(step(trig_edge,
+                            stage_id="DNS Rebinding Access",
+                            stage_desc="AgentAPI endpoint " + path + " reached over plain HTTP via DNS name " + foreign + " instead of the loopback literal"))
+      else:
+          chain.append(step(trig_edge,
+                            stage_id="Cross-Origin Localhost Access",
+                            stage_desc="loopback AgentAPI endpoint " + path + " driven from external name " + foreign + " (" + anchor + ")"))
+          if local_edge != None and local_edge != trig_edge:
+              chain.append(step(local_edge,
+                                stage_id="Local API Client",
+                                stage_desc="same session also speaks plain HTTP to a loopback endpoint"))
+
+      extra = []
+      poll = poll_by_pid.get(chosen, 0)
+      if poll >= MIN_POLL_COUNT:
+          extra.append(str(poll) + " repeated fetches")
+      pe = pub_by_pid.get(chosen, None)
+      if pe != None:
+          pu = node(pe["to"])
+          ph = ""
+          if pu != None:
+              ph = pu.get("host", "")
+          chain.append(step(pe,
+                            stage_id="Possible Exfil Hop",
+                            stage_desc="same actor also sent HTTP to public host " + ph + " inside the window"))
+          extra.append("public egress to " + ph)
+
+      who    = actor_label(event_ts, aname)
+      reason = ("AgentAPI DNS rebinding suspected - " + path +
+                " reached via external name " + foreign +
+                " [anchor=" + anchor + ", actor=" + who +
+                ", attribution=" + attribution + "]")
+      if extra:
+          reason = reason + " | " + ", ".join(extra)
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
