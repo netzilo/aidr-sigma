@@ -1,0 +1,130 @@
+title: Langflow Unauthenticated Code Injection Exploit Attempt
+id: f3b2a1c7-8d4e-4a6b-9c25-7e1d0f4a9b83
+status: experimental
+level: high
+description: |
+  Detects exploitation of the Langflow code-injection weakness (CVE-2025-3248 class)
+  in which an unauthenticated attacker posts attacker-controlled Python to a Langflow
+  code-evaluation endpoint (/api/v1/validate/code, /api/v1/custom_component) or embeds
+  it in a publicly-accessible flow (/api/v1/build, /api/v1/run, /api/v1/flows,
+  /api/v1/mcp with access_type=PUBLIC).
+
+  The endpoint compiles and exec's the submitted module, so *statement* bodies are not
+  executed - only constructs evaluated at definition time run. Every published proof of
+  concept therefore hides the payload in a decorator, a function default argument, a base
+  class expression, or a metaclass expression. This rule requires that exact syntactic
+  shape in the same event as a Langflow code endpoint, which is what separates a live
+  exploit from a developer legitimately saving a custom component.
+
+  Two observable surfaces are covered:
+    * http_request - the agent (or a process behind it) issues the exploit request itself.
+    * execute_process - the agent shells out to curl / python / httpie to hit the same
+      endpoint with a JSON "code" field.
+
+  OWASP web mapping from the source advisory is A03:2021 - Injection; the closest
+  OWASP LLM Top 10 mapping for untrusted code reaching an interpreter inside an
+  LLM orchestration framework is LLM05.
+author: Selhan
+date: "2025-11-18"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-3248
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0044
+  - owasp.llm05
+  - cwe.94
+  - cve.2025-3248
+falsepositives:
+  - Langflow developer saving or validating a custom component that genuinely wraps a
+    decorator or default argument around subprocess/os - rare, because these shapes are
+    Python anti-patterns, but possible in hand-rolled shell-runner components.
+  - Authorised vulnerability scanning or red-team validation of an internal Langflow
+    instance (nuclei template, Metasploit module, manual curl PoC for CVE-2025-3248).
+  - CI/CD regression tests that replay the exploit payload against a disposable Langflow
+    test instance to verify the patch.
+  - An operator pasting a public proof of concept into a shell one-liner while researching
+    the advisory rather than attacking a production host.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── event scoping ───────────────────────────────────────────────────────────
+  sel_http:
+    event_type: http_request
+  sel_proc:
+    event_type: execute_process
+
+  # ── Langflow code-evaluation endpoints (compile/exec surface) ───────────────
+  sel_ep_code_path:
+    path|contains:
+      - '/api/v1/validate/code'
+      - '/api/v1/custom_component'
+  sel_ep_code_url:
+    url.full|contains:
+      - '/api/v1/validate/code'
+      - '/api/v1/custom_component'
+
+  # ── Langflow flow build / run / publish endpoints ───────────────────────────
+  sel_ep_flow_path:
+    path|re: '(?i)/api/v1/(?:build|run|flows|mcp)(?:/|\?|$)'
+  sel_ep_flow_url:
+    url.full|re: '(?i)/api/v1/(?:build|run|flows|mcp)(?:/|\?|$)'
+
+  # ── flow is being made public (auth-bypass leg of the chain) ────────────────
+  sel_public_flow:
+    content|re:
+      - '(?i)access_type\\?"?\s*:\s*\\?"?public'
+      - '(?i)\\?"is_public\\?"\s*:\s*true'
+
+  # ── definition-time execution primitives: the actual exploit syntax ─────────
+  sel_inject_shape:
+    content|re:
+      # decorator payload:  @exec("...")  /  @os.system("id")
+      - '@\s*(?:exec|eval|compile|__import__|breakpoint|os\.(?:system|popen|execl|execv|execve|spawnl|spawnv)|subprocess\.(?:Popen|run|call|check_call|check_output|getoutput)|pty\.spawn|importlib\.import_module|socket\.socket)\s*\('
+      # default-argument payload:  def f(x=__import__("os").system("id")): pass
+      - 'def\s+\w+\s*\([^)]{0,300}=\s*(?:exec|eval|compile|__import__|breakpoint|os\.(?:system|popen|execl|execv|execve|spawnl|spawnv)|subprocess\.(?:Popen|run|call|check_call|check_output|getoutput)|pty\.spawn|importlib\.import_module|socket\.socket)\s*\('
+      # base-class payload:  class A(exec("...")): pass
+      - 'class\s+\w+\s*\(\s*(?:exec|eval|compile|__import__)\s*\('
+      # metaclass payload:  class A(metaclass=eval("...")): pass
+      - 'metaclass\s*=\s*(?:exec|eval|compile|__import__)\s*\('
+      # chained import-exec used by nearly every published PoC
+      - '__import__\s*\([^)]{0,40}\)\s*\.\s*(?:system|popen|exec\w+)'
+
+  # ── shell one-liner variant (execute_process) ───────────────────────────────
+  sel_cmd_endpoint:
+    content|contains:
+      - '/api/v1/validate/code'
+      - '/api/v1/custom_component'
+  sel_cmd_code_field:
+    content|re: '\\?"code\\?"\s*:'
+
+  # ── false-positive suppression ──────────────────────────────────────────────
+  # The vulnerability requires a request body; read-only probes cannot exploit it.
+  filter_probe:
+    method:
+      - GET
+      - HEAD
+      - OPTIONS
+  # Documentation / advisory templates rather than a live payload.
+  filter_doc_placeholder:
+    content|contains:
+      - 'YOUR_PAYLOAD'
+      - 'YOUR_COMMAND_HERE'
+      - 'PASTE_PAYLOAD_HERE'
+      - 'REPLACE_ME'
+      - '<insert-command>'
+      - '<your-command-here>'
+
+  condition: >
+    (
+      (sel_http and (sel_ep_code_url or sel_ep_code_path) and sel_inject_shape) or
+      (sel_http and (sel_ep_flow_url or sel_ep_flow_path) and sel_public_flow and sel_inject_shape) or
+      (sel_proc and sel_cmd_endpoint and (sel_cmd_code_field or sel_inject_shape))
+    ) and not (filter_probe or filter_doc_placeholder)
+action: report
