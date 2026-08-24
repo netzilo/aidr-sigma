@@ -1,0 +1,84 @@
+title: MCP Delegated Code Edit Applied With Validation Gate Bypass
+id: 7b3f1c9e-2d64-4a1b-9f0e-8c5a4d2e6b71
+status: experimental
+level: high
+description: |
+  Detects a monitored AI agent (or an MCP server acting under it, e.g. mcp-bifrost
+  style worker-model delegation) spawning a process that BOTH atomically applies a
+  code change AND explicitly disables the validation/verification gate that is
+  supposed to review that change before it lands.
+
+  mcp-bifrost delegates code edits to a cheaper worker model and relies on a chain
+  of validation gates before an atomic apply. The failure mode -- reachable through
+  prompt injection into the worker model or through gate-logic weaknesses -- is that
+  the apply step still executes while the gates are skipped. The only live-observable
+  artefact of that failure is the child process the server spawns to write the change:
+  a patch/apply/in-place-edit/atomic-rename invocation carrying an explicit
+  "skip the checks" flag or environment variable.
+
+  This is a single-event content rule on execute_process command lines. Neither half
+  is suspicious alone -- `git apply` is routine, and `--no-verify` appears in help
+  text and search commands -- so both halves are required, and inspection-only forms
+  (dry-run, --check, grep) are filtered out.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1562/001/
+  - https://attack.mitre.org/techniques/T1059/004/
+tags:
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.execution
+  - attack.t1059.004
+  - atlas.aml.t0050
+  - atlas.aml.t0053
+  - owasp.llm05
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_edit_apply:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bgit\s+(-[^\s]+\s+)*(apply|am)\b'
+      - '(?i)\bgit\s+(-[^\s]+\s+)*(commit|push)\b'
+      - '(?i)\bpatch\s+[^\n]{0,120}-p[0-9]'
+      - '(?i)\bsed\s+-[a-z]*i[a-z]*[\s.]'
+      - '(?i)\bsed\s+[^\n]{0,40}--in-place'
+      - '(?i)\bperl\s+-[a-z]*i[a-z]*[\s.]'
+      - '(?i)\b(mv|cp|install)\s+(-[a-zA-Z]+\s+)*[^\s]{1,160}\.(py|js|jsx|ts|tsx|go|rb|rs|java|kt|scala|c|cc|cpp|h|hpp|php|cs|swift|sh|sql|tf)\s'
+      - '(?i)\btee\s+(-a\s+)*[^\s]{1,160}\.(py|js|ts|go|rb|rs|java|c|cpp|php|sh)\b'
+  sel_gate_bypass:
+    event_type: execute_process
+    content|re:
+      - '(?i)--no-verify\b'
+      - '(?i)--unsafe-paths\b'
+      - '(?i)--skip-(validation|validate|checks?|gates?|hooks?|tests?|lint|review|ci)\b'
+      - '(?i)--no-(validate|validation|checks?|lint|tests?|hooks?|pre-commit|precommit|gates?|review|confirm)\b'
+      - '(?i)--(allow-unvalidated|force-apply|auto-apply|bypass-[a-z-]{2,20})\b'
+      - '(?i)\bHUSKY=0\b'
+      - '(?i)\bNO_VERIFY=(1|true|yes)\b'
+      - '(?i)\bSKIP_(VALIDATION|CHECK|CHECKS|HOOKS|TEST|TESTS|LINT|REVIEW|GATES)=(1|true|yes)\b'
+      - '(?i)\bPRE_COMMIT_ALLOW_NO_CONFIG=1\b'
+  filter_inspection_only:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ag|ack|awk)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)--help\b'
+      - '(?i)\bgit\s+(log|show|status|config|help)\b'
+      - '(?i)\bgit\s+apply\s+[^\n]{0,120}--(check|stat|numstat|summary)\b'
+      - '(?i)\bpatch\s+[^\n]{0,120}--(dry-run|version)\b'
+  condition: sel_edit_apply and sel_gate_bypass and not filter_inspection_only
+falsepositives:
+  - A developer explicitly asks the agent to commit with hooks disabled because the
+    repository pre-commit hook is broken, slow, or requires a network resource
+    (`git commit --no-verify`). This is the single most common benign hit.
+  - Bootstrap or container build steps run by the agent that set HUSKY=0 or
+    SKIP_TESTS=1 for reproducible installs and then also touch a source file in the
+    same shell line.
+  - A legitimate large refactor where the agent chains an in-place `sed -i` edit with
+    an unrelated `--no-verify` commit in one compound command.
+  - Release/automation scripts invoked by the agent that pass `--skip-tests` to a
+    packaging step while also moving generated source files into place.
+action: report
