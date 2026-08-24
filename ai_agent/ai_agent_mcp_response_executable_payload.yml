@@ -1,0 +1,116 @@
+title: MCP Tool Response Carries Executable Attack Payload
+id: 4f2b8c91-6d3a-4e17-9b52-8ac0f1d7e3b6
+status: experimental
+level: high
+description: |
+  Single-event content detection for executable attack payloads returned inside an
+  MCP tool response (event_type: tool_response) -- the point at which untrusted
+  third-party content re-enters the agent loop and may be executed or echoed to a
+  shell tool.
+
+  Scope is deliberately narrow: only payload forms that are effectively never
+  produced by benign tooling are matched -- /dev/tcp reverse shells, netcat/socat
+  exec shells, .NET TCPClient shells, socket+dup2/pty.spawn shell code, plaintext
+  or bare-IP download-and-pipe-to-interpreter, base64/openssl decode piped to a
+  shell, and PowerShell -EncodedCommand / IEX DownloadString.
+
+  This rule is REPORT-ONLY by design. It replaces the destructive response actions
+  previously declared on ATR-2026-00010 (quarantine_session, kill_agent), which
+  were never justified by the measured false-positive rate, and it drops the
+  enforcement-tracking signals that do not exist in the engine schema
+  (MALICIOUS_PAYLOAD_DETECTED / MCP_RESPONSE / TOOL_BLOCKED edges and the
+  tool_call_blocked event type). Only the payload-bearing tool_response event is
+  observable, so only that is asserted here.
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://modelcontextprotocol.io/specification
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.command-and-control
+  - attack.t1105
+  - atlas.aml.t0051
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  scope_event:
+    event_type: tool_response
+
+  sel_payload_revshell:
+    content|re:
+      - '/dev/(?:tcp|udp)/[0-9A-Za-z._\-]{1,64}/\d{1,5}'
+      - '\b(?i:netcat|ncat|nc)\b[^\n]{0,80}\s-e\s+/(?:usr/)?bin/(?:ba|z|k)?sh\b'
+      - '(?i)\bncat\b[^\n]{0,80}--exec\s+[^\n]{0,24}sh\b'
+      - '(?i)\bsocat\b[^\n]{0,120}exec:[^\n]{0,24}(?:ba|z|k)?sh\b'
+      - '(?i)new-object\s+(?:system\.)?net\.sockets\.tcp(?:client|listener)\b'
+      - '\bTCPSocket\.(?:new|open)\([^\n]{0,120}\)[\s\S]{0,200}(?:IO\.popen|exec\s|spawn\s)'
+
+  sel_payload_socket_code:
+    content|re:
+      - 'socket\.socket\([\s\S]{0,200}\.connect\(\([\s\S]{0,300}(?:dup2|subprocess\.(?:call|Popen|run))'
+      - 'socket\.socket\([\s\S]{0,300}pty\.spawn\('
+
+  sel_payload_pipe_exec:
+    content|re:
+      - '(?i)\b(?:curl|wget)\b[^\n|]{0,200}(?:http://|\b(?:\d{1,3}\.){3}\d{1,3}\b)[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:/bin/)?(?:ba|z|k)?sh\b'
+      - '(?i)\b(?:curl|wget)\b[^\n|]{0,200}\|\s*(?:sudo\s+)?(?:python[23]?|perl|ruby|node)\b'
+      - '(?i)\b(?:ba|z|k)?sh\s+<\(\s*(?:curl|wget)\b'
+
+  sel_payload_encoded:
+    content|re:
+      - '(?i)\b(?:base64\s+(?:-d|-D|--decode)|openssl\s+(?:base64|enc)\s+-d)[^\n]{0,80}\|\s*(?:sudo\s+)?(?:/bin/)?(?:ba|z|k)?sh\b'
+      - '(?i)\becho\s+[^\n|]{0,40}[A-Za-z0-9+/]{40,}={0,2}[^\n|]{0,10}\|\s*base64\s+(?:-d|--decode)'
+      - '(?i)powershell(?:\.exe)?\b[^\n]{0,60}\s-(?:e|en|enc|enco|encod|encode|encoded|encodedc|encodedcommand)\s+[A-Za-z0-9+/]{40,}={0,2}'
+      - '(?i)(?:iex|invoke-expression)\s*\(?\s*\(?\s*new-object\s+[^\n]{0,60}webclient\s*\)?\s*\.downloadstring\s*\('
+      - '(?i)\beval\s*\(\s*(?:base64_decode|atob|gzinflate|str_rot13)\s*\('
+
+  filter_placeholder:
+    content|re:
+      - '(?i)<(?:your[_-]?ip|attacker[_-]?ip|lhost|rhost|target[_-]?ip|ip|host|port|lport)>'
+      - '(?i)\b(?:ATTACKER|YOUR|TARGET|LISTENER)[_-]?(?:IP|HOST|ADDR)\b'
+      - '\bx\.x\.x\.x\b'
+      - '(?i)\$\{?(?:LHOST|RHOST|TARGET_IP|ATTACKER_IP)\}?'
+      - '\{\{\s*[A-Za-z_][A-Za-z0-9_]{0,30}\s*\}\}'
+
+  filter_docs:
+    content|re:
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\b(?:falsepositives|logsource|sigma rule|yara rule|snort rule|mitre att&ck|atlas\.aml|owasp)\b'
+      - '(?i)\bfor (?:educational|demonstration|training|testing) purposes\b'
+      - '(?i)\bdo not (?:run|execute|use) (?:this|the following|these)\b'
+      - '(?i)\bexample (?:payload|exploit|only)\b'
+      - '(?i)\breverse shell cheat ?sheet\b'
+
+  filter_manpage:
+    content|re:
+      - '(?m)^\s{0,4}(?:USAGE|Usage|SYNOPSIS|OPTIONS|DESCRIPTION):?\s*$'
+
+  filter_telemetry:
+    content|re:
+      - '(?i)"(?:rule_id|execute_reason|triggered_rules|stage_desc|stage_id|falsepositives)"\s*:'
+      - '(?i)\b(?:atr|netzilo|sigma)-\d{4}-\d{3,6}\b'
+
+  condition: scope_event and (1 of sel_payload_*) and not (1 of filter_*)
+action: report
+falsepositives:
+  - Security tooling output surfaced through an MCP tool -- vulnerability scanner
+    findings, pentest report drafts, CTF write-ups, or exploit-database excerpts
+    that legitimately quote reverse-shell one-liners.
+  - A repository read/grep/cat tool returning a bootstrap, CI, or provisioning
+    script that genuinely pipes a download into an interpreter (narrowed by
+    requiring plaintext http:// or a bare IPv4 literal in the URL, so ordinary
+    HTTPS installer snippets do not match).
+  - Man pages, --help output, or vendor documentation for nc, ncat, socat or
+    PowerShell that show exec/encoded-command syntax (suppressed by
+    filter_manpage and filter_docs).
+  - Incident-response or SIEM tooling echoing a previously captured payload back
+    into the agent as evidence, including this platform's own security events
+    (suppressed by filter_telemetry).
+  - Developer debugging of a socket server where socket.socket(), connect() and
+    subprocess appear within a few hundred characters of each other in the same
+    source file.
