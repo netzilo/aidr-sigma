@@ -1,0 +1,106 @@
+title: vLLM Vision Placeholder Token DoS Payload
+id: 3f8c1d92-7ab4-4e15-9c60-5d2e8a41b7f3
+status: experimental
+level: medium
+description: |
+  Detects an outbound POST to a vLLM OpenAI-compatible generation endpoint whose body
+  carries Qwen2.5-VL / vLLM multimodal placeholder tokens (<|vision_start|>,
+  <|image_pad|>, <|video_pad|>, <|vision_end|>) while carrying NO image or video
+  payload of any kind.
+
+  That exact combination is the trigger for the token-injection denial of service in
+  vLLM's multimodal input-position computation: the placeholder increments the vision
+  token counter, the code then indexes into an empty image_grid_thw / video_grid_thw
+  array inside _vl_get_input_positions_tensor(), and the resulting unhandled IndexError
+  terminates the worker process. A well-formed multimodal request always ships the media
+  alongside the placeholder, so the absence of media next to the placeholder is the
+  discriminating signal - not the placeholder on its own.
+
+  The engine exposes no crash/exception edge for the second half of the attack
+  (no CRASH or DENIAL_OF_SERVICE edge kind, no exception_raised event type), so this
+  rule is deliberately scoped to the single observable pre-crash event: the malformed
+  request itself, on http_request, plus the same payload shape assembled on a
+  command line (curl / wget / python) on execute_process.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://github.com/vllm-project/vllm
+  - https://atlas.mitre.org/techniques/AML.T0029
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - atlas.aml.t0029
+  - owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # --- the payload marker: a vLLM/Qwen vision placeholder token, raw or JSON-escaped ---
+  sel_vision_tokens:
+    content|re:
+      - '(?i)<\|(?:vision_start|vision_end|vision_pad|image_pad|video_pad)\|>'
+      - '(?i)\\{1,2}u003[cC]\\{1,2}u007[cC](?:vision_start|vision_end|vision_pad|image_pad|video_pad)\\{1,2}u007[cC]\\{1,2}u003[eE]'
+
+  # --- delivery vector 1: direct POST to a generation endpoint ---
+  sel_http_endpoint:
+    event_type: http_request
+    method: POST
+    path|re: '(?i)(/v1/chat/completions|/v1/completions|/v1/responses|/generate)/?(\?|$)'
+
+  # --- delivery vector 2: the same body assembled on a command line ---
+  sel_proc_evt:
+    event_type: execute_process
+    content|re: '(?i)\b(curl|wget|httpie|http|python[23]?)\b'
+  sel_proc_ep:
+    content|re: '(?i)(/v1/chat/completions|/v1/completions|/v1/responses|/generate)\b'
+
+  # --- benign case 1: real multimodal request - media IS attached, no IndexError path ---
+  filter_media_present:
+    content|contains:
+      - '"image_url"'
+      - '"video_url"'
+      - '"input_image"'
+      - '"input_video"'
+      - '"multi_modal_data"'
+      - '"image_grid_thw"'
+      - '"video_grid_thw"'
+      - '"image_embeds"'
+      - '"video_embeds"'
+      - '"pixel_values"'
+      - '"images":'
+      - '"videos":'
+      - 'data:image/'
+      - 'data:video/'
+
+  # --- benign case 2: tokenizer/template configuration and advisory text that names the tokens ---
+  filter_config_or_advisory:
+    content|contains:
+      - 'special_tokens_map'
+      - 'added_tokens_decoder'
+      - 'additional_special_tokens'
+      - 'tokenizer_config.json'
+      - 'chat_template'
+      - '_vl_get_input_positions_tensor'
+      - 'GHSA-'
+      - 'CVE-2024-'
+      - 'CVE-2025-'
+      - 'CVE-2026-'
+
+  condition: >
+    sel_vision_tokens
+    and (sel_http_endpoint or (sel_proc_evt and sel_proc_ep))
+    and not (filter_media_present or filter_config_or_advisory)
+falsepositives:
+  - Client-side chat-template rendering where the application expands the Qwen2.5-VL
+    template into a flat prompt string and attaches the image through a field this rule
+    does not enumerate; the request is malformed in the same way but the intent is benign
+    (and the same request will still crash an unpatched worker).
+  - A user or developer asking a model to explain vLLM tokenizer internals and quoting the
+    literal placeholder tokens in the question. Advisory and tokenizer-config wording is
+    filtered, but a bare "what does <|image_pad|> do" prompt will still match.
+  - CI and regression suites that deliberately send placeholder-without-media prompts to
+    confirm a patched build now raises a clean 400 instead of crashing the worker.
+  - Prompt-debugging tooling that echoes a fully rendered multimodal template to a
+    completions endpoint with the media stripped for readability.
+action: report
