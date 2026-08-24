@@ -1,0 +1,151 @@
+title: MCP OAuth Redirect Handler Command Injection (sequa-mcp redirectToAuthorization)
+id: 7c1e4b2a-9f3d-4e58-b0a6-2d51c9f4e83b
+status: experimental
+level: high
+description: |
+  Detects the single-event signature of OS command injection through an MCP client's
+  OAuth "redirect to authorization" step (sequa-ai sequa-mcp <= 1.0.13,
+  src/helpers/node-oauth-client-provider.ts::redirectToAuthorization, and the same
+  pattern in any MCP client that hands an unvalidated discovery/authorization URL to a
+  browser-launcher).
+
+  The vulnerable code path spawns a URL opener (xdg-open / open / start /
+  rundll32 url.dll / a browser binary / python -m webbrowser) with an attacker-controlled
+  authorization URL interpolated into the command line. When the non-sequa discovery URL
+  is unvalidated, the spawned command line simultaneously carries:
+    1. a URL-opener invocation with an http(s) URL,
+    2. a shell command-substitution or command-separator payload that resolves to a
+       remote-fetch / shell-exec verb (curl, wget, nc, /bin/sh, python -c, powershell -,
+       mkfifo, certutil, ...), raw or percent-encoded, and
+    3. OAuth Server Discovery context (.well-known/oauth-authorization-server,
+       response_type=/client_id=/code_challenge=/redirect_uri=, an /authorize path, or
+       the sequa product marker).
+
+  All three must be present in the same EXECUTE_PROCESS command line for the rule to fire.
+  A benign browser launch has (1) and (3) but never (2); a generic shell-metacharacter
+  spawn has (2) but not (1)+(3).
+author: Haibo
+date: "2026-05-19"
+references:
+  - https://cwe.mitre.org/data/definitions/78.html
+  - https://attack.mitre.org/techniques/T1059/
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.initial-access
+  - cwe.78
+  - owasp.a03-2021-injection
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # (1) a URL-opener / browser-launcher invocation carrying an http(s) URL
+  sel_opener_cmd:
+    command|re:
+      - '(?i)\b(?:xdg-open|gnome-open|kde-open5?|gio\s+open|exo-open)\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)(?:^|[\s;&|(])(?:/usr/bin/)?open\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)(?:^|[\s;&|(])(?:cmd(?:\.exe)?\s+/c\s+)?start\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)rundll32(?:\.exe)?[^\n]{0,60}url\.dll[^\n]{0,60}https?(?::|%3a)//'
+      - '(?i)\b(?:python[23]?|py)\b[^\n]{0,60}-m\s+webbrowser\b[^\n]{0,160}https?://'
+      - '(?i)\b(?:google-chrome|chromium(?:-browser)?|firefox|msedge|safari|brave(?:-browser)?)\b[^\n]{0,160}https?://'
+  sel_opener_raw:
+    content|re:
+      - '(?i)\b(?:xdg-open|gnome-open|kde-open5?|gio\s+open|exo-open)\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)(?:^|[\s;&|("])(?:/usr/bin/)?open\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)(?:^|[\s;&|("])(?:cmd(?:\.exe)?\s+/c\s+)?start\b[^\n]{0,160}https?(?::|%3a)//'
+      - '(?i)rundll32(?:\.exe)?[^\n]{0,60}url\.dll[^\n]{0,60}https?(?::|%3a)//'
+      - '(?i)\b(?:python[23]?|py)\b[^\n]{0,60}-m\s+webbrowser\b[^\n]{0,160}https?://'
+      - '(?i)\b(?:google-chrome|chromium(?:-browser)?|firefox|msedge|safari|brave(?:-browser)?)\b[^\n]{0,160}https?://'
+
+  # (2) injected shell execution riding along with the URL
+  sel_inject_cmd:
+    command|re:
+      - '\$\([^)\n]{0,200}(?:\b(?:curl|wget|nc|ncat|netcat|telnet|mkfifo|certutil|bitsadmin|osascript|xterm)\b|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-)'
+      - '`[^`\n]{0,200}(?:\b(?:curl|wget|nc|ncat|netcat|telnet|mkfifo|certutil|bitsadmin|osascript)\b|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-)'
+      - '(?i)https?://[^\s\n]{0,300}(?:;|&&|\|\|)[^\n]{0,80}(?:\b(?:curl|wget|ncat|netcat|mkfifo|certutil|bitsadmin|osascript)\b|\bnc\s|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-|\brm\s+-rf\s|\bchmod\s+\+x\s)'
+      - '(?i)https?://[^\s\n]{0,300}\|\s*(?:/bin/)?(?:ba|z)?sh\b'
+      - '(?i)https?://[^\s\n]{0,300}(?:%3b|%7c|%26%26|%60|%24%28|%0a)[^\s\n]{0,120}(?:curl|wget|bash|%20sh|nc%20|python|powershell|certutil|mkfifo)'
+      - '(?i)https?://[^\s\n]{0,300}\$\{IFS\}'
+      - '(?i)https?://[^\s\n]{0,300}(?:\n|%0a|%0d)[^\n]{0,120}\b(?:curl|wget|bash|sh|python[23]?|nc|ncat|powershell)\b'
+  sel_inject_raw:
+    content|re:
+      - '\$\([^)\n]{0,200}(?:\b(?:curl|wget|nc|ncat|netcat|telnet|mkfifo|certutil|bitsadmin|osascript|xterm)\b|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-)'
+      - '`[^`\n]{0,200}(?:\b(?:curl|wget|nc|ncat|netcat|telnet|mkfifo|certutil|bitsadmin|osascript)\b|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-)'
+      - '(?i)https?://[^\s\n]{0,300}(?:;|&&|\|\|)[^\n]{0,80}(?:\b(?:curl|wget|ncat|netcat|mkfifo|certutil|bitsadmin|osascript)\b|\bnc\s|/bin/(?:ba|z)?sh|\b(?:bash|sh|zsh)\s+-[ci]|\b(?:python[23]?|perl|ruby|node|php)\s+-[ce]|\bpowershell(?:\.exe)?\s+-|\brm\s+-rf\s|\bchmod\s+\+x\s)'
+      - '(?i)https?://[^\s\n]{0,300}\|\s*(?:/bin/)?(?:ba|z)?sh\b'
+      - '(?i)https?://[^\s\n]{0,300}(?:%3b|%7c|%26%26|%60|%24%28|%0a)[^\s\n]{0,120}(?:curl|wget|bash|%20sh|nc%20|python|powershell|certutil|mkfifo)'
+      - '(?i)https?://[^\s\n]{0,300}\$\{IFS\}'
+      - '(?i)https?://[^\s\n]{0,300}(?:\n|%0a|%0d)[^\n]{0,120}\b(?:curl|wget|bash|sh|python[23]?|nc|ncat|powershell)\b'
+
+  # (3) OAuth Server Discovery / authorization context (or the sequa product marker)
+  sel_oauth_cmd:
+    command|re:
+      - '(?i)\.well-known/oauth-(?:authorization-server|protected-resource)'
+      - '(?i)[?&](?:response_type|client_id|code_challenge|code_challenge_method|redirect_uri|scope)='
+      - '(?i)https?://[^\s\n]{0,200}/(?:oauth2?|authorize|authorization|connect/authorize|auth/authorize)\b'
+      - '(?i)\bsequa(?:-mcp)?\b'
+  sel_oauth_raw:
+    content|re:
+      - '(?i)\.well-known/oauth-(?:authorization-server|protected-resource)'
+      - '(?i)[?&](?:response_type|client_id|code_challenge|code_challenge_method|redirect_uri|scope)='
+      - '(?i)https?://[^\s\n]{0,200}/(?:oauth2?|authorize|authorization|connect/authorize|auth/authorize)\b'
+      - '(?i)\bsequa(?:-mcp)?\b'
+
+  # ── FP suppression ─────────────────────────────────────────────────────────
+
+  # The opener string is an ARGUMENT to a read-only text tool (grep/sed/echo/man …),
+  # i.e. the command line is searching or printing the pattern, not executing it.
+  filter_text_tools:
+    content|re:
+      - '(?i)(?:^|[\s"''(=])(?:grep|egrep|fgrep|rg|ag|sed|awk|jq|less|more|man|diff|echo|printf|cat|head|tail|tee)\s+[^\n]{0,80}(?:xdg-open|gnome-open|rundll32|webbrowser|open|start)\b'
+      - '(?i)\s(?:--help|--version|-h)(?:\s|$)'
+
+  # CI / e2e OAuth login tests and security tooling that legitimately assemble and
+  # launch authorization URLs, or scan source for this exact pattern.
+  filter_test_scanners:
+    content|re:
+      - '(?i)\b(?:jest|mocha|vitest|ava|pytest|tox|nox|go\s+test|cargo\s+test|playwright(?:\s+test)?|cypress\s+run|selenium|puppeteer\s+test)\b'
+      - '(?i)\b(?:npm|yarn|pnpm|bun)\s+(?:run\s+)?(?:test|test:e2e|e2e)\b'
+      - '(?i)\b(?:semgrep|codeql|trivy|snyk|bandit|nuclei|gitleaks|trufflehog|eslint|sonar-scanner|osv-scanner)\b'
+
+  # Documentation, templates and CVE-reproduction material rather than a live payload.
+  filter_placeholder_docs:
+    content|re:
+      - '(?i)\$\((?:command|your[_-]?command|payload|cmd|injected[_-]?command|malicious[_-]?command)\)'
+      - '(?i)(?:<|%3c)(?:command|payload|cmd|injection|your[_-]?command)(?:>|%3e)'
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\b(?:proof[_-]of[_-]concept|exploit[_-]?demo|sample[_-]?payload|reproduction[_-]?steps)\b'
+
+  condition: >
+    sel_event
+    and (sel_opener_cmd or sel_opener_raw)
+    and (sel_inject_cmd or sel_inject_raw)
+    and (sel_oauth_cmd or sel_oauth_raw)
+    and not (filter_text_tools or filter_test_scanners or filter_placeholder_docs)
+
+falsepositives:
+  - Developer or CI shell wrappers that build an OAuth authorization URL with command
+    substitution before launching a browser, e.g.
+    'xdg-open "https://idp/authorize?client_id=$(cat id)&code_challenge=$(gen)"'.
+    Mitigated by restricting substitution bodies to remote-fetch / shell-exec verbs
+    (curl, wget, nc, /bin/sh, python -c, powershell -, mkfifo, certutil) rather than
+    value-producing helpers such as cat, hostname, whoami, openssl or base64.
+  - End-to-end OAuth login tests (Playwright, Cypress, Selenium) that spawn a browser
+    with a crafted authorization URL containing separators inside query values.
+    Mitigated by filter_test_scanners.
+  - Security research, CVE reproduction scripts and vulnerability-scanner rule content
+    that embeds this exact command shape. Mitigated by filter_placeholder_docs and the
+    scanner names in filter_test_scanners.
+  - grep/rg/sed/man over source or logs containing the vulnerable one-liner (code review,
+    incident triage). Mitigated by filter_text_tools.
+  - Legitimate authorization URLs whose query values contain a single '&' or ';'
+    separator; the rule requires ';', '&&', '||' or '|' followed by an actual
+    executable verb, so ordinary '&'-delimited OAuth parameters never match.
+
+action: report
