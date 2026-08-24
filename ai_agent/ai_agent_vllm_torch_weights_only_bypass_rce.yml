@@ -1,0 +1,137 @@
+title: Malicious Model RCE - PyTorch weights_only Bypass in vLLM Launch
+id: 7b3f1c9e-2d54-4a86-9f1b-6c0e8a4d5b72
+status: experimental
+level: high
+description: |
+  Detects a spawned process command line that loads PyTorch-pickle-serialised model
+  weights in a way that is exploitable by the weights_only bypass affecting PyTorch
+  versions before 2.6.0 (as used by vLLM).
+
+  Three independent single-event signatures on execute_process command lines:
+
+    1. vLLM invoked while explicitly forcing the pickle loader
+       (--load-format pt|bin|npcache), or pointed at a .bin/.pt/.pth/.ckpt/.pkl
+       checkpoint, or pointed at a model staged in a world-writable scratch
+       directory (/tmp, /var/tmp, /dev/shm, /private/tmp).
+    2. An inline deserialisation call on the command line itself
+       (torch.load(, torch.serialization.load(, pickle.load(s)(, Unpickler()
+       - a source-level call text can only appear in a command line when it was
+       passed via python -c / -m, which is not how production ML code is run -
+       combined with an untrusted-payload indicator: weights_only=False,
+       pickle_module=, add_safe_globals(, a pickle-format file extension, a
+       remote URL, or a scratch-directory path.
+    3. TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD set truthy in the process environment,
+       which globally disables the weights_only guard for every torch.load in
+       that process.
+
+  Note that weights_only=True is deliberately NOT treated as exculpatory: the whole
+  point of this vulnerability class is that the flag does not prevent code
+  execution on PyTorch < 2.6.0. The rule cannot observe the installed torch
+  version, so the verdict is report, not block.
+author: Selhan
+date: "2026-03-11"
+references:
+  - https://pytorch.org/docs/stable/generated/torch.load.html
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope ────────────────────────────────────────────────────────────────
+  sel_scope:
+    event_type: execute_process
+
+  # ── branch 1: vLLM driven down the pickle loading path ───────────────────
+  sel_vllm:
+    content|re: '(?i)\bvllm\b'
+
+  sel_unsafe_pickle_load:
+    content|re:
+      # explicitly force the PyTorch pickle loader instead of safetensors
+      - '(?i)--load[-_]format[= ]+"?(pt|bin|npcache)\b'
+      # model / tokenizer argument points straight at a pickle checkpoint
+      - '(?i)--(model|model[-_]name[-_]or[-_]path|speculative[-_]model|tokenizer)[= ]+"?[^ "]{0,240}\.(pickle|pkl|pth|ckpt|bin|pt)\b'
+      # model staged in a world-writable scratch directory
+      - '(?i)--(model|model[-_]name[-_]or[-_]path|download[-_]dir)[= ]+"?(/tmp/|/var/tmp/|/dev/shm/|/private/tmp/)'
+
+  # ── branch 2: inline deserialisation call on the command line ────────────
+  sel_deser_call:
+    content|re:
+      - '(?i)torch\s*\.\s*load\s*\('
+      - '(?i)torch\s*\.\s*serialization\s*\.\s*load\s*\('
+      - '(?i)\bpickle\s*\.\s*loads?\s*\('
+      - '(?i)\b_pickle\s*\.\s*loads?\s*\('
+      - '(?i)\bUnpickler\s*\('
+
+  sel_untrusted_payload:
+    content|re:
+      - '(?i)weights_only\s*=\s*False'
+      - '(?i)pickle_module\s*='
+      - '(?i)add_safe_globals\s*\('
+      - '(?i)\.(pickle|pkl|pth|ckpt|bin|pt)\b'
+      - '(?i)(https?|ftp)://'
+      - '(?i)(/tmp/|/var/tmp/|/dev/shm/|/private/tmp/)'
+
+  # ── branch 3: guard globally disabled via environment ────────────────────
+  sel_guard_disabled:
+    content|re: '(?i)\bTORCH_FORCE_NO_WEIGHTS_ONLY_LOAD[= ]+"?(1|true|yes|on|y)\b'
+
+  # ── filters ──────────────────────────────────────────────────────────────
+  # Text-search / inspection tooling: developers grepping for torch.load, or
+  # hashing a checkpoint, are the dominant source of literal matches.
+  filter_inspection_tools:
+    content|re: '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ack|locate|man|less|more|diff|strings|xxd|hexdump|md5sum|sha1sum|sha256sum)\b'
+
+  # Package management, source control, image builds, linters and test runners.
+  filter_package_and_ci:
+    content|re:
+      - '(?i)\b(pip[0-9]*|uv|conda|mamba|poetry|pdm|pipenv)\b[^;&|]{0,120}\b(install|uninstall|add|sync|lock|download|resolve)\b'
+      - '(?i)\bgit\s+(clone|pull|fetch|checkout|log|diff|show)\b'
+      - '(?i)\bdocker\b[^;&|]{0,100}\b(build|pull)\b'
+      - '(?i)\bpython[0-9.]*\s+setup\.py\b'
+      - '(?i)\b(pytest|tox|nox|mypy|ruff|flake8|pylint|black|isort)\b'
+      - '(?i)\bconftest\.py\b'
+      - '(?i)(_test\.py|test_[a-z0-9_]{1,60}\.py)\b'
+
+  # Documentation and notebooks that quote the vulnerable call.
+  filter_docs:
+    content|re:
+      - '(?i)\.(md|rst|ipynb)\b'
+      - '(?i)\breadme\b'
+
+  # Formats that do not go through the pickle deserialiser at all.
+  filter_explicit_safetensors:
+    content|re:
+      - '(?i)--load[-_]format[= ]+"?(safetensors|runai_streamer|sharded_state|tensorizer|gguf|mistral)\b'
+      - '(?i)--(model|model[-_]name[-_]or[-_]path)[= ]+"?[^ "]{0,240}\.safetensors\b'
+
+  condition: >
+    sel_scope and
+    ( (sel_vllm and sel_unsafe_pickle_load) or
+      (sel_deser_call and sel_untrusted_payload) or
+      sel_guard_disabled )
+    and not ( filter_inspection_tools or filter_package_and_ci or
+              filter_docs or filter_explicit_safetensors )
+
+falsepositives:
+  - Legitimate vLLM deployment of an older Hugging Face repo that ships only PyTorch
+    .bin/.pt weights and therefore requires --load-format pt or a .bin model path.
+  - ML engineers inspecting a trusted local checkpoint with a one-liner such as
+    'python -c "import torch; print(torch.load(''ckpt.pth'').keys())"'.
+  - Model conversion or quantisation pipelines that read a .bin checkpoint from a
+    scratch directory (/tmp, /dev/shm) before re-serialising it to safetensors.
+  - Deliberate use of TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1 on PyTorch >= 2.6.0 to load a
+    known-good legacy checkpoint containing non-tensor objects.
+  - CI fixture checkpoints staged in /tmp by a job whose command line does not contain
+    pytest/conftest markers and therefore escapes the CI filter.
+
+action: report
