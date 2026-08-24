@@ -1,0 +1,415 @@
+title: Shell Escape Privilege Escalation
+id: 3f9c1e0a-7b42-4d6e-9c85-1a2f4b6d8e07
+status: experimental
+level: high
+description: |
+  Detects an AI agent session breaking out of a restricted or wrapped execution
+  context into a privileged interactive shell (classic GTFOBins-style shell
+  escape) and then operating with the elevated shell.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks the true spawn chain with
+  proc_lineage(), and only considers EXECUTE_PROCESS rows belonging to that one
+  session (lineage plus the processes that lineage spawned) inside a 5-minute
+  window. It never attributes activity across sessions and never walks
+  path-keyed graph Process nodes, which are ambiguous when many parents share a
+  single binary node such as /bin/sh.
+
+  A high-specificity anchor is REQUIRED: the exec must carry a recognised shell
+  escape payload (vi/less/man bang-escape, find -exec /bin/sh, awk BEGIN system,
+  python pty.spawn, expect spawn, script -qc /bin/sh, SUID-preserving sh -p,
+  nmap --interactive, or a privilege wrapper invoking a shell directly). The
+  anchor alone is not reported: at least one additional, distinct evidence row
+  from the same session must corroborate it (a restricted host binary spawning a
+  shell, a privilege wrapper in the chain, an interactive/priv-preserving shell,
+  or post-escalation recon after the anchor).
+
+  Action is report only - shell escapes are also a legitimate operator workflow
+  on developer machines, so this rule produces evidence for review rather than
+  interrupting work.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://gtfobins.github.io/
+  - https://attack.mitre.org/techniques/T1548/
+  - https://attack.mitre.org/techniques/T1059/004/
+tags:
+  - attack.privilege-escalation
+  - attack.execution
+  - attack.t1548
+  - attack.t1059.004
+  - atlas.aml.t0050
+  - owasp.llm06
+falsepositives:
+  - Developer or operator deliberately taking a root shell on their own machine
+    (sudo -s, sudo su, sudo -i) and then running id / whoami - this produces
+    anchor plus privilege-wrapper corroboration and will be reported.
+  - Interactive editor or pager shell-out during normal work (:!bash from vim,
+    !sh from less or man) while inspecting build output.
+  - Build, packaging or CI scripts that use find ... -exec /bin/sh -c ... or
+    script -qc /bin/sh to provide a PTY to a non-interactive runner.
+  - Automation that legitimately uses python -c 'import pty; pty.spawn(...)' or
+    expect/spawn to drive an interactive tool (ssh, passwd, telnet).
+  - Security research, GTFOBins study, CTF work, or an authorised pentest run by
+    the user through the agent - the command text is identical to the attack.
+  - Container debugging where an entrypoint execs /bin/bash and a wrapper such
+    as gosu or su-exec appears in the process chain.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_escape_hint:
+    content|re:
+      - '(?i)(^|[/\s"])(sh|bash|zsh|dash|ksh|csh|tcsh|ash|busybox)([\s";,)}]|$)'
+      - '(?i)(^|[/\s"])(sudo|su|doas|pkexec|runuser|gosu|setpriv|capsh)([\s";,)}]|$)'
+      - '(?i)(pty\.spawn|import\s+pty|--interactive|stty\s+raw|:shell)'
+  condition: sel_exec and sel_escape_hint
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Shell Escape Privilege Escalation - instance-resolved, session-scoped.
+  #   caller_pid -> proc_instance() -> proc_lineage() -> query_events()
+  # Only EXECUTE_PROCESS rows belonging to the triggering instance's own
+  # lineage (and its descendants) are considered. No cross-session stitching.
+  # ---------------------------------------------------------------------------
+
+  WINDOW_NS = 300000000000      # 5 minutes - stage clustering window
+  MAX_ROWS  = 500
+
+  SHELLS  = ["sh", "bash", "zsh", "dash", "ksh", "csh", "tcsh", "ash", "busybox"]
+  PRIVESC = ["sudo", "su", "doas", "pkexec", "runuser", "gosu", "setpriv", "capsh"]
+
+  # Binaries that host a restricted/interactive context and are the classic
+  # GTFOBins escape launchers. Deliberately excludes sh/bash/zsh, git, node,
+  # npm, make and docker - those spawn shells constantly in benign work.
+  ESCAPE_HOSTS = [
+      "less", "more", "most", "man", "vi", "vim", "nvim", "rvim", "vimdiff",
+      "view", "ed", "ex", "nano", "pico", "emacs", "awk", "gawk", "mawk",
+      "find", "nmap", "ftp", "gdb", "tar", "zip", "unzip", "crontab", "watch",
+      "mysql", "psql", "sqlite3", "expect", "script", "screen", "tmux",
+      "strace", "ltrace", "socat", "flock", "stdbuf", "capsh", "xargs",
+      "journalctl", "systemctl", "perl", "ruby", "python", "python2",
+      "python3", "php", "lua", "irb", "tclsh", "env", "pg", "cpulimit",
+      "nice", "ionice", "taskset", "setarch", "busybox",
+  ]
+
+  # REQUIRED anchor - recognised shell-escape / privilege-wrapper payloads.
+  ESCAPE_PAYLOADS = [
+      r"!\s*/?(usr/)?(bin/)?(sh|bash|zsh|ksh|dash)(\s|$|;)",
+      r":shell(\s|$)",
+      r"-exec\s+/(usr/)?bin/(sh|bash|zsh|ksh|dash)(\s|$)",
+      r"BEGIN\s*\{\s*system\s*\(",
+      r"pty\.spawn\s*\(",
+      r"(?i)import\s+pty",
+      r"(?i)os\.(system|execl|execv|popen)\s*\(\s*.{0,3}/(usr/)?bin/(sh|bash)",
+      r"(?i)\bsystem\s*\(\s*.{0,3}/(usr/)?bin/(sh|bash)",
+      r"(?i)\bexec\s+.{0,3}/(usr/)?bin/(sh|bash)(\s|$|;)",
+      r"(?i)\bspawn\s+/(usr/)?bin/(sh|bash)(\s|$)",
+      r"(?i)\bscript\b.{0,20}\s-\w*c\s+/(usr/)?bin/(sh|bash)",
+      r"SHELL=/(usr/)?bin/(sh|bash)\s+.{0,20}(script|less|more|man|vi|vim|env|find|awk)\b",
+      r"/(usr/)?bin/(sh|bash|dash|ksh)\s+-\w*p\b",
+      r"(?i)\bnmap\b.{0,60}--interactive",
+      r"(?i)\bstty\s+raw\s+-echo",
+      r"(?i)(^|/|\s)(sudo|doas|pkexec|runuser)\s+(-\w+\s+)*/?(usr/)?(bin/)?(sh|bash|zsh|ksh|dash)(\s|$)",
+      r"(?i)(^|/|\s)sudo\s+(-\w+\s+)*su(\s|$)",
+      r"(?i)(^|/|\s)sudo\s+-[a-z]*[si](\s|$)",
+      r"(?i)(^|/|\s)(vi|vim|nvim|less|more|man|awk|gawk|find|gdb|ftp|tar|zip)\b.{0,80}(^|\s)!\s*/?(usr/)?(bin/)?(sh|bash)",
+  ]
+
+  SHELL_TOKEN   = r"(^|[/\s])(sh|bash|zsh|dash|ksh|csh|tcsh|ash|busybox)(\s|$)"
+  PRIVESC_TOKEN = r"(^|[/\s])(sudo|su|doas|pkexec|runuser|gosu|setpriv|capsh)(\s|$)"
+  INTERACTIVE   = r"(^|[/\s])(sh|bash|zsh|dash|ksh)\s+-[a-zA-Z]*[ip](\s|$)"
+  EXTRA_HINTS   = [r"pty\.spawn", r"(?i)import\s+pty", r"--interactive",
+                   r"(?i)stty\s+raw", r":shell"]
+
+  RECON = [
+      r"(^|[/\s])(whoami|id)(\s|$)",
+      r"(?i)\bsudo\s+-l\b",
+      r"/etc/(shadow|sudoers)\b",
+      r"-perm\s+[-/]?[0-9]{4}\b",
+      r"-perm\s+-u=s",
+      r"(?i)\bgetcap\b",
+      r"(?i)\bcapsh\s+--print",
+  ]
+
+  # -- pure helpers (no graph / log calls) -----------------------------------
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      return int(s)
+
+  def short(s, n):
+      if s == None:
+          return ""
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def base_name(p):
+      if p == None or p == "":
+          return ""
+      parts = p.split("/")
+      return parts[len(parts) - 1].lower()
+
+  def in_list(name, lst):
+      for x in lst:
+          if name == x:
+              return True
+      return False
+
+  def payload_hit(cmd):
+      if cmd == None or cmd == "":
+          return ""
+      for p in ESCAPE_PAYLOADS:
+          m = re.find(p, cmd)
+          if m != None:
+              return m
+      return ""
+
+  def recon_hit(cmd):
+      if cmd == None or cmd == "":
+          return ""
+      for p in RECON:
+          m = re.find(p, cmd)
+          if m != None:
+              return m
+      return ""
+
+  def in_window(ts, anchor):
+      d = ts - anchor
+      if d < 0:
+          d = -d
+      return d <= WINDOW_NS
+
+  def ev_key(e):
+      return e.get("actor_pid", "?") + "@" + e.get("ts", "0")
+
+  def ev_edge(e):
+      ap = e.get("actor_path", "")
+      pp = e.get("parent_path", "")
+      if pp == "":
+          pp = "pid:" + e.get("parent_pid", "0")
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + pp,
+          "to":       "process://" + ap,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+          "cmdline":  short(e.get("cmdline", ""), 200),
+      }
+
+  # -- relevance gate - pure string checks on meta, no traversal -------------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if payload_hit(cmd) != "":
+          return True
+      if re.find(SHELL_TOKEN, cmd) != None:
+          return True
+      if re.find(PRIVESC_TOKEN, cmd) != None:
+          return True
+      for h in EXTRA_HINTS:
+          if re.find(h, cmd) != None:
+              return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = to_int(meta.get("event_ts", "0"))
+      cp  = to_int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      # -- anchor on the exact triggering instance --------------------------
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"          # create row not landed yet; next exec re-fires
+
+      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
+                             to_int(inst.get("actor_start", "0")))
+      if not lineage:
+          lineage = [inst]
+
+      # -- session scope: lineage + what the lineage spawned, in-window -----
+      session = {}
+      for x in lineage:
+          pid = x.get("actor_pid", "")
+          if pid != "":
+              session[pid] = x.get("actor_start", "")
+
+      since = now - WINDOW_NS
+      if since < 0:
+          since = 0
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=MAX_ROWS)
+
+      for _pass in range(3):      # rows are newest-first; settle the closure
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in session:
+                  session[ap] = e.get("actor_start", "")
+
+      srows = []
+      for e in rows:
+          if e.get("actor_pid", "") in session or e.get("parent_pid", "") in session:
+              srows.append(e)
+
+      # -- REQUIRED anchor: shell-escape payload ----------------------------
+      anchor_edge = None
+      anchor_ts   = 0
+      anchor_desc = ""
+      anchor_key  = ""
+
+      tcmd = meta.get("content", "")
+      thit = payload_hit(tcmd)
+      if thit != "":
+          # trigger stage comes from meta (never re-queried - ingest races)
+          anchor_ts   = now
+          anchor_desc = "shell-escape payload executed: " + short(thit, 90)
+          te = {
+              "actor_pid":   inst.get("actor_pid", "0"),
+              "actor_path":  inst.get("actor_path", ""),
+              "parent_path": inst.get("parent_path", ""),
+              "parent_pid":  inst.get("parent_pid", "0"),
+              "ts":          str(now),
+              "cmdline":     short(tcmd, 200),
+          }
+          anchor_edge = ev_edge(te)
+          anchor_key  = ev_key(te)
+      else:
+          for e in srows:
+              h = payload_hit(e.get("cmdline", ""))
+              if h == "":
+                  continue
+              ts = to_int(e.get("ts", "0"))
+              if now - ts > WINDOW_NS:
+                  continue
+              anchor_ts   = ts
+              anchor_desc = "shell-escape payload in session: " + short(h, 90)
+              anchor_edge = ev_edge(e)
+              anchor_key  = ev_key(e)
+              break
+
+      if anchor_edge == None:
+          return "allow"          # no high-specificity anchor - never report
+
+      # -- corroborating stages, session-scoped and window-clustered --------
+      stages   = []
+      evidence = []
+
+      # 1. restricted host binary spawned a shell (the escape itself)
+      for e in srows:
+          if ev_key(e) == anchor_key:
+              continue
+          if not in_window(to_int(e.get("ts", "0")), anchor_ts):
+              continue
+          a = base_name(e.get("actor_path", ""))
+          p = base_name(e.get("parent_path", ""))
+          if in_list(a, SHELLS) and in_list(p, ESCAPE_HOSTS):
+              stages.append("restricted-context escape")
+              evidence.append([e, "Shell Escape",
+                               p + " spawned shell " + a + ": " +
+                               short(e.get("cmdline", ""), 120)])
+              break
+
+      # 2. privilege wrapper in the same session
+      for e in srows:
+          if ev_key(e) == anchor_key:
+              continue
+          if not in_window(to_int(e.get("ts", "0")), anchor_ts):
+              continue
+          a = base_name(e.get("actor_path", ""))
+          p = base_name(e.get("parent_path", ""))
+          if in_list(a, PRIVESC) or (in_list(p, PRIVESC) and in_list(a, SHELLS)):
+              stages.append("privilege wrapper")
+              evidence.append([e, "Privilege Escalation",
+                               "privilege wrapper in chain (" + p + " -> " + a +
+                               "): " + short(e.get("cmdline", ""), 120)])
+              break
+
+      # 2b. privileged ancestor in the lineage (only if 2 did not already fire)
+      if not ("privilege wrapper" in stages):
+          for x in lineage:
+              if in_list(base_name(x.get("actor_path", "")), PRIVESC):
+                  stages.append("privileged ancestor")
+                  evidence.append([x, "Privileged Ancestor",
+                                   "escape runs under " +
+                                   base_name(x.get("actor_path", "")) +
+                                   " (pid " + x.get("actor_pid", "?") + ")"])
+                  break
+
+      # 3. interactive / privilege-preserving shell
+      for e in srows:
+          if ev_key(e) == anchor_key:
+              continue
+          if not in_window(to_int(e.get("ts", "0")), anchor_ts):
+              continue
+          c = e.get("cmdline", "")
+          if re.find(INTERACTIVE, c) != None:
+              stages.append("interactive shell")
+              evidence.append([e, "Interactive Shell",
+                               "interactive/priv-preserving shell: " + short(c, 120)])
+              break
+
+      # 4. post-escalation recon - must FOLLOW the anchor
+      for e in srows:
+          if ev_key(e) == anchor_key:
+              continue
+          ts = to_int(e.get("ts", "0"))
+          if ts < anchor_ts:
+              continue
+          if not in_window(ts, anchor_ts):
+              continue
+          r = recon_hit(e.get("cmdline", ""))
+          if r != "":
+              stages.append("post-escalation recon")
+              evidence.append([e, "Post-Escalation Recon",
+                               "privilege recon after escape: " + short(r, 60) +
+                               " | " + short(e.get("cmdline", ""), 100)])
+              break
+
+      if len(stages) == 0:
+          return "allow"          # anchor alone is not enough - stay quiet
+
+      # -- kill chain -------------------------------------------------------
+      root = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain.append(step(anchor_edge,
+                        stage_id="Shell Escape Payload",
+                        stage_desc=anchor_desc))
+      for ev in evidence:
+          chain.append(step(ev_edge(ev[0]), stage_id=ev[1], stage_desc=ev[2]))
+
+      names = []
+      for x in lineage:
+          nm = base_name(x.get("actor_path", ""))
+          if nm == "":
+              nm = "pid:" + x.get("actor_pid", "?")
+          names.append(nm)
+      lin = " <- ".join(names)
+
+      attribution = "instance-resolved"
+      if len(lineage) < 2:
+          attribution = "degraded"
+
+      reason = ("Shell escape privilege escalation - " + anchor_desc +
+                "; stages: " + ", ".join(stages) +
+                "; lineage: " + lin +
+                " (pid " + str(cp) + ", " + attribution + ")")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
