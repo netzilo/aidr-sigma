@@ -1,0 +1,398 @@
+title: Slack Unfurl Exfiltration Vector — Untrusted Fetch then Data-Bearing Link Send
+id: 6f1c2d84-9a37-4e51-b0c2-7d5e83a41f96
+status: experimental
+level: medium
+description: |
+  Detects the in-boundary half of the Slack MCP link-unfurling exfiltration chain
+  (deprecated Anthropic Slack MCP Server): the monitored agent (or an MCP tool acting
+  for it) first fetches content from a public external host, and then, within the same
+  short window, issues an outbound message-send request to a Slack chat/files/webhook
+  endpoint whose body embeds a data-bearing hyperlink pointing at a non-Slack host.
+
+  Boundary statement (answers triage dissent): the exfiltration hop itself is performed
+  by Slack-LinkExpanding / Slackbot / Slack-ImgProxy inside Slack's infrastructure and is
+  structurally outside our collection boundary — this rule does NOT claim to observe it.
+  It also does not model the chain with edges the engine does not have: SEND_MESSAGE and
+  EXFILTRATE_DATA are unknown edge kinds and message_send / data_exfiltration are never
+  emitted, so no selection references them. Instead the rule detects the last hop we do
+  instrument: an agent-originated http_request / HTTP_REQUEST carrying the crafted link
+  into Slack. That request is the moment the payload leaves the monitored host and is the
+  only enforceable point in the chain. The predicted unfurl fetch is recorded in the kill
+  chain as an explicitly labelled out-of-band stage, never as observed telemetry.
+
+  The rule is deliberately a reporter, not an enforcer: the sink is a legitimate business
+  channel and the discriminator is heuristic.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://attack.mitre.org/techniques/T1567/
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.t1071.001
+  - atlas.aml.t0051
+  - atlas.aml.t0025
+  - owasp.llm01
+  - owasp.llm02
+falsepositives:
+  - Agent researches a vendor page or documentation site and then legitimately shares a
+    long presigned / tokenised link (S3, Google Drive, Notion, Figma, Grafana snapshot,
+    CI artefact) into Slack. Mitigated by requiring the link to be masked with a label
+    that does not name its own host, or to carry credential-shaped material, or to point
+    at the very host the agent just fetched from.
+  - Release or alerting bots posting Slack mrkdwn links with build hashes or signed URLs.
+    Mitigated by the same masked/closed-loop/secret-marker discriminator and by the
+    15-minute window tying the send to a preceding public fetch.
+  - Support workflows where the agent scrapes a customer page and then posts that same
+    page's link back into Slack — this legitimately trips the closed-loop signal. Expect
+    these; they are the main residual noise source and are why the action is report.
+  - URL shorteners and analytics redirectors whose paths look like encoded blobs.
+  - Multiple Slack sends about the same external host inside an hour are suppressed by a
+    per-link-host cooldown, so a chatty thread yields one finding, not many.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http_send:
+    event_type: http_request
+    method:
+      - POST
+      - PUT
+      - PATCH
+  sel_slack_host:
+    host|endswith:
+      - slack.com
+  sel_slack_send_path:
+    path|contains:
+      - /api/chat.postMessage
+      - /api/chat.update
+      - /api/chat.scheduleMessage
+      - /api/chat.meMessage
+      - /api/files.upload
+      - /api/files.completeUploadExternal
+      - /api/files.remote.add
+      - /services/
+  condition: sel_http_send and (sel_slack_host or sel_slack_send_path)
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── windows and constants (this rule's own, never stored) ──────────────────
+  WINDOW_NS   = 900000000000     # 15 minutes: fetch -> send clustering
+  COOLDOWN_NS = 3600000000000    # 1 hour per-link-host dedupe
+  SKEW_NS     = 5000000000       # 5s tolerance for edge/event clock skew
+
+  # Detection targets (sinks / markers) only — no trust list, nothing is exempted.
+  SLACK_SUFFIXES = ["slack.com", "slack-gov.com"]
+  SEND_PATHS = ["/api/chat.postmessage", "/api/chat.update",
+                "/api/chat.schedulemessage", "/api/chat.memessage",
+                "/api/files.upload", "/api/files.completeuploadexternal",
+                "/api/files.remote.add", "/services/"]
+  SECRET_MARKERS = ["eyj", "akia", "asia", "sk-", "-----begin", "ghp_", "ghs_",
+                    "github_pat_", "xoxb-", "xoxp-", "xapp-", "aws_secret",
+                    "token=", "secret=", "password=", "passwd=", "apikey=",
+                    "api_key=", "access_key=", "authorization=", "session=",
+                    "creds=", "payload=", "dump=", "exfil="]
+
+  def tsint(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      if re.match(r'^[0-9]+$', s):
+          return int(s)
+      return 0
+
+  def is_slack_host(h):
+      for s in SLACK_SUFFIXES:
+          if h == s or h.endswith("." + s):
+              return True
+      return False
+
+  def is_send_path(p):
+      for s in SEND_PATHS:
+          if s in p:
+              return True
+      return False
+
+  def host_of(u):
+      s = u.lower()
+      i = s.find("://")
+      if i >= 0:
+          s = s[i+3:]
+      cut = len(s)
+      for c in ["/", "?", "#"]:
+          j = s.find(c)
+          if j >= 0 and j < cut:
+              cut = j
+      s = s[:cut]
+      at = s.rfind("@")
+      if at >= 0:
+          s = s[at+1:]
+      col = s.find(":")
+      if col >= 0:
+          s = s[:col]
+      return s
+
+  def rest_of(u):
+      s = u
+      i = s.find("://")
+      body = s[i+3:] if i >= 0 else s
+      j = -1
+      for c in ["/", "?", "#"]:
+          k = body.find(c)
+          if k >= 0 and (j < 0 or k < j):
+              j = k
+      if j < 0:
+          return ""
+      return body[j:]
+
+  def data_bearing(rest):
+      if len(rest) >= 120 and "%" in rest:
+          return True
+      if len(re.find_all(r'[A-Za-z0-9+/=_-]{32,}', rest, 4)) > 0:
+          return True
+      return False
+
+  def has_secret_marker(u):
+      lu = u.lower()
+      for m in SECRET_MARKERS:
+          if m in lu:
+              return True
+      return False
+
+  # ── link extraction from the outbound Slack payload ────────────────────────
+  def extract_links(body):
+      out = []
+      # Slack mrkdwn masked link: <https://host/BLOB|label>
+      for m in re.find_all(r'<https?://[^>|\s]{6,400}\|[^>]{0,120}>', body, 40):
+          inner = m[1:len(m)-1]
+          parts = inner.split("|")
+          url = parts[0]
+          label = parts[1] if len(parts) > 1 else ""
+          lh = host_of(url)
+          masked = True
+          if lh != "" and lh in label.lower():
+              masked = False
+          if len(label.strip()) <= 3:
+              masked = True
+          out.append([url, masked])
+      # Markdown image (auto-loaded, zero-click): ![alt](https://host/BLOB)
+      for m in re.find_all(r'!\[[^\]]{0,120}\]\(https?://[^)\s]{6,400}\)', body, 40):
+          k = m.find("](")
+          if k > 0:
+              out.append([m[k+2:len(m)-1], True])
+      # Markdown link: [label](https://host/BLOB)
+      for m in re.find_all(r'\[[^\]]{0,120}\]\(https?://[^)\s]{6,400}\)', body, 40):
+          k = m.find("](")
+          if k > 0:
+              url = m[k+2:len(m)-1]
+              b = m.find("[")
+              label = m[b+1:k] if b >= 0 else ""
+              lh = host_of(url)
+              masked = True
+              if lh != "" and lh in label.lower():
+                  masked = False
+              out.append([url, masked])
+      # Bare / angle-wrapped URLs — need a stronger signal than masking to count.
+      for m in re.find_all(r'https?://[^\s"\\<>|)\]}]{6,400}', body, 60):
+          out.append([m, False])
+      return out
+
+  # ── actor scoping: caller instance lineage -> graph nodes ──────────────────
+  def collect_actor_nodes():
+      pids = {}
+      paths = {}
+      cp = tsint(meta.get("caller_pid", "0"))
+      if cp > 0:
+          inst = proc_instance(cp, tsint(meta.get("event_ts", "0")))
+          if inst != None:
+              lin = proc_lineage(tsint(inst.get("actor_pid", "0")),
+                                 tsint(inst.get("actor_start", "0")))
+              for x in lin:
+                  pids[str(x.get("actor_pid", ""))] = True
+                  paths[x.get("actor_path", "")] = True
+      out = []
+      for p in graph(type="Process"):
+          if p.get("pid", "") in pids or p.get("path", "") in paths:
+              out.append(p)
+      if len(out) == 0:
+          for p in graph(type="Process"):
+              if p.get("agent", "0") == "1":
+                  out.append(p)
+      # MCP tools fetch on the agent's behalf — that is how untrusted data arrives.
+      for t in graph(type="Tool"):
+          out.append(t)
+      return out
+
+  def collect_fetches(owners, event_ts):
+      out = []
+      for p in owners:
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              if u.get("is_ztna_host", "1") != "0":
+                  continue
+              h = u.get("host", "").lower()
+              if h == "" or is_slack_host(h):
+                  continue
+              ts = tsint(e.get("last_ts", ""))
+              if ts == 0:
+                  ts = tsint(e.get("first_ts", ""))
+              if ts == 0:
+                  continue
+              if ts > event_ts + SKEW_NS:
+                  continue
+              if event_ts - ts > WINDOW_NS:
+                  continue
+              out.append({"host": h, "edge": e, "ts": ts, "owner": p})
+      return out
+
+  def dedupe_ok(key, now):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      last = seen.get(key)
+      if last != None and now - tsint(str(last)) < COOLDOWN_NS:
+          return False
+      if len(seen) > 200:
+          seen = {}
+      seen[key] = str(now)
+      if store_usage()["free"] > 4096:
+          store_set("reported", seen)
+      return True
+
+  # ── relevance gate: pure string checks on meta, no traversal ───────────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      m = meta.get("method", "").upper()
+      if m != "" and m not in ("POST", "PUT", "PATCH"):
+          return False
+      h = meta.get("host", "").lower()
+      p = meta.get("path", "").lower()
+      if not (is_slack_host(h) or is_send_path(p)):
+          return False
+      body = meta.get("content", "")
+      if len(body) < 24:
+          return False
+      if body.find("http") < 0:
+          return False
+      return True
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      event_ts = tsint(meta.get("event_ts", "0"))
+      if event_ts == 0:
+          return "allow"
+
+      host = meta.get("host", "").lower()
+      path = meta.get("path", "")
+      body = meta.get("content", "")
+
+      owners  = collect_actor_nodes()
+      fetches = collect_fetches(owners, event_ts)
+      if len(fetches) == 0:
+          return "allow"          # no untrusted ingest anchor in window
+
+      prior_hosts = {}
+      latest = None
+      for f in fetches:
+          cur = prior_hosts.get(f["host"])
+          if cur == None or f["ts"] > cur["ts"]:
+              prior_hosts[f["host"]] = f
+          if latest == None or f["ts"] > latest["ts"]:
+              latest = f
+
+      hit = None
+      for pair in extract_links(body):
+          url = pair[0]
+          masked = pair[1]
+          lh = host_of(url)
+          if lh == "" or lh.find(".") < 0 or is_slack_host(lh):
+              continue
+          rest = rest_of(url)
+          sigs = []
+          if lh in prior_hosts:
+              sigs.append("link-host-matches-earlier-agent-fetch")
+          if has_secret_marker(url):
+              sigs.append("credential-or-token-shaped-material-in-url")
+          if masked and data_bearing(rest):
+              sigs.append("masked-link-with-encoded-payload-segment")
+          if len(sigs) > 0:
+              hit = {"url": url, "host": lh, "sigs": sigs}
+              break
+
+      if hit == None:
+          return "allow"
+
+      if not dedupe_ok("unfurl:" + hit["host"], event_ts):
+          return "allow"
+
+      anchor = prior_hosts.get(hit["host"])
+      if anchor == None:
+          anchor = latest
+
+      owner = anchor["owner"]
+      root  = owner.get("id", "")
+      if root == "":
+          root = "process://" + meta.get("agent_name", "unknown")
+      chain = new_chain(root)
+
+      chain.append(step(anchor["edge"],
+                        stage_id="Untrusted Ingest",
+                        stage_desc="agent/tool fetched external public content from " +
+                                   anchor["host"] + " (candidate injection source)"))
+
+      trigger_edge = {
+          "from": root,
+          "to": "https://" + host,
+          "kind": "HTTP_REQUEST",
+          "method": meta.get("method", "POST"),
+          "ts": str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts": str(event_ts),
+          "count": "1",
+      }
+      chain.append(step(trigger_edge,
+                        stage_id="Message Send",
+                        stage_desc="agent posted to Slack sink " + host + path +
+                                   " with an embedded external link"))
+
+      unfurl_edge = {
+          "from": "https://" + host,
+          "to": "https://" + hit["host"],
+          "kind": "HTTP_REQUEST",
+          "method": "GET",
+          "ts": str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts": str(event_ts),
+          "count": "0",
+      }
+      chain.append(step(unfurl_edge,
+                        stage_id="Predicted Unfurl (out-of-band, NOT observed)",
+                        stage_desc="Slack link-preview bots (Slack-LinkExpanding/" +
+                                   "Slackbot/Slack-ImgProxy) are expected to fetch " +
+                                   hit["host"] + " server-side; that hop is outside " +
+                                   "our collection boundary and is inferred, not seen"))
+
+      print("slack-unfurl vector: sink=" + host + path +
+            " link_host=" + hit["host"] +
+            " ingest=" + anchor["host"] +
+            " signals=" + ",".join(hit["sigs"]))
+
+      return {
+          "action": "report",
+          "reason": "Possible Slack unfurl exfiltration: agent fetched " +
+                    anchor["host"] + " then sent a data-bearing link to " +
+                    hit["host"] + " via " + host + path +
+                    " [" + ", ".join(hit["sigs"]) + "]",
+          "chain": chain,
+      }
+
+  result = run()
