@@ -1,0 +1,343 @@
+title: Supply Chain — holdpoint Acquisition Then Session Egress
+id: 5f3c9e21-4b7a-4d18-9c6e-2a71d0b4e8f3
+status: experimental
+level: medium
+description: |
+  Instance-resolved supply-chain rule for the PyPI package 'holdpoint' (an approval-queue
+  library that sits in the agent's action-execution path). The rule does NOT alert on the
+  mere presence or installation of the package — that would be pure noise, and the triage
+  dissent is correct that no campaign, CVE or IOC exists for it.
+
+  Instead it alerts on two things that are actually representable with the live event
+  schema (execute_process, connects) and that are genuinely anomalous:
+
+    A) PROVENANCE ANOMALY — the package is acquired through a non-default channel:
+       an explicit index override (--index-url / --extra-index-url / --find-links),
+       --trusted-host (TLS verification disabled), a git+ / http(s) / file:// URL, a
+       loose .whl / .tar.gz artifact, or an artifact staged in /tmp, /var/tmp, /dev/shm.
+       This is the shape of dependency-confusion / substituted-artifact delivery and is
+       the only way a "compromised holdpoint" would actually reach the host differently
+       from the benign one.
+
+    B) ORDERED INSTALL -> EGRESS SEQUENCE — within ONE process session (root instance
+       resolved via caller_pid -> proc_instance -> proc_lineage), the holdpoint
+       acquisition is followed within 15 minutes by an outbound connection made by an
+       instance belonging to that same session. Cloud-metadata, link-local and RFC1918
+       destinations always qualify. Public destinations only qualify when the connecting
+       instance was spawned AFTER the acquisition (i.e. freshly installed code running)
+       or the acquisition itself was a provenance anomaly — this suppresses the package
+       manager's own index fetch and the agent's pre-existing outbound traffic.
+
+  Attribution is strictly instance-scoped: session identity is the (pid, start_ns) pair of
+  the lineage root, and only pids in that lineage (or spawned by it) are ever correlated.
+  No cross-session stitching is possible. ACQUIRED_SKILL is used only as graph enrichment
+  (it is never a triggering edge) to note when the agent also loaded holdpoint-related
+  instruction content.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - A developer or CI job legitimately installing holdpoint from an internal package
+    mirror with --index-url / --extra-index-url — this is exactly path (A) and will
+    report once per acquisition. Expected in shops that proxy PyPI; triage by confirming
+    the index host is the organisation's own mirror.
+  - Installing holdpoint from a local checkout, built wheel, sdist tarball or git ref
+    during development (pip install ./holdpoint-*.whl, pip install git+...). Also path (A).
+  - An agent that legitimately uses holdpoint's approval queue and then contacts its own
+    internal approval/review service on an RFC1918 address inside the 15-minute window —
+    path (B), private destination. Triage by confirming the destination is the approval
+    backend.
+  - A short-lived agent session that installs holdpoint and, within the same 15 minutes,
+    spawns a new Python process which calls a legitimate public API (model provider,
+    telemetry). Path (B), public destination, "fresh instance" condition.
+  - Containerised or ephemeral build environments where the lineage root is a generic
+    shell, making the "session" broader than a human would draw it. Lineage is emitted in
+    the reason string so this is visible during triage.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_exec:
+    event_type: execute_process
+    content|contains:
+      - 'holdpoint'
+      - 'hold-point'
+      - 'hold_point'
+      - 'holdp0int'
+  sel_connect:
+    event_type: connects
+  condition: sel_pkg_exec or sel_connect
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── constants ────────────────────────────────────────────────────────────────
+  PKG_RE       = r"(?i)\bhold[-_.]?p[o0]ints?\b"
+  INSTALLER_RE = r"(?i)\b(pip|pip3|pipx|uv|uvx|poetry|pdm|conda|mamba|python|python3|easy_install)\b"
+  ACQUIRE_RE   = r"(?i)\b(install|download|add|sync|lock|update|upgrade|fetch)\b"
+  NONCANON_RE  = r"(?i)(--index-url|--extra-index-url|--find-links|--trusted-host|--no-build-isolation|git\+|https?://|file://|\.whl\b|\.tar\.gz\b|/tmp/|/var/tmp/|/dev/shm/)"
+
+  METADATA = ["169.254.169.254", "169.254.170.2", "100.100.100.200",
+              "192.0.0.192", "fd00:ec2::254"]
+
+  PRIVATE_PREFIXES = ["10.", "192.168.",
+                      "172.16.", "172.17.", "172.18.", "172.19.", "172.20.", "172.21.",
+                      "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
+                      "172.28.", "172.29.", "172.30.", "172.31.", "100.64."]
+
+  WINDOW_NS        = 900000000000     # 15 min: acquisition -> egress correlation window
+  SESSION_TTL_NS   = 3600000000000    # 1 h: how long a session marker is retained
+  LOOKBACK_EXEC_NS = 5000000000       # 5 s: find the real installer child instance
+
+  # ── pure helpers (no graph / no log) ────────────────────────────────────────
+  def is_loopback(h):
+      if h == "localhost" or h == "::1" or h == "0.0.0.0":
+          return True
+      return h.startswith("127.")
+
+  def dest_class(h):
+      if h in METADATA:
+          return "cloud-metadata"
+      if h.startswith("169.254."):
+          return "link-local"
+      if ":" in h and (h.startswith("fd") or h.startswith("fc")):
+          return "private"
+      for p in PRIVATE_PREFIXES:
+          if h.startswith(p):
+              return "private"
+      return "public"
+
+  def names(lin):
+      out = []
+      for x in lin:
+          out.append(x.get("actor_path", "?").split("/")[-1])
+      return " -> ".join(out)
+
+  def exec_edge(root_path, actor_path, ts):
+      return {"from": "process://" + root_path, "to": "process://" + actor_path,
+              "kind": "EXECUTE_PROCESS", "ts": str(ts),
+              "first_ts": str(ts), "last_ts": str(ts)}
+
+  def conn_edge(actor_path, host, port, proto, ts):
+      return {"from": "process://" + actor_path,
+              "to": "host://" + proto + ":" + host + ":" + port,
+              "kind": "CONNECTS", "ts": str(ts),
+              "first_ts": str(ts), "last_ts": str(ts), "count": "1"}
+
+  def prune(sessions, now):
+      out = {}
+      for k in sessions:
+          s = sessions[k]
+          if now - int(s.get("ts", 0)) <= SESSION_TTL_NS:
+              out[k] = s
+      if len(out) <= 64:
+          return out
+      rows = []
+      for k in out:
+          rows.append([int(out[k].get("ts", 0)), k])
+      rows = sorted(rows)
+      keep = {}
+      for i in range(len(rows) - 64, len(rows)):
+          keep[rows[i][1]] = out[rows[i][1]]
+      return keep
+
+  # ── graph enrichment (only reached on a confirmed session hit) ──────────────
+  def skill_step(s0, now):
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          for e in edges(a["id"], dir="out", kind="ACQUIRED_SKILL"):
+              sk = node(e["to"])
+              if sk == None:
+                  continue
+              blob = sk.get("name", "") + " " + sk.get("host", "") + " " + sk.get("id", "")
+              if re.find(PKG_RE, blob) == None:
+                  continue
+              ts = int(e.get("ts", "0"))
+              if ts < s0 - WINDOW_NS or ts > now:
+                  continue
+              return step(e, stage_id="Instruction Source",
+                          stage_desc="agent loaded holdpoint-related instruction content from " +
+                                     sk.get("host", "?"))
+      return None
+
+  # ── path A: acquisition of the package ──────────────────────────────────────
+  def on_exec():
+      cmd = meta.get("content", "")
+      if re.find(PKG_RE, cmd) == None:
+          return "allow"
+      if re.find(INSTALLER_RE, cmd) == None:
+          return "allow"
+      if re.find(ACQUIRE_RE, cmd) == None and re.find(NONCANON_RE, cmd) == None:
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      root      = lineage[-1]
+      root_path = root.get("actor_path", "")
+      rkey      = str(root.get("actor_pid", "")) + ":" + str(root.get("actor_start", ""))
+
+      sessions = prune(store_get("sessions") or {}, now)
+
+      # resolve the real installer instance (child of the caller) within 5s
+      installers = {str(cp): True}
+      inst_path  = inst.get("actor_path", "")
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - LOOKBACK_EXEC_NS, limit=200):
+          cl = e.get("cmdline", "")
+          if re.find(PKG_RE, cl) == None:
+              continue
+          if e.get("actor_pid", "") == str(cp) or e.get("parent_pid", "") == str(cp):
+              installers[e.get("actor_pid", "")] = True
+              if e.get("actor_path", "") != "":
+                  inst_path = e["actor_path"]
+
+      pids = {}
+      prev = sessions.get(rkey)
+      if prev != None:
+          for k in prev.get("pids", {}):
+              pids[k] = True
+          for k in prev.get("installers", {}):
+              installers[k] = True
+      for x in lineage:
+          pids[str(x.get("actor_pid", ""))] = True
+      for k in installers:
+          pids[k] = True
+
+      anomaly = ""
+      m = re.find(NONCANON_RE, cmd)
+      if m != None:
+          anomaly = m
+
+      sessions[rkey] = {"ts": now, "cmd": cmd[:300], "root_path": root_path,
+                        "inst_path": inst_path, "pids": pids,
+                        "installers": installers, "anomaly": anomaly}
+      if store_usage()["free"] > 16384:
+          store_set("sessions", sessions)
+
+      if anomaly == "":
+          return "allow"          # canonical acquisition: recorded silently, never alerted
+
+      chain = new_chain("process://" + root_path)
+      chain.append(step(exec_edge(root_path, inst_path, now),
+                   stage_id="Supply Chain Acquisition",
+                   stage_desc="holdpoint acquired via non-canonical channel (" + anomaly +
+                              "): " + cmd[:200]))
+      print("holdpoint provenance anomaly: " + anomaly + " | " + names(lineage))
+      return {"action": "report",
+              "reason": "holdpoint acquired from a non-default source (" + anomaly +
+                        ") by " + names(lineage),
+              "chain":  chain}
+
+  # ── path B: egress by the same session after acquisition ────────────────────
+  def on_connect():
+      host = meta.get("host", "")
+      if host == "" or is_loopback(host):
+          return "allow"
+      sessions = store_get("sessions") or {}
+      if not sessions:
+          return "allow"          # cheap gate: no holdpoint session on this host
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+      sessions = prune(sessions, now)
+      if not sessions:
+          return "allow"
+
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                      # degraded — never attribute on missing data
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      hit  = ""
+      rkey = str(lineage[-1].get("actor_pid", "")) + ":" + str(lineage[-1].get("actor_start", ""))
+      if rkey in sessions:
+          hit = rkey
+      if hit == "":
+          for k in sessions:
+              p = sessions[k].get("pids", {})
+              if str(cp) in p:
+                  hit = k
+              for x in lineage:
+                  if str(x.get("actor_pid", "")) in p:
+                      hit = k
+      if hit == "":
+          return "allow"          # connection belongs to a different session
+
+      s  = sessions[hit]
+      s0 = int(s.get("ts", 0))
+      if now < s0 or (now - s0) > WINDOW_NS:
+          return "allow"          # ordering + window: acquisition must precede egress
+
+      dclass = dest_class(host)
+      if dclass == "public":
+          if str(cp) in s.get("installers", {}):
+              return "allow"      # the package manager fetching from its own index
+          fresh = int(inst.get("actor_start", "0")) > s0
+          if not fresh and s.get("anomaly", "") == "":
+              return "allow"      # pre-existing process, canonical install: not evidence
+
+      p = s.get("pids", {})
+      p[str(cp)] = True
+      for x in lineage:
+          p[str(x.get("actor_pid", ""))] = True
+      s["pids"]     = p
+      sessions[hit] = s
+      if store_usage()["free"] > 16384:
+          store_set("sessions", sessions)
+
+      root_path = s.get("root_path", lineage[-1].get("actor_path", ""))
+      port      = meta.get("port", "")
+      proto     = meta.get("protocol", "tcp")
+
+      chain = new_chain("process://" + root_path)
+      chain.append(step(exec_edge(root_path, s.get("inst_path", ""), s0),
+                   stage_id="Supply Chain Acquisition",
+                   stage_desc="holdpoint acquired in this session: " + s.get("cmd", "")[:200]))
+      sk = skill_step(s0, now)
+      if sk != None:
+          chain.append(sk)
+      chain.append(step(conn_edge(inst.get("actor_path", ""), host, port, proto, now),
+                   stage_id="Post-Install Egress",
+                   stage_desc="post-acquisition connection to " + dclass + " destination " +
+                              host + ":" + port))
+
+      gap = (now - s0) // 1000000000
+      print("holdpoint session egress: " + host + " (" + dclass + ") " + str(gap) +
+            "s after acquisition | " + names(lineage))
+      return {"action": "report",
+              "reason": "holdpoint acquisition followed by " + dclass + " egress to " + host +
+                        " " + str(gap) + "s later, same session (" + names(lineage) + ")",
+              "chain":  chain}
+
+  def run():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          return on_exec()
+      if ct == "connects":
+          return on_connect()
+      return "allow"
+
+  result = run()
