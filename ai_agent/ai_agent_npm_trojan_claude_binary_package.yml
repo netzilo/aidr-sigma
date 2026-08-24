@@ -1,0 +1,114 @@
+title: Supply Chain Trojanized Claude Binary npm Package
+id: 7f3c1d92-4a6b-4e58-9c02-8ad51f6b3e47
+status: experimental
+level: high
+description: |
+  Detects an AI agent installing, materialising, fetching or executing a
+  platform-specific binary npm package that impersonates Claude tooling
+  (e.g. @go-hare/claude-code-darwin-x64).
+
+  The distribution shape is the signal: a *scoped* package whose name is
+  claude-code plus an explicit <os>-<arch> suffix is an npm platform-binary
+  sub-package - the pattern used to ship a native executable that is
+  downloaded and run with full developer privileges at install time. Three
+  independent single-event surfaces are covered:
+
+    1. execute_process / tool_call - the install command line, an npx/bunx
+       direct execution, a package.json dependency block being written, or
+       execution of a binary already unpacked under
+       node_modules/@<scope>/claude-code-<os>-<arch>/
+    2. tool_response / llm_tool_result - registry or lockfile content naming
+       the known-bad @go-hare scope
+    3. http_request - a registry path resolving or tarballing such a package
+
+  This is a content-only rule; it reports and never blocks, because a vendor
+  could legitimately adopt platform sub-package naming for Claude tooling.
+author: Haibo
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── contexts ────────────────────────────────────────────────────────────
+  sel_ctx_local:
+    event_type:
+      - execute_process
+      - tool_call
+
+  sel_ctx_result:
+    event_type:
+      - tool_response
+      - llm_tool_result
+
+  sel_ctx_http:
+    event_type: http_request
+
+  # ── the impersonating platform-binary package name ──────────────────────
+  # scoped  @<scope>/claude[-_.]?code<...>-<os>-<arch>
+  sel_impersonating_pkg:
+    content|re: '(?i)@[a-z0-9][a-z0-9._~-]{0,38}/claude[-_.]?code[a-z0-9._-]{0,24}-(?:darwin|linux|win32|windows|freebsd|alpine)-(?:x64|x86_64|amd64|arm64|aarch64|ia32|armv7|arm|ppc64|s390x)\b'
+
+  # ── an actual install / materialisation context, not mere mention ───────
+  sel_install_context:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,240}?\b(?:install|i|add|ci|create|dlx|exec|link|pack)\b'
+      - '(?i)\b(?:npx|bunx|pnpm\s+dlx|yarn\s+dlx)\b'
+      - '(?i)"(?:dependencies|devDependencies|optionalDependencies|trustedDependencies|resolutions|overrides)"\s*:'
+      - '(?i)\bresolved"?\s*[:=]\s*"?https?://[^\n"]{0,120}/-/'
+
+  # ── known-bad distributing scope (high specificity, no verb required) ───
+  sel_known_bad_scope:
+    content|contains:
+      - '@go-hare/'
+      - '@go-hare%2f'
+
+  # ── the binary already unpacked on disk / being executed ────────────────
+  sel_nm_binary_path:
+    content|re: '(?i)node_modules[/\\]@[a-z0-9][a-z0-9._~-]{0,38}[/\\]claude[-_.]?code[a-z0-9._-]{0,24}-(?:darwin|linux|win32|windows)-(?:x64|x86_64|amd64|arm64|aarch64|ia32)[/\\]'
+
+  # ── registry resolve / tarball fetch for such a package ─────────────────
+  sel_registry_pkg_path:
+    path|re: '(?i)/@[a-z0-9][a-z0-9._~-]{0,38}(?:/|%2[Ff])claude[-_.]?code[a-z0-9._-]{0,24}-(?:darwin|linux|win32|windows)-(?:x64|x86_64|amd64|arm64|aarch64|ia32)(?:/|\?|$)'
+
+  # ── FP suppression: incident-response / removal / advisory prose ────────
+  filter_investigation:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:uninstall|remove|audit|why|view|info|deprecate|unpublish)\b'
+
+  filter_threat_intel:
+    content|re: '(?i)(?:supply[ -]chain (?:attack|risk|compromise|failure)|typosquat|malicious package|trojan(?:ized|ised)|indicators? of compromise|do not install|security advisor(?:y|ies)|CVE-\d{4}-\d{4,7}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})'
+
+  condition: >
+    (
+      (sel_ctx_local and (sel_known_bad_scope or sel_nm_binary_path or
+        (sel_install_context and sel_impersonating_pkg)))
+      or (sel_ctx_result and sel_known_bad_scope)
+      or (sel_ctx_http and sel_registry_pkg_path)
+    )
+    and not (filter_investigation or filter_threat_intel)
+
+falsepositives:
+  - A vendor legitimately shipping Claude tooling as npm platform sub-packages
+    (the esbuild/swc optionalDependencies pattern). The rule reports rather
+    than blocks precisely because this naming shape is not inherently
+    malicious - triage by confirming the publishing scope and package
+    provenance on the registry.
+  - Incident responders or dependency-scanning tooling running
+    'npm view/info/audit/why' or 'npm uninstall/remove' against the malicious
+    package name during cleanup - suppressed by filter_investigation.
+  - Threat-intelligence write-ups, advisories, SBOM diffs or this rule's own
+    documentation pasted into an agent conversation - suppressed by
+    filter_threat_intel.
+  - A lockfile or 'npm ls' style tool_response that merely enumerates an
+    already-quarantined dependency; the finding is accurate but the event is
+    an audit artefact rather than a fresh installation.
+
+action: report
