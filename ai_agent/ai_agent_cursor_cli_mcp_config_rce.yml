@@ -1,0 +1,117 @@
+title: Cursor CLI MCP Config RCE - Repo-Local mcp.json Command Execution
+id: 6f3c1a9e-8b47-4d2e-9f05-3c7a1b6e4d82
+status: experimental
+level: high
+description: |
+  Detects a process spawn whose command line ties a repository-local Cursor MCP
+  configuration (.cursor/mcp.json) to an execution primitive - a shell -c payload,
+  an inline interpreter (-e / -c), a downloader, a base64 decode, an ad-hoc package
+  runner (npx / uvx / bunx / dlx), or a redirect that writes the config itself.
+
+  Cursor CLI Beta before 2025.09.17-25b418f launches the stdio MCP server declared in
+  a cloned repository's .cursor/mcp.json with no consent prompt, so an attacker-supplied
+  repo achieves arbitrary code execution the moment the victim opens the project.
+
+  A second, narrower branch fires when an MCP-scoped command line also contains a
+  download-piped-to-interpreter chain, which is the canonical payload shape observed in
+  weaponised mcp.json server entries.
+
+  Single-event content rule on execute_process only - it inspects the spawned command
+  line and nothing else. Action is report: the same command shapes occur when a
+  developer legitimately scaffolds or repairs their own MCP configuration.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://cursor.com/security
+  - https://modelcontextprotocol.io/docs/concepts/architecture
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1195/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.initial-access
+  - attack.t1195
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+  - owasp.asi02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1 anchor: the spawn references a repo-local Cursor MCP config ──────
+  sel_cursor_mcp_path:
+    event_type: execute_process
+    content|re: '(?i)\.cursor[/\\]mcp\.json'
+
+  # ── Branch 1 qualifier: an actual execution / write primitive is present ──────
+  sel_exec_primitive:
+    content|re:
+      - '(?i)\b(?:ba|z|k|da)?sh\b\s+-[a-z]*c\b'
+      - '(?i)\bnode\b\s+(?:-e|--eval|--input-type)\b'
+      - '(?i)\bpython[23]?\b\s+-c\b'
+      - '(?i)\b(?:perl|ruby|php)\b\s+-e\b'
+      - '(?i)\b(?:curl|wget|fetch)\b'
+      - '(?i)\bbase64\b\s+(?:-d|-D|--decode)\b'
+      - '(?i)\b(?:npx|bunx|uvx|pnpm\s+dlx|yarn\s+dlx)\b'
+      - '(?i)\b(?:powershell(?:\.exe)?|osascript)\b'
+      - '(?i)\bcmd(?:\.exe)?\s+/c\b'
+      - '(?i)>>?\s*\S*\.cursor[/\\]mcp\.json'
+      - '(?i)\btee\b\s+[^|;&]*\.cursor[/\\]mcp\.json'
+
+  # ── Branch 2 anchor: the spawn is MCP-scoped by name or flag ──────────────────
+  sel_mcp_token:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bmcp[-_.]?(?:server|servers|json|config)\b'
+      - '(?i)--mcp[-a-z]*\b'
+
+  # ── Branch 2 qualifier: download piped straight into an interpreter ───────────
+  sel_pipe_to_shell:
+    content|re:
+      - '(?i)\b(?:curl|wget|fetch)\b[^|;&]{0,200}\|\s*(?:/\S*/)?(?:ba|z|k|da)?sh\b'
+      - '(?i)\b(?:curl|wget|fetch)\b[^|;&]{0,200}\|\s*(?:/\S*/)?(?:python[23]?|node|perl|ruby)\b'
+      - '(?i)\bbase64\b\s+(?:-d|-D|--decode)\b[^|;&]{0,120}\|\s*(?:/\S*/)?(?:ba|z|k|da)?sh\b'
+      - '(?i)\biex\b\s*\(\s*(?:new-object|iwr|invoke-webrequest)'
+
+  # ── Filters: read-only inspection of the config file, not execution of it ─────
+  filter_readonly_inspect:
+    content|re: '(?i)(?:^|["''\s/])(?:cat|bat|less|more|head|tail|wc|stat|file|jq|yq|diff|grep|rg|git\s+(?:diff|status|log|show|add|checkout))\s+[^|;&]{0,120}\.cursor[/\\]mcp\.json'
+
+  # ── Filters: help / version / dry-run invocations, not real launches ──────────
+  filter_help_or_dryrun:
+    content|re: '(?i)\s--(?:help|version|dry-run|dryrun|print-config|validate)\b'
+
+  # ── Filters: scaffolding placeholders that never execute as written ───────────
+  filter_placeholder:
+    content|contains:
+      - '<your-command>'
+      - '<command>'
+      - 'your-command-here'
+      - 'command-goes-here'
+      - 'REPLACE_ME'
+      - 'CHANGE_ME'
+      - 'PLACEHOLDER'
+      - 'TODO:'
+      - '$MCP_COMMAND'
+      - '${MCP_COMMAND}'
+
+  condition: >
+    ((sel_cursor_mcp_path and sel_exec_primitive)
+     or (sel_mcp_token and sel_pipe_to_shell))
+    and not (filter_readonly_inspect or filter_help_or_dryrun or filter_placeholder)
+
+falsepositives:
+  - A developer intentionally authoring or repairing their own .cursor/mcp.json with a
+    shell redirect, tee, or an editor helper that passes the config path on the command line.
+  - Project scaffolding tools (npx/uvx/pnpm dlx create-*) that generate a Cursor MCP
+    configuration as part of first-time repository setup.
+  - Locally vetted stdio MCP servers that are legitimately launched through npx or uvx and
+    happen to carry the config path in their argv for logging or --config purposes.
+  - Security engineering and rule-validation harnesses replaying the Cursor CLI proof of
+    concept in an isolated lab.
+  - Onboarding or documentation walkthroughs where an engineer pastes a documented MCP
+    install one-liner into a terminal.
+
+action: report
