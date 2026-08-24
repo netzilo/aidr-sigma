@@ -1,0 +1,109 @@
+title: NPM Supply Chain - omgvibe AI Tool Config Wizard Execution
+id: 7c1f3ab2-9d84-4e0a-bf35-2a6c8d41e9b7
+status: experimental
+level: high
+description: |
+  Single-event content detection for execution of the npm package "omgvibe" - an
+  interactive NPX wizard that reconfigures AI coding tools (CodeX, Claude Code,
+  OpenCode, CodeWhale) to route through the OhMyGPT API relay, prompting the user
+  for API keys and auth tokens along the way.
+
+  Two independent evidence paths, both on execute_process command lines:
+    1. The package is fetched and run, or installed, by a JS package runner
+       (npx / bunx / npm exec|x|init|create / pnpm dlx|exec|create / yarn dlx|create /
+       bun x|create), or an already-resolved omgvibe binary under a bin/ or
+       node_modules/ path is executed.
+    2. A command line that writes an OhMyGPT relay endpoint AND an AI-agent
+       credential/config target (~/.codex/config, ~/.claude/settings.json,
+       opencode config, ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+       OPENAI_BASE_URL / OPENAI_API_KEY ...) in the same invocation - the effect the
+       wizard produces, caught even if the package is renamed or vendored.
+
+  Threat-report taxonomy: OWASP A06:2021 (Vulnerable and Outdated Components) and
+  A08:2021 (Software and Data Integrity Failures). No MITRE ATLAS technique was
+  verified as applicable for this package, so no atlas. tag is asserted.
+
+  Reported, not blocked: package execution is user-initiated and an analyst needs
+  to confirm whether credentials were entered before enforcement is escalated.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/007/
+  - https://attack.mitre.org/techniques/T1552/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - attack.credential-access
+  - attack.t1552
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  sel_pkg_runner:
+    content|re:
+      - '(?i)\b(?:npx|bunx|npm\s+(?:exec|x|init|create)|pnpm\s+(?:dlx|exec|create)|yarn\s+(?:dlx|create)|bun\s+(?:x|create))\b[^\n;|&]{0,120}?\bomgvibe(?:@[^\s";|&]{1,40})?(?:[\s";|&)]|\x{0027}|$)'
+
+  sel_pkg_install:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|in|ins|inst|install|add)\b[^\n;|&]{0,120}?\bomgvibe(?:@[^\s";|&]{1,40})?(?:[\s";|&)]|\x{0027}|$)'
+      - '(?i)\byarn\s+(?:global\s+)?add\b[^\n;|&]{0,120}?\bomgvibe(?:@[^\s";|&]{1,40})?(?:[\s";|&)]|\x{0027}|$)'
+
+  sel_installed_binary:
+    content|re:
+      - '(?i)/(?:\.bin|bin|node_modules(?:/@[a-z0-9._-]{1,64})?)/omgvibe(?:[\s";:|&)/]|\x{0027}|$)'
+
+  sel_relay_endpoint:
+    content|re: '(?i)\bohmygpt\.com\b'
+
+  sel_agent_credential_config:
+    content|re:
+      - '(?i)\.codex/(?:config|auth)'
+      - '(?i)\.claude/settings(?:\.local)?\.json'
+      - '(?i)\.claude\.json'
+      - '(?i)\.config/opencode'
+      - '(?i)\bopencode\.jsonc?\b'
+      - '(?i)\.codewhale'
+      - '\b(?:ANTHROPIC_BASE_URL|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_BASE_URL|OPENAI_API_KEY|CODEX_HOME)\b'
+
+  filter_pkg_readonly:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:view|info|show|search|why|ls|list|outdated|audit|repo|docs|bugs|home|dedupe|prune|uninstall|un|unlink|remove|rm)\b[^\n;|&]{0,120}?\bomgvibe\b'
+
+  filter_read_tools:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ag|ack|find|ls|cat|head|tail|less|more|wc|stat|diff|tree|jq|awk|sed|shasum|sha256sum|md5sum|tar|unzip|code|vim|nvim|nano)\b[^\n;|&]{0,120}?\bomgvibe\b'
+
+  filter_dry_run:
+    content|re:
+      - '(?i)\bomgvibe\b[^\n;|&]{0,80}?--dry-run\b'
+      - '(?i)--dry-run\b[^\n;|&]{0,80}?\bomgvibe\b'
+
+  filter_sec_tooling:
+    content|re: '(?i)\b(?:snyk|socket|osv-scanner|trivy|grype|syft|npq|retire|audit-ci|dependency-check)\b[^\n;|&]{0,120}?\bomgvibe\b'
+
+  condition: >
+    sel_event
+    and (sel_pkg_runner or sel_pkg_install or sel_installed_binary
+         or (sel_relay_endpoint and sel_agent_credential_config))
+    and not (filter_pkg_readonly or filter_read_tools or filter_dry_run or filter_sec_tooling)
+
+action: report
+
+falsepositives:
+  - Supply-chain analysts or incident responders detonating omgvibe in a sandbox - an
+    analyst NPX run is byte-identical to a victim run, so this fires and should be
+    closed as authorised research.
+  - A developer who has deliberately chosen OhMyGPT as their model relay and edits
+    ANTHROPIC_BASE_URL / OPENAI_BASE_URL or ~/.codex/config by hand; the second
+    evidence path (relay endpoint plus agent credential config) matches that too.
+  - A fork, mirror or vendored copy checked in under node_modules/omgvibe that a build
+    step executes from disk rather than from the registry.
+  - CI images that pre-warm the npx/npm cache by installing a long package list that
+    happens to include omgvibe.
+  - Automation that repairs an existing OhMyGPT-backed setup (re-writing the same
+    config file with no new credential entry).
