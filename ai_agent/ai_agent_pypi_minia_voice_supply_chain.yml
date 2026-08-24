@@ -1,0 +1,100 @@
+title: Supply Chain PyPI Voice Bridge Package Install (minia-voice)
+id: 7b3f2c9e-5d41-4a8b-9c6e-2f0a71d84e35
+status: experimental
+level: medium
+description: |
+  Single-event detection for acquisition or inline execution of the PyPI
+  distribution 'minia-voice', a voice-bridge component advertised as relaying an
+  AI agent's final answer to text-to-speech systems. Installing it runs arbitrary
+  setup/build code and, once imported, places attacker-controlled code inside the
+  agent runtime with access to every final answer the agent produces.
+
+  Fires on one execute_process command line that shows any of:
+    1. a Python package manager (pip / pipx / uv / poetry / pdm / conda / mamba /
+       easy_install) resolving or installing the distribution, matched on the
+       PEP 503-normalised name (minia-voice == minia_voice == minia.voice);
+    2. the distribution being pulled from a direct URL, a git+ VCS reference, an
+       alternate index (--index-url / --extra-index-url / --find-links), or a
+       loose wheel/sdist artifact — the classic dependency-confusion and
+       typosquat delivery paths;
+    3. the module being executed through inline code (python -c '...minia_voice...'),
+       which is how a dropper invokes the payload rather than how the package is
+       normally used.
+
+  Deliberately NOT matched: the package's own console entrypoint or 'python -m'
+  invocation. Teams that legitimately adopted the package would generate one
+  event per run, which is noise, not signal.
+
+  Taxonomy note: the verified mapping for this threat is OWASP
+  'A08:2021 - Software and Data Integrity Failures' (see references), which has no
+  representation under the owasp.LLMxx / owasp.ASIxx tag namespace; the closest
+  valid identifier, LLM03 Supply Chain, is tagged instead. No MITRE ATLAS
+  technique was verified as applicable, so none is asserted.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://peps.python.org/pep-0503/#normalized-names
+  - https://pypi.org/project/minia-voice/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_evt:
+    event_type: execute_process
+
+  sel_install:
+    command|re:
+      - '(?i)\b(pip[23]?|pipx|uv|poetry|pdm|conda|mamba|micromamba|easy_install)\b[^\n]{0,240}(\binstall\b|\badd\b|\bsync\b|\bupgrade\b|--with[=\s])[^\n]{0,240}\bminia[-_.]{1,3}voice\b'
+      - '(?i)\bpipx\s+run\b[^\n]{0,200}\bminia[-_.]{1,3}voice\b'
+
+  sel_untrusted_source:
+    command|re:
+      - '(?i)\b(pip[23]?|pipx|uv|poetry|pdm)\b[^\n]{0,240}(git\+|https?://)[^\s"'']{0,240}minia[-_.]{1,3}voice'
+      - '(?i)\bminia[-_.]{1,3}voice[-_][0-9][^\s"'']{0,60}\.(whl|tar\.gz|zip)\b'
+      - '(?i)(--index-url|--extra-index-url|--find-links)[^\n]{0,240}\bminia[-_.]{1,3}voice\b'
+
+  sel_inline_exec:
+    command|re:
+      - '(?i:python[23]?)(\.[0-9]{1,2})?[^\n]{0,120}\s-c\s[^\n]{0,400}(?i:minia[-_.]{1,3}voice)'
+
+  filter_readonly:
+    command|re:
+      - '^\s*(sudo\s+)?(/[^\s]*/)?(grep|egrep|fgrep|rg|ag|ack|sed|awk|cat|less|more|head|tail|man|jq|diff|wc|sort|uniq|comm|find|ls|stat|file|md5sum|sha256sum|shasum)\b[^;&|>\n`$]*$'
+
+  filter_remediation:
+    command|re:
+      - '(?i)^[^;&|\n]*\buninstall\b[^;&|\n]*$'
+      - '(?i)^[^;&|\n]*\b(pip[23]?|pipx|uv|poetry|pdm|conda|mamba)\s+remove\b[^;&|\n]*$'
+      - '(?i)^\s*(sudo\s+)?(/[^\s]*/)?(pip-audit|pipdeptree|deptry|safety|osv-scanner|syft|grype|trivy|bandit)\b[^;&|\n]*$'
+
+  condition: >
+    sel_evt
+    and (sel_install or sel_untrusted_source or sel_inline_exec)
+    and not filter_readonly
+    and not filter_remediation
+action: report
+falsepositives:
+  - A team that has deliberately adopted minia-voice — every container image build
+    or environment bootstrap whose command line names the package explicitly will
+    report once per build. Expected and intended while the package's trust status
+    is unresolved; suppress per-project only after review, never by widening the
+    pattern.
+  - Security or supply-chain analysts installing the package into a disposable
+    sandbox to inspect it. Read-only inspection (grep/rg/cat/ls over a lockfile or
+    requirements file) is already excluded by filter_readonly.
+  - Remediation and inventory work — 'pip uninstall minia-voice', 'poetry remove
+    minia-voice', or a pip-audit/safety/trivy run naming the package — excluded by
+    filter_remediation.
+  - Documentation or detection-test fixtures that literally execute the advisory's
+    install command; these are indistinguishable from a real install at the
+    process layer and are reported by design.
+  - Mirroring or artifact-caching workflows using verbs the rule does not match
+    ('pip download', 'pip wheel', 'pip show') are not detected at all.
