@@ -1,0 +1,320 @@
+title: MCP Config Tampering (Instance-Resolved)
+id: 7c1f4b2e-9d3a-4f68-b0c5-2e8a41d7f93b
+status: experimental
+level: high
+description: |
+  Detects an AI agent session writing to an MCP server configuration file
+  (claude_desktop_config.json, .mcp.json, .cursor/mcp.json, .vscode/mcp.json,
+  cline_mcp_settings.json, .gemini/settings.json, ...) as a persistence or
+  privilege-escalation step. A tampered MCP config silently grants the agent new
+  tools/servers on every subsequent launch, so it survives session teardown.
+
+  Reachability note (answers the triage objection): there is NO live producer for
+  the file_write / file_modify event types, and MODIFY_FILE is not an edge kind.
+  This rule therefore never uses a file event as its trigger. It triggers on live
+  AI-layer and EDR events (tool_call / tool_response / execute_process) and reads
+  the WRITE_FILE rows out of the instance-resolved event log with query_events(),
+  which IS populated by AIDR ingest for every file operation. The write evidence
+  is real and live; only the trigger is borrowed from an event type that has a
+  producer.
+
+  Attribution is instance-exact: the rule anchors on meta["caller_pid"], resolves
+  it with proc_instance() at meta["event_ts"], walks proc_lineage() upward, and
+  expands the session only through EXECUTE_PROCESS rows whose (parent_pid,
+  parent_start) pair matches a known session instance. No cross-session
+  attribution is possible, and PID reuse cannot pull an unrelated process in.
+author: Evgen
+date: "2026-03-14"
+references:
+  - https://modelcontextprotocol.io/docs/concepts/architecture
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1554/
+tags:
+  - attack.persistence
+  - attack.privilege-escalation
+  - attack.t1546
+  - attack.t1554
+  - ai.agent.supply-chain
+falsepositives:
+  - User explicitly asked the agent to install or configure an MCP server ("claude mcp add",
+    Cursor/VS Code "Add MCP server" flow). Suppressed unless a corroborator fires - the
+    editor/agent process writing its own config from inside its own lineage with a benign
+    server definition returns allow and produces no event at all.
+  - Dotfile managers and provisioning scripts (chezmoi, ansible, make, stow) run from inside
+    an agent session that template MCP configs through sed/tee/jq. These DO match the
+    "spawned utility" corroborator and will be reported once per write; report-only by design.
+  - git checkout / git stash restoring a project-scoped .mcp.json - the writer basename is
+    "git", which is not in the spawned-utility set, so it is not corroborated.
+  - CI or test fixtures that generate mcp_settings.json under an agent-driven build.
+  - Multi-product config sync tools that legitimately write two or more MCP configs in one
+    run will trip the fan-out corroborator.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------- constants
+  WINDOW_NS    = 300000000000     # 5 min - writes must cluster with the trigger
+  DEDUP_TTL_NS = 3600000000000    # 1 h  - suppress repeat reports of same write
+
+  MCP_PATH_SUFFIXES = [
+      "/.mcp.json", "/mcp.json", "/mcp_config.json", "/mcp_settings.json",
+  ]
+  MCP_PATH_MARKERS = [
+      "claude_desktop_config.json",
+      "/.claude.json",
+      "/.claude/settings.json",
+      "/.claude/settings.local.json",
+      "/.cursor/mcp.json",
+      "/.vscode/mcp.json",
+      "/.gemini/settings.json",
+      "/.codeium/windsurf/mcp_config.json",
+      "cline_mcp_settings.json",
+      "/.config/mcp/",
+      "/.aws/amazonq/mcp.json",
+  ]
+  CFG_HINTS = [
+      "mcp.json", "mcpservers", "claude_desktop_config", "mcp_config",
+      "mcp_settings", ".claude/settings", ".claude.json", "cursor/mcp",
+      "vscode/mcp", "gemini/settings", "amazonq/mcp",
+  ]
+  WRITE_TOOLS = [
+      "write", "edit", "patch", "create_file", "write_file", "str_replace",
+      "bash", "shell", "run_command", "execute_command", "run_terminal",
+      "terminal", "powershell",
+  ]
+  WRITER_TOOLS = [
+      "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python2",
+      "python3", "perl", "ruby", "node", "deno", "bun", "tee", "sed", "awk",
+      "gawk", "dd", "cp", "mv", "ln", "install", "jq", "yq", "tar", "unzip",
+      "curl", "wget", "osascript", "powershell", "pwsh", "php", "cat",
+      "printf", "tsx", "ts-node",
+  ]
+  WRITER_RE = [
+      r"\btee\b", r"\bsed\b", r"\bjq\b", r"\byq\b", r"\bcp\b", r"\bmv\b",
+      r"\bdd\b", r"\binstall\b", r"\bpython[23]?\b", r"\bnode\b",
+      r"\bperl\b", r"\bruby\b", r"\bosascript\b", r"\bpowershell\b",
+      r"\bpwsh\b", r"\bcat\b", r"\bprintf\b", r"\btar\b", r"\bunzip\b",
+  ]
+  # High-specificity markers of a WEAPONISED server definition (not just any edit)
+  SUSPICIOUS_DEF = [
+      r'(?i)"command"\s*:\s*"[^"]*\b(curl|wget)\b',
+      r'(?i)"args"\s*:\s*\[[^\]]{0,400}\b(curl|wget)\b',
+      r'(?i)"command"\s*:\s*"[^"]*/(ba|z|k|da)?sh"',
+      r'(?i)"command"\s*:\s*"(ba|z|k|da)?sh"',
+      r'(?i)"command"\s*:\s*"[^"]*\b(powershell|pwsh|osascript)\b',
+      r'(?i)\|\s*(ba|z)?sh\b',
+      r'(?i)\bbase64\b[^"]{0,40}-{1,2}d\b',
+      r'(?i)"-c"\s*,\s*"[^"]{0,400}(curl|wget|import |exec\(|eval\(|socket)',
+      r'(?i)\bnc\b\s+-[a-z]{0,6}e\b',
+      r'(?i)/dev/tcp/',
+  ]
+
+  # ------------------------------------------------------------------ helpers
+  def norm(p):
+      return p.lower().replace("\\", "/")
+
+  def basename(p):
+      return norm(p).split("/")[-1]
+
+  def is_mcp_config(p):
+      lp = norm(p)
+      for s in MCP_PATH_SUFFIXES:
+          if lp.endswith(s):
+              return True
+      for m in MCP_PATH_MARKERS:
+          if m in lp:
+              return True
+      return False
+
+  def content_hint(c):
+      lc = c.lower()
+      for h in CFG_HINTS:
+          if h in lc:
+              return True
+      return False
+
+  # Relevance gate: pure string checks on meta only. No graph, no event log.
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      c  = meta.get("content", "")
+      if ct == "tool_input" or ct == "tool_output":
+          tn = meta.get("tool_name", "").lower()
+          for w in WRITE_TOOLS:
+              if w in tn:
+                  return True
+          return content_hint(c)
+      if ct == "execute_process":
+          if content_hint(c):
+              return True
+          for pat in WRITER_RE:
+              if re.find(pat, c) != None:
+                  return True
+          return False
+      # descriptions, prompts, sampling, llm_* cannot themselves write a file
+      return False
+
+  def ev_edge(e):
+      tid = e.get("target_id", "")
+      if tid == "":
+          tid = "filesystem://" + e.get("path", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tid,
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  # --------------------------------------------------------------------- main
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      ets = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if ets == 0 or cp == 0:
+          return "allow"
+
+      inst = proc_instance(cp, ets)
+      if inst == None:
+          return "allow"          # degraded attribution - never guess an owner
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      win  = ets - WINDOW_NS
+      root = lineage[-1]
+
+      # Session = the caller's lineage plus descendants spawned by it, matched on
+      # the full (pid, start) instance key so PID reuse cannot leak in.
+      lineage_pids = {}
+      session      = {}
+      for x in lineage:
+          lineage_pids[x["actor_pid"]] = True
+          session[x["actor_pid"]]      = x["actor_start"]
+
+      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=win, limit=2000)
+      for _ in range(3):          # transitive closure, bounded depth
+          for e in spawns:
+              pp = e.get("parent_pid", "")
+              if pp in session and session[pp] == e.get("parent_start", ""):
+                  if e["actor_pid"] not in session:
+                      session[e["actor_pid"]] = e["actor_start"]
+      spawn_by_pid = {}
+      for e in spawns:
+          if e["actor_pid"] in session and session[e["actor_pid"]] == e["actor_start"]:
+              spawn_by_pid[e["actor_pid"]] = e
+
+      # REQUIRED ANCHOR - a WRITE_FILE row targeting an MCP config, performed by
+      # an instance of THIS session, inside the window. Scoped per (pid, start)
+      # so the query stays cheap and cannot bleed across sessions.
+      hits  = []
+      paths = {}
+      for pid in session:
+          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
+                              actor_start=int(session[pid]), since_ns=win, limit=300)
+          for e in rows:
+              p = e.get("path", "")
+              if p == "" or not is_mcp_config(p):
+                  continue
+              hits.append(e)
+              paths[norm(p)] = True
+      if not hits:
+          return "allow"
+
+      # CORROBORATION - a bare config write is legitimate ("claude mcp add", the
+      # editor's own MCP UI). Require at least one discriminating signal.
+      corr = []
+      bad  = ""
+      c    = meta.get("content", "")
+      for pat in SUSPICIOUS_DEF:
+          m = re.find(pat, c)
+          if m != None:
+              bad = m
+              break
+      if bad != "":
+          corr.append("weaponised server definition in payload: " + bad[:120])
+
+      tool_writer = None
+      for e in hits:
+          if e["actor_pid"] in lineage_pids:
+              continue                       # agent/editor writing its own config
+          if basename(e.get("actor_path", "")) in WRITER_TOOLS:
+              tool_writer = e
+              break
+      if tool_writer != None:
+          corr.append("written by spawned utility " +
+                      basename(tool_writer.get("actor_path", "")))
+
+      if len(paths) >= 2:
+          corr.append(str(len(paths)) + " distinct MCP config files written")
+
+      if not corr:
+          return "allow"
+
+      # Idempotence - do not re-report a write already reported this hour.
+      seen  = store_get("reported") or {}
+      fresh = {}
+      for k in seen:
+          if int(seen[k]) > ets - DEDUP_TTL_NS:
+              fresh[k] = seen[k]
+      newhits = []
+      for e in hits:
+          fp = e.get("actor_pid", "") + ":" + e.get("ts", "") + ":" + norm(e.get("path", ""))
+          if fp in fresh:
+              continue
+          fresh[fp] = ets
+          newhits.append(e)
+      if not newhits:
+          return "allow"
+      if store_usage()["free"] > 8192:
+          store_set("reported", fresh)
+
+      # Kill chain, built from real event-log rows (instance-accurate).
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      shown = {}
+      n     = 0
+      for e in newhits:
+          if n >= 5:
+              break
+          apid = e["actor_pid"]
+          if apid not in lineage_pids and apid not in shown:
+              sp = spawn_by_pid.get(apid, None)
+              if sp != None:
+                  chain.append(step(ev_edge(sp), stage_id="Execution Vector",
+                                    stage_desc="session spawned " +
+                                               basename(sp.get("actor_path", "")) +
+                                               ": " + sp.get("cmdline", "")))
+              shown[apid] = True
+          chain.append(step(ev_edge(e), stage_id="MCP Config Tampering",
+                            stage_desc=basename(e.get("actor_path", "")) +
+                                       " (pid " + apid + ") wrote MCP config " +
+                                       e.get("path", "")))
+          n += 1
+
+      names = []
+      for x in lineage:
+          names.append(basename(x.get("actor_path", "")))
+      attribution = "exact"
+      if len(lineage) < 2:
+          attribution = "degraded"
+      reason = ("MCP configuration tampering - " + str(len(newhits)) +
+                " write(s) to MCP config by session " + " -> ".join(names) +
+                " [attribution: " + attribution + "] | corroborators: " +
+                "; ".join(corr))
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
