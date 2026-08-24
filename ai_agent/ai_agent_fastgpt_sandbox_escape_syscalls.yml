@@ -1,0 +1,165 @@
+title: Sandbox Escape - Permissive Syscall Abuse in Agent Code Execution (FastGPT Sandbox)
+id: 7b3c9d24-5f81-4a6e-9d0b-2c14e8f37a56
+status: experimental
+level: high
+description: |
+  Detects a single spawned process whose command line carries in-line, attacker-supplied
+  code (python -c / node -e / interpreter heredoc) that ALSO contains a container/sandbox
+  escape primitive, or a direct invocation of a namespace-breakout binary.
+
+  Targets FastGPT sandbox (fastgpt-sandbox < 4.9.11), where the execution container allows
+  an overly permissive syscall set. An attacker who gets code into the sandbox can call
+  those syscalls through ctypes/libc (ptrace, mount, unshare, setns, init_module,
+  process_vm_writev, open_by_handle_at), pivot into the host namespace, read and overwrite
+  arbitrary host files, and defeat the interpreter-level module import restrictions via
+  __builtins__/__subclasses__/__import__ reflection.
+
+  This is a single-event content rule: the only live signal for this threat is the
+  execute_process command line (file_read / file_write event types are not emitted by any
+  live producer, and there is no SANDBOX_ESCAPE edge kind). Detection therefore requires
+  two independent high-specificity elements in the SAME command line - an inline-code
+  vector AND an escape primitive - or a breakout binary invoked with breakout arguments.
+author: Egemen
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://github.com/labring/FastGPT/releases
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://attack.mitre.org/techniques/T1611/
+  - https://attack.mitre.org/techniques/T1068/
+tags:
+  - attack.privilege-escalation
+  - attack.defense-evasion
+  - attack.t1611
+  - attack.t1068
+  - attack.t1059.006
+  - owasp.a04-2021
+  - owasp.a06-2021
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+
+  # ── Scope: only child-process spawn events ────────────────────────────────
+  sel_exec:
+    event_type: execute_process
+
+  # ── Vector A precondition: attacker-controlled code delivered inline ──────
+  sel_inline_code:
+    content|re:
+      - '(?i:python)[0-9.]{0,4}[^\n]{0,200}(\s-c[\s\x22\x27]|[\x22\x27]-c[\x22\x27])'
+      - '(?i:node|deno|bun)[^\n]{0,200}(\s-e[\s\x22\x27]|[\x22\x27](-e|--eval)[\x22\x27])'
+      - '(?i:python)[0-9.]{0,4}[^\n]{0,80}<<[-\s]{0,2}[\x22\x27]?[A-Za-z_]{2,}'
+
+  # ── Escape primitive 1: raw libc / ctypes syscall gateway ─────────────────
+  sel_esc_libc:
+    content|re:
+      - '\bCDLL\s*\(\s*[\x22\x27]?(None|libc)'
+      - '\bcdll\.LoadLibrary\s*\(\s*[\x22\x27]?libc'
+      - '\blibc\.so\.6\b'
+      - '\b(libc|_libc|clib)\.(syscall|ptrace|mount|umount2?|unshare|setns|pivot_root|init_module|finit_module|capset|prctl)\s*\('
+      - '\bctypes\.util\.find_library\s*\(\s*[\x22\x27]c[\x22\x27]'
+
+  # ── Escape primitive 2: the permissive syscalls / capabilities themselves ─
+  sel_esc_syscall:
+    content|re:
+      - '\b(SYS_|__NR_)(ptrace|mount|umount2|unshare|setns|pivot_root|init_module|finit_module|kexec_load|process_vm_readv|process_vm_writev|open_by_handle_at|bpf)\b'
+      - '\bPTRACE_(ATTACH|SEIZE|POKEDATA|POKETEXT|SETREGS)\b'
+      - '\b(CLONE_NEWNS|CLONE_NEWUSER|CLONE_NEWPID|CAP_SYS_ADMIN|CAP_SYS_PTRACE|CAP_SYS_MODULE|CAP_DAC_READ_SEARCH)\b'
+      - '\bos\.(setuid|setgid|setresuid|setresgid|setgroups)\s*\(\s*0'
+
+  # ── Escape primitive 3: interpreter import-restriction bypass ─────────────
+  sel_esc_import:
+    content|re:
+      - '__builtins__\s*(\[|\.get\s*\(\s*)[\x22\x27]__import__'
+      - '\bbuiltins\.__import__\s*\('
+      - '\b__import__\s*\(\s*[\x22\x27](os|sys|posix|subprocess|ctypes|socket|shutil|pty|resource)[\x22\x27]'
+      - '\.__(subclasses|mro|bases|globals)__\b'
+      - '\bimportlib\.(machinery|_bootstrap|util\.spec_from_file_location)\b'
+      - '\b(gi_frame|f_back)\.f_(globals|builtins)\b'
+      - '\bsys\.modules\s*\[\s*[\x22\x27](os|subprocess|ctypes)[\x22\x27]\s*\]'
+
+  # ── Escape primitive 4: arbitrary host file read / overwrite past the jail ─
+  sel_esc_hostfs:
+    content|re:
+      - '/proc/(self|1|[0-9]{2,})/(mem|root|ns/|environ|cwd|exe)'
+      - '/var/run/docker\.sock'
+      - '/etc/(shadow|sudoers|kubernetes)'
+      - '/root/\.(ssh|aws|kube|docker)'
+      - '\bopen\s*\(\s*[\x22\x27]/(etc|root|usr|bin|sbin|opt|srv|boot|lib|host)/[^\x22\x27\n]{0,160}[\x22\x27]\s*,\s*[\x22\x27][rbx+]{0,2}[wa+]'
+      - '\bos\.(chroot|chmod|chown|unlink|remove|rename|symlink|link)\s*\(\s*[\x22\x27]/(etc|root|usr|bin|sbin|boot|host)/'
+      - '\bshutil\.(copy2?|copyfile|move|rmtree)\s*\([^\n]{0,80},\s*[\x22\x27]/(etc|root|usr|bin|sbin|host)/'
+      - '\bPath\s*\(\s*[\x22\x27]/(etc|root|usr|bin|sbin|host)/[^\x22\x27\n]{0,160}[\x22\x27]\s*\)\s*\.write_(text|bytes)\s*\('
+
+  # ── Vector B: breakout binary invoked with breakout arguments ─────────────
+  sel_breakout_cmd:
+    content|re:
+      - '\bnsenter\b[^\n]{0,160}(--target|\s-t)[\s\x22\x27=]{1,3}1\b'
+      - '\bnsenter\b[^\n]{0,160}/proc/1/ns/'
+      - '\bunshare\b[^\n]{0,160}(--mount|--user|-m|-r)\b[^\n]{0,160}(--map-root-user|--fork|--pid|-r|chroot)\b'
+      - '\bchroot\s+/proc/[0-9]+/root\b'
+      - '\bmount\b[^\n]{0,160}(-o\s+(bind|rw,bind)|-t\s+(proc|sysfs|cgroup2?|overlay|devtmpfs))\b'
+      - '\b(insmod|kexec)\s'
+      - '\b(docker|ctr|crictl|nerdctl)\b[^\n]{0,160}(-H|--host|--address)[\s\x22\x27=]{1,3}unix://'
+      - '\bcapsh\b[^\n]{0,80}--(gid|uid|caps)='
+      - '\bgdb\b[^\n]{0,80}\s-p\s+1\b'
+
+  # ── Benign-context suppressors (content markers only; no trust widening) ──
+  filter_help_version:
+    content|re: '[\s\x22](--help|--version)([\s\x22]|$)'
+
+  filter_search_tooling:
+    content|re:
+      - '\b(grep|egrep|fgrep|ripgrep|rg|ack|ag)\b[^\n]{0,120}(-r|-R|-rn|-l|--include|--glob)\b'
+      - '\bgit\s+(grep|log|diff|show|blame|commit)\b'
+      - '\bfind\b[^\n]{0,120}\s-name\s'
+
+  filter_security_docs:
+    content|contains:
+      - 'CVE-'
+      - 'proof of concept'
+      - 'proof-of-concept'
+      - 'sandbox escape'
+      - 'writeup'
+      - 'vulnerability report'
+      - 'security advisory'
+
+  filter_policy_authoring:
+    content|re:
+      - '\bSCMP_ACT_'
+      - '\bdefaultAction\b'
+      - '\bseccompProfile\b'
+      - '\bsecurityContext\b'
+      - '\bapparmor\b'
+      - '\bapiVersion\s*:'
+      - '\bsyscalls[\x22\x27]?\s*:\s*\['
+
+  condition: >
+    sel_exec
+    and (
+      (sel_inline_code and (sel_esc_libc or sel_esc_syscall or sel_esc_import or sel_esc_hostfs))
+      or sel_breakout_cmd
+    )
+    and not (filter_help_version or filter_search_tooling or filter_security_docs or filter_policy_authoring)
+
+action: report
+
+falsepositives:
+  - Security or platform engineers authoring/linting seccomp, AppArmor or Kubernetes
+    securityContext policy that enumerates syscall and capability names such as SYS_ptrace
+    or CAP_SYS_ADMIN - suppressed by filter_policy_authoring.
+  - Code-review or triage agents grepping a repository for sandbox-escape indicators
+    (__subclasses__, ctypes.CDLL, nsenter) - suppressed by filter_search_tooling.
+  - Documentation, advisory or PoC writing about this exact FastGPT sandbox issue -
+    suppressed by filter_security_docs.
+  - Rootless-container and CI tooling that legitimately runs `unshare --user --map-root-user`
+    or `mount -t proc` during image or namespace setup; not suppressed, because the same
+    command line is the escape itself. Expect these on build/CI hosts and tune per fleet.
+  - Legitimate low-level platform probing via ctypes (for example calling libc.prctl to set
+    a thread name). The libc selection is restricted to escape-relevant symbols, but a
+    developer tool that calls libc.prctl inline will still match.
+  - Test suites for a sandbox implementation that intentionally exercise interpreter
+    introspection or namespace syscalls from an inline `python -c` harness.
