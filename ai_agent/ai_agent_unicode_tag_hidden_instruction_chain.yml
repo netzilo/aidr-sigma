@@ -1,0 +1,297 @@
+title: Hidden Unicode Tag Instruction Then Agent Action
+id: 7c1e4a92-3f8b-4d06-9a1e-5b2c8f0d4e7a
+status: experimental
+level: high
+description: |
+  Detects the invisible prompt-injection chain that abuses the Unicode Tags block
+  (U+E0000-U+E007F, "ASCII smuggling"). Gemini-class models decode these
+  zero-width characters as ordinary text and follow them as instructions, so an
+  attacker can hide directives inside content an agent routinely ingests
+  (GitHub issue bodies, PR descriptions, web pages, MCP tool documents).
+
+  This rule is behavioural, not a content filter. The Starlark script:
+    1. Anchors on a decoded hidden-instruction run of >= 10 printable ASCII
+       characters carried by a tool_call or execute_process event, and records
+       that taint in the rule store (the injected text and the action it drives
+       usually arrive on different events).
+    2. Confirms, by traversing the behaviour graph, that the agent acquired
+       external instruction content (ACQUIRED_SKILL) inside the look-back window
+       and/or wrote a file (WRITE_FILE, resolved to the exact path and timestamp
+       via fs_activity) after the hidden instruction appeared.
+    3. Only then emits a report with a kill chain. Verdict is report-only; the
+       script never returns block.
+author: Evgen
+date: "2026-03-11"
+modified: "2026-03-11"
+references:
+  - https://www.unicode.org/charts/PDF/UE0000.pdf
+  - https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1027
+  - atlas.aml.t0051
+falsepositives:
+  - Security research, red-team notes, CTF write-ups or regression fixtures that
+    embed real Unicode Tag characters as a proof of concept; the agent then makes
+    any unrelated file write in the same 15-minute window. Report-only verdict and
+    the decoded text in the reason make this cheap to triage.
+  - Localisation or encoding test corpora that round-trip the whole Unicode plane
+    (including the Tags block) through a tool call.
+  - RGI emoji tag sequences (subdivision flags such as the Scotland flag) legitimately
+    contain 2-7 Tag characters; the 10-printable-character minimum excludes them by
+    construction, so they are not a live false positive.
+  - A stale taint from an earlier benign document being re-associated with a later
+    unrelated write; mitigated by the 15-minute look-back window, the ordering
+    requirement (write must follow the hidden text) and a 5-minute report cooldown.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - execute_process
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── tuning ────────────────────────────────────────────────────────────────
+  LOOK_BACK_NS   = 900000000000     # 15 min: taint validity / stage clustering
+  COOLDOWN_NS    = 300000000000     # 5 min: suppress duplicate reports
+  SLACK_NS       = 5000000000       # 5 s ordering jitter
+  MIN_HIDDEN     = 10               # decoded printable chars (excludes flag emoji)
+  MAX_RUNS       = 12
+  MAX_FS_CALLS   = 12
+  MAX_TAINT_KEYS = 16
+  MAX_AGENTS     = 8
+
+  TAG_RUN   = r"[\x{e0000}-\x{e007f}]{2,}"
+  ASCII_TBL = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+
+  # context_type values that collapse onto event_type tool_call / execute_process
+  TRIGGER_CTX = ["tool_input", "tool_description", "gateway_description",
+                 "prompt_description", "prompt_request", "sampling_request",
+                 "execute_process"]
+
+  def to_i(v):
+      if v == None:
+          return 0
+      if type(v) == "int":
+          return v
+      if v == "":
+          return 0
+      if re.match(r"^-?[0-9]+$", v):
+          return int(v)
+      return 0
+
+  # ── hidden-instruction anchor (pure string work, no graph) ────────────────
+  def decode_tags(run):
+      out = []
+      for c in run.codepoint_ords():
+          i = c - 0xE0020
+          if i >= 0 and i < len(ASCII_TBL):
+              out.append(ASCII_TBL[i])
+      return "".join(out)
+
+  def hidden_instructions(content):
+      if content == "":
+          return []
+      out = []
+      for r in re.find_all(TAG_RUN, content, MAX_RUNS):
+          txt = decode_tags(r)
+          if len(txt) >= MIN_HIDDEN:
+              out.append(txt)
+      return out
+
+  # ── rule store (copied out of the store so nothing frozen is mutated) ─────
+  def load_taint():
+      raw = store_get("taint")
+      out = {}
+      if raw == None:
+          return out
+      for k in raw.keys():
+          v = raw[k]
+          if type(v) != "dict":
+              continue
+          out[k] = {
+              "ts":       str(v.get("ts", "0")),
+              "text":     str(v.get("text", "")),
+              "ctx":      str(v.get("ctx", "")),
+              "reported": str(v.get("reported", "0")),
+          }
+      return out
+
+  def trim_taint(t):
+      for _i in range(MAX_TAINT_KEYS * 2):
+          if len(t) <= MAX_TAINT_KEYS:
+              return t
+          oldest_k  = ""
+          oldest_ts = -1
+          for k in t.keys():
+              ts = to_i(t[k].get("ts", "0"))
+              if oldest_ts < 0 or ts < oldest_ts:
+                  oldest_ts = ts
+                  oldest_k  = k
+          if oldest_k == "":
+              return t
+          t.pop(oldest_k)
+      return t
+
+  def save_taint(t):
+      u = store_usage()
+      if u == None:
+          return
+      if to_i(u.get("free", 0)) < 8192:
+          store_delete("taint")
+          return
+      store_set("taint", trim_taint(t))
+
+  # ── graph helpers ─────────────────────────────────────────────────────────
+  def agent_nodes():
+      want  = meta.get("agent_name", "")
+      exact = []
+      allag = []
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          allag.append(p)
+          if want != "" and (p.get("path", "") == want or p.get("id", "") == want):
+              exact.append(p)
+      if exact:
+          return exact[:MAX_AGENTS]
+      return allag[:MAX_AGENTS]
+
+  def proc_scope(aid):
+      ids = [aid]
+      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          if len(ids) >= 24:
+              break
+          ids.append(e["to"])
+      return ids
+
+  def find_skill(aid, lo, hi):
+      best = None
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          ts = to_i(e.get("ts", "0"))
+          if ts < lo:
+              continue
+          if hi > 0 and ts > hi:
+              continue
+          if best == None or ts > best[0]:
+              best = [ts, e]
+      return best
+
+  def find_write(scope, lo, hi):
+      best  = None
+      calls = 0
+      for pid in scope:
+          for e in edges(pid, dir="out", kind="WRITE_FILE"):
+              if to_i(e.get("last_ts", "0")) < lo:
+                  continue
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              if calls >= MAX_FS_CALLS:
+                  return best
+              calls += 1
+              for ent in fs_activity(fs["id"], "WRITE"):
+                  ts = to_i(ent.get("ts", "0"))
+                  if ts < lo:
+                      continue
+                  if hi > 0 and ts > hi:
+                      continue
+                  if best == None or ts > best[0]:
+                      best = [ts, e, ent]
+      return best
+
+  # ── main ──────────────────────────────────────────────────────────────────
+  def run():
+      # 1. relevance gate — cheap, meta-only
+      ct = meta.get("context_type", "")
+      if ct not in TRIGGER_CTX:
+          return "allow"
+
+      now  = to_i(meta.get("event_ts", "0"))
+      akey = meta.get("agent_name", "")
+      if akey == "":
+          akey = meta.get("server_name", "unknown")
+
+      # 2. anchor: decoded Unicode Tag instruction on this event
+      hits  = hidden_instructions(meta.get("content", ""))
+      taint = load_taint()
+
+      if hits:
+          taint[akey] = {"ts": str(now), "text": hits[0][:160],
+                         "ctx": ct, "reported": "0"}
+          save_taint(taint)
+
+      rec = taint.get(akey)
+      if rec == None:
+          return "allow"                      # no hidden instruction in this session
+
+      t0 = to_i(rec.get("ts", "0"))
+      if t0 == 0:
+          return "allow"
+      if now > 0 and (now - t0) > LOOK_BACK_NS:
+          return "allow"                      # stale taint — already handled
+
+      last = to_i(rec.get("reported", "0"))
+      if last > 0 and now > 0 and (now - last) < COOLDOWN_NS:
+          return "allow"                      # already reported very recently
+
+      hi = 0
+      if now > 0:
+          hi = now + SLACK_NS
+
+      # 3. behavioural confirmation via the graph
+      for a in agent_nodes():
+          aid    = a["id"]
+          chain  = new_chain(aid)
+          stages = []
+
+          sk = find_skill(aid, t0 - LOOK_BACK_NS, hi)
+          if sk != None:
+              s     = node(sk[1]["to"])
+              shost = "?"
+              ssrc  = "?"
+              sname = "?"
+              if s != None:
+                  shost = s.get("host", "?")
+                  ssrc  = s.get("source", "?")
+                  sname = s.get("name", "?")
+              chain.append(step(sk[1], stage_id="Injection Vector",
+                  stage_desc="external instruction content acquired: " + sname +
+                             " from " + shost + " (source=" + ssrc + ")"))
+              stages.append("skill from " + shost)
+
+          w = find_write(proc_scope(aid), t0 - SLACK_NS, hi)
+          if w != None:
+              wpath = w[2].get("path", "?")
+              chain.append(step(w[1], stage_id="Instructed Write",
+                  stage_desc="file written after hidden instruction appeared: " + wpath,
+                  activity=w[2]))
+              stages.append("write " + wpath)
+
+          if not stages:
+              continue
+
+          rec["reported"] = str(now)
+          taint[akey] = rec
+          save_taint(taint)
+
+          detail = rec.get("text", "")
+          print("invisible unicode-tag instruction decoded: \"" + detail +
+                "\" | stages: " + ", ".join(stages))
+          return {
+              "action": "report",
+              "reason": "Invisible Unicode Tag (U+E0000-U+E007F) instruction seen in " +
+                        rec.get("ctx", ct) + " (decoded: \"" + detail + "\") followed by " +
+                        ", ".join(stages),
+              "chain":  chain,
+          }
+      return "allow"
+
+  result = run()
