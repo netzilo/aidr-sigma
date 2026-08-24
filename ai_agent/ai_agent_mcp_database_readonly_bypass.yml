@@ -1,0 +1,277 @@
+title: MCP Database Server Read-Only Bypass
+id: b7c3f1a2-9d4e-4f18-8a6b-2e5c07d91f43
+status: experimental
+level: high
+description: |
+  Detects a read-only enforcement bypass against the mcp-database-server MCP server
+  (npm @executeautomation/database-server <= 1.1.0, and equivalent MCP DB bridges).
+
+  The observable signal available to the engine for this threat is process execution
+  only: there is no database_operation event type and no EXECUTE_QUERY / WRITE_DATABASE
+  edge kind. The rule therefore anchors on the exact process instance that issued a
+  mutating SQL statement (INSERT/UPDATE/DELETE/DDL/GRANT/COPY TO PROGRAM/administrative
+  functions) through a database client or connection URI, resolves its true owning
+  session with proc_instance -> proc_lineage, and only reports when that SAME session
+  also launched an MCP database server that was explicitly configured read-only
+  (--read-only / readonly=true / mode=ro) BEFORE the write, inside a 15 minute window.
+
+  "Read-only server is running in this session AND a write just went out on the same
+  database plumbing" is the discriminating signature. A writable database server doing
+  writes produces no anchor and the rule stays silent.
+
+  Placement: after any organisation-specific allow rules for DBA tooling, before broad
+  execute_process audit rules. Shipped as report to measure the false-positive rate on
+  real developer sessions before any escalation is considered.
+author: Evgen
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://www.npmjs.com/package/@executeautomation/database-server
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.impact
+  - attack.t1565
+  - owasp.a01_2021
+  - owasp.a04_2021
+falsepositives:
+  - A developer or DBA legitimately running a migration or hotfix (psql -c "ALTER TABLE ...",
+    prisma/flyway/liquibase, sqlite3 write) in a terminal session that also happens to have a
+    read-only MCP database server running. The rule requires same-session lineage and a
+    15 minute window, and only reports - it never blocks the statement.
+  - Integration test suites that intentionally start a read-only MCP database server next to
+    a privileged admin connection and then seed or tear down fixtures in the same session.
+  - Seeding or bootstrap scripts launched from the same shell that started the MCP server
+    (npm run db:seed, docker-compose entrypoints spawned under the same parent).
+  - Command lines that merely echo or pipe SQL text while also naming a database client
+    binary or a postgres:// URI, for example building a migration file with psql on the same
+    line but not executing the DDL.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_mutating_sql:
+    content|re:
+      - '(?i)\b(insert\s+into|delete\s+from|truncate\s+table)\b'
+      - '(?i)\b(drop|alter)\s+(table|database|schema|index|view|role|user|system|sequence|function)\b'
+      - '(?i)\bcreate\s+(table|database|schema|role|user|extension|function|index)\b'
+      - '(?i)\b(grant|revoke)\s+[a-z0-9_, ]+\s+on\b'
+      - '(?i)\bupdate\b[\s\S]{0,200}?\bset\b'
+      - '(?i)\bcopy\b[\s\S]{0,160}?\bto\s+program\b'
+      - '(?i)\b(pg_terminate_backend|pg_sleep|lo_export|pg_read_file|pg_write_file)\s*\('
+      - '(?i)\bvacuum\s+full\b'
+  condition: sel_exec and sel_mutating_sql
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── MCP database-server read-only enforcement bypass ────────────────────────
+  # Instance-resolved: caller_pid -> proc_instance -> proc_lineage -> query_events.
+  # Strictly one session; the trigger stage is taken from meta (never re-queried).
+
+  WINDOW_NS = 900000000000   # 15 minutes: server launch must precede the write
+
+  MUTATION = [
+      r"(?i)\binsert\s+into\b",
+      r"(?i)\bdelete\s+from\b",
+      r"(?i)\btruncate\s+table\b",
+      r"(?i)\bdrop\s+(table|database|schema|index|view|role|user|function)\b",
+      r"(?i)\balter\s+(table|database|schema|role|user|system|sequence)\b",
+      r"(?i)\bcreate\s+(table|database|schema|role|user|extension|function|index)\b",
+      r"(?i)\bgrant\s+[a-z0-9_, ]+\s+on\b",
+      r"(?i)\brevoke\s+[a-z0-9_, ]+\s+on\b",
+      r"(?i)\bupdate\b[\s\S]{0,200}?\bset\b",
+      r"(?i)\bcopy\b[\s\S]{0,160}?\bto\s+program\b",
+      r"(?i)\b(pg_terminate_backend|pg_sleep|lo_export|pg_read_file|pg_write_file)\s*\(",
+      r"(?i)\bvacuum\s+full\b",
+      r"(?i)\bdo\s+\$\$",
+  ]
+
+  # Positive requirement (not an allowlist): the write must actually be aimed at a DB.
+  DB_CONTEXT = [
+      r"(?i)\b(psql|pgcli|pg_dump|pg_restore|mysql|mariadb|sqlite3|mongosh|sqlcmd|clickhouse-client)\b",
+      r"(?i)(postgres(ql)?|mysql|mongodb(\+srv)?)://",
+      r"(?i)\bport\s*=\s*(5432|3306|1433)\b",
+      r"(?i)(mcp-database-server|executeautomation[/\\]database-server)",
+  ]
+
+  DB_SERVER = [
+      r"(?i)(mcp-database-server|@?executeautomation[/\\]database-server)",
+      r"(?i)\bdatabase-server\b[\s\S]{0,200}?\b--(postgresql|postgres|sqlite|sqlserver|mysql)\b",
+  ]
+
+  READONLY = [
+      r"(?i)--read[-_]?only\b",
+      r"(?i)\bread[-_]?only\s*[:=]\s*(true|1|yes|on)\b",
+      r"(?i)\bREADONLY\s*=\s*(true|1)\b",
+      r"(?i)[?&]mode=ro\b",
+      r"(?i)\b--mode\s+ro\b",
+  ]
+
+  def any_match(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def short(s):
+      if len(s) > 180:
+          return s[:180] + "..."
+      return s
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("parent_path", e.get("actor_path", "")),
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  short(e.get("cmdline", "")),
+      }
+
+  # Relevance gate — pure string checks on meta, no graph / log / fs calls.
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if not any_match(MUTATION, cmd):
+          return False
+      if not any_match(DB_CONTEXT, cmd):
+          return False
+      return True
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd        = meta.get("content", "")
+      trigger_ts = int(meta.get("event_ts", "0"))
+
+      # ── Anchor on the exact triggering instance ─────────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"          # degraded attribution — re-fires when logged
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── Scope strictly to this session (lineage + its descendants) ──────────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+
+      since = trigger_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                           until_ns=trigger_ts, limit=4000)
+
+      # two passes -> children and grandchildren of the session
+      for i in range(2):
+          for e in execs:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "0")
+
+      trig_pid   = inst.get("actor_pid", "")
+      trig_start = inst.get("actor_start", "")
+
+      # ── REQUIRED anchor: read-only MCP database server in THIS session ──────
+      anchor = None
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              if e.get("parent_pid", "") not in session:
+                  continue
+          c = e.get("cmdline", "") + " " + e.get("actor_path", "")
+          if not any_match(DB_SERVER, c):
+              continue
+          if not any_match(READONLY, c):
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts > trigger_ts:
+              continue
+          if (trigger_ts - ts) > WINDOW_NS:
+              continue
+          if anchor == None:
+              anchor = e
+          elif int(anchor.get("ts", "0")) < ts:
+              anchor = e
+      if anchor == None:
+          return "allow"          # no read-only claim -> no bypass to report
+      a_ts = int(anchor.get("ts", "0"))
+
+      # ── Optional supporting evidence: earlier writes after the anchor ───────
+      priors = []
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          if e.get("actor_pid", "") == trig_pid:
+              if e.get("actor_start", "") == trig_start:
+                  continue          # this is the trigger itself
+          ts = int(e.get("ts", "0"))
+          if ts < a_ts or ts > trigger_ts:
+              continue
+          c = e.get("cmdline", "")
+          if c == "":
+              continue
+          if any_match(MUTATION, c) and any_match(DB_CONTEXT, c):
+              priors.append(e)
+          if len(priors) >= 3:
+              break
+
+      # ── Kill chain rooted at the session owner ──────────────────────────────
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      chain.append(step(ev_edge(anchor),
+                        stage_id="Read-Only Server Launched",
+                        stage_desc="MCP database server started with read-only enforcement: " +
+                                   short(anchor.get("cmdline", anchor.get("actor_path", "")))))
+
+      for e in priors:
+          chain.append(step(ev_edge(e),
+                            stage_id="Prior Write Attempt",
+                            stage_desc="mutating statement earlier in the same session: " +
+                                       short(e.get("cmdline", ""))))
+
+      parent_path = inst.get("actor_path", "")
+      if len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", parent_path)
+      trig_edge = {
+          "from":     "process://" + parent_path,
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+          "cmdline":  short(cmd),
+      }
+      chain.append(step(trig_edge,
+                        stage_id="Read-Only Bypass",
+                        stage_desc="write/DDL statement issued against a read-only-configured " +
+                                   "database server: " + short(cmd)))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[-1])
+      path_txt = " -> ".join(names)
+      print("read-only MCP database bypass via " + path_txt)
+
+      return {
+          "action": "report",
+          "reason": "MCP database-server read-only bypass - mutating SQL issued by " +
+                    path_txt + " while a read-only-configured database server is active " +
+                    "in the same session (" + str(len(priors) + 1) + " write attempt(s))",
+          "chain":  chain,
+      }
+
+  result = run()
