@@ -1,0 +1,109 @@
+title: LLM Jailbreak — TAP/PAIR Iterative Prompt Optimizer Execution
+id: 3f8a1c6e-24b7-4d59-9e0a-7c5b18d4af62
+status: experimental
+level: high
+description: |
+  Detects local execution of an automated iterative jailbreak search harness —
+  TAP (Tree-of-Attacks with Pruning) or PAIR (Prompt Automatic Iterative
+  Refinement) — or an equivalent tree-search jailbreak strategy driven through a
+  red-team CLI (garak, promptfoo, PyRIT, deepeval, HarmBench).
+
+  TAP/PAIR operate entirely inside the prompt/response layer of an LLM API, and
+  the engine exposes no api_call event, no PROMPT_INJECTION edge and no
+  BYPASS_MITIGATION edge, so the adversarial prompts themselves are not
+  observable. The one live, triggering signal is the process that runs the
+  optimizer. This rule therefore targets the harness invocation, not the
+  jailbreak content: the distinguishing artefact is a command line that names a
+  known tree-search jailbreak entrypoint, or that simultaneously carries the
+  attacker-model / target-model / (judge-model | tree-search) argument triple
+  that only an iterative adversarial-prompt optimizer needs, or that selects a
+  tap/pair/tree-of-attacks probe on a red-team runner.
+
+  Because a generic Python process is indistinguishable from a TAP/PAIR harness,
+  no single generic token is trusted: every branch of the condition requires
+  either a framework-unique identifier or a co-occurring multi-flag signature.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://arxiv.org/abs/2312.02119
+  - https://arxiv.org/abs/2310.08419
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0054
+  - atlas.aml.t0043
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_evt:
+    event_type: execute_process
+
+  # ── Branch A — framework-unique entrypoints / class names / strategy ids ────
+  sel_named_harness:
+    content|re:
+      - '(?i)\bmain_tap\.py\b'
+      - '(?i)\btree[-_]?of[-_]?attacks(_?with_?pruning)?\b'
+      - '(?i)\btreeofattackswithpruningorchestrator\b'
+      - '(?i)\btaporchestrator\b'
+      - '(?i)\bjailbreakingllms\b'
+      - '(?i)\beasyjailbreak\.attacker\.(pair|tap)\b'
+      - '(?i)\bgarak\.probes\.(tap|pair)\b'
+      - '(?i)\bjailbreak:tree\b'
+      - '(?i)\btreejailbreaking\b'
+      - '(?i)\bpair_?attack(er)?\.py\b'
+
+  # ── Branch B — the attacker/target/judge flag triple (PAIR & TAP signature) ─
+  sel_attacker_model_flag:
+    content|re: '(?i)--attack(er)?[-_]model[=\s]'
+  sel_target_model_flag:
+    content|re: '(?i)--target[-_]model[=\s]'
+  sel_iterative_search_flag:
+    content|re:
+      - '(?i)--(judge|evaluator)[-_]model[=\s]'
+      - '(?i)--(branching[-_]factor|n[-_]streams|n[-_]iterations|n[-_]iters|keep[-_]last[-_]n|tree[-_]width)[=\s]'
+      - '(?i)--target[-_]str[=\s]'
+
+  # ── Branch C — red-team runner explicitly selecting a tap/pair strategy ─────
+  sel_redteam_cli:
+    content|re: '(?i)\b(garak|promptfoo|pyrit|deepeval|harmbench)\b'
+  sel_tap_pair_selector:
+    content|re: '(?i)--(probes?|strategies|strategy|attack[-_]strategy|plugins?|attacks?)[=\s][^\s"]{0,60}\b(tap|pair|tree[-_]of[-_]attacks|iterative[-_]tree)\b'
+
+  # ── Filters — benign command lines that merely mention the framework ────────
+  filter_readonly_tooling:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ag|ack|less|more|head|tail|bat|wc|diff|nano|vim|nvim|emacs|man|tree|open)\s'
+      - '(?i)\bcat\s+[^\n|]{0,200}\.(py|md|json|ya?ml|toml|txt)\b'
+      - '(?i)\bgit\s+(clone|diff|log|grep|show|status|pull|fetch|checkout)\b'
+      - '(?i)\b(pip3?|uv|pipx|poetry|conda|mamba|npm|pnpm|yarn|brew|apt|apt-get)\s+(install|add|download|update|upgrade|remove|uninstall)\b'
+      - '(?i)\b(pytest|py\.test|unittest|tox|nox|jest|vitest|mypy|ruff|flake8|black|isort|pylint)\b'
+
+  filter_noop_invocation:
+    content|re:
+      - '(?i)(^|\s)--(help|version|list[-_](probes|plugins|strategies|detectors|models)|dry[-_]run|report[-_]only)\b'
+      - '(?i)(^|\s)-h(\s|$)'
+
+  filter_docs_artifacts:
+    content|re:
+      - '(?i)/(docs?|documentation|examples?|samples?|tests?|testdata|fixtures?)/'
+      - '(?i)\.(md|rst|adoc)\b'
+
+  condition: >
+    sel_evt and
+    (sel_named_harness
+     or (sel_attacker_model_flag and sel_target_model_flag and sel_iterative_search_flag)
+     or (sel_redteam_cli and sel_tap_pair_selector))
+    and not (filter_readonly_tooling or filter_noop_invocation or filter_docs_artifacts)
+
+falsepositives:
+  - Authorised red-team engineers running a scheduled garak/promptfoo/PyRIT TAP or PAIR probe against an internal model endpoint.
+  - AI-safety researchers reproducing published TAP/PAIR/HarmBench results against a locally hosted or sandboxed target model.
+  - Pre-release CI jobs that execute an adversarial-robustness regression suite including tree-search jailbreak strategies.
+  - Model-evaluation harnesses that legitimately pass separate --attack-model / --target-model / --judge-model arguments for graded adversarial benchmarking.
+  - Training or capture-the-flag environments where the jailbreak harness is executed intentionally for instruction.
+
+action: report
