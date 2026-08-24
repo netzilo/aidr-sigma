@@ -1,0 +1,101 @@
+title: Langchain load_prompt Template Code Execution
+id: 9c1e4f7a-3b52-4d86-a0f4-6e2b8d5c71af
+status: experimental
+level: high
+description: |
+  Detects a process spawn whose command line invokes LangChain's prompt loader
+  (load_prompt / load_prompt_from_config / langchain.prompts.loading) together
+  with a Python code-execution primitive, a Jinja2 sandbox-escape expression, or
+  a remote prompt source URI.
+
+  LangChain 0.0.171 and earlier render prompt templates fetched by load_prompt()
+  through an unsandboxed Jinja2 environment. A prompt document whose
+  "template_format" is "jinja2" and whose "template" contains an expression such
+  as {{ __import__('os').popen('id').read() }} is executed as arbitrary Python at
+  load time, before any model call happens. The only telemetry the engine exposes
+  for this vulnerability is the execute_process event, so this rule matches the
+  loader invocation and the payload as they appear on the spawned command line
+  (typically python -c, python -m, or a shell wrapper around them).
+author: Egemen
+date: "2026-06-14"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36281
+  - https://github.com/langchain-ai/langchain/issues/4394
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm03
+falsepositives:
+  - LangChain developers running an interactive one-liner that loads a prompt from
+    a remote URI or the lc:// prompt hub (matches loader + remote source, no code
+    primitive) - expected during prototyping, and still worth an audit record.
+  - Security engineers reproducing CVE-2023-36281 or practising Jinja2 SSTI on a
+    developer workstation.
+  - Code-search, linting and SCA tooling whose argv carries the exploit string
+    (grep/rg/semgrep/bandit/codeql/pip-audit/...) - suppressed by
+    filter_analysis_tooling_*.
+  - Test suites that exercise the prompt loader, invoked as python -m pytest /
+    unittest / tox - suppressed by filter_test_runner.
+  - Notebook export or documentation build steps that echo an example payload into
+    a child process command line.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  sel_loader_content:
+    content|re:
+      - '(?i)\bload_prompt(?:_from_(?:file|config|path))?\s*\('
+      - '(?i)\blangchain[\w.]*\.prompts?\.loading\b'
+      - '(?i)\bfrom\s+langchain[\w.]*\.prompts\s+import\s+[^\n]{0,120}load_prompt'
+
+  sel_loader_command:
+    command|re: '(?i)\bload_prompt(?:_from_(?:file|config|path))?\s*\('
+
+  sel_langchain_prompt_api:
+    content|re:
+      - '(?i)\blangchain[\w.]*\.prompts\b'
+      - '(?i)\bPromptTemplate\s*\.\s*from_(?:file|template)\s*\('
+      - '(?i)\bload_prompt_from_config\b'
+
+  sel_exec_primitive:
+    content|re:
+      - '(?i)__import__\s*\(\s*[''"](?:os|subprocess|posix|pty|builtins|socket|importlib)[''"]'
+      - '(?i)\bos\s*\.\s*(?:popen|system|execv|execve|execl|execlp|execvp|spawnl|spawnv|fork)\s*\('
+      - '(?i)\bsubprocess\s*\.\s*(?:Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\s*\('
+      - '(?i)\bpty\s*\.\s*spawn\s*\('
+      - '(?i)\b(?:eval|exec)\s*\(\s*(?:__import__|compile|base64|codecs|bytes|open|requests|urllib|input)'
+      - '(?i)\bcommands\s*\.\s*getoutput\s*\('
+
+  sel_jinja_escape:
+    content|re:
+      - '\{\{[^}]{0,300}__import__'
+      - '\{\{[^}]{0,300}\.__(?:class|subclasses|mro|globals|builtins|base|init)__'
+      - '\{%[^%]{0,300}__import__'
+      - '(?i)\{\{[^}]{0,300}(?:popen|system|check_output)\s*\('
+      - '(?i)template_format\s*[''"]?\s*[:=]\s*[''"]?jinja2'
+
+  sel_remote_prompt:
+    content|re: '(?i)\bload_prompt(?:_from_file)?\s*\(\s*[fr]?[''"](?:https?|ftp|file|lc|s3|gs)://'
+
+  filter_analysis_tooling_content:
+    content|re: '(?i)^\s*(?:sudo\s+)?(?:env\s+[^\s]+=[^\s]*\s+)?(?:[^\s"'']*/)?(?:grep|egrep|fgrep|rg|ag|ack|git|semgrep|bandit|codeql|snyk|trivy|osv-scanner|pip-audit|safety|ruff|pylint|flake8|mypy|pytest|tox|nox|jq)\b'
+
+  filter_analysis_tooling_command:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:env\s+[^\s]+=[^\s]*\s+)?(?:[^\s"'']*/)?(?:grep|egrep|fgrep|rg|ag|ack|git|semgrep|bandit|codeql|snyk|trivy|osv-scanner|pip-audit|safety|ruff|pylint|flake8|mypy|pytest|tox|nox|jq)\b'
+
+  filter_test_runner:
+    content|re: '(?i)^\s*(?:[^\s"'']*/)?python[\d.]*\s+(?:-[^\s]+\s+){0,4}-m\s+(?:pytest|unittest|tox|nox|doctest)\b'
+
+  condition: >
+    sel_event
+    and (
+      ((sel_loader_content or sel_loader_command)
+        and (sel_exec_primitive or sel_jinja_escape or sel_remote_prompt))
+      or (sel_langchain_prompt_api and sel_jinja_escape and sel_exec_primitive)
+    )
+    and not (filter_analysis_tooling_content or filter_analysis_tooling_command
+             or filter_test_runner)
+action: report
