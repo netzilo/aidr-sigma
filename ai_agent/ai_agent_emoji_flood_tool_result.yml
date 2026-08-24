@@ -1,0 +1,387 @@
+title: Emoji Flood Obfuscation In Tool Result
+id: b7f3c1d2-4e8a-4f6b-9c15-3a7e5d8b201f
+status: experimental
+level: medium
+description: |
+  Detects indirect prompt injection delivered through dense emoji-only payload floods
+  returned to an agent inside a tool result.
+
+  The evasion works by packing runs of 8 or more consecutive emoji-class codepoints
+  (U+1F300-U+1FAFF pictographs, U+2600-U+27BF symbols and dingbats, plus playing-card
+  and regional-indicator blocks), optionally glued together with ZWJ, variation
+  selectors, skin-tone modifiers and whitespace, so that keyword-based content filters
+  see no contiguous instruction text while the model still reconstructs the directive.
+
+  This rule is behavioural, not payload-shaped. The Sigma condition is only a cheap
+  pre-filter; the Starlark script measures flood geometry (run length, distinct
+  codepoints per run, emoji share of the payload), then walks the behaviour graph from
+  the receiving agent to answer the question that actually decides severity: does this
+  agent currently hold the capability surface an injection would want? It anchors the
+  kill chain on the TOOL_RESULT edge that delivered the flood and corroborates with
+  ACQUIRED_SKILL edges pointing at public hosts and with EXECUTE_PROCESS -> CONNECTS
+  subprocess egress inside a 10-minute window. Reports only when the flood is paired
+  with injection directives, with graph corroboration, or when the payload is
+  overwhelmingly emoji by volume.
+
+  Also detects the JSON-escaped surrogate-pair form (\\udXXX\\udXXX runs), which the
+  literal-codepoint scan alone would miss when the tool result body is not decoded.
+author: Selhan
+date: "2026-03-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://attack.mitre.org/techniques/T1027/
+  - https://www.unicode.org/emoji/charts/full-emoji-list.html
+tags:
+  - attack.defense-evasion
+  - attack.t1027
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Chat platform history dumps (Slack, Discord, Teams exports) where reaction rows and
+    emoji-heavy messages produce long mixed emoji runs. Mitigated by requiring either
+    injection directives, graph corroboration, or an extreme emoji share of the payload.
+  - Emoji cheat sheets, Unicode reference tables, emoji-picker datasets and i18n
+    resource files read by a file or fetch tool. The density-only path is suppressed
+    when the payload also carries U+XXXX notation or emoji/unicode reference wording.
+  - CI, test-runner and progress-bar output made of long rows of a single status glyph
+    (checkmarks, crosses, blocks). Suppressed by the requirement that a qualifying run
+    contain at least 4 distinct emoji codepoints.
+  - Gitmoji-style commit-log listings where every subject line starts with an emoji.
+    These produce many short runs, not one dense run, and are filtered by RUN_MIN.
+  - Security research or red-team training material that deliberately embeds obfuscated
+    injection samples. This will report by design and is the intended human-review case.
+  - Marketing copy, release notes or social-media drafts written by the agent's own
+    toolchain that legitimately contain long decorative emoji banners.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_result:
+    event_type: tool_response
+  sel_literal_emoji_run:
+    content|re: '(?:[\x{1F300}-\x{1FAFF}\x{2600}-\x{27BF}\x{1F000}-\x{1F0FF}\x{1F1E6}-\x{1F1FF}][\x{FE0E}\x{FE0F}\x{200D}\x{20E3}\s]{0,4}){6,}'
+  sel_escaped_emoji_run:
+    content|re: '(?:\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}[ \t\r\n]{0,4}){6,}'
+  condition: sel_tool_result and (sel_literal_emoji_run or sel_escaped_emoji_run)
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── thresholds (all tuning lives here) ──────────────────────────────────────
+  RUN_MIN        = 8              # consecutive emoji codepoints = one flood run
+  DISTINCT_MIN   = 4              # distinct codepoints inside that run
+  DENSE_TOTAL    = 32             # density-only path: emoji count
+  DENSE_DISTINCT = 8              # density-only path: distinct codepoints
+  DENSE_RATIO    = 35             # density-only path: emoji % of non-space payload
+  MAX_SCAN       = 65536          # bytes of payload scanned (cost bound)
+  WINDOW_NS      = 600000000000   # 10 min corroboration window
+  DEDUP_NS       = 900000000000   # 15 min identical-payload suppression
+
+  ESC_PAIR = r'\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}'
+  ESC_RUN  = r'(?:\\u[dD][89abAB][0-9a-fA-F]{2}\\u[dD][c-fC-F][0-9a-fA-F]{2}[ \t\r\n]{0,4}){8,}'
+
+  DIRECTIVES = [
+      r'(?i)ignore\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier)\s+(instruction|prompt|rule|direction)',
+      r'(?i)disregard\s+(all\s+|any\s+|the\s+)?(previous|prior|above|earlier|system)',
+      r'(?i)\b(new|updated|revised)\s+(system\s+)?instructions?\b',
+      r'(?i)\byour\s+(new\s+)?(system\s+)?(prompt|instructions|persona|role)\b',
+      r'(?i)\byou\s+are\s+now\b',
+      r'(?i)\bdo\s+not\s+(tell|inform|mention|reveal)\b',
+      r'(?i)\bdon.t\s+(tell|inform|mention|reveal)\b',
+      r'(?i)\bexfiltrat',
+      r'(?i)\breveal\s+(your|the)\s+(system\s+)?(prompt|instructions?)\b',
+      r'(?i)\b(developer|god)\s+mode\b',
+      r'(?i)\bwithout\s+(telling|informing|asking)\s+the\s+user\b',
+  ]
+
+  def as_int(v):
+      if v == None:
+          return 0
+      if v == "":
+          return 0
+      return int(v)
+
+  def is_emoji(cp):
+      if cp >= 0x1F300 and cp <= 0x1FAFF:
+          return True
+      if cp >= 0x2600 and cp <= 0x27BF:
+          return True
+      if cp >= 0x1F000 and cp <= 0x1F0FF:
+          return True
+      if cp >= 0x1F1E6 and cp <= 0x1F1FF:
+          return True
+      return False
+
+  def is_glue(cp):
+      # joiners, variation selectors, skin tones, whitespace:
+      # neither counted as emoji nor allowed to break a run
+      if cp == 0x200D or cp == 0x200B or cp == 0x2060:
+          return True
+      if cp == 0xFE0E or cp == 0xFE0F or cp == 0x20E3:
+          return True
+      if cp >= 0x1F3FB and cp <= 0x1F3FF:
+          return True
+      if cp == 0x20 or cp == 0x09 or cp == 0x0A or cp == 0x0D:
+          return True
+      return False
+
+  def close_run(st):
+      n = st["run"]
+      d = len(st["runset"])
+      if n >= RUN_MIN and d >= DISTINCT_MIN:
+          st["qual"] = st["qual"] + 1
+          if n > st["qmax"]:
+              st["qmax"] = n
+              st["qdist"] = d
+      st["run"] = 0
+      st["runset"] = {}
+
+  def scan_literal(s):
+      st = {"run": 0, "runset": {}, "qual": 0, "qmax": 0, "qdist": 0,
+            "total": 0, "nonspace": 0, "distinct": {}}
+      for cp in s.codepoint_ords():
+          if is_glue(cp):
+              continue
+          if cp > 0x20:
+              st["nonspace"] = st["nonspace"] + 1
+          if is_emoji(cp):
+              st["run"] = st["run"] + 1
+              st["total"] = st["total"] + 1
+              st["runset"][cp] = True
+              st["distinct"][cp] = True
+          else:
+              close_run(st)
+      close_run(st)
+      return st
+
+  def scan_escaped(c):
+      runs = re.find_all(ESC_RUN, c, 8)
+      if len(runs) == 0:
+          return None
+      best = ""
+      for m in runs:
+          if len(m) > len(best):
+              best = m
+      pairs = re.find_all(ESC_PAIR, best, 512)
+      seen = {}
+      for p in pairs:
+          seen[p.lower()] = True
+      total = 0
+      for m in runs:
+          total = total + len(re.find_all(ESC_PAIR, m, 512))
+      return {"qual": len(runs), "qmax": len(pairs), "qdist": len(seen),
+              "total": total, "distinct": len(seen),
+              "ratio": (total * 12 * 100) // max(1, len(c)), "form": "json-escaped"}
+
+  def analyse(c):
+      st = scan_literal(c)
+      if st["qual"] > 0:
+          ratio = 0
+          if st["nonspace"] > 0:
+              ratio = (st["total"] * 100) // st["nonspace"]
+          return {"qual": st["qual"], "qmax": st["qmax"], "qdist": st["qdist"],
+                  "total": st["total"], "distinct": len(st["distinct"]),
+                  "ratio": ratio, "form": "literal"}
+      esc = scan_escaped(c)
+      if esc != None and esc["qmax"] >= RUN_MIN and esc["qdist"] >= DISTINCT_MIN:
+          return esc
+      return None
+
+  def has_directive(c):
+      for p in DIRECTIVES:
+          if re.find(p, c) != None:
+              return True
+      return False
+
+  def looks_like_reference(c):
+      if re.find(r'(?i)\bU\+[0-9A-Fa-f]{4,6}\b', c) != None:
+          return True
+      if re.find(r'(?i)\bemoji[-_ ]?(list|table|map|data|set|sheet|picker|cheat)', c) != None:
+          return True
+      if re.find(r'(?i)\bunicode\b', c) != None and re.find(r'(?i)\bemoji\b', c) != None:
+          return True
+      return False
+
+  def is_relevant_event():
+      # pure string checks on meta only - no graph, no store
+      ct = meta.get("context_type", "")
+      if ct not in ("tool_output", "prompt_response", "sampling_response"):
+          return False
+      if len(meta.get("content", "")) < 24:
+          return False
+      return True
+
+  def find_agent():
+      want = meta.get("agent_name", "")
+      best = None
+      best_ts = -1
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if want != "" and p.get("path", "") == want:
+              return p
+          ls = as_int(p.get("last_seen", ""))
+          if ls > best_ts:
+              best_ts = ls
+              best = p
+      return best
+
+  def find_anchor(aid):
+      tname = meta.get("tool_name", "")
+      best = None
+      best_ts = -1
+      for e in edges(aid, dir="in", kind="TOOL_RESULT"):
+          t = node(e["from"])
+          if t == None:
+              continue
+          if tname != "" and t.get("name", "") != tname:
+              continue
+          ts = as_int(e.get("ts", ""))
+          if ts > best_ts:
+              best_ts = ts
+              best = e
+      if best != None:
+          return best
+      for e in edges(aid, dir="in", kind="TOOL_RESULT"):
+          ts = as_int(e.get("ts", ""))
+          if ts > best_ts:
+              best_ts = ts
+              best = e
+      if best != None:
+          return best
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          ts = as_int(e.get("ts", ""))
+          if ts > best_ts:
+              best_ts = ts
+              best = e
+      return best
+
+  def corroborate(aid, chain, ev_ts):
+      lo = 0
+      if ev_ts > 0:
+          lo = ev_ts - WINDOW_NS
+      hits = []
+
+      # external instruction source: skill pulled from a public host
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          s = node(e["to"])
+          if s == None:
+              continue
+          if s.get("is_ztna_host", "1") != "0":
+              continue
+          t = as_int(e.get("ts", ""))
+          if lo > 0 and t < lo:
+              continue
+          chain.append(step(e, stage_id="External Instruction Source",
+                       stage_desc="instruction content loaded from public host " +
+                                  s.get("host", "?") + " (source " + s.get("source", "?") + ")"))
+          hits.append("external-skill:" + s.get("host", "?"))
+          break
+
+      # egress capability: subprocess of this agent reached a public host
+      found = False
+      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          if found:
+              break
+          child = node(pe["to"])
+          if child == None:
+              continue
+          for ce in edges(pe["to"], dir="out", kind="CONNECTS"):
+              h = node(ce["to"])
+              if h == None:
+                  continue
+              if h.get("is_ztna_host", "1") != "0":
+                  continue
+              if lo > 0 and as_int(ce.get("last_ts", "")) < lo:
+                  continue
+              chain.append(step(pe, stage_id="Subprocess Spawn",
+                           stage_desc="agent spawned " + child.get("name", "?") +
+                                      ": " + pe.get("cmdline", "?")))
+              chain.append(step(ce, stage_id="Egress Capability",
+                           stage_desc="subprocess reached public host " +
+                                      h.get("host", "?") + ":" + h.get("port", "?")))
+              hits.append("subprocess-egress:" + h.get("host", "?"))
+              found = True
+              break
+      return hits
+
+  def remember(fp, ev_ts, seen):
+      u = store_usage()
+      if u["free"] < 16384:
+          return
+      fresh = {}
+      for k in seen:
+          v = as_int(seen[k])
+          if ev_ts == 0 or (ev_ts - v) < DEDUP_NS:
+              fresh[k] = str(v)
+      if len(fresh) < 200:
+          fresh[fp] = str(ev_ts)
+      store_set("seen", fresh)
+      store_set("flood_reports", str(as_int(store_get("flood_reports")) + 1))
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      c = meta.get("content", "")
+      if len(c) > MAX_SCAN:
+          c = c[:MAX_SCAN]
+
+      a = analyse(c)
+      if a == None:
+          return "allow"                      # no qualifying dense run
+
+      directive = has_directive(c)
+      dense = (a["total"] >= DENSE_TOTAL and a["distinct"] >= DENSE_DISTINCT and
+               a["ratio"] >= DENSE_RATIO and not looks_like_reference(c))
+
+      ev_ts = as_int(meta.get("event_ts", "0"))
+
+      # suppress identical payload shapes seen recently (noise control)
+      fp = (meta.get("tool_name", "?") + "|" + a["form"] + "|" + str(len(c)) + "|" +
+            str(a["total"]) + "|" + str(a["qmax"]) + "|" + str(a["distinct"]))
+      seen = store_get("seen")
+      if type(seen) != "dict":
+          seen = {}
+      prev = seen.get(fp)
+      if prev != None and ev_ts > 0 and (ev_ts - as_int(prev)) < DEDUP_NS:
+          return "allow"
+
+      agent = find_agent()
+      if agent == None:
+          return "allow"                      # degraded attribution - no chain to show
+      aid = agent["id"]
+      anchor = find_anchor(aid)
+      if anchor == None:
+          return "allow"                      # ingest race - re-evaluated on next event
+
+      chain = new_chain(aid)
+      chain.append(step(anchor, stage_id="Emoji Flood",
+                   stage_desc="tool result carried " + str(a["qual"]) +
+                              " dense emoji run(s) [" + a["form"] + "], longest " +
+                              str(a["qmax"]) + " codepoints / " + str(a["qdist"]) +
+                              " distinct, " + str(a["total"]) + " emoji total (" +
+                              str(a["ratio"]) + "% of payload)"))
+
+      hits = corroborate(aid, chain, ev_ts)
+
+      if not directive and len(hits) == 0 and not dense:
+          return "allow"                      # flood alone, not dense, no capability - invisible
+
+      bits = ["longest run " + str(a["qmax"]) + "/" + str(a["qdist"]) + " distinct (" +
+              a["form"] + ")"]
+      if directive:
+          bits.append("injection directive text alongside flood")
+      if dense:
+          bits.append("payload " + str(a["ratio"]) + "% emoji")
+      for h in hits:
+          bits.append(h)
+
+      reason = ("Emoji-flood obfuscation in tool result via " +
+                meta.get("tool_name", "?") + " - " + ", ".join(bits))
+      print(reason)
+      remember(fp, ev_ts, seen)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
