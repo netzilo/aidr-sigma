@@ -1,0 +1,135 @@
+title: Cursor JSON Schema Download Exfiltration
+id: 7f3c9d21-5b48-4e6a-9c14-8d2e6b0a17f5
+status: experimental
+level: high
+description: |
+  Detects the outbound leg of the Cursor "json.schemaDownload.enable" abuse chain.
+
+  Cursor (and other VS Code derived editors) automatically issue an unattended HTTP GET
+  for the URL referenced by a "$schema" key as soon as a JSON file is created or edited.
+  An attacker who has already achieved prompt injection against the Cursor Agent can have
+  the agent write a JSON file whose $schema points at an attacker-controlled URL, and can
+  smuggle whatever the agent can read (env vars, keys, file contents) into that URL's
+  query string, path or hostname. No user confirmation is required and the request looks
+  like an ordinary editor schema fetch.
+
+  This rule fires on a single http_request event only when BOTH are true:
+    1. the request is a GET whose URL has the shape of a JSON-schema download
+       (a .json target, a "schema" path component, or an explicit $schema= parameter), AND
+    2. that same URL (or body) carries a bulk or credential-shaped payload -- a >=120 char
+       opaque parameter value, URL-encoded JSON ('%7B%22'), repeated encoded newlines,
+       a >=140 char base64 path segment, a >=40 char single DNS label (subdomain smuggling),
+       or literal credential material (AKIA..., sk-..., ghp_..., xox?-..., a JWT pair,
+       or a PEM PRIVATE KEY header).
+
+  A schema download is by definition an unauthenticated fetch of a static document; it has
+  no legitimate reason to carry a payload. The payload is the exfiltration.
+author: Selhan
+date: "2026-05-14"
+modified: "2026-05-14"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://attack.mitre.org/techniques/T1567/
+  - https://attack.mitre.org/techniques/T1041/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.t1041
+  - attack.t1071.001
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Gate: an unattended editor schema fetch is always a GET ──────────────────
+  sel_event:
+    event_type: http_request
+    method: GET
+
+  # ── Shape: the URL looks like a JSON-schema download ─────────────────────────
+  sel_schema_url:
+    url.full|re:
+      - '(?i)^https?://[^\s/]+/[^?#\s]*\.json(\?|#|$)'
+      - '(?i)^https?://[^\s/]+/[^?#\s]*schema[^?#\s]*(\?|#|$)'
+      - '(?i)[?&](\$schema|%24schema|schema|schema_url|schemaurl|schemauri)=[^&\s]{4,}'
+
+  # ── Payload carried inside the schema URL itself ─────────────────────────────
+  sel_payload_url:
+    url.full|re:
+      # bulk opaque value in a query parameter (base64 / hex / urlsafe blob)
+      - '[?&][A-Za-z0-9_.%\[\]-]{1,48}=[A-Za-z0-9%+/_=-]{120,}'
+      # bulk base64 blob smuggled as a path segment
+      - '(?i)/[A-Za-z0-9+/]{140,}={0,2}(\.json)?(\?|#|$)'
+      # data smuggled in an oversized single DNS label (subdomain channel)
+      - '(?i)^https?://[a-z0-9-]{40,63}\.[a-z0-9.-]+\.[a-z]{2,}/'
+      # URL-encoded JSON object as a parameter value: %7B%22 == {"
+      - '(?i)[?&][A-Za-z0-9_.%\[\]-]{1,48}=[^&#\s]{0,32}%7b%22'
+      # multi-line file content encoded into a parameter value
+      - '(?i)[?&][A-Za-z0-9_.%\[\]-]{1,48}=[^&#\s]*(%0a[^&#\s]*){3,}'
+      # literal credential material in the URL
+      - '\bAKIA[0-9A-Z]{16}\b'
+      - '\bsk-[A-Za-z0-9]{32,}'
+      - '\bgh[pousr]_[A-Za-z0-9]{36,}'
+      - '\bxox[baprs]-[A-Za-z0-9-]{10,}'
+      - '\beyJ[A-Za-z0-9_-]{16,}\.eyJ[A-Za-z0-9_-]{16,}'
+      - '(?i)(-----|%2d%2d%2d%2d%2d)BEGIN'
+
+  # ── Payload carried in the request body of the same event (belt and braces) ──
+  sel_payload_content:
+    content|re:
+      - '-----BEGIN\s+(RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----'
+      - '\bAKIA[0-9A-Z]{16}\b'
+      - '\bsk-[A-Za-z0-9]{32,}'
+      - '\bgh[pousr]_[A-Za-z0-9]{36,}'
+      - '\bxox[baprs]-[A-Za-z0-9-]{10,}'
+
+  # ── FP suppression: documentation / template / placeholder URLs ──────────────
+  filter_placeholder:
+    url.full|re:
+      - '(?i)(placeholder|changeme|redacted|lorem[-_]?ipsum)'
+      - '(?i)your[-_.]?(api[-_.]?)?(key|token|secret)'
+      - '(?i)insert[-_]?(your[-_]?)?(key|token|secret)'
+      - '(?i)(dummy|fake|sample)[-_]?(key|token|secret|data|payload)'
+      - '(?i)x{8,}'
+      - '(?i)(%3c|<)[a-z_]{2,24}(%3e|>)'
+
+  # ── FP suppression: object-storage presigned URLs (shape, not host) ──────────
+  # A SigV4 presigned URL to a .json object legitimately embeds an AKIA id in
+  # X-Amz-Credential and a long opaque signature. Both the fixed algorithm token
+  # and the 64-hex signature must be present, so this cannot be repurposed as a
+  # general data channel.
+  filter_presigned:
+    url.full|re:
+      - '(?i)[?&]x-amz-algorithm=aws4-hmac-sha256[^#]*[?&]x-amz-signature=[a-f0-9]{64}'
+      - '(?i)[?&]x-amz-signature=[a-f0-9]{64}[^#]*[?&]x-amz-algorithm=aws4-hmac-sha256'
+      - '(?i)[?&]x-goog-algorithm=goog4-rsa-sha256[^#]*[?&]x-goog-signature=[a-f0-9]{64,}'
+      - '(?i)[?&]googleaccessid=[^&#]{6,}[^#]*[?&]signature=[a-z0-9%+/=]{40,}'
+      - '(?i)[?&]sv=[0-9]{4}-[0-9]{2}-[0-9]{2}[^#]*[?&]sig=[a-z0-9%+/=]{40,}'
+      - '(?i)[?&]sig=[a-z0-9%+/=]{40,}[^#]*[?&]sv=[0-9]{4}-[0-9]{2}-[0-9]{2}'
+
+  condition: >
+    sel_event and sel_schema_url
+    and (sel_payload_url or sel_payload_content)
+    and not (filter_placeholder or filter_presigned)
+
+falsepositives:
+  - Agent fetching an authenticated JSON API endpoint that ends in .json and passes a JWT
+    or opaque session token in the query string (for example a Firebase realtime-database
+    read, or a legacy API using ?access_token=eyJ...). The URL still has to end in .json or
+    contain a "schema" path component for this to fire, so ordinary REST paths do not match.
+  - Presigned object-storage downloads of a .json artifact. The two most common forms
+    (AWS SigV4, GCS V4, GCS V2, Azure SAS) are explicitly suppressed by filter_presigned;
+    an unusual signing scheme with a >=120 character opaque parameter could still report.
+  - Schema or config downloads from a CDN that append a very long cache-busting or build
+    fingerprint parameter (>=120 characters). Typical fingerprints are 8-40 characters and
+    do not reach the threshold.
+  - Security research, CTF or detection-engineering traffic that deliberately places sample
+    credential strings in a URL. Obvious placeholder and template tokens are suppressed by
+    filter_placeholder.
+  - Very long single-label hostnames used by some ephemeral preview or tunnel providers can
+    match the subdomain-smuggling pattern when the fetched path is a .json file.
+
+action: report
