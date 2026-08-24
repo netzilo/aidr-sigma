@@ -1,0 +1,141 @@
+title: Agent File Transfer Path Traversal and IP-Notation Bypass
+id: 7b3f1c2e-9a4d-4f61-b8e2-5c0d7a1e9f34
+status: experimental
+level: high
+description: |
+  Single-event content detection for the browser-use 0.12.7 security-fix cluster
+  (file-upload path traversal, download filename sanitisation escape, IPv4
+  block-list bypass via non-standard address notation, and secrets surfacing in
+  transfer URLs).
+
+  Scope statement (answering triage dissent): the engine emits only the
+  file_upload and file_download semantic events for this framework. FILE_READ,
+  FILE_WRITE, PATH_TRAVERSAL_ATTEMPT, SENSITIVE_DATA_LEAK and IP_BLOCK_BYPASS
+  are not edge kinds, and network_request / proxy_connection are never emitted,
+  so the *resolved local destination* of a transfer is genuinely unobservable.
+  This rule therefore does not claim to prove that a file escaped the FileSystem
+  directory. It matches only what IS carried in the event payload -- the
+  key=value body whose `url=` and `host=` lines contain the attacker-controlled
+  transfer target verbatim. Traversal sequences, encoded traversal, null-byte
+  truncation, drive-letter/tilde escapes in filename parameters, decimal /
+  hexadecimal / octal / short-form / IPv4-mapped-IPv6 host notation, and
+  credential material in the request line are all *syntactically present* in
+  that payload before the framework normalises them. That is a real, tight,
+  single-event signal for the exact input shapes the 0.12.7 patches reject, and
+  it is why the action is `report`: it is evidence of a malformed/hostile
+  transfer target, not proof of successful containment escape.
+author: Haibo
+date: "2026-05-20"
+references:
+  - https://github.com/browser-use/browser-use/releases
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.defense-evasion
+  - attack.t1027
+  - atlas.aml.t0025
+  - owasp.llm02
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: the only two event types the engine actually emits for this framework.
+  scope_event:
+    event_type:
+      - file_upload
+      - file_download
+
+  # 1. Dot-dot traversal in the transfer URL, including mixed / over-long /
+  #    double-encoded forms and null-byte truncation. Every branch requires a
+  #    path separator (raw or encoded) immediately after the two dots, so
+  #    ordinary filenames and version ranges containing ".." do not match.
+  sel_traversal_sequence:
+    content|re:
+      - '(?mi)^url=[^\n]*(?:\.|%2e|%c0%ae|%e0%80%ae){2}(?:/|%2f|\\|%5c|%c0%af|%c1%9c)'
+      - '(?mi)^url=[^\n]*%252e%252e'
+      - '(?mi)^url=[^\n]*[/\\]\.\.(?:$|[?#&])'
+      - '(?mi)^url=[^\n]*%00'
+
+  # 2. Filename / destination parameter whose value STARTS with an escape
+  #    primitive. Anchored directly after "=" so that ordinary object keys
+  #    (path=/folder/file.pdf) and files named "report..2024.csv" are excluded,
+  #    and so that [a-z]:/ can only match a one-letter drive, never "https:/".
+  sel_filename_escape:
+    content|re:
+      - '(?mi)^url=[^\n]*[?&](?:file|filename|file_name|filepath|file_path|path|dest|destination|target|output|save_as|savepath|attachment|upload_path|download_path)=(?:%2e%2e|\.\.|~[/\\]|%7e[/\\]|[a-z]:[/\\]|%5c|\\)'
+
+  # 3. Host-filesystem credential path referenced as a PARAMETER VALUE or after
+  #    a traversal primitive (bounded look-back of 32 chars). Repository paths
+  #    such as .../dotfiles/etc/passwd have no adjacent "=" or ".." and are not
+  #    matched.
+  sel_sensitive_local_path:
+    content|re:
+      - '(?mi)^url=[^\n]*(?:\.\.|%2e%2e|=|file:/{2}|%3a%2f%2f)[^\n]{0,32}?/(?:etc/(?:passwd|shadow)|proc/self/environ|root/\.ssh|\.aws/credentials|\.ssh/id_(?:rsa|ed25519)|\.docker/config\.json|windows/win\.ini)(?:[^0-9a-z_-]|$)'
+
+  # 4. Non-standard IPv4 notation used as the transfer endpoint -- the exact
+  #    class of input the 0.12.7 IPv4 block-list fix addresses. Every pattern is
+  #    fully line-anchored, so a normal FQDN or dotted-quad never matches.
+  sel_ip_notation_bypass:
+    content|re:
+      - '(?m)^host=[0-9]{5,10}$'
+      - '(?mi)^host=0x[0-9a-f]{2,8}$'
+      - '(?m)^host=0[0-7]{0,3}(?:\.0?[0-7]{1,3}){1,3}$'
+      - '(?m)^host=[0-9]{1,3}\.[0-9]{1,8}$'
+      - '(?m)^host=[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,8}$'
+      - '(?mi)^host=\[?(?:::ffff:|0:0:0:0:0:ffff:)[0-9a-f:.]{3,}\]?$'
+      - '(?mi)^url=https?://(?:[^/@\n]{1,80}@)?(?:0x[0-9a-f]{2,8}|[0-9]{5,10})(?::[0-9]{1,5})?(?:[/?#]|$)'
+
+  # 5. Cloud instance-metadata endpoint as a file transfer target.
+  sel_metadata_endpoint:
+    content|re:
+      - '(?m)^host=(?:169\.254\.169\.254|100\.100\.100\.200|metadata\.google\.internal)$'
+
+  # 6. Credential material in the request line (redaction-bypass surface). Each
+  #    pattern requires the secret to appear AFTER the authority separator, and
+  #    the authority class excludes "@", so ordinary basic-auth URLs
+  #    (https://user:token@host/file) can never match these branches.
+  sel_secret_in_transfer_url:
+    content|re:
+      - '(?mi)^url=https?://[^/@\n]{1,253}[/?#][^\n]*\b(?:ghp|ghs|gho|ghu|ghr)_[0-9a-z]{30,}'
+      - '(?mi)^url=https?://[^/@\n]{1,253}[/?#][^\n]*\bgithub_pat_[0-9a-z]{20,}'
+      - '(?m)^url=https?://[^/@\n]{1,253}[/?#][^\n]*\bsk-(?:ant-api03-|proj-)?[A-Za-z0-9]{24,}'
+      - '(?mi)^url=https?://[^/@\n]{1,253}[/?#][^\n]*\bxox[baprse]-[0-9a-z]{6,}-[0-9a-z]{6,}'
+      - '(?mi)^url=[^\n]*[?&](?:password|passwd|client[_-]?secret|private[_-]?key)=[^&\n]{6,}'
+
+  # Suppression: an unsubstituted template token means the agent emitted a
+  #   rendering bug, not an attack payload.
+  filter_unrendered_template:
+    content|re:
+      - '(?m)^url=[^\n]*(?:\{[A-Za-z_][A-Za-z0-9_]{0,31}\}|%7B[A-Za-z_][A-Za-z0-9_]{0,31}%7D|\$\{[A-Za-z_][A-Za-z0-9_]{0,31}\}|<[A-Za-z_][A-Za-z0-9_]{0,31}>)'
+
+  # Suppression: non-network URI schemes carry no transfer target at all.
+  filter_non_network_uri:
+    content|re:
+      - '(?mi)^url=(?:data:|blob:|about:|chrome-extension:)'
+
+  condition: >
+    scope_event and 1 of sel_*
+    and not (filter_unrendered_template or filter_non_network_uri)
+
+falsepositives:
+  - Security research or dotfile repositories where the downloaded object key
+    itself is a query-parameter value naming a host path (e.g. an API call with
+    "?path=/etc/passwd" against a documentation or payload-list service). The
+    32-character adjacency bound reduces but does not eliminate this.
+  - CDN or scraped-page URLs that were never normalised by the HTTP client and
+    still contain a literal "../" segment from a relative href.
+  - Legitimate transfers to a bare IPv4 short form on an internal lab host
+    (e.g. host=10.5 style shorthand typed by an operator), which is
+    syntactically indistinguishable from block-list evasion.
+  - Upload APIs that accept a Windows-style backslash path from a Windows agent
+    ('?filename=\\subdir\\file.docx'), which is malformed but usually benign.
+  - An object legitimately named with a leading tilde-slash or a single-letter
+    drive prefix in a destination parameter.
+  - Query strings that carry a 'password=' or 'client_secret=' parameter as part
+    of a legacy provider authentication flow; this is still a credential-in-URL
+    hygiene finding and is reported deliberately.
+action: report
