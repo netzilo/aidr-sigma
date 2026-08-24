@@ -1,0 +1,325 @@
+title: MCP Agent Abuse - heylead Autonomous LinkedIn Outreach At Scale
+id: 7b3f1c02-9d64-4a17-b0e5-2c8f4d61ae93
+status: experimental
+level: medium
+description: |
+  Instance-resolved detection for the heylead MCP-native LinkedIn SDR agent.
+
+  The published attack narrative (dependency compromise -> LinkedIn credential theft ->
+  authenticated social engineering at scale) is NOT fully observable in this telemetry
+  model: there is no ACQUIRED_CREDENTIAL or AUTHENTICATED_SESSION edge and no
+  'authentication' event type. This rule therefore refuses to assert credential theft.
+  It asserts only what the engine can actually prove:
+
+    REQUIRED anchor  a process whose executable path or command line identifies the
+                     heylead SDR agent is running inside THIS process session
+                     (resolved via caller_pid -> proc_instance -> proc_lineage, plus
+                     children spawned by session instances).
+    Stage 2          instances belonging to that same session issued >= 10 LinkedIn
+                     messaging / invitation WRITE actions (POST/PUT/PATCH to voyager
+                     messaging, invitation, or /v2|/rest message endpoints) inside a
+                     15-minute window that begins no earlier than the agent launch.
+    Stage 3 (opt.)   the same session touched >= 4 distinct hosts during that burst -
+                     an off-platform sink worth reviewing, reported as context only.
+
+  Verdict is report. This is an auditable-autonomy signal for a tool whose normal
+  function is bulk outreach, not a compromise assertion - blocking it would be a
+  claim the telemetry cannot support.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1566/003/
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+tags:
+  - attack.initial-access
+  - attack.t1566.003
+  - atlas.aml.t0048
+  - owasp.llm06
+falsepositives:
+  - A sales team deliberately running heylead for its intended purpose. Bulk outreach IS
+    the product; this rule reports the autonomy event so it is auditable, and a 30-minute
+    per-session cooldown keeps one campaign to one alert rather than one per message.
+  - Integration tests or demo runs that replay 10+ LinkedIn message/invite API calls
+    against a sandbox account inside 15 minutes.
+  - A human operator clicking through many connection requests in a browser that happens
+    to have been launched as a child of the heylead process - the session expansion will
+    attribute those requests to the agent session.
+  - Session over-attribution when the lineage root is a long-lived shell that also spawned
+    unrelated children. Mitigated by instance-exact (pid,start) scoping, the 6-hour session
+    reconstruction bound, the 15-minute burst window, and the required heylead anchor.
+  - Degraded lineage (an unmonitored ancestor) shortens the chain; the rule still reports
+    but stamps the attribution quality in the reason string.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_linkedin_http:
+    event_type: http_request
+    host|contains: linkedin
+  sel_heylead_exec:
+    event_type: execute_process
+    content|re: '(?i)\bhey[-_]?lead\b'
+  condition: sel_linkedin_http or sel_heylead_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- tunables (this rule's own window - never baked into storage) -----------
+  WINDOW_NS   = 900000000000        # 15 min - outreach burst clustering window
+  SESSION_NS  = 21600000000000      # 6 h    - how far back we reconstruct a session
+  COOLDOWN_NS = 1800000000000       # 30 min - one report per session per campaign
+  MIN_WRITES  = 10                  # LinkedIn write-actions inside WINDOW_NS
+  FANOUT_MIN  = 4                   # distinct hosts -> context stage only
+  MAX_PIDS    = 40                  # bound on session expansion
+  DUP_NS      = 2000000000          # 2 s - trigger already in the log?
+
+  # Target set (narrows detection to the SDR surface). NOT a trust list: nothing
+  # here permits traffic, and no host is exempted from any other rule.
+  LINKEDIN_DOMAINS = ["linkedin.com", "licdn.com"]
+
+  WRITE_PATH_RE = [
+      r"(?i)/voyager/api/[^?]*messag",
+      r"(?i)/voyager/api/[^?]*invitation",
+      r"(?i)/voyager/api/[^?]*connect",
+      r"(?i)/growth/norminvitations",
+      r"(?i)/(v2|rest)/(messages|messaging|conversations|invitation|invitations)",
+      r"(?i)/messaging/(conversations|threads|messages)",
+  ]
+  WRITE_METHODS = ["POST", "PUT", "PATCH", ""]
+
+  # ---- pure helpers (no graph / log / fts calls) -------------------------------
+  def first_nonempty(a, b):
+      if a != "":
+          return a
+      return b
+
+  def is_heylead(s):
+      if s == "":
+          return False
+      return re.find(r"(?i)\bhey[-_]?lead\b", s) != None
+
+  def is_linkedin(h):
+      if h == "":
+          return False
+      for d in LINKEDIN_DOMAINS:
+          if h == d or h.endswith("." + d):
+              return True
+      return False
+
+  def is_write_path(p):
+      if p == "":
+          return False
+      for pat in WRITE_PATH_RE:
+          if re.find(pat, p) != None:
+              return True
+      return False
+
+  def is_write_method(m):
+      for w in WRITE_METHODS:
+          if m == w:
+              return True
+      return False
+
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          if not is_linkedin(meta.get("host", "").lower()):
+              return False
+          if not is_write_path(meta.get("path", "")):
+              return False
+          return is_write_method(meta.get("method", "").upper())
+      if ct == "execute_process":
+          return is_heylead(meta.get("content", ""))
+      return False
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "process://" + e.get("actor_path", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       tgt,
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def run():
+      # 1. relevance gate - pure string checks on meta, no traversal
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if now == 0 or cp == 0:
+          return "allow"
+
+      # 2. anchor on the exact triggering instance
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                     # degraded - re-fires when the row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # 3. scope strictly to this session: lineage + descendants of session pids
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=now - SESSION_NS, limit=5000)
+      for i in range(2):
+          for e in execs:
+              if len(session) >= MAX_PIDS:
+                  break
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and pp in session and ap not in session:
+                  session[ap] = e.get("actor_start", "0")
+
+      # 4. REQUIRED high-specificity anchor: heylead itself, inside this session
+      anchor = None
+      for x in lineage:
+          if is_heylead(x.get("actor_path", "")) or is_heylead(x.get("cmdline", "")):
+              anchor = x
+              break
+      if anchor == None:
+          for e in execs:
+              if e.get("actor_pid", "") not in session:
+                  continue
+              if is_heylead(e.get("actor_path", "")) or is_heylead(e.get("cmdline", "")):
+                  if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
+                      anchor = e
+      if anchor == None:
+          return "allow"                     # no SDR agent in this session - say nothing
+
+      s0 = int(anchor.get("ts", "0"))
+      if s0 == 0:
+          s0 = int(anchor.get("actor_start", "0"))
+
+      # 5. ordered + windowed: outreach must follow the launch and cluster near now
+      since = now - WINDOW_NS
+      if s0 > since:
+          since = s0
+
+      writes = []
+      hosts  = {}
+      newest = None
+      for pid in session:
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              actor_start=int(session[pid]), since_ns=since,
+                              until_ns=now, limit=500)
+          for e in rows:
+              h = e.get("host", "").lower()
+              if h != "":
+                  hosts[h] = True
+              if newest == None or int(e.get("ts", "0")) > int(newest.get("ts", "0")):
+                  newest = e
+              if not is_linkedin(h):
+                  continue
+              if not is_write_path(e.get("path", "")):
+                  continue
+              if is_write_method(e.get("method", "").upper()):
+                  writes.append(e)
+
+      # 6. the TRIGGER stage comes from meta, never from a log re-lookup
+      ct    = meta.get("context_type", "")
+      total = len(writes)
+      if ct == "http_request":
+          th = meta.get("host", "").lower()
+          tp = meta.get("path", "")
+          hosts[th] = True
+          dup = False
+          for e in writes:
+              if e.get("path", "") == tp and (now - int(e.get("ts", "0"))) < DUP_NS:
+                  dup = True
+          if not dup:
+              total = total + 1
+
+      if total < MIN_WRITES:
+          return "allow"
+
+      # 7. per-session cooldown so one campaign is one alert
+      root = lineage[-1]
+      skey = "rep:" + root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+      last = store_get(skey)
+      if last != None and (now - int(last)) < COOLDOWN_NS:
+          return "allow"
+
+      # 8. kill chain, built from instance-resolved event rows
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin_str = " -> ".join(names)
+      quality = "instance-resolved"
+      if len(lineage) < 2:
+          quality = "degraded (lineage truncated)"
+
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain.append(step(ev_edge(anchor), stage_id="SDR Agent Launch",
+                        stage_desc="heylead MCP SDR agent in this session: " +
+                                   first_nonempty(anchor.get("cmdline", ""),
+                                                  anchor.get("actor_path", "?"))))
+
+      oldest = None
+      for e in writes:
+          if oldest == None or int(e.get("ts", "0")) < int(oldest.get("ts", "0")):
+              oldest = e
+      if oldest != None:
+          chain.append(step(ev_edge(oldest), stage_id="Automated Outreach",
+                            stage_desc="first LinkedIn write-action in burst: " +
+                                       oldest.get("method", "?") + " " +
+                                       oldest.get("host", "?") + oldest.get("path", "")))
+
+      mins = (now - since) // 60000000000
+      if ct == "http_request":
+          tedge = {
+              "from":     "process://" + inst.get("actor_path", ""),
+              "to":       "https://" + meta.get("host", ""),
+              "kind":     "HTTP_REQUEST",
+              "method":   meta.get("method", ""),
+              "ts":       str(now),
+              "first_ts": str(now),
+              "last_ts":  str(now),
+          }
+          tdesc = (str(total) + " LinkedIn messaging/invitation write-actions in " +
+                   str(mins) + " min; latest " + meta.get("method", "?") + " " +
+                   meta.get("host", "?") + meta.get("path", ""))
+      else:
+          tedge = {
+              "from":     "process://" + inst.get("actor_path", ""),
+              "to":       "process://" + inst.get("actor_path", ""),
+              "kind":     "EXECUTE_PROCESS",
+              "cmdline":  meta.get("content", ""),
+              "ts":       str(now),
+              "first_ts": str(now),
+              "last_ts":  str(now),
+          }
+          tdesc = ("heylead re-invoked while " + str(total) +
+                   " LinkedIn write-actions were already outstanding in " + str(mins) + " min")
+      chain.append(step(tedge, stage_id="Outreach At Scale", stage_desc=tdesc))
+
+      if len(hosts) >= FANOUT_MIN and newest != None:
+          chain.append(step(ev_edge(newest), stage_id="Egress Fan-Out",
+                            stage_desc="session touched " + str(len(hosts)) +
+                                       " distinct hosts during the burst - review for " +
+                                       "off-platform sinks (context only, not proof)"))
+
+      # 9. persist the cooldown marker
+      if len(store_keys()) > 200:
+          store_reset()
+      if store_usage()["free"] > 4096:
+          store_set(skey, str(now))
+
+      reason = ("heylead SDR agent drove " + str(total) +
+                " LinkedIn messaging/invitation write-actions in " + str(mins) +
+                " min from one session (" + lin_str + "); " + str(len(hosts)) +
+                " distinct hosts touched; attribution " + quality +
+                ". Autonomous outreach at scale - no credential-theft claim is made " +
+                "(no auth telemetry exists).")
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
