@@ -1,0 +1,384 @@
+title: Khoj Automation Stored XSS Payload Submission
+id: 3f1c8a7e-6b24-4d9a-9c05-2e7d41b8af63
+status: experimental
+level: medium
+description: |
+  Detects an agent-driven HTTP request that writes executable markup into the Khoj
+  Automation task-instruction sink (the `q` parameter of /api/automation, unsanitised
+  before 1.15.0). The rule is instance-resolved: it anchors on meta.caller_pid, resolves
+  the exact process instance with proc_instance(), walks proc_lineage() to the session
+  root, expands the session with EXECUTE_PROCESS descendants, and correlates prior
+  HTTP_REQUEST rows from the event log scoped to that one session only.
+
+  HONEST SCOPE (answers the triage dissent): our telemetry stops at the write. The
+  engine has no render_content / execute_script event type and no STORED_XSS or
+  SCRIPT_INJECTION edge kind, so the victim-side render, the script execution and any
+  resulting session-token theft are NOT observable here. This rule therefore proves
+  "a payload with executable markup was submitted into the vulnerable sink by this
+  process instance", never "the XSS fired". That unobservable success state is exactly
+  why the action is `report` and the level is `medium` rather than a block: escalation
+  requires browser-side or Khoj application telemetry we do not have.
+
+  Corroboration that IS available and is used: (1) prior same-host session traffic,
+  proving the submitting instance is genuinely interacting with the Khoj deployment
+  and not merely echoing a payload string; (2) whether any external host embedded in
+  the payload (a beacon/exfil target inside fetch()/new Image().src/src=) has already
+  been contacted by the same session — a strong, allowlist-free signal.
+
+  Taxonomy note: no ATLAS technique describes a browser-rendered stored XSS in an AI
+  application's own web UI, so no atlas. tag is asserted rather than forcing a wrong
+  identifier. The supplied web mappings (A03:2021 Injection, A07:2021 XSS) have no
+  valid `owasp.` prefix form in this schema and are recorded as CWE-79 plus the
+  closest genuine LLM-Top-10 identifier for an unescaped-render sink.
+author: Evgen
+date: "2026-06-14"
+references:
+  - https://cwe.mitre.org/data/definitions/79.html
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://owasp.org/www-community/attacks/xss/
+  - https://github.com/khoj-ai/khoj
+tags:
+  - attack.execution
+  - attack.t1059.007
+  - cwe.cwe-79
+  - owasp.llm05
+falsepositives:
+  - Security engineers or AppSec CI validating the 1.15.0 fix by firing canonical XSS
+    payloads (<script>alert(1)</script>, <svg/onload=...>) at /api/automation. These are
+    genuine matches; the rule reports rather than blocks precisely so that this work is
+    never interrupted, and the kill chain names the submitting process lineage so a
+    scanner/pentest host is obvious at triage.
+  - Automated web scanners (Burp, ZAP, nuclei) reachable through the agent proxy that
+    spray payloads across every parameter of every endpoint.
+  - Legitimate automation tasks about front-end work — "review this snippet", "explain
+    what <img onerror=...> does", "summarise the CSP report for this inline script" —
+    where the user genuinely pastes markup into the task instruction field.
+  - Developer documentation, XSS cheat-sheets or security training content copied into a
+    Khoj automation for summarisation.
+  - The Khoj UI re-submitting or PUT-updating an automation record that already contains
+    the same markup, which would otherwise alert once per edit (suppressed by the
+    one-hour per-payload dedupe in the rule store).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ────────────────────────────────────────────────────────────────────────────
+  # Khoj Automation stored-XSS submission — instance-resolved, single-session.
+  # Trigger data comes from meta (never re-queried: the just-fired event races
+  # async ingest). The event log is used only for PRIOR stages and lineage.
+  # ────────────────────────────────────────────────────────────────────────────
+  WINDOW_NS        = 600000000000    # 10 min — session correlation window
+  DEDUPE_NS        = 3600000000000   # 1 h  — suppress identical re-submissions
+  MAX_SESSION_PIDS = 40
+  MAX_SEEN         = 400
+
+  # The vulnerable sink. Narrow by design: this rule is about one endpoint.
+  AUTOMATION_SINKS = ["/api/automation", "/api/automations", "/automation"]
+
+  # REQUIRED anchor — every pattern implies script execution in a rendered page.
+  # A bare "<b>" or an escaped "&lt;" alone is deliberately NOT enough.
+  TAG_ANCHORS = [
+      r"(?i)<\s*script[\s>/]",
+      r"(?i)<\s*/\s*script\s*>",
+      r"(?i)<\s*(img|svg|iframe|body|video|audio|object|embed|details|marquee|form|input|a|div|span|style|link|math|table|td|select|textarea)[^>]{0,300}[\s/'\"]on[a-z]{2,15}\s*=",
+      r"(?i)\bsrcdoc\s*=\s*['\"]",
+      r"(?i)(href|src|action|formaction|data|xlink:href)\s*=\s*['\"]?\s*javascript\s*:",
+      r"(?i)<\s*style[^>]{0,100}>[^<]{0,300}expression\s*\(",
+      r"(?i)&lt;\s*/?\s*script",
+      r"(?i)&#0*60;\s*script",
+      r"(?i)&#x0*3c;\s*script",
+  ]
+
+  # Corroborators — raise confidence, never sufficient on their own.
+  JS_SIGNALS = [
+      r"(?i)document\s*\.\s*cookie",
+      r"(?i)localStorage\s*\.\s*(get|set)Item",
+      r"(?i)sessionStorage\s*\.",
+      r"(?i)\bfetch\s*\(",
+      r"(?i)XMLHttpRequest",
+      r"(?i)navigator\s*\.\s*sendBeacon",
+      r"(?i)\batob\s*\(",
+      r"(?i)\beval\s*\(",
+      r"(?i)new\s+Image\s*\(",
+      r"(?i)window\s*\.\s*location",
+      r"(?i)document\s*\.\s*write",
+  ]
+
+  PCT = [["%3c", "<"], ["%3C", "<"], ["%3e", ">"], ["%3E", ">"],
+         ["%22", "\""], ["%27", "'"], ["%20", " "], ["%2f", "/"], ["%2F", "/"],
+         ["%3d", "="], ["%3D", "="], ["%28", "("], ["%29", ")"],
+         ["%3b", ";"], ["%3B", ";"], ["%2b", "+"], ["%2B", "+"],
+         ["%0a", "\n"], ["%0A", "\n"], ["%09", " "]]
+
+  ENT = [["&lt;", "<"], ["&LT;", "<"], ["&#60;", "<"], ["&#x3c;", "<"], ["&#x3C;", "<"],
+         ["&gt;", ">"], ["&#62;", ">"], ["&quot;", "\""], ["&#39;", "'"],
+         ["&apos;", "'"], ["&#40;", "("], ["&#41;", ")"], ["&#61;", "="]]
+
+  ESC = [["\\u003c", "<"], ["\\u003C", "<"], ["\\u003e", ">"], ["\\u003E", ">"],
+         ["\\u0022", "\""], ["\\u0027", "'"], ["\\/", "/"]]
+
+  def normalize(s):
+      out = s
+      for i in range(2):            # two passes → survives double encoding
+          out = out.replace("%25", "%")
+          for p in PCT:
+              out = out.replace(p[0], p[1])
+          for p in ENT:
+              out = out.replace(p[0], p[1])
+          for p in ESC:
+              out = out.replace(p[0], p[1])
+      return out
+
+  def first_hit(pats, s):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return None
+
+  def count_hits(pats, s):
+      n = 0
+      for p in pats:
+          if re.find(p, s) != None:
+              n = n + 1
+      return n
+
+  def one_line(s, n):
+      t = re.replace(r"[\r\n\t]+", s, " ")
+      if len(t) > n:
+          t = t[:n] + "..."
+      return t
+
+  def sink_hit(u):
+      low = u.lower()
+      for a in AUTOMATION_SINKS:
+          if a in low:
+              return True
+      return False
+
+  def q_from_url(u):
+      m = re.find(r"[?&]q=[^&#]{1,4000}", u)
+      if m == None:
+          return ""
+      return m[3:]
+
+  def q_from_body(b):
+      m = re.find(r'"q"\s*:\s*"[^"]{0,4000}"', b)
+      if m == None:
+          return ""
+      i = m.find(":")
+      if i < 0:
+          return ""
+      v = m[i + 1:].strip()
+      if len(v) < 2:
+          return ""
+      return v[1:len(v) - 1]
+
+  def payload_hosts(s):
+      out = []
+      for m in re.find_all(r"(?i)https?://[a-z0-9._~-]{3,253}", s, 20):
+          parts = m.split("//")
+          if len(parts) < 2:
+              continue
+          h = parts[1].lower()
+          if h != "" and h not in out:
+              out.append(h)
+      return out
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── relevance gate: pure string checks on meta, no graph / log calls ────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      return sink_hit(meta.get("path", "") + " " + meta.get("url", ""))
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      url    = meta.get("url", "")
+      host   = meta.get("host", "")
+      path   = meta.get("path", "")
+      method = meta.get("method", "")
+      body   = meta.get("content", "")
+      ets    = int(meta.get("event_ts", "0"))
+
+      # candidate payload — prefer the q sink, fall back to the request body
+      sink = ""
+      raw  = ""
+      uq   = q_from_url(url)
+      if uq != "":
+          raw  = raw + uq + "\n"
+          sink = "url q parameter"
+      bq = q_from_body(body)
+      if bq != "":
+          raw = raw + bq + "\n"
+          if sink == "":
+              sink = "body q field"
+          else:
+              sink = sink + " + body q field"
+      if raw == "":
+          raw  = body[:8000]
+          sink = "request body"
+      if raw == "":
+          return "allow"
+
+      norm = normalize(raw)
+
+      # REQUIRED high-specificity anchor: executable markup, not merely HTML.
+      anchor = first_hit(TAG_ANCHORS, raw)
+      if anchor == None:
+          anchor = first_hit(TAG_ANCHORS, norm)
+      if anchor == None:
+          return "allow"
+
+      js = count_hits(JS_SIGNALS, norm)
+
+      # ── dedupe identical submissions (UI re-saves, retry loops) ────────────
+      fp   = host + "|" + path + "|" + one_line(norm[:160], 160)
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          if ets - int(seen[k]) < DEDUPE_NS:
+              fresh[k] = seen[k]
+      if fp in fresh:
+          return "allow"
+
+      # ── instance-resolved attribution ─────────────────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          print("khoj-xss: payload seen but no caller_pid — attribution degraded")
+          return {
+              "action": "report",
+              "reason": "Executable markup written to Khoj automation sink " +
+                        host + path + " (" + sink + ") — attribution degraded, no caller_pid",
+          }
+
+      inst = proc_instance(cp, ets)
+      if inst == None:
+          print("khoj-xss: payload seen, proc_instance unresolved for pid " + str(cp))
+          return {
+              "action": "report",
+              "reason": "Executable markup written to Khoj automation sink " +
+                        host + path + " (" + sink + ") by pid " + str(cp) +
+                        " — attribution degraded, process instance not yet in event log",
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # session = lineage + descendants spawned inside the window. One session only.
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS,
+                          until_ns=ets, limit=5000)
+      for i in range(3):
+          for e in rows:
+              if len(session) >= MAX_SESSION_PIDS:
+                  break
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap != "" and ap not in session:
+                  session[ap] = e.get("actor_start", "0")
+
+      # ── prior stage 1: same-host session traffic (proves real interaction) ─
+      prior = None
+      for pid in session:
+          if prior != None:
+              break
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                actor_start=int(session[pid]),
+                                since_ns=ets - WINDOW_NS, until_ns=ets, limit=50):
+              if e.get("host", "") == host:
+                  prior = e
+                  break
+
+      # ── prior stage 2: beacon host embedded in the payload already contacted ─
+      hosts  = payload_hosts(norm)
+      beacon = None
+      if hosts:
+          for pid in session:
+              if beacon != None:
+                  break
+              for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                    actor_start=int(session[pid]),
+                                    since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
+                  if e.get("host", "").lower() in hosts:
+                      beacon = e
+                      break
+
+      # ── kill chain, rooted at the session owner ───────────────────────────
+      root  = lineage[len(lineage) - 1].get("actor_path", inst.get("actor_path", ""))
+      chain = new_chain("process://" + root)
+
+      if prior != None:
+          chain.append(step(ev_edge(prior), stage_id="Session Context",
+                            stage_desc="same session already reached Khoj host " + host +
+                                       " (" + prior.get("method", "?") + " " +
+                                       prior.get("path", "?") + ")"))
+
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "method":   method,
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+      }
+      chain.append(step(trig, stage_id="Stored XSS Write",
+                        stage_desc="executable markup submitted to automation sink " +
+                                   method + " " + path + " (" + sink + "): " +
+                                   one_line(anchor, 120)))
+
+      if beacon != None:
+          chain.append(step(ev_edge(beacon), stage_id="Payload Host Pre-Contacted",
+                            stage_desc="external host embedded in the payload (" +
+                                       beacon.get("host", "?") +
+                                       ") was already contacted by this session"))
+
+      names = []
+      for x in lineage:
+          parts = x.get("actor_path", "").split("/")
+          names.append(parts[len(parts) - 1])
+      lin = " -> ".join(names)
+
+      reason = ("Stored-XSS payload written to Khoj automation sink " + host + path +
+                " (" + sink + ") by " + lin +
+                " [pid " + str(cp) + "]; anchor=" + one_line(anchor, 100) +
+                "; js_signals=" + str(js))
+      if prior != None:
+          reason = reason + "; prior same-host session traffic"
+      if beacon != None:
+          reason = reason + "; payload host " + beacon.get("host", "?") + " already contacted"
+      reason = reason + " — render/execution NOT observable in this telemetry"
+
+      print("khoj-xss: " + reason)
+
+      if len(fresh) < MAX_SEEN and store_usage()["free"] > 8192:
+          fresh[fp] = ets
+          store_set("seen", fresh)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
