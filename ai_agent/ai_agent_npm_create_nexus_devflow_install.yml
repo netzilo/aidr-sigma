@@ -1,0 +1,112 @@
+title: NPM Supply Chain - create-nexus-devflow Installer Invocation
+id: 7c1f4e28-3a6d-4b91-9c02-5f8ad3e71b64
+status: experimental
+level: medium
+description: |
+  Reports when a monitored agent (or a process it spawned) executes a package-manager
+  command that installs, creates from, or directly executes the NPM package
+  @jakkrichm/create-nexus-devflow (or its unscoped `create-nexus-devflow` initializer
+  form, e.g. `npx create-nexus-devflow`, `npm create @jakkrichm/nexus-devflow`).
+
+  The package advertises itself as an installer for a "Nexus-DevFlow" agentic workflow
+  layer. NPM initializer packages run arbitrary code at install/exec time (postinstall
+  hooks and the initializer entrypoint itself) with the developer's full privileges,
+  and are a standard vector for injecting backdoors into an agent's tooling.
+
+  SCOPE / HONESTY NOTE (answers triage dissent): there is no verified payload, hash or
+  network IOC for this package. This rule therefore does NOT claim compromise - it is a
+  name-based, single-event observation of an install/exec attempt, and is deliberately
+  `action: report` at `level: medium`. It also does not attempt to reconstruct the
+  install -> backdoor -> file-modification chain: the engine has no INSTALLED_PACKAGE,
+  EXECUTED_CODE or MODIFIED_FILE edge kind, no `package_install` event type, and
+  `file_write` has no live producer. `execute_process` is the only live telemetry that
+  carries the package name, so the rule matches the command line and nothing else.
+
+  Distinct from generic typosquat rules: those score name *shape* against popular
+  packages. This rule pins one exact scoped identifier and one exact initializer name,
+  so it produces an attributable, greppable hit for this specific supply-chain report
+  rather than a heuristic similarity score.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://www.npmjs.com/package/@jakkrichm/create-nexus-devflow
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1195/001/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.001
+  - attack.execution
+  - attack.t1059.007
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Event scope: the only live producer that carries a package name ──────────
+  sel_event:
+    event_type: execute_process
+
+  # ── Branch 1: the exact scoped package identifier, with optional version spec ─
+  sel_scoped_content:
+    content|re: '(?i)@jakkrichm[/\\]create-nexus-devflow(?:@[\w.*+~^-]{1,40})?'
+  sel_scoped_command:
+    command|re: '(?i)@jakkrichm[/\\]create-nexus-devflow(?:@[\w.*+~^-]{1,40})?'
+
+  # ── Branch 2: `npm|pnpm|yarn|bun create|init @jakkrichm/nexus-devflow`
+  #    (the shorthand form that npm expands to @jakkrichm/create-nexus-devflow) ──
+  sel_shorthand_content:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:create|init)\s+(?:-{1,2}[\w=./-]+\s+)*@jakkrichm[/\\]nexus-devflow(?:[^\w-]|$)'
+  sel_shorthand_command:
+    command|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:create|init)\s+(?:-{1,2}[\w=./-]+\s+)*@jakkrichm[/\\]nexus-devflow(?:[^\w-]|$)'
+
+  # ── Branch 3: bare initializer name, ONLY when paired with an install/exec verb
+  #    (the unscoped name alone is far too weak to report on its own) ────────────
+  sel_bare_content:
+    content|re: '(?i)(?:^|[\s"\[,(=:])create-nexus-devflow(?:@[\w.*+~^-]{1,40})?(?:[^\w-]|$)'
+  sel_bare_command:
+    command|re: '(?i)(?:^|[\s"\[,(=:])create-nexus-devflow(?:@[\w.*+~^-]{1,40})?(?:[^\w-]|$)'
+  sel_verb_content:
+    content|re: '(?i)(?:\b(?:npx|pnpx|bunx)\b|\b(?:npm|pnpm|yarn|bun)\s+(?:i|in|ins|install|add|create|init|exec|dlx)\b)'
+  sel_verb_command:
+    command|re: '(?i)(?:\b(?:npx|pnpx|bunx)\b|\b(?:npm|pnpm|yarn|bun)\s+(?:i|in|ins|install|add|create|init|exec|dlx)\b)'
+
+  # ── Suppression: analyst inspection, IR grepping, removal, SCA scanning ───────
+  # These are verb/tool based only - no host, domain or path is trusted here.
+  filter_inspect_tool:
+    content|re: '(?i)(?:^|[\s"\[,(])(?:sudo\s+)?(?:/[\w./-]+/)?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|find|fd|jq|sed|awk|cat|less|more|head|tail|strings|file|code|vim|nvim|nano|emacs|osv-scanner|snyk|trivy|grype|syft|semgrep|npq)\b'
+  filter_pkg_inspect:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:-{1,2}[\w=./-]+\s+)*(?:view|info|show|search|why|ls|list|outdated|audit|deprecate|unpublish|uninstall|remove|rm|un|unlink|pack|dist-tag|explain)\b'
+
+  condition: >
+    sel_event and
+    (sel_scoped_content or sel_scoped_command or
+     sel_shorthand_content or sel_shorthand_command or
+     ((sel_bare_content or sel_bare_command) and
+      (sel_verb_content or sel_verb_command)))
+    and not (filter_inspect_tool or filter_pkg_inspect)
+
+action: report
+
+falsepositives:
+  - Security analyst or SOC triage inspecting the package metadata before a verdict
+    exists - `npm view|info|show|audit @jakkrichm/create-nexus-devflow`. Suppressed by
+    filter_pkg_inspect.
+  - Incident response grepping a source tree, lockfile or CI log for the package name
+    (`grep -r create-nexus-devflow .`, `rg`, `jq` over package-lock.json). Suppressed by
+    filter_inspect_tool.
+  - Remediation - `npm uninstall`, `pnpm remove`, `yarn remove` of an already-installed
+    copy. Suppressed by filter_pkg_inspect; removal must not be reported as an install.
+  - Detection engineering - editing or linting this very rule file with an editor or
+    with rulelint. Suppressed by filter_inspect_tool (editor/tool token present).
+  - A different, unrelated package whose unscoped initializer name ends in
+    `create-nexus-devflow` under another scope. Branch 3 requires an install/exec verb
+    in the same command line, but this can still fire - one reason the rule is
+    report-only.
+  - A team that has independently reviewed the package and chosen to adopt it. The rule
+    is deliberately non-blocking so an approved CI install is annotated, never broken.
+  - No payload, hash or C2 indicator has been verified for this package. A hit means
+    "this named package was installed or executed here", not "this host is compromised";
+    triage the postinstall process tree and outbound connections before escalating.
