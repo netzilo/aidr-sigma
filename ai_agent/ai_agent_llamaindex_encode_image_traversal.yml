@@ -1,0 +1,346 @@
+title: LlamaIndex encode_image Path Traversal
+id: b7f3c1d2-9a4e-4c68-8f2b-1d6e5a0c7b93
+status: experimental
+level: high
+description: |
+  Detects exploitation of the path-traversal flaw in llama_index 0.12.27-0.12.40
+  (encode_image in core/multi_modal_llms/generic_utils.py), where an unsanitised
+  image_path parameter lets an attacker make the agent process read arbitrary
+  files on the host.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"] of the event
+  that carries the traversal payload, resolves the exact process instance with
+  proc_instance(), walks proc_lineage() to the owning session, then queries the
+  instance-scoped event log (query_events kind=READ_FILE) for a corroborating
+  arbitrary-file read performed by that same session inside a 5-minute window.
+  Attribution never crosses sessions: only the caller's lineage and processes
+  spawned by that lineage are queried.
+
+  Anchor stage (required): an image-bearing parameter whose value contains a
+  traversal sequence (../ , ..\ , %2e%2e%2f) or an absolute path into a
+  sensitive location. A benign relative image path is not sufficient.
+  Corroboration stage: a READ_FILE by a session instance of a sensitive file,
+  or of exactly the non-image file named by the payload.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://github.com/run-llama/llama_index
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.discovery
+  - attack.t1083
+  - cwe.22
+  - owasp.a01-2021
+  - owasp.a03-2021
+falsepositives:
+  - Multimodal pipelines that legitimately pass relative image paths such as
+    "../assets/diagram.png". Not reported - a relative path with no sensitive
+    token and no corroborating sensitive read never reaches a verdict.
+  - Security regression tests or CVE reproduction fixtures that deliberately
+    send image_path=../../../etc/passwd through a tool call. These will be
+    reported as an attempt; scope them out by session/agent at triage.
+  - A human asking the model how to fix this CVE in free prose. Mitigated - the
+    attempt-only verdict is restricted to structured tool-parameter contexts
+    (tool_input/tool_output/llm_tool_call/llm_tool_result); prose contexts must
+    also show a corroborating arbitrary-file read.
+  - Tool and gateway description text that documents the vulnerable parameter.
+    Mitigated - description contexts are excluded by the relevance gate.
+  - An unrelated process in the same lineage reading /etc/hosts while an image
+    is being encoded. Mitigated - the read must fall inside the 5-minute window
+    that ends at the payload event and the payload anchor is required first.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_request
+      - llm_tool_call
+      - llm_tool_result
+  sel_image_param:
+    content|re:
+      - '(?i)(image|img)[_\- ]?(path|file|url|src|name|loc|documents?)'
+      - '(?i)encode_image'
+  sel_traversal:
+    content|re:
+      - '\.\.[\\/]'
+      - '(?i)%2e%2e(%2f|%5c)'
+      - '(?i)/(etc|proc|root)/'
+      - '(?i)/private/etc/'
+      - '(?i)\.(ssh|aws|kube|gnupg)/'
+      - '(?i)/\.env'
+  condition: sel_event and sel_image_param and sel_traversal
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── llama_index encode_image() path traversal ───────────────────────────
+  # Anchor  : traversal payload in an image parameter (this event, from meta)
+  # Confirm : READ_FILE by the SAME process instance / session (event log)
+  # Verdict : report only - never blocks a multimodal pipeline.
+
+  WINDOW_NS = 300000000000        # 5 minutes
+  SLACK_NS  = 2000000000          # 2s clock slack on the upper bound
+  MAX_PIDS  = 10
+  MAX_BLOB  = 200000
+
+  RELEVANT_CTX = ["tool_input", "tool_output", "llm_request",
+                  "llm_tool_call", "llm_tool_result",
+                  "prompt_request", "sampling_request"]
+
+  # Contexts where the content IS a structured parameter payload, not prose.
+  PARAM_CTX = ["tool_input", "tool_output", "llm_tool_call", "llm_tool_result"]
+
+  IMG_HINT  = r'(?i)(?:image|img)[_\- ]?(?:path|file|url|src|name|loc|documents?)|encode_image'
+  TRAV_HINT = r'(?i)\.\.[\\/]|%2e%2e(?:%2f|%5c)|/etc/|/proc/self/|/root/|/private/etc/|\.ssh/|\.aws/|\.kube/|\.gnupg/|/\.env'
+  ANCHOR    = r'(?i)(?:image|img)[_\- ]?(?:path|file|url|src|name|loc|documents?)?[\x22\x27\[\] ]*[:=][ \x22\x27\[]*[^\x22\x27\n]{0,240}?(?:\.\.[\\/]|%2e%2e(?:%2f|%5c)|/etc/|/proc/self/|/root/|/private/etc/|\.ssh/|\.aws/|\.kube/|/\.env)'
+
+  SENSITIVE = [
+      "/etc/passwd", "/etc/shadow", "/etc/master.passwd", "/etc/sudoers",
+      "/etc/ssh/", "/etc/hosts", "/private/etc/",
+      "/proc/self/environ", "/proc/self/cmdline", "/proc/self/maps",
+      "/root/", "/.ssh/", "id_rsa", "id_ed25519", "id_ecdsa", "authorized_keys",
+      "/.aws/credentials", "/.aws/config", "/.kube/config", "/.docker/config.json",
+      "/.netrc", "/.pgpass", "/.my.cnf", "/.gnupg/", "/.npmrc", "/.git-credentials",
+      "/.env", "/.bash_history", "/.zsh_history", "/var/log/auth.log",
+      "/.config/gcloud/", "/.azure/", "/windows/system32/config/sam", "/win.ini",
+  ]
+
+  IMAGE_EXT = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tif",
+               ".tiff", ".svg", ".heic", ".heif", ".ico", ".avif"]
+
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      return int(s)
+
+  def has_any(hay, items):
+      for it in items:
+          if it in hay:
+              return True
+      return False
+
+  def canon(p):
+      q = p.lower()
+      q = re.replace(r'(?i)%2f', q, "/")
+      q = re.replace(r'(?i)%5c', q, "/")
+      q = re.replace(r'\\', q, "/")
+      return q
+
+  def is_image_name(name):
+      n = name.lower()
+      for ext in IMAGE_EXT:
+          if n.endswith(ext):
+              return True
+      return False
+
+  def payload_targets(blob):
+      outs = []
+      for m in re.find_all(r'(?:\.\.[\\/])+[^\s\x22\x27<>,;)\]}]{0,220}', blob, 40):
+          outs.append(m)
+      for m in re.find_all(r'(?i)(?:%2e%2e(?:%2f|%5c))+[^\s\x22\x27<>,;)\]}]{0,220}', blob, 40):
+          outs.append(m)
+      for m in re.find_all(r'(?:/etc/|/proc/self/|/root/|/private/etc/)[^\s\x22\x27<>,;)\]}]{0,220}', blob, 40):
+          outs.append(m)
+      return outs
+
+  def trav_depth(p):
+      n = 0
+      for m in re.find_all(r'\.\.[\\/]', p, 60):
+          n = n + 1
+      for m in re.find_all(r'(?i)%2e%2e(?:%2f|%5c)', p, 60):
+          n = n + 1
+      return n
+
+  def tail_of(p):
+      t = ""
+      for c in canon(p).split("/"):
+          if c != "" and c != "..":
+              t = c
+      return t
+
+  def short(path):
+      return path.split("/")[-1]
+
+  def trigger_edge(actor_path, ts):
+      tn = meta.get("tool_name", "")
+      if tn != "":
+          sv = meta.get("server_name", "")
+          if sv == "":
+              sv = "local"
+          return {"from": "process://" + actor_path, "to": "tool://" + sv + "/" + tn,
+                  "kind": "TOOL_CALL", "ts": str(ts),
+                  "first_ts": str(ts), "last_ts": str(ts)}
+      return {"from": "process://" + actor_path,
+              "to": "llm://" + meta.get("provider", "?") + "/" + meta.get("model", "?"),
+              "kind": "LLM_REQUEST", "ts": str(ts),
+              "first_ts": str(ts), "last_ts": str(ts)}
+
+  def read_edge(ev):
+      tgt = ev.get("path", "")
+      if tgt == "":
+          tgt = ev.get("target_id", "")
+      return {"from": "process://" + ev.get("actor_path", ""), "to": tgt,
+              "kind": "READ_FILE", "ts": ev.get("ts", "0"),
+              "first_ts": ev.get("ts", "0"), "last_ts": ev.get("ts", "0")}
+
+  def run():
+      # ── 1. relevance gate — pure string work on meta only ──────────────
+      ct = meta.get("context_type", "")
+      if ct not in RELEVANT_CTX:
+          return "allow"
+      blob = meta.get("content", "")
+      if blob == "":
+          return "allow"
+      if len(blob) > MAX_BLOB:
+          blob = blob[:MAX_BLOB]
+      if re.find(IMG_HINT, blob) == None:
+          return "allow"
+      if re.find(TRAV_HINT, blob) == None:
+          return "allow"
+
+      # ── 2. required anchor: traversal inside an image parameter ────────
+      strict = re.find(ANCHOR, blob) != None
+      tgts = payload_targets(blob)
+      if len(tgts) == 0:
+          return "allow"
+      sensitive_payload = False
+      example = ""
+      depth = 0
+      for t in tgts:
+          if has_any(canon(t), SENSITIVE):
+              sensitive_payload = True
+              if example == "":
+                  example = t
+          d = trav_depth(t)
+          if d > depth:
+              depth = d
+      if example == "":
+          example = tgts[0]
+      if not sensitive_payload and not strict:
+          return "allow"
+      if not sensitive_payload and depth < 2:
+          return "allow"
+
+      # ── 3. instance-resolved attribution (caller anchored) ─────────────
+      ev_ts = to_int(meta.get("event_ts", "0"))
+      since = 0
+      until = 0
+      if ev_ts > 0:
+          since = ev_ts - WINDOW_NS
+          if since < 0:
+              since = 0
+          until = ev_ts + SLACK_NS
+      cp = to_int(meta.get("caller_pid", "0"))
+      inst = None
+      if cp != 0:
+          inst = proc_instance(cp, ev_ts)
+
+      if inst == None:
+          # degraded attribution — only surface the unambiguous payload
+          if not sensitive_payload or ct not in PARAM_CTX:
+              return "allow"
+          ap = meta.get("agent_name", "")
+          if ap == "":
+              ap = "unknown"
+          ch = new_chain("process://" + ap)
+          ch.append(step(trigger_edge(ap, ev_ts), stage_id="Traversal Payload",
+                         stage_desc="image parameter carries traversal to sensitive path: " + example))
+          msg = ("llama_index encode_image path traversal ATTEMPT — payload " +
+                 example + " (attribution degraded: no process instance for pid " + str(cp) + ")")
+          print(msg)
+          return {"action": "report", "reason": msg, "chain": ch}
+
+      lineage = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      if lineage == None or len(lineage) == 0:
+          lineage = [inst]
+
+      # ── 4. session scope: caller lineage + children of that lineage ────
+      sess = {}
+      order = []
+      sess[str(inst["actor_pid"])] = str(inst["actor_start"])
+      order.append(str(inst["actor_pid"]))
+      for x in lineage:
+          k = str(x.get("actor_pid", ""))
+          if k != "" and k not in sess:
+              sess[k] = str(x.get("actor_start", "0"))
+              order.append(k)
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=until, limit=2000):
+          pp = e.get("parent_pid", "")
+          k = str(e.get("actor_pid", ""))
+          if pp in sess and k != "" and k not in sess:
+              sess[k] = str(e.get("actor_start", "0"))
+              order.append(k)
+
+      # ── 5. corroboration: READ_FILE by a session instance, scoped ──────
+      tail = tail_of(example)
+      hit = None
+      hit_why = ""
+      n = 0
+      for k in order:
+          if n >= MAX_PIDS:
+              break
+          n = n + 1
+          rows = query_events(kind="READ_FILE", actor_pid=to_int(k),
+                              actor_start=to_int(sess[k]), since_ns=since,
+                              until_ns=until, limit=400)
+          for r in rows:
+              p = r.get("path", "")
+              if p == "":
+                  continue
+              pl = canon(p)
+              if has_any(pl, SENSITIVE):
+                  hit = r
+                  hit_why = "sensitive file"
+                  break
+              if len(tail) >= 5 and not is_image_name(tail):
+                  if pl == tail or pl.endswith("/" + tail):
+                      hit = r
+                      hit_why = "exact payload target"
+                      break
+          if hit != None:
+              break
+
+      # ── 6. verdict ─────────────────────────────────────────────────────
+      if hit == None:
+          if not sensitive_payload:
+              return "allow"
+          if ct not in PARAM_CTX:
+              return "allow"          # prose mention, no read — stay silent
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "?")))
+      lin = " -> ".join(names)
+
+      root = lineage[-1].get("actor_path", inst.get("actor_path", ""))
+      ch = new_chain("process://" + root)
+      ch.append(step(trigger_edge(inst.get("actor_path", ""), ev_ts),
+                     stage_id="Traversal Payload",
+                     stage_desc="image parameter reaching encode_image carries traversal/absolute path: " + example))
+      verdict = "ATTEMPT"
+      if hit != None:
+          verdict = "CONFIRMED"
+          ch.append(step(read_edge(hit), stage_id="Arbitrary File Read",
+                         stage_desc=short(hit.get("actor_path", "?")) + " read " +
+                                    hit.get("path", "?") + " (" + hit_why +
+                                    ") within " + str(WINDOW_NS // 1000000000) +
+                                    "s of the payload, same session"))
+
+      reason = ("llama_index encode_image path traversal " + verdict +
+                " — payload " + example)
+      if hit != None:
+          reason = reason + " ; session read " + hit.get("path", "?")
+      reason = reason + " ; lineage " + lin
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": ch}
+
+  result = run()
