@@ -1,0 +1,97 @@
+title: PyPI Supply Chain - tabella-enable Package Install or Artifact Fetch
+id: 7c1f4a2e-9b83-4d6f-8e21-3af05c6b91d4
+status: experimental
+level: medium
+description: |
+  Single-event detection for the suspect PyPI distribution 'tabella-enable', which
+  advertises AI-enablement features (REST access layer, MCP tooling, RAG vectorization)
+  and is therefore installed directly into agent runtimes where install-time and
+  import-time code execution has immediate access to MCP servers and model credentials.
+
+  This rule is deliberately IOC-scoped, not behaviour-scoped. It fires on exactly three
+  observable, schema-supported facts:
+    1. execute_process - a Python package manager invocation whose command line names
+       the tabella-enable distribution together with an install/add/sync verb;
+    2. execute_process - execution of the distribution's own entry point
+       (python -m tabella_enable, or a console script under bin/Scripts/site-packages);
+    3. http_request - a fetch of the project's index page, JSON metadata, or a
+       tabella_enable-<version>.whl / .tar.gz artifact.
+
+  It deliberately does NOT attempt to trace the narrative's downstream claims. There is
+  no ACQUIRED_CAPABILITY or EXFILTRATE_DATA edge in this engine and file_write has no
+  live producer, so "MCP compromise" and "data exfiltration" cannot be corroborated
+  end-to-end from telemetry. A bare 'connects' event carries no package attribution and
+  is not used. Because the underlying report is unconfirmed ("appears to be", "may
+  execute"), the action is report only: this rule exists to answer "did this package
+  ever touch our agent fleet, on which host, spawned by what" so an analyst can pivot to
+  the process lineage, not to enforce a verdict on a package with no published payload IOC.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # 1. Package-manager install of the exact distribution name.
+  #    Requires manager token + install verb + the distribution token on one command line.
+  sel_exec_install:
+    event_type: execute_process
+    content|re: '(?i)\b(?:pip[0-9.]*|pipx|uv|poetry|pdm|rye|conda|micromamba|easy_install)\b[^\n]{0,160}?\b(?:install|add|sync)\b[^\n]{0,200}?\btabella[-_.]?enable\b'
+
+  # 2. Execution of the installed distribution itself (module or console script).
+  sel_exec_entrypoint:
+    event_type: execute_process
+    content|re: '(?i)(?:python[0-9.]*\s+-m\s+tabella[-_.]?enable\b|/(?:bin|Scripts|site-packages)/\S{0,80}tabella[-_.]?enable\b)'
+
+  # 3. Index / metadata / wheel / sdist fetch for the exact project name.
+  sel_http_artifact:
+    event_type: http_request
+    url.full|re: '(?i)/(?:simple/|pypi/)?tabella[-_.]?enable(?:/|-[0-9]|\.whl|\.tar\.gz)'
+
+  # ── Filters: benign collisions that produce the same tokens ──────────────────
+
+  # Read-only inspection, resolution-only runs, and removal/remediation.
+  filter_inspection:
+    content|re:
+      - '(?i)\bpip[0-9.]*\s+(?:show|list|index|search|download|cache)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)\b(?:uninstall|poetry\s+remove|pdm\s+remove|uv\s+remove|conda\s+remove)\b'
+
+  # Text search / documentation lookup that merely quotes an install command.
+  filter_text_search:
+    content|re: '(?i)\b(?:grep|rg|ripgrep|ack|git\s+grep|man)\b'
+
+  # Software-composition-analysis and malware-triage tooling legitimately resolving,
+  # downloading or detonating the distribution as part of its job.
+  filter_sca_tooling:
+    content|re: '(?i)\b(?:pip-audit|safety|osv-scanner|trivy|grype|syft|snyk|dependabot|renovate|bandit|guarddog)\b'
+
+  condition: (sel_exec_install or sel_exec_entrypoint or sel_http_artifact) and not (filter_inspection or filter_text_search or filter_sca_tooling)
+
+falsepositives:
+  - Security researcher or malware analyst deliberately installing or fetching tabella-enable
+    in a sandbox to triage it. Partially filtered when the run is driven by pip-audit,
+    guarddog, trivy, grype, syft, snyk or similar; a manual 'pip install' in a lab VM will
+    still report and should be closed as expected analyst activity.
+  - An internal fork, vendored copy, or unrelated project whose distribution name normalizes
+    to the same token (tabella_enable / tabella.enable). Verify the resolved index host and
+    artifact hash in the process lineage before escalating.
+  - CI or Dockerfile logs, README snippets, or shell history replay that echo an install
+    command. The command-line selection requires a real manager invocation, and grep/rg/man
+    lookups are filtered, but a heredoc or 'echo ... && pip install' chain can still report.
+  - A package mirror, proxy, or index warm-up job enumerating PyPI project JSON endpoints will
+    match sel_http_artifact once per project. Expect exactly one hit per mirror sync, correlated
+    with hits for many other projects at the same timestamp.
+  - Legitimate evaluation of the package after it has been vetted and approved. This rule is
+    IOC-scoped, not behaviour-scoped, and cannot distinguish approved from unapproved use.
+action: report
