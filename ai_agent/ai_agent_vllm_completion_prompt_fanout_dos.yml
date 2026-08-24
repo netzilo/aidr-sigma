@@ -1,0 +1,101 @@
+title: vLLM Completion Prompt List Unbounded Fanout
+id: 7c1f4b62-9d3a-4e58-b0a7-2f6c8e51d934
+status: experimental
+level: high
+description: |
+  Detects a single request to a vLLM OpenAI-compatible /v1/completions endpoint whose
+  `prompt` field is a JSON list carrying more than ~256 elements (either string prompts or
+  nested token-id lists).
+
+  vLLM's CompletionRequest validator enforces no outer bound on the prompt list, and
+  OnlineRenderer.preprocess_completion() expands the list verbatim, so the serving loop
+  allocates one engine generator, one scheduler slot and one response buffer per element.
+  An authenticated client can therefore convert one small HTTP POST into tens of thousands
+  of concurrent backend requests and starve other tenants of the shared instance.
+
+  Scope note (answering triage dissent): the engine exposes no DENIAL_OF_SERVICE or
+  RESOURCE_CONSUMED edge and no resource_allocation event, so the *effect* of the fanout
+  is not observable. This rule deliberately detects only the attacker-controlled *cause* --
+  the prompt-array cardinality -- which IS present in the http_request `content` field
+  (the raw POST body) and in an execute_process command line that embeds the JSON inline.
+  Because a large legitimate batch is byte-identical to a small abusive one, the rule is
+  report-only and is sized to a cardinality that ordinary client libraries do not produce.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1499/002/
+  - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.002
+  - owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Where: an actual completions submission, not arbitrary traffic ──────────
+  sel_http_completions:
+    event_type: http_request
+    method: POST
+    path|contains: '/v1/completions'
+
+  sel_exec_completions:
+    event_type: execute_process
+    content|contains: '/v1/completions'
+
+  # ── Shape: prompt is a LIST of prompts, not a single string or a single
+  #    flat token-id array (a flat [1,2,3,...] is ONE prompt and must not match).
+  sel_prompt_is_list:
+    content|re: '"prompt"\s*:\s*\[\s*(?:"|\[)'
+
+  # ── Cardinality: >256 string elements. Boundary is an unescaped "," sequence;
+  #    JSON renders quotes inside a prompt as \" so prose containing "," cannot match.
+  sel_fanout_string_elements:
+    content|re: '(?:"\s*,\s*"[^"]*?){256,}'
+
+  # ── Cardinality: >256 nested token-id lists ( ...],[... boundaries ).
+  sel_fanout_tokenid_lists:
+    content|re: '(?:\]\s*,\s*\[){256,}'
+
+  # ── Filter: perplexity / logprob scoring harness (lm-eval-harness style).
+  #    All three markers must be present together: no tokens are generated, so the
+  #    request is a scoring pass rather than a generation fanout.
+  filter_eval_maxtokens0:
+    content|re: '"max_tokens"\s*:\s*0\s*[,}]'
+  filter_eval_echo:
+    content|re: '"echo"\s*:\s*true'
+  filter_eval_logprobs:
+    content|re: '"logprobs"\s*:\s*[0-9]'
+
+  # ── Filter: OpenAPI/Swagger "Try it out" or generated-client schema probe.
+  #    Both markers required -- the model name is also a placeholder, so the request
+  #    is rejected at model lookup and never reaches generator allocation.
+  filter_probe_placeholder_model:
+    content|re: '"model"\s*:\s*"(?:string|your-model|model-name|MODEL_NAME|<[^"]{1,32}>)"'
+  filter_probe_placeholder_prompts:
+    content|re: '(?:"(?:string|prompt|text|example)"\s*,\s*){32,}'
+
+  condition: >
+    (sel_http_completions or sel_exec_completions)
+    and sel_prompt_is_list
+    and (sel_fanout_string_elements or sel_fanout_tokenid_lists)
+    and not (filter_eval_maxtokens0 and filter_eval_echo and filter_eval_logprobs)
+    and not (filter_probe_placeholder_model and filter_probe_placeholder_prompts)
+
+falsepositives:
+  - Offline evaluation harnesses (lm-eval-harness, HELM) submitting a whole task split as
+    one prompt list. Partially suppressed by the echo + max_tokens=0 + logprobs filter;
+    generation-mode eval runs will still be reported.
+  - Bulk synthetic-data or data-labelling jobs that intentionally batch thousands of short
+    prompts against a dedicated single-tenant vLLM instance where starvation is not a concern.
+  - Capacity or soak testing of the inference tier from a CI performance job, including
+    production traffic mirrored into staging.
+  - A single legitimate prompt containing a serialised CSV/JSON blob with hundreds of
+    quote-comma-quote sequences. Mitigated because JSON escaping emits inner quotes as
+    backslash-quote, which the boundary regex cannot match.
+  - An MCP gateway or batching proxy that coalesces many independent user requests into one
+    upstream completions call; the fanout is real but authorised.
+
+action: report
