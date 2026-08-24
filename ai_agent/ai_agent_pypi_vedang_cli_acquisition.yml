@@ -1,0 +1,106 @@
+title: Supply Chain Acquisition of PyPI Package vedang-cli
+id: 7b3f1c42-9d5e-4a86-b1f0-2c8e5d74a913
+status: experimental
+level: medium
+description: |
+  Reports process executions that acquire, resolve, or launch the PyPI package
+  "vedang-cli" — a CLI client advertising AI-agent, Web3-research and MCP-server
+  functionality that has been flagged as a possible supply-chain distribution
+  vector for AI tooling.
+
+  SCOPE AND HONEST LIMITS (answers the triage dissent):
+    * There is no CVE, no confirmed malicious payload and no published IOC for
+      this package. This rule therefore does NOT assert that the package is
+      malicious and is deliberately action: report, never block.
+    * The engine has no package_install event type and no ACQUIRED_DEPENDENCY /
+      EXECUTED_CODE edges, so the install->execute->exfil chain in the narrative
+      is not observable. The only live signal is execute_process, whose content
+      is the spawned command line.
+    * Because a generic execute_process cannot distinguish install-time
+      supply-chain behaviour from any other process spawn, the rule does not try
+      to. It matches one thing only: a rare, high-specificity package token
+      (vedang-cli, in all PEP 503 normalised spellings) appearing in an
+      installer, artifact or entry-point command line. That is an acquisition
+      tripwire for triage, not a verdict.
+    * This is mechanistically distinct from the existing typosquat rule
+      (c6e0b534): it is a named-package watch, not a lexical-distance check.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://packaging.python.org/en/latest/specifications/name-normalization/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # --- Acquisition: an installer/resolver command naming the package ---------
+  sel_installer:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bpip[0-9.]{0,4}\b[^\n]{0,200}\binstall\b[^\n]{0,200}\bvedang[-_.]+cli\b'
+      - '(?i)\b(?:uv|pipx|pdm|poetry|rye|hatch|conda|mamba|micromamba)\b[^\n]{0,200}\b(?:install|add|run|tool|sync)\b[^\n]{0,200}\bvedang[-_.]+cli\b'
+      - '(?i)\buvx\b[^\n]{0,160}\bvedang[-_.]+cli\b'
+
+  # --- Acquisition: a concrete wheel/sdist artifact for the package ----------
+  sel_artifact:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bvedang[-_.]+cli-[0-9][^\s]{0,48}\.(?:whl|tar\.gz|zip)\b'
+      - '(?i)pythonhosted\.org/[^\s]{0,200}vedang[-_.]+cli'
+
+  # --- Runtime: the installed console script / module entry point ------------
+  sel_entrypoint:
+    event_type: execute_process
+    content|re:
+      - '(?i)(?:^|[\s";/\\])vedang[-_]cli(?:\.exe)?(?:$|[\s";)])'
+      - '(?i)\bpython[0-9.]{0,4}\b[^\n]{0,120}-m\s+vedang[_.]cli\b'
+
+  # --- Benign case: removal / remediation of the package ---------------------
+  filter_removal:
+    content|re: '(?i)\b(?:uninstall|remove|purge)\b[^\n]{0,80}\bvedang[-_.]+cli\b'
+
+  # --- Benign case: read-only inspection, resolution preview, text handling ---
+  filter_readonly:
+    content|re:
+      - '(?i)\bpip[0-9.]{0,4}\s+(?:show|list|index|search|inspect|cache|config|check)\b'
+      - '(?i)\b(?:poetry|pdm|uv|pipx)\s+(?:show|list|tree|search)\b'
+      - '(?i)(?:^|[\s";/\\])(?:grep|rg|ag|ack|cat|bat|head|tail|less|more|awk|sed|strings|file|stat|echo|printf|find)\b[^\n]{0,160}\bvedang[-_.]+cli'
+      - '(?i)--dry-run\b'
+
+  # --- Benign case: the package is the SUBJECT of a supply-chain audit -------
+  filter_audit_tooling:
+    content|re: '(?i)(?:^|[\s";/\\])(?:pip-audit|safety|guarddog|packj|osv-scanner|syft|grype|trivy|snyk|bandit|semgrep|dependency-check)\b[^\n]{0,200}vedang[-_.]+cli'
+
+  condition: (sel_installer or sel_artifact or sel_entrypoint) and not (filter_removal or filter_readonly or filter_audit_tooling)
+
+falsepositives:
+  - A developer who has legitimately adopted vedang-cli as a veda.ng client and
+    is installing or running it as part of normal work. This rule reports every
+    such invocation by design; it is a named-package watch, not a malice verdict.
+  - CI/CD pipelines that install the package as a declared dependency on every
+    build, producing one report per job. Suppress by pipeline identity, not by
+    widening the pattern.
+  - Security researchers detonating or unpacking the package for analysis. The
+    common read-only verbs (pip show/list/index/inspect, poetry show, grep, cat,
+    strings, --dry-run) and the named audit tools (pip-audit, safety, guarddog,
+    osv-scanner, syft, trivy, snyk, semgrep) are filtered when they appear
+    adjacent to the package token; a genuine "pip install" during detonation is
+    still reported, which is correct.
+  - Uninstall/remediation commands, filtered when the removal verb sits within
+    80 characters of the package name.
+  - Documentation and shell history echoes that merely print the install string.
+    Filtered via echo/printf/cat; if such a string is piped into a shell, the
+    resulting child pip process emits its own execute_process event and is still
+    caught.
+  - Directory or file paths that merely contain the string (for example
+    /tmp/vedang-cli-analysis/notes.txt). The entry-point pattern requires the
+    token to terminate at whitespace, quote, semicolon or close-paren, so a
+    trailing hyphen or dot in a longer path does not match.
+action: report
