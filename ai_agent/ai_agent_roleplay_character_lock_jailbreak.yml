@@ -1,0 +1,373 @@
+title: Roleplay Character-Lock Jailbreak Delivered Via Tool Output
+id: 7c1f4b9e-0a3d-4e62-9b18-5d6a2f8c41ad
+status: experimental
+level: high
+author: Tanya
+date: "2026-05-19"
+description: |
+  Detects the DAN-style "two film actors who never break character" jailbreak arriving
+  in a TOOL RESPONSE (indirect / poisoned tool output) and being fed into a live agent
+  reasoning loop.
+
+  The rule is behavioural, not a phrase blocklist. It requires the co-occurrence of
+  a refusal-suppression *character lock* ('never break character', 'nie aus der Rolle
+  fallen', 'bleibt immer in der Rolle') AND an actor/screenplay framing (English or
+  German), and then confirms the sequence in the behaviour graph:
+
+    TOOL_CALL  ->  TOOL_RESULT carrying the framing  ->  active LLM_REQUEST loop
+    (+ optional ACQUIRED_SKILL from a public host as the instruction source)
+
+  A single benign mention of either half is never enough: at least one corroborating
+  signal is required (explicit refusal suppression, harmful-topic elicitation,
+  repeated delivery from the same tool/server, the framing already present in an
+  indexed LLM request body, or an untrusted skill source in the same window).
+
+  Reports only. It never blocks agent work, because film scripts, red-team corpora
+  and German drama material legitimately contain this language.
+references:
+  - https://atlas.mitre.org/techniques/AML.T0054
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - atlas.aml.t0054
+  - atlas.aml.t0051
+  - owasp.llm01
+  - attack.defense-evasion
+falsepositives:
+  - Screenwriting or script-editing assistants whose tool returns a real screenplay
+    containing stage directions such as "the actors never break character".
+  - Security research agents fetching jailbreak corpora, DAN prompt collections, or
+    blog posts that quote this exact attack for defensive purposes.
+  - German drama-school, improv or theatre material - "nie aus der Rolle fallen" and
+    "bleibt in der Rolle" are ordinary German expressions.
+  - Model-evaluation and safety-regression harnesses replaying known jailbreak
+    fixtures through MCP tools.
+  - Abuse-triage or ticketing tools that return a user-submitted jailbreak attempt
+    verbatim to a human reviewer.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_response:
+    event_type: tool_response
+  sel_roleplay_surface:
+    content|contains:
+      - 'character'
+      - 'charakter'
+      - 'rolle'
+      - 'actor'
+      - 'actress'
+      - 'schauspiel'
+      - 'drehbuch'
+      - 'rollenspiel'
+      - 'filmszene'
+  condition: sel_tool_response and sel_roleplay_surface
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── windows / bounds ─────────────────────────────────────────────────────────
+  LOOK_BACK_NS = 900000000000    # 15 min - LLM loop + skill correlation window
+  SUPPRESS_NS  = 120000000000    # 2 min  - per-source re-fire suppression
+  MAX_HEAD     = 80000
+  MAX_TAIL     = 40000
+
+  IRRELEVANT = ["connects", "execute_process", "http_request", "periodic",
+                "file_read", "file_write", "file_create", "file_delete",
+                "file_rename"]
+
+  CHEAP = ["character", "charakter", "rolle", "actor", "actress",
+           "schauspiel", "drehbuch", "rollenspiel", "filmszene"]
+
+  # Refusal-suppression character lock - the discriminating anchor.
+  CHAR_LOCK = [
+      r"(?i)never\s+(?:ever\s+)?break(?:s|ing)?\s+(?:out\s+of\s+)?(?:the\s+|their\s+|his\s+|her\s+|your\s+)?character",
+      r"(?i)(?:do|does|must|will)\s+not\s+break\s+(?:the\s+|their\s+|your\s+)?character",
+      r"(?i)without\s+(?:ever\s+)?breaking\s+character",
+      r"(?i)(?:stay|stays|remain|remains)\s+in\s+character\s+(?:at\s+all\s+times|no\s+matter|always|forever|until|regardless)",
+      r"(?i)nie(?:mals)?\s+aus\s+(?:der|ihrer|seiner|eurer)\s+rolle",
+      r"(?i)(?:f(?:\x{00e4}|ae)ll(?:t|en)?|fallen|fall)\s+nie(?:mals)?\s+aus\s+der\s+rolle",
+      r"(?i)bleib(?:t|e|en)?\s+(?:immer\s+|stets\s+|jederzeit\s+)?in\s+(?:der\s+|ihrer\s+|seiner\s+)?rolle",
+      r"(?i)verlass(?:t|en|e)?\s+(?:die|ihre|seine)\s+rolle\s+nie(?:mals)?",
+      r"(?i)brech(?:t|en|e)?\s+(?:die\s+|ihre\s+)?rolle\s+nie(?:mals)?",
+  ]
+
+  # Actor / screenplay framing (EN + DE).
+  ROLE_FRAME = [
+      r"(?i)\btwo\s+(?:film\s+|movie\s+|professional\s+|famous\s+)?actors?\b",
+      r"(?i)\bactors?\s+(?:in|for|playing)\s+(?:a|an|the)\s+(?:film|movie|scene|screenplay|play|thriller)\b",
+      r"(?i)\b(?:film|movie|screenplay|script)\s+(?:scene|dialogue|dialog)\b",
+      r"(?i)\bmethod\s+actors?\b",
+      r"(?i)\bplay(?:ing)?\s+the\s+role\s+of\b",
+      r"(?i)\byou\s+(?:will\s+|are\s+to\s+|must\s+)?(?:act|play)\s+as\s+(?:an?\s+)?(?:actor|character)\b",
+      r"(?i)\bzwei\s+(?:film\s*)?schauspieler(?:innen|in)?\b",
+      r"(?i)\bschauspieler(?:innen|in)?\s+in\s+(?:einem|einer|dem|der)\s+(?:film|drehbuch|theaterst(?:\x{00fc}|ue)ck|szene|filmszene)",
+      r"(?i)\bdrehbuch\b",
+      r"(?i)\brollenspiel\b",
+      r"(?i)\bfilmszene\b",
+  ]
+
+  # Explicit refusal suppression / DAN framing.
+  SUPPRESSION = [
+      r"(?i)(?:never|do\s+not|don'?t|must\s+not|shall\s+not)\s+(?:refuse|decline|apologi[sz]e|say\s+no|warn|lecture)",
+      r"(?i)no\s+(?:disclaimers?|warnings?|apolog(?:y|ies)|moralizing|lectures?|censorship)",
+      r"(?i)keine\s+(?:warnungen|hinweise|entschuldigungen|moralpredigten|belehrungen|zensur)",
+      r"(?i)ignor(?:e|ing)\s+(?:all\s+|any\s+|your\s+)?(?:previous\s+|prior\s+|earlier\s+)?(?:instructions|guidelines|rules|policies|restrictions)",
+      r"(?i)ignorier(?:e|en|t)?\s+(?:alle\s+)?(?:vorherigen\s+|bisherigen\s+)?(?:anweisungen|regeln|richtlinien|einschr(?:\x{00e4}|ae)nkungen)",
+      r"(?i)(?:answer|respond|comply)\s+(?:no\s+matter\s+what|regardless\s+of|always)",
+      r"(?i)antworte(?:t|n)?\s+(?:immer|stets)\b",
+      r"(?i)(?:as|because)\s+(?:an?\s+)?actors?\s+(?:they|we|you)\s+(?:can|may|must|will)\b",
+      r"(?i)(?:als|weil)\s+schauspieler(?:innen|in)?\s+(?:d(?:\x{00fc}|ue)rf(?:en|t)|k(?:\x{00f6}|oe)nn(?:en|t)|m(?:\x{00fc}|ue)ss(?:en|t))",
+      r"(?i)without\s+(?:any\s+)?(?:ethical\s+)?(?:limits|restrictions|filters|guardrails)",
+      r"(?i)(?:keine|ohne)\s+(?:ethischen?\s+)?(?:grenzen|einschr(?:\x{00e4}|ae)nkungen|filter)",
+      r"(?i)\bdo\s+anything\s+now\b",
+      r"\bDAN\b",
+  ]
+
+  # Harmful continuation the roleplay is used to elicit.
+  HARMFUL = [
+      r"(?i)\b(?:synthesi[sz]e|synthesis\s+of|manufactur\w*)\b.{0,60}\b(?:meth\w*|explosive|nerve\s+agent|fentanyl|sarin|vx)\b",
+      r"(?i)\b(?:build|make|construct|bauen|herstellen|herstellung)\b.{0,40}\b(?:bomb|bombe|sprengstoff|explosive|ied|rohrbombe)\b",
+      r"(?i)\b(?:ransomware|keylogger|rootkit|botnet|malware|trojaner|schadsoftware)\b",
+      r"(?i)\b(?:untraceable|unauffindbar|spurenlos)\b",
+      r"(?i)\b(?:credit\s+card|kreditkarten)\s+(?:dump|skimm\w*|fraud|betrug)\b",
+      r"(?i)\bhow\s+to\s+(?:hack|hotwire|poison|kidnap|launder)\b",
+      r"(?i)\bschritt\s+f(?:\x{00fc}|ue)r\s+schritt\b.{0,60}\b(?:herstellung|anleitung|bauen|umgehen)\b",
+  ]
+
+  def hits(pats, s):
+      out = []
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              out.append(m[:60])
+      return out
+
+  def scan_text(c):
+      if len(c) <= MAX_HEAD + MAX_TAIL:
+          return c
+      return c[:MAX_HEAD] + "\n" + c[len(c) - MAX_TAIL:]
+
+  # ── relevance gate: pure string checks on meta, no graph / no search ──────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      for x in IRRELEVANT:
+          if ct == x:
+              return False
+      if len(meta.get("content", "")) < 60:
+          return False
+      return True
+
+  def prescreen(lc):
+      for k in CHEAP:
+          if k in lc:
+              return True
+      return False
+
+  # ── graph helpers ────────────────────────────────────────────────────────────
+  def find_tool(tname):
+      if tname == "":
+          return None
+      for t in graph(type="Tool"):
+          if t.get("name", "") == tname:
+              return t
+      return None
+
+  def find_agent(tool_node):
+      fallback = ""
+      fb_edge  = None
+      if tool_node != None:
+          for e in edges(tool_node["id"], dir="out", kind="TOOL_RESULT"):
+              p = node(e["to"])
+              if p == None or p.get("_type", "") != "Process":
+                  continue
+              if p.get("agent", "0") == "1":
+                  return [p["id"], e]
+              if fallback == "":
+                  fallback = p["id"]
+                  fb_edge  = e
+      if fallback != "":
+          return [fallback, fb_edge]
+      apath = meta.get("agent_name", "")
+      if apath != "":
+          for p in graph(type="Process"):
+              if p.get("agent", "0") == "1" and p.get("path", "") == apath:
+                  return [p["id"], None]
+      for p in graph(type="Process"):
+          if p.get("agent", "0") == "1":
+              return [p["id"], None]
+      return ["", None]
+
+  def call_edge_for(aid, tid):
+      if aid == "" or tid == "":
+          return None
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          if e.get("to", "") == tid:
+              return e
+      return None
+
+  def llm_loop_edge(aid, now_ns):
+      if aid == "":
+          return None
+      best = None
+      for e in edges(aid, dir="out", kind="LLM_REQUEST"):
+          ts = int(e.get("ts", "0"))
+          if now_ns > 0 and ts > 0 and (now_ns - ts) > LOOK_BACK_NS:
+              continue
+          best = e
+      return best
+
+  def public_skill_edge(aid, now_ns):
+      if aid == "":
+          return None
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          s = node(e["to"])
+          if s == None:
+              continue
+          if s.get("is_ztna_host", "1") != "0":
+              continue
+          ts = int(e.get("ts", "0"))
+          if now_ns > 0 and ts > 0 and (now_ns - ts) > LOOK_BACK_NS:
+              continue
+          return e
+      return None
+
+  def framing_in_llm_body():
+      for q in ["never break character", "stay in character", "aus der rolle"]:
+          for h in search(q, 20):
+              s = h.get("source", "")
+              if s.startswith("llmreq://") or s.startswith("llmres://"):
+                  return s
+      return ""
+
+  def remember(seen, skey, n, now_ns):
+      seen[skey] = {"n": n, "last": now_ns}
+      u = store_usage()
+      if u["free"] <= 8192:
+          store_reset()
+          seen = {skey: {"n": n, "last": now_ns}}
+      store_set("sources", seen)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      raw = meta.get("content", "")
+      if not prescreen(raw.lower()):
+          return "allow"
+      body = scan_text(raw)
+
+      # anchor: refusal-suppression character lock is REQUIRED
+      lock = hits(CHAR_LOCK, body)
+      if len(lock) == 0:
+          return "allow"
+      # framing: actor / screenplay context is REQUIRED
+      role = hits(ROLE_FRAME, body)
+      if len(role) == 0:
+          return "allow"
+
+      supp = hits(SUPPRESSION, body)
+      harm = hits(HARMFUL, body)
+
+      now_ns = int(meta.get("event_ts", "0"))
+      tname  = meta.get("tool_name", "")
+      sname  = meta.get("server_name", "")
+      skey   = sname + "/" + tname
+      if skey == "/":
+          skey = meta.get("context_type", "tool") + "/unknown"
+
+      seen = store_get("sources")
+      if seen == None:
+          seen = {}
+      prev_n  = 0
+      prev_ts = 0
+      prev = seen.get(skey)
+      if prev != None:
+          prev_n  = int(prev.get("n", 0))
+          prev_ts = int(prev.get("last", 0))
+      repeat = prev_n + 1
+
+      # already reported this source moments ago and nothing new escalated
+      if prev_ts > 0 and now_ns > 0 and (now_ns - prev_ts) < SUPPRESS_NS and len(harm) == 0:
+          remember(seen, skey, repeat, prev_ts)
+          return "allow"
+
+      # ── behavioural sequence ────────────────────────────────────────────────
+      tool_node = find_tool(tname)
+      pair      = find_agent(tool_node)
+      aid       = pair[0]
+      res_edge  = pair[1]
+      tid       = ""
+      if tool_node != None:
+          tid = tool_node["id"]
+      call_edge  = call_edge_for(aid, tid)
+      llm_edge   = llm_loop_edge(aid, now_ns)
+      skill_edge = public_skill_edge(aid, now_ns)
+      llm_src    = framing_in_llm_body()
+
+      # ── corroboration - the lock+frame pair alone is not enough ──────────────
+      strong = []
+      if len(supp) > 0:
+          strong.append("refusal-suppression x" + str(len(supp)))
+      if len(harm) > 0:
+          strong.append("harmful-elicitation x" + str(len(harm)))
+      if llm_src != "":
+          strong.append("framing indexed in LLM body")
+      if skill_edge != None:
+          strong.append("untrusted skill source in window")
+      if repeat >= 2:
+          strong.append("repeat delivery x" + str(repeat))
+      if len(lock) >= 2 and len(role) >= 2:
+          strong.append("multiple lock+frame variants")
+
+      if len(strong) == 0:
+          remember(seen, skey, repeat, now_ns)
+          return "allow"
+
+      remember(seen, skey, repeat, now_ns)
+
+      anchor = aid
+      if anchor == "":
+          anchor = "process://" + meta.get("agent_name", "unknown-agent")
+      chain = new_chain(anchor)
+
+      if call_edge != None:
+          chain.append(step(call_edge,
+              stage_id="Tool Invoked",
+              stage_desc="agent called tool: " + skey))
+      if res_edge != None:
+          chain.append(step(res_edge,
+              stage_id="Jailbreak Framing In Tool Output",
+              stage_desc="character-lock jailbreak returned by " + skey +
+                         " | lock: " + lock[0] + " | frame: " + role[0]))
+      if skill_edge != None:
+          s = node(skill_edge["to"])
+          hname = "?"
+          if s != None:
+              hname = s.get("host", "?")
+          chain.append(step(skill_edge,
+              stage_id="Untrusted Instruction Source",
+              stage_desc="instruction content acquired from public host: " + hname))
+      if llm_edge != None:
+          l = node(llm_edge["to"])
+          lname = "?"
+          if l != None:
+              lname = l.get("provider", "?") + "/" + l.get("model", "?")
+          chain.append(step(llm_edge,
+              stage_id="Reasoning Loop Fed",
+              stage_desc="poisoned tool output enters active model loop: " + lname))
+
+      reason = ("Roleplay character-lock jailbreak in tool output (" + skey + ") - " +
+                "lock=\"" + lock[0] + "\" frame=\"" + role[0] + "\" | " +
+                "; ".join(strong))
+      if llm_src != "":
+          reason = reason + " | llm doc: " + llm_src
+      print(reason)
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
