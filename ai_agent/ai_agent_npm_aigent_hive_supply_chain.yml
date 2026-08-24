@@ -1,0 +1,122 @@
+title: Supply Chain Suspicious npm Package Install (@aigent-hive)
+id: 7f3c1a92-4d8e-4b6a-9c05-2e1f8a6b3d47
+status: experimental
+level: medium
+description: |
+  Single-event indicator detection for acquisition or execution of the npm
+  package @aigent-hive/darwin-arm64 (and its sibling platform binaries under the
+  same scope), reported as a provider-neutral "local agent harness for
+  subscription-authenticated hosts".
+
+  SCOPE AND HONESTY NOTE: this rule detects the *package identifier* in an
+  install / execute / registry-fetch context. It does NOT assert that the
+  package is malicious. No CVE, no advisory, and no static or dynamic analysis
+  of a payload was cited for this threat; the reported harm (credential
+  harvesting via the subscription-auth flow, persistent control of the agent
+  runtime) is inferred from the package name and description, not observed.
+
+  The engine has no package_install, credential_access or network_connect event
+  type, and no INSTALLED_PACKAGE or ACQUIRED_CREDENTIAL edge, so the claimed
+  chain cannot be modelled. What is observable is the mechanical footprint that
+  precedes it: the package specifier appearing in a package-manager invocation
+  or a spawned process command line (EXECUTE_PROCESS), and the registry fetch of
+  the scoped tarball (HTTP_REQUEST). That is exactly what this rule matches, and
+  why the verdict is report-only at medium severity — it is a triage lead for a
+  human to pull and analyse the ARM64 binary, not an enforcement decision.
+author: Evgen
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The indicator: the scoped package specifier ─────────────────────────────
+  # Exact target first, then the platform-binary family published under the same
+  # scope (an npm optionalDependencies fan-out publishes darwin-arm64,
+  # linux-x64, win32-x64 … from one publisher — same provenance, same risk).
+  sel_pkg_name:
+    event_type:
+      - execute_process
+      - tool_call
+    content|re:
+      - '(?i)@aigent-hive/darwin-arm64\b'
+      - '(?i)@aigent-hive/(?:darwin|linux|win32|freebsd|android)-(?:arm64|x64|ia32|arm)(?:-musl)?\b'
+
+  # ── Acquisition / execution context (ANDed with the indicator above) ────────
+  # A bare mention of the name is not enough — it must appear inside a package
+  # manager verb, an installed-tree path, an npx cache path, a postinstall hook,
+  # or a manual tarball fetch.
+  sel_delivery:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:i|install|add|exec|x|dlx)\b'
+      - '(?i)\byarn\s+(?:add|dlx|global\s+add)\b'
+      - '(?i)\bnpx\s'
+      - '(?i)node_modules/@aigent-hive/'
+      - '(?i)/_npx/'
+      - '(?i)\bpostinstall\b'
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,300}registry\.npmjs\.org'
+
+  # ── Registry fetch of the scoped tarball (HTTP_REQUEST footprint) ───────────
+  # Path form: /@aigent-hive/darwin-arm64/-/darwin-arm64-1.2.3.tgz
+  # Encoded form used by some clients: /@aigent-hive%2fdarwin-arm64
+  sel_registry_path:
+    event_type: http_request
+    path|re: '(?i)@aigent-hive(?:/|%2[Ff])(?:darwin|linux|win32|freebsd|android)-(?:arm64|x64|ia32|arm)'
+  sel_registry_url:
+    event_type: http_request
+    url.full|re: '(?i)@aigent-hive(?:/|%2[Ff])(?:darwin|linux|win32|freebsd|android)-(?:arm64|x64|ia32|arm)'
+
+  # ── Filters: remediation and non-installing inspection are not the threat ───
+  filter_remediation:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|bun)\s+(?:un|uninstall|rm|remove)\b'
+      - '(?i)\byarn\s+remove\b'
+      - '(?i)\bnpm\s+audit\s+fix\b'
+  filter_dry_run:
+    content|re:
+      - '--dry-run'
+      - '--package-lock-only'
+      - '(?i)\bnpm\s+(?:view|info|ls|explain|why)\b'
+  filter_advisory:
+    content|re:
+      - '\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b'
+      - '\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)\bdo not (?:install|run|execute)\b'
+      - '(?i)\bmalicious package (?:advisory|report|write-?up)\b'
+
+  condition: >
+    ((sel_pkg_name and sel_delivery) or sel_registry_path or sel_registry_url)
+    and not (filter_remediation or filter_dry_run or filter_advisory)
+
+action: report
+
+falsepositives:
+  - A security engineer or malware analyst deliberately installing
+    @aigent-hive/darwin-arm64 in a sandbox to reproduce and triage this very
+    report. This is the single most likely trigger and is exactly why the rule
+    is report-only — it is a lead, not a verdict.
+  - Remediation work — uninstalling the package or running `npm audit fix` —
+    where the transcript also quotes the original install command
+    (suppressed by filter_remediation).
+  - Dependency inspection that does not install — `npm view`, `npm ls`,
+    `npm explain`, `--dry-run`, `--package-lock-only`
+    (suppressed by filter_dry_run).
+  - The agent reading a vendor advisory, changelog, blog post or internal
+    write-up that quotes `npm install @aigent-hive/darwin-arm64`
+    (suppressed by filter_advisory when an advisory/CVE marker is present;
+    prose that quotes the command with no such marker will still report).
+  - The package is a legitimately published, benign harness. The detection is
+    name/publisher based, not payload based; no malicious behaviour has been
+    confirmed. A first-party team that has approved this dependency will
+    generate one report per install and per binary launch.
+  - A CI or build transcript replayed through the agent that echoes an install
+    line from a lockfile-driven `npm ci` run.
