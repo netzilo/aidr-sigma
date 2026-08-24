@@ -1,0 +1,130 @@
+title: Supply Chain - AI Skill Package Install From PyPI
+id: 7c3f1a9e-2b64-4d5e-9a17-8f0c6d43be21
+status: experimental
+level: medium
+description: |
+  Single-event content detection on execute_process command lines that install an
+  AI *skill definition* package from a Python package index.
+
+  Two arms:
+    1. Named IOC - the reported biomedical-ai-skills distribution (any of the PyPI
+       name-normalisation forms: hyphen, underscore, dot; also matches the wheel /
+       sdist filename and pythonhosted URL forms, which embed the same token).
+    2. Autonomous widening - any pip/uv/pipx/poetry/pdm/conda invocation whose target
+       distribution name matches the *-ai-skills / *-agent-skills / *-mcp-skills /
+       *-claude-skills family convention. These packages exist to drop SKILL.md
+       instruction files into an agent's context, which is the injection surface.
+
+  WHY THIS IS NOT netzilo-agent-skill-poison-chain-001:
+  That correlator fires on ACQUIRED_SKILL -> READ_FILE -> execute_process, i.e. only
+  after the skill document has already been loaded into an agent's context. Those
+  edges do not exist at install time. This rule observes the *acquisition command*
+  itself - one execute_process event, no graph state - and therefore fires strictly
+  earlier, on a surface the correlator cannot see. The two are complementary, not
+  duplicative: this one gives the operator a chance to pull the package before any
+  agent parses it, and it names the distribution so triage does not have to reverse
+  the skill document to find out where it came from. It makes no claim to observe
+  PyPI transport (package_download / DOWNLOADED_DEPENDENCY are not in the schema) -
+  it observes the installer subprocess, which is.
+
+  KNOWN GAP (by design, covered downstream): an install driven by a requirements or
+  lock file does not carry the distribution name on the command line and is not
+  visible to a content rule. Those installs are explicitly filtered out here rather
+  than guessed at, and remain the correlator's job.
+author: Egemen
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://pypi.org/project/biomedical-ai-skills/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Arm 1: the named IOC distribution, in any PyPI-normalised form ──────────
+  sel_ioc_pkg:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bbiomedical[-_.]ai[-_.]skills\b'
+
+  # ── Arm 2 part A: an actual package-installer invocation ────────────────────
+  sel_installer:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:pip|pip3|pipx|uv|poetry|pdm|rye|conda|mamba|micromamba)\b[^\n]{0,200}?\b(?:install|add|sync|download)\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\b[^\n]{0,200}?\binstall\b'
+      - '(?i)\b(?:uvx|pipx)\s+run\b'
+      - '(?i)\buv\s+run\b[^\n]{0,120}--with\b'
+
+  # ── Arm 2 part B: the AI-skill package naming family ────────────────────────
+  sel_skill_family:
+    content|re:
+      - '(?i)\b[a-z0-9][a-z0-9._-]{0,48}[-_.](?:ai|agent|agents|claude|mcp|llm|copilot)[-_.]skills?\b'
+      - '(?i)\b(?:ai|agent|agents|claude|mcp|llm|copilot)[-_.]skills?\b'
+
+  # ── Filters ─────────────────────────────────────────────────────────────────
+
+  # Remediation / cleanup is the opposite of the threat.
+  filter_removal:
+    content|re: '(?i)\b(?:pip3?|pipx|uv|poetry|pdm|conda|mamba)\b[^\n]{0,80}?\b(?:uninstall|remove)\b'
+
+  # A read-only inspection command that merely *mentions* the package or installer
+  # (grep/cat/echo of a README, a docs snippet, a triage lookup, shell history).
+  # Anchored to the start of a command segment so it cannot be triggered by the word
+  # appearing incidentally deep inside a long install line.
+  filter_readonly:
+    content|re: '(?i)(?:\A|[;&|(\["]\s*)(?:grep|rg|ag|cat|echo|printf|less|more|head|tail|man|history|which|type)\s[^\n]{0,160}?(?:pip|uv|poetry|biomedical)'
+
+  # Security research, advisory text, IOC lists, detection engineering.
+  filter_secdoc:
+    content|re: '(?i)\b(?:cve-\d{4}-\d{4,}|ghsa-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|osv-\d{4}-\d+|pysec-\d{4}-\d+|malware\s+analysis|threat\s+intel|indicators?\s+of\s+compromise|sigma\s+rule|yara)\b'
+
+  # Resolution-only invocations that never place code on disk.
+  filter_dryrun:
+    content|contains:
+      - '--dry-run'
+      - '--help'
+
+  filter_lockonly:
+    content|re: '(?i)\b(?:pip-compile|pip\s+freeze|poetry\s+lock|poetry\s+check|uv\s+lock|pdm\s+lock|conda\s+env\s+export)\b'
+
+  # Developer installing their own working tree (editable / local path / file://).
+  # NOTE: deliberately NOT applied to the named-IOC arm, so that
+  # "pip install -e git+https://...#egg=biomedical-ai-skills" is not a bypass.
+  filter_local:
+    content|re: '(?i)\binstall\b[^\n]{0,120}(?:--editable\b|\s-e\s|\sfile://|\s\./|\s\.\./|\s\.\s|\s\."|\s\.$)'
+
+  # Requirements/constraints-file install: the distribution name is not on the
+  # command line, so any family match here is a directory component, not a target.
+  filter_reqfile:
+    content|re: '(?i)\b(?:-r|--requirement|-c|--constraint)\s+[^\s]{0,200}(?:requirements|constraints)[^\s]{0,40}\.(?:txt|in)\b'
+
+  condition: >
+    (sel_ioc_pkg and not (filter_removal or filter_readonly or filter_secdoc))
+    or (sel_installer and sel_skill_family and not (filter_removal or filter_readonly or
+    filter_secdoc or filter_dryrun or filter_lockonly or filter_local or filter_reqfile))
+
+falsepositives:
+  - A bioinformatician or researcher legitimately installing biomedical-ai-skills for
+    genuine cancer-bioinformatics work. The package is reported, not confirmed
+    malicious - this is why the rule reports rather than blocks.
+  - CI pipelines (tox, nox, GitHub Actions, Docker builds) installing a first-party
+    internal package that follows the *-agent-skills / *-ai-skills naming convention.
+    Expect a steady low-volume baseline per build agent; tune by distribution name,
+    not by relaxing the installer patterns.
+  - Security or triage staff pasting the package name into a shell to look it up.
+    Mitigated by filter_readonly and filter_secdoc.
+  - Remediation commands uninstalling or purging the package. Mitigated by
+    filter_removal.
+  - A developer running an editable or local-path install of their own skills package
+    (pip install -e ., uv pip install ./pkg). Mitigated by filter_local on the family
+    arm only.
+  - Dependency resolution checks (--dry-run, pip-compile, poetry lock, uv lock) that
+    print a plan without installing. Mitigated by filter_dryrun and filter_lockonly.
+action: report
