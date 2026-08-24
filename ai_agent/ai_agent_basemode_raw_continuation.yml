@@ -1,0 +1,270 @@
+title: Basemode Raw-Continuation Tooling In Agent Session
+id: 5b1f9c2e-3d47-4a86-9f10-7c2e8b4d6a51
+status: experimental
+level: medium
+description: |
+  Detects an AI-agent session acquiring or invoking the `basemode` package — tooling
+  whose stated purpose is to force any LLM into raw text continuation, stripping the
+  structured-output path that carries the model's formatting and safety scaffolding.
+
+  Scope is deliberately honest about what the telemetry can prove. The engine has no
+  INSTALL_PACKAGE or EXECUTE_CODE edge and no package_install event type, and the
+  actual bypass happens inside LLM payload/response content that is never attributable
+  to a process. This rule therefore does NOT claim to detect raw continuation itself.
+  It detects the tooling footprint: the highly specific literal token `basemode` on a
+  command line spawned inside one resolved agent session. A generic `pip install <x>`
+  can never fire it — only the named artifact can.
+
+  Because the signal is a capability indicator rather than proof of abuse, the verdict
+  is report-only. Two optional corroborating stages, both scoped to the same session
+  and a 15-minute window, raise confidence in the reason string without ever being
+  required: (1) a prior acquisition command that fetched the package, and (2) an
+  outbound HTTP request to an inference completion path made by a session process.
+
+  Attribution is instance-resolved: the rule anchors on meta.caller_pid, resolves the
+  exact (pid, start) instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), and expands the session only to descendants of that lineage. It
+  never walks path-keyed graph nodes and never stitches evidence across sessions.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1562/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.defense-evasion
+  - attack.t1562
+  - attack.execution
+  - attack.t1059.006
+  - ai.guardrail_bypass
+falsepositives:
+  - A security researcher or red-teamer intentionally evaluating basemode in a sandbox.
+    The rule reports rather than blocks precisely so this work stays visible and unbroken.
+  - A local project directory, virtualenv, script or internal module legitimately named
+    base_mode / base-mode (for example an editor "base mode" plugin or a state-machine
+    helper) appearing on a spawned command line. Mitigated - separator variants are only
+    reported when they also appear in an install or invocation shape; a bare identifier
+    is dropped.
+  - Dependency resolution or lockfile sync output that mentions basemode as a transitive
+    name while installing something else (uv sync, poetry install). The full command line
+    is carried in the reason so triage can dismiss in seconds.
+  - The optional "Unconstrained Inference" stage can attach to an unrelated, legitimate
+    LLM call made by a sibling process in the same session inside the 15-minute window.
+    It only annotates confidence and is never required for the report to be produced.
+  - Repeated invocations by the same process instance with the same command line are
+    suppressed via the rule store, so an interactive loop produces one report, not many.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_token_cmd:
+    command|re: '(?i)\bbase[-_]?mode\b'
+  sel_token_content:
+    content|re: '(?i)\bbase[-_]?mode\b'
+  condition: sel_exec and (sel_token_cmd or sel_token_content)
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── basemode: raw-continuation / guardrail-bypass tooling ───────────────────
+  # The Sigma section is only a cheap pre-filter. Everything below is the detector.
+  EXACT_RE     = r"(?i)\bbasemode\b"
+  VAR_RE       = r"(?i)\bbase[-_]mode\b"
+  INSTALLER_RE = r"(?i)\b(pip|pip3|uv|uvx|pipx|poetry|pdm|hatch|conda|mamba|micromamba)\b"
+  VERB_RE      = r"(?i)\b(install|add|sync|download)\b"
+  URL_RE       = r"(?i)(git\+(ssh|https?)://|https?://)[^\s\"']*base[-_]?mode"
+  RUN_RE       = r"(?i)(-m\s+base[-_]?mode\b|import\s+base[-_]?mode\b|from\s+base[-_]?mode\b|/base[-_]?mode(\.py)?\b|\bbase[-_]?mode\s+(run|raw|complete|continue|serve))"
+  INFER_PATHS  = ["/v1/chat/completions", "/v1/completions", "/v1/messages",
+                  "/v1/responses", "/v1/complete", "/api/generate",
+                  "/generate", "/infer"]
+  SESSION_TOP  = ["launchd", "init", "systemd", "kernel_task"]
+  WINDOW_NS    = 900000000000   # 15 minutes - one working session, not one day
+  MAX_SEEN     = 300
+
+  def has(pat, s):
+      return re.find(pat, s) != None
+
+  def base(p):
+      if p == "":
+          return "?"
+      return p.split("/")[-1]
+
+  def exec_edge(e):
+      return {
+          "from":     "process://" + e.get("parent_path", ""),
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def http_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     "HTTP_REQUEST",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "method":   e.get("method", ""),
+      }
+
+  # The triggering event is taken from meta, never re-queried: the log is written
+  # asynchronously and the event that just fired this rule may not be readable yet.
+  def trigger_edge(inst, ts, cmd):
+      return {
+          "from":     "process://" + inst.get("parent_path", ""),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+          "cmdline":  cmd[:300],
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no graph / log calls ──
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      exact   = has(EXACT_RE, cmd)
+      variant = has(VAR_RE, cmd)
+      if not exact and not variant:
+          return "allow"
+
+      acquire = (has(INSTALLER_RE, cmd) and has(VERB_RE, cmd)) or has(URL_RE, cmd)
+      invoke  = has(RUN_RE, cmd)
+      # base_mode / base-mode are plausible generic identifiers - only report them
+      # when they also carry an install or invocation shape.
+      if not exact and not (acquire or invoke):
+          return "allow"
+
+      if acquire:
+          lbl = "acquisition"
+      elif invoke:
+          lbl = "invocation"
+      else:
+          lbl = "reference"
+
+      snippet = cmd[:200]
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+
+      # ── 2. anchor on the exact triggering instance ──────────────────────────
+      if cp == 0:
+          return {"action": "report",
+                  "reason": "basemode " + lbl + " observed; attribution degraded (no caller pid) | cmd: " + snippet}
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return {"action": "report",
+                  "reason": "basemode " + lbl + " observed; attribution degraded (instance not yet in event log) | cmd: " + snippet}
+
+      lineage = proc_lineage(int(inst.get("actor_pid", "0")), int(inst.get("actor_start", "0")))
+      if not lineage:
+          lineage = [inst]
+
+      # ── 3. scope to ONE session: caller lineage (bounded, stopping below the
+      #      OS session leader) plus descendants of those pids inside the window ─
+      trimmed = []
+      for x in lineage[:8]:
+          if base(x.get("actor_path", "")) in SESSION_TOP:
+              break
+          trimmed.append(x)
+      if not trimmed:
+          trimmed = [inst]
+      root = trimmed[len(trimmed) - 1]
+
+      # ── 4. per-instance dedupe, keyed inside this session root ──────────────
+      key = root.get("actor_pid", "?") + "/" + root.get("actor_start", "0")
+      key = key + "/" + inst.get("actor_pid", "?") + "/" + inst.get("actor_start", "0")
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      if seen.get(key, "") == snippet:
+          return "allow"
+
+      since = now - WINDOW_NS
+      if since < 0:
+          since = 0
+
+      session = {}
+      for x in trimmed:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now, limit=4000)
+      for i in range(3):
+          for e in execs:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "0")
+
+      # ── 5. optional corroborating stage A: earlier acquisition in-session ────
+      acq_ev = None
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          if (e.get("actor_pid", "") == inst.get("actor_pid", "") and
+              e.get("actor_start", "") == inst.get("actor_start", "")):
+              continue
+          c = e.get("cmdline", "")
+          if not has(EXACT_RE, c) and not has(VAR_RE, c):
+              continue
+          if (has(INSTALLER_RE, c) and has(VERB_RE, c)) or has(URL_RE, c):
+              acq_ev = e   # newest-first: last assignment is the earliest event
+
+      # ── 6. optional corroborating stage B: inference egress by this session ──
+      infer_ev = None
+      probed = 0
+      for pid in session:
+          if probed >= 25 or infer_ev != None:
+              break
+          probed = probed + 1
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=since, until_ns=now, limit=40):
+              p = e.get("path", "")
+              for hint in INFER_PATHS:
+                  if hint in p:
+                      infer_ev = e
+                      break
+              if infer_ev != None:
+                  break
+
+      # ── 7. kill chain, rooted at the session owner ───────────────────────────
+      chain  = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+      if acq_ev != None:
+          chain.append(step(exec_edge(acq_ev),
+                            stage_id="Tooling Acquisition",
+                            stage_desc="basemode fetched earlier in this session: " + acq_ev.get("cmdline", "")[:180]))
+          stages.append("acquired")
+      chain.append(step(trigger_edge(inst, now, cmd),
+                        stage_id="Guardrail Bypass Tooling",
+                        stage_desc="basemode " + lbl + " by " + base(inst.get("actor_path", "")) + ": " + snippet))
+      stages.append(lbl)
+      if infer_ev != None:
+          chain.append(step(http_edge(infer_ev),
+                            stage_id="Unconstrained Inference",
+                            stage_desc="same-session inference call: " + infer_ev.get("method", "") + " " + infer_ev.get("host", "") + infer_ev.get("path", "")))
+          stages.append("inference-egress")
+
+      if len(seen) > MAX_SEEN:
+          seen = {}
+      seen[key] = snippet
+      u = store_usage()
+      if u["free"] > 8192:
+          store_set("seen", seen)
+
+      names = []
+      for x in trimmed:
+          names.append(base(x.get("actor_path", "")))
+      reason = ("basemode raw-continuation tooling in session [" + " -> ".join(names) +
+                "] - stages: " + ", ".join(stages) +
+                " | note: tooling footprint only, payload-level continuation is not observable" +
+                " | cmd: " + snippet)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
