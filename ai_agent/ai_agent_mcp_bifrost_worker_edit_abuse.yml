@@ -1,0 +1,417 @@
+title: MCP Bifrost Delegated Worker Edit Abuse
+id: 6f2c9a41-7d3e-4b58-9c02-1ae5f83b7d64
+status: experimental
+level: high
+description: |
+  mcp-bifrost delegates code-editing work to a cheaper worker model and applies the
+  resulting edits atomically after passing local validation gates. If the worker model
+  is manipulated (crafted task input, poisoned context, compromised upstream), the edits
+  it emits are applied with the trust of the primary agent.
+
+  This rule does not inspect the diff text. It watches the sequence: a process belonging
+  to an mcp-bifrost session spawns an edit/apply worker (execute_process), and WRITE_FILE
+  activity attributed to that same process session lands on files that a scoped code-edit
+  task has no business rewriting - CI workflow definitions, git/husky hooks, dependency
+  manifests and lockfiles, container entrypoints, the validation-gate configs themselves,
+  secret material, or agent/shell persistence files.
+
+  It requires (a) mcp-bifrost provenance for the session, (b) at least one write to an
+  execution-trust, gate-config or persistence surface, and (c) at least one further
+  independent evidence class (another surface class, secret material, or a wide write
+  blast radius) inside a 15 minute window. A single expected manifest edit never fires.
+
+  File events have no live rule producer, so the file layer is reached by traversing
+  WRITE_FILE edges in the behaviour graph on the next execute_process event of the same
+  session; a reported finding is fingerprinted in the rule store so it is not re-reported
+  on every subsequent spawn.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://genai.owasp.org/llmrisk/llm05-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1195.002
+  - atlas.aml.t0051
+  - atlas.aml.t0053
+  - owasp.llm05
+  - owasp.llm06
+falsepositives:
+  - A developer legitimately asks mcp-bifrost to add or edit a CI workflow, Dockerfile,
+    Makefile or git hook. Mitigated by requiring a second independent evidence class -
+    a single expected surface edit is not reported.
+  - Dependency installation (npm/yarn/pnpm install, pip/poetry install, bundle install)
+    rewriting a lockfile or manifest during a bifrost session. This yields one evidence
+    class only, because writes under vendored dependency and cache trees are not counted.
+  - Large legitimate refactors or codegen runs that touch many files. Volume alone is
+    never sufficient - an execution-trust, gate-config or persistence write is required.
+  - Repository bootstrap or scaffolding tasks ("set up CI and pre-commit for this repo")
+    which intentionally touch a workflow file and a validator config together. Expected
+    to be reported; report-only so no work is blocked.
+  - Local .env / .npmrc edits performed by the developer's own editor process. Only
+    writers inside the resolved bifrost process session are considered; sample and
+    template env files are ignored.
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_bifrost:
+    content|contains:
+      - 'bifrost'
+  sel_edit_tooling:
+    content|re: '(?i)\b(git|patch|node|npm|npx|pnpm|yarn|bun|deno|uv|uvx|python[23]?|pip[23]?|sed|tee|install|apply)\b'
+  condition: sel_exec and (sel_bifrost or sel_edit_tooling)
+
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Tunables ──────────────────────────────────────────────────────────────────
+  WINDOW_NS   = 900000000000      # 15 min correlation window
+  GRACE_NS    = 2000000000        # 2 s forward tolerance on write timestamps
+  SEEN_TTL_NS = 21600000000000    # 6 h dedup memory
+  VOLUME_MIN  = 12                # distinct source writes = wide blast radius
+  MIN_CLASSES = 2                 # required class + at least one more
+
+  BIFROST_RE = r"(?i)(mcp[-_. ]?bifrost|\bbifrost\b)"
+
+  RELEVANT_CMD = [
+      r"(?i)\bbifrost\b",
+      r"(?i)\bgit\b",
+      r"(?i)\bpatch\b",
+      r"(?i)\bnode\b",
+      r"(?i)\b(npm|npx|pnpm|yarn|bun|deno)\b",
+      r"(?i)\b(uv|uvx|pip[23]?|python[23]?)\b",
+      r"(?i)\b(sed|tee|mv|cp|install|apply)\b",
+  ]
+
+  CLS_GATE    = "Validation Gate Tampering"
+  CLS_EXEC    = "Unreviewed Execution Surface"
+  CLS_SECRET  = "Secret Material Write"
+  CLS_PERSIST = "Agent Persistence Surface"
+  CLASS_ORDER = [CLS_GATE, CLS_EXEC, CLS_SECRET, CLS_PERSIST]
+  REQUIRED    = [CLS_GATE, CLS_PERSIST, CLS_EXEC]
+
+  GATE_SUB = [
+      ".pre-commit-config", ".eslintrc", "eslint.config.", "biome.json",
+      "/.flake8", "ruff.toml", "mypy.ini", "pytest.ini", "tox.ini",
+      "jest.config.", "vitest.config.", "sonar-project.properties",
+      "/.semgrep", "semgrep.yml", "codeql", "bifrost.config", "bifrost.json",
+      "/.bifrost/",
+  ]
+  EXEC_SUB = [
+      "/.github/workflows/", "/.github/actions/", "/.gitlab-ci", "/.circleci/",
+      "azure-pipelines", "/jenkinsfile", "/.git/hooks/", "/.husky/",
+      "/docker-compose", "/.devcontainer/", "/entrypoint.sh", "/install.sh",
+      "/postinstall", "/preinstall",
+  ]
+  EXEC_END = [
+      "/package.json", "/package-lock.json", "/yarn.lock", "/pnpm-lock.yaml",
+      "/pyproject.toml", "/requirements.txt", "/poetry.lock", "/setup.py",
+      "/setup.cfg", "/gemfile", "/go.mod", "/cargo.toml", "/pom.xml",
+      "/build.gradle", "/dockerfile", "/makefile",
+  ]
+  SECRET_SUB = [
+      "/.aws/", "/.ssh/", "/.npmrc", "/.pypirc", "/.netrc",
+      "/.git-credentials", "/.docker/config.json", "/.kube/config", "/.env",
+  ]
+  SECRET_END = ["/.env", ".env", "id_rsa", "/credentials"]
+  SAMPLE_ENV = [".env.example", ".env.sample", ".env.template", ".env.dist"]
+  PERSIST_SUB = [
+      "/.claude/", "claude_desktop_config.json", "/.cursor/", "/mcp.json",
+      "/.codex/", "/.gemini/", "/.aider", "/.zshrc", "/.bashrc",
+      "/.bash_profile", "/.profile", "/library/launchagents/",
+      "/.config/systemd/user/", "/etc/cron", "/.git/config", "/authorized_keys",
+      "/.vscode/tasks.json",
+  ]
+
+  # Vendored dependency trees and generated caches are not the reviewed codebase.
+  # This is scoping of *where the edit landed*, not a trust list for any destination.
+  VENDORED = [
+      "/node_modules/", "/site-packages/", "/.venv/", "/__pycache__/",
+      "/.git/objects/", "/.git/refs/", "/.git/logs/", "/.git/index",
+      "/.cache/", "/.npm/_cacache/", "/dist/", "/build/", "/target/",
+      "/.next/", "/.nuxt/", "/coverage/", "/.pytest_cache/", "/.mypy_cache/",
+      "/.ruff_cache/", "/.gradle/", "/.m2/", "/.terraform/",
+  ]
+  VENDORED_END = [".pyc", ".map", ".log", ".tmp", ".swp", ".ds_store"]
+
+  SRC_END = [
+      ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".py", ".go", ".rs",
+      ".java", ".kt", ".rb", ".php", ".cs", ".swift", ".c", ".cc", ".cpp",
+      ".h", ".hpp", ".sh", ".bash", ".zsh", ".sql", ".yaml", ".yml",
+      ".json", ".toml", ".tf", ".gradle",
+  ]
+
+  # ── Pure helpers (no graph / log calls) ───────────────────────────────────────
+  def has(s, lst):
+      for x in lst:
+          if x in s:
+              return True
+      return False
+
+  def ends(s, lst):
+      for x in lst:
+          if s.endswith(x):
+              return True
+      return False
+
+  def vendored(pl):
+      if has(pl, VENDORED):
+          return True
+      if ends(pl, VENDORED_END):
+          return True
+      return False
+
+  def classify(pl):
+      if has(pl, GATE_SUB):
+          return CLS_GATE
+      if has(pl, EXEC_SUB) or ends(pl, EXEC_END):
+          return CLS_EXEC
+      if has(pl, SAMPLE_ENV):
+          return ""
+      if has(pl, SECRET_SUB) or ends(pl, SECRET_END):
+          return CLS_SECRET
+      if has(pl, PERSIST_SUB):
+          return CLS_PERSIST
+      return ""
+
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      for p in RELEVANT_CMD:
+          if re.find(p, cmd) != None:
+              return True
+      return False
+
+  def ev_edge(frm, to, kind, ts):
+      return {
+          "from": frm, "to": to, "kind": kind,
+          "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
+      }
+
+  def pick_edge(wedges, ts):
+      for e in wedges:
+          f = int(e.get("first_ts", "0"))
+          l = int(e.get("last_ts", "0"))
+          if f <= ts and ts <= l:
+              return e
+      return wedges[0]
+
+  # ── Cheap graph probe: does mcp-bifrost exist in this peer's session at all? ──
+  def bifrost_present(cmd):
+      if re.find(BIFROST_RE, cmd) != None:
+          return True
+      for p in graph(type="Process"):
+          s = p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")
+          if re.find(BIFROST_RE, s) != None:
+              return True
+      for t in graph(type="Tool"):
+          s = t.get("server", "") + " " + t.get("name", "") + " " + t.get("id", "")
+          if re.find(BIFROST_RE, s) != None:
+              return True
+      return False
+
+  def run():
+      # 1. Relevance gate — pure string checks on meta, no traversal.
+      if not is_relevant_event():
+          return "allow"
+
+      now_ts = int(meta.get("event_ts", "0"))
+      cmd    = meta.get("content", "")
+      if now_ts == 0:
+          return "allow"
+
+      # 2. Cheap in-memory probe before any log work.
+      if not bifrost_present(cmd):
+          return "allow"
+
+      # 3. Anchor on the exact triggering instance and resolve its session.
+      cp      = int(meta.get("caller_pid", "0"))
+      inst    = None
+      lineage = []
+      if cp != 0:
+          inst = proc_instance(cp, now_ts)
+          if inst != None:
+              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+
+      session_pids  = {}
+      session_paths = {}
+      for x in lineage:
+          session_pids[x.get("actor_pid", "")]           = True
+          session_paths[x.get("actor_path", "").lower()] = True
+
+      # Sibling / descendant expansion (two hops) from the exec event log.
+      if len(session_pids) > 0:
+          for _round in range(2):
+              for e in query_events(kind="EXECUTE_PROCESS",
+                                    since_ns=now_ts - WINDOW_NS, limit=4000):
+                  if e.get("parent_pid", "") in session_pids:
+                      session_pids[e.get("actor_pid", "")]           = True
+                      session_paths[e.get("actor_path", "").lower()] = True
+
+      # 4. Provenance: is mcp-bifrost inside THIS session (strong) or only
+      #    present on the peer (weak — raises the evidence bar).
+      prov   = ""
+      strong = False
+      if re.find(BIFROST_RE, cmd) != None:
+          prov   = "delegation cmdline"
+          strong = True
+      if not strong:
+          for x in lineage:
+              s = x.get("actor_path", "") + " " + x.get("cmdline", "")
+              if re.find(BIFROST_RE, s) != None:
+                  prov   = "ancestor " + x.get("actor_path", "?")
+                  strong = True
+                  break
+      if not strong:
+          for p in graph(type="Process"):
+              if p.get("pid", "") in session_pids:
+                  s = p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")
+                  if re.find(BIFROST_RE, s) != None:
+                      prov   = "session process " + p.get("path", "?")
+                      strong = True
+                      break
+      if prov == "":
+          prov = "mcp-bifrost present on peer (attribution degraded)"
+
+      # Degraded lineage: restrict writers to bifrost's own executables only.
+      if len(session_paths) == 0:
+          for p in graph(type="Process"):
+              s = (p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")).lower()
+              if re.find(BIFROST_RE, s) != None:
+                  session_paths[p.get("path", "").lower()] = True
+          strong = False
+      if len(session_paths) == 0:
+          return "allow"
+
+      # 5. Evidence: WRITE_FILE edges of session-owned writers, in-window.
+      lo      = now_ts - WINDOW_NS
+      hi      = now_ts + GRACE_NS
+      classes = {}
+      volume  = 0
+
+      for fs in graph(type="FileSystem"):
+          wpath = fs.get("proc_path", "").lower()
+          if wpath == "":
+              continue
+          in_session = wpath in session_paths
+          if not in_session and re.find(BIFROST_RE, wpath) != None:
+              in_session = True
+          if not in_session:
+              continue
+          wedges = edges(fs["id"], dir="in", kind="WRITE_FILE")
+          if not wedges:
+              continue
+          for a in fs_activity(fs["id"], "WRITE"):
+              ts = int(a.get("ts", "0"))
+              if ts < lo or ts > hi:
+                  continue
+              p  = a.get("path", "")
+              pl = p.lower()
+              if vendored(pl):
+                  continue
+              if ends(pl, SRC_END):
+                  volume += 1
+              c = classify(pl)
+              if c == "":
+                  continue
+              prev = classes.get(c, None)
+              if prev == None or ts < int(prev["ts"]):
+                  classes[c] = {
+                      "path":   p,
+                      "ts":     ts,
+                      "act":    a,
+                      "edge":   pick_edge(wedges, ts),
+                      "writer": fs.get("proc_name", fs.get("proc_path", "?")),
+                  }
+
+      # 6. Verdict: a required surface class plus one more independent class.
+      required = ""
+      for c in REQUIRED:
+          if c in classes:
+              required = c
+              break
+      if required == "":
+          return "allow"
+
+      wide       = volume >= VOLUME_MIN
+      cls_count  = len(classes)
+      if wide:
+          cls_count = cls_count + 1
+      need = MIN_CLASSES
+      if not strong:
+          need = MIN_CLASSES + 1
+      if cls_count < need:
+          return "allow"
+
+      # 7. Dedup so later spawns in the same session do not re-report.
+      prim = classes[required]
+      fp   = required + "|" + prim["path"] + "|" + str(prim["ts"])
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          v = int(seen[k])
+          if now_ts - v < SEEN_TTL_NS:
+              fresh[k] = v
+      if fp in fresh:
+          return "allow"
+      fresh[fp] = now_ts
+      if store_usage()["free"] > 8192:
+          store_set("reported", fresh)
+
+      # 8. Kill chain.
+      root = ""
+      for p in graph(type="Process"):
+          if p.get("agent", "0") == "1" and p.get("pid", "") in session_pids:
+              root = p["id"]
+              break
+      if root == "" and len(lineage) > 0:
+          root = "process://" + lineage[len(lineage) - 1].get("actor_path", "")
+      if root == "":
+          root = "process://" + meta.get("agent_name", "mcp-bifrost")
+
+      chain    = new_chain(root)
+      spawn_to = "process://"
+      if inst != None:
+          spawn_to = spawn_to + inst.get("actor_path", "?")
+      else:
+          spawn_to = spawn_to + meta.get("agent_name", "?")
+      chain.append(step(ev_edge(root, spawn_to, "EXECUTE_PROCESS", now_ts),
+                        stage_id="Delegated Edit Worker",
+                        stage_desc="mcp-bifrost edit/apply worker spawned (" + prov +
+                                   "): " + cmd[:200]))
+
+      names = []
+      for c in CLASS_ORDER:
+          r = classes.get(c, None)
+          if r == None:
+              continue
+          names.append(c)
+          chain.append(step(r["edge"], stage_id=c,
+                            stage_desc="worker session wrote " + r["path"] +
+                                       " (writer: " + r["writer"] + ")",
+                            activity=r["act"]))
+      if wide:
+          names.append("Wide Blast Radius")
+
+      reason = ("mcp-bifrost delegated edit applied outside review scope — " +
+                required + " on " + prim["path"] +
+                "; evidence classes: " + ", ".join(names) +
+                "; " + str(volume) + " source files written in 15m window; " +
+                "provenance: " + prov)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
