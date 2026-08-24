@@ -1,0 +1,387 @@
+title: YAML Include Directive Resolved To Sensitive File Read
+id: 7c1e4a92-3b6d-4f18-9c05-2a8f6d51b4e7
+status: experimental
+level: high
+description: |
+  Detects the YAML file-inclusion chain produced by a custom loader that honours
+  an `!include` (or `!import` / `!env_file` / `!ref`) constructor, or an unsafe
+  language-specific YAML tag (`!!python/object/apply`, `!!ruby/object`, ...).
+
+  The rule does NOT fire on the YAML payload alone. It parses the include target
+  out of the YAML text that reached the agent, and then requires the behaviour
+  graph to confirm that the agent process (or a descendant it spawned) actually
+  performed a READ_FILE of that same target - or, when the target is encoded or
+  unresolvable, of a credential/secret path - inside a 5 minute window around the
+  triggering event. That path-to-path match is the causal link between the
+  attacker-controlled directive and the file the loader opened, which is what makes
+  this distinguishable from the ordinary config reads the agent performs routinely.
+
+  For unsafe deserialization tags (arbitrary object construction) the corroborating
+  stage may instead be an interpreter/shell subprocess spawned inside the same
+  window, which is the observable consequence of code execution during YAML load.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://attack.mitre.org/techniques/T1552/001/
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm04
+falsepositives:
+  - Home-Assistant / Ansible / Helm style multi-document configs that legitimately
+    use a custom !include loader pointing at a dotfile directory under the user's
+    home (e.g. !include /home/dev/.config/app/sensors.yaml). The declared target is
+    read on disk, so both stages are satisfied. Reported, never blocked.
+  - Kubernetes or cloud tooling that legitimately reads ~/.kube/config or
+    /var/run/secrets/... in the same five-minute window as a YAML manifest that
+    contains include directives - the sensitive-read fallback stage will corroborate
+    even though the two are unrelated. The reason string states which stage matched
+    so triage can separate exact-target confirmation from window correlation.
+  - Security research, CVE write-ups, PyYAML hardening documentation or CTF notes
+    pasted into a tool result that contain !!python/object/apply payload examples,
+    while the agent independently spawns python/bash for unrelated work.
+  - Secret-scanning, backup or SBOM agents whose job is to read .env and credential
+    files while also processing YAML manifests.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_include_directive:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_tool_result
+    content|re: '!(?i:include_dir|include_raw|includedir|include|import|env_file|inc|ref|file)\b'
+  sel_unsafe_yaml_tag:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_tool_result
+    content|re:
+      - '!!python/(?:object/apply|object/new|object|name|module)'
+      - '!!ruby/(?:object|hash|struct)'
+      - '!!php/object'
+      - '!!perl/'
+      - '!!(?:java|javax|com|org)\.[A-Za-z0-9_.$]+'
+  condition: sel_include_directive or sel_unsafe_yaml_tag
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── YAML !include / unsafe-tag file-inclusion chain ──────────────────────────
+  WINDOW_NS = 300000000000    # 5 min: directive and resolved read must cluster
+  SKEW_NS   = 1000000000      # 1 s tolerance for clock skew
+  MAX_DEPTH = 3               # process-subtree depth
+  MAX_STEPS = 6               # evidence steps in the chain
+  FS_BUDGET = 140             # hard cap on fs_activity calls per evaluation
+
+  INCLUDE_SPLIT = r"!(?i:include_dir|include_raw|includedir|include|import|env_file|inc|ref|file)\b"
+
+  UNSAFE_TAG = [
+      r"!!python/(?:object/apply|object/new|object|name|module)",
+      r"!!ruby/(?:object|hash|struct)",
+      r"!!php/object",
+      r"!!perl/",
+      r"!!(?:java|javax|com|org)\.[A-Za-z0-9_.$]+",
+  ]
+
+  TRAVERSAL = ["../", "..\\", "%2e%2e", "..%2f", "..%5c"]
+
+  SENSITIVE_RE = [
+      r"/\.ssh/", r"/\.aws/", r"/\.kube/", r"/\.docker/", r"/\.gnupg/",
+      r"/\.config/gcloud", r"/\.netrc", r"/\.npmrc", r"/\.pgpass",
+      r"/\.git-credentials", r"/\.azure/", r"/\.terraform",
+      r"/etc/(?:passwd|shadow|sudoers|krb5\.keytab)",
+      r"/proc/self/(?:environ|cmdline)", r"/var/run/secrets/",
+      r"id_(?:rsa|dsa|ecdsa|ed25519)", r"authorized_keys",
+      r"(?:^|/)\.env(?:\.[a-z0-9_.-]+)?$",
+      r"credentials(?:\.[a-z]+)?$",
+      r"\.(?:pem|key|p12|pfx|jks|kdbx)$",
+      r"(?:^|/)secrets?\.(?:ya?ml|json|toml|ini|env)$",
+      r"/root/", r"/home/[^/]+/\.[a-z]", r"/users/[^/]+/\.[a-z]",
+  ]
+
+  SENS_TOKENS = [
+      "ssh id rsa", "ssh id ed25519", "ssh authorized keys", "aws credentials",
+      "etc passwd", "etc shadow", "kube config", "gnupg", "netrc", "pgpass",
+      "git credentials", "docker config json", "proc self environ", "run secrets",
+  ]
+
+  EXEC_HINT = [r"\bpython[23]?\b", r"\bbash\b", r"\bzsh\b", r"\bsh\b", r"/bin/sh",
+               r"\bcurl\b", r"\bwget\b", r"\bperl\b", r"\bruby\b", r"\bnc\b",
+               r"\bosascript\b", r"\bpowershell\b"]
+
+  GENERIC = ["yml", "yaml", "json", "txt", "cfg", "ini", "conf", "toml", "lock"]
+
+  AI_CTX = ("tool_input", "tool_output", "llm_tool_result", "llm_request",
+            "llm_response", "prompt_response", "sampling_response",
+            "tool_description", "gateway_description")
+
+  # ── pure helpers (no graph / log access) ─────────────────────────────────────
+  def clean_target(raw):
+      t = raw
+      for i in range(5):
+          t = t.strip()
+          if t.startswith(":") or t.startswith("=") or t.startswith("-"):
+              t = t[1:]
+          elif t.startswith("\\\"") or t.startswith("\\'"):
+              t = t[2:]
+          elif t.startswith("\"") or t.startswith("'") or t.startswith("["):
+              t = t[1:]
+          else:
+              break
+      t = t.strip()
+      cut = len(t)
+      for s in ["\\n", "\\r", "\\t", "\\\"", "\n", "\r", "\t", "\"", "'",
+                ",", "}", "]", " ", "#"]:
+          i = t.find(s)
+          if i >= 0 and i < cut:
+              cut = i
+      return t[:cut]
+
+  def include_targets(text):
+      out = []
+      parts = re.split(INCLUDE_SPLIT, text, 120)
+      if len(parts) < 2:
+          return out
+      for p in parts[1:]:
+          t = clean_target(p[:400])
+          if len(t) >= 2:
+              out.append(t)
+      return out
+
+  def classify(t):
+      tags = []
+      low = t.lower()
+      for s in TRAVERSAL:
+          if s in low:
+              tags.append("path-traversal")
+              break
+      for pat in SENSITIVE_RE:
+          if re.find(pat, low) != None:
+              tags.append("sensitive-target")
+              break
+      if re.find(r"^[a-z][a-z0-9+.-]*://", low) != None:
+          tags.append("remote-include")
+      if "${" in t or "$(" in t or "%(" in t:
+          tags.append("dynamic-include")
+      return tags
+
+  def path_pattern(p):
+      toks = []
+      q = p.replace("\\", "/").lower()
+      for part in q.split("/"):
+          part = part.strip()
+          if part == "" or part == "." or part == "..":
+              continue
+          for t in part.split("."):
+              if len(t) >= 3 and t not in GENERIC:
+                  toks.append(t)
+      if len(toks) > 3:
+          toks = toks[len(toks) - 3:]
+      return " ".join(toks)
+
+  def pattern_ok(pat):
+      if pat == "":
+          return False
+      toks = pat.split(" ")
+      if len(toks) >= 2:
+          return True
+      return len(toks[0]) >= 6
+
+  # ── graph helpers ────────────────────────────────────────────────────────────
+  def agent_roots():
+      want = meta.get("agent_name", "")
+      exact = []
+      allp  = []
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          allp.append(p)
+          if want != "" and p.get("path", "") == want:
+              exact.append(p)
+      if exact:
+          return exact
+      return allp
+
+  def subtree(root_id):
+      seen = {root_id: True}
+      frontier = [root_id]
+      for d in range(MAX_DEPTH):
+          nxt = []
+          for pid in frontier:
+              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+                  c = e["to"]
+                  if c not in seen:
+                      seen[c] = True
+                      nxt.append(c)
+          frontier = nxt
+          if not frontier:
+              break
+      return seen.keys()
+
+  def fs_hits(pids, pattern, lo, hi, budget, limit):
+      out = []
+      for pid in pids:
+          for e in edges(pid, dir="out", kind="READ_FILE"):
+              if budget[0] <= 0:
+                  return out
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              budget[0] = budget[0] - 1
+              for ent in fs_activity(fs["id"], "READ", pattern):
+                  ts = int(ent.get("ts", "0"))
+                  if ts >= lo and ts <= hi:
+                      out.append([e, ent])
+                      if len(out) >= limit:
+                          return out
+      return out
+
+  def find_exec(pids, lo, hi):
+      for pid in pids:
+          for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              ts = int(e.get("ts", "0"))
+              if ts < lo or ts > hi:
+                  continue
+              cl = e.get("cmdline", "")
+              if cl == "":
+                  p = node(e["to"])
+                  if p != None:
+                      cl = p.get("cmdline", "") or p.get("path", "")
+              for pat in EXEC_HINT:
+                  if re.find(pat, cl) != None:
+                      return e
+      return None
+
+  def ingest_edge(root_id, tn):
+      if tn == "":
+          return None
+      for k in ["TOOL_CALL", "TOOL_RESULT"]:
+          for e in edges(root_id, dir="both", kind=k):
+              for x in [node(e["to"]), node(e["from"])]:
+                  if x != None and x.get("_type", "") == "Tool":
+                      if x.get("name", "") == tn:
+                          return e
+      return None
+
+  # ── main ─────────────────────────────────────────────────────────────────────
+  def run():
+      # 1. relevance gate — pure string checks on meta, no traversal
+      ct = meta.get("context_type", "")
+      if ct not in AI_CTX:
+          return "allow"
+      body = meta.get("content", "")
+      if body == "" or "!" not in body:
+          return "allow"
+
+      # 2. parse the YAML surface: include targets and unsafe construction tags
+      targets = include_targets(body)
+      unsafe  = []
+      for pat in UNSAFE_TAG:
+          m = re.find(pat, body)
+          if m != None:
+              unsafe.append(m)
+      if not targets and not unsafe:
+          return "allow"
+
+      # 3. required high-specificity anchor: a target that is traversal / sensitive /
+      #    remote / dynamically built, or an unsafe deserialization tag.
+      anchor  = ""
+      a_tags  = []
+      for t in targets:
+          tg = classify(t)
+          if tg:
+              anchor = t
+              a_tags = tg
+              break
+      if anchor == "" and unsafe:
+          a_tags = ["unsafe-deserialization-tag"]
+      if not a_tags:
+          return "allow"
+
+      ev = int(meta.get("event_ts", "0"))
+      if ev <= 0:
+          return "allow"
+      lo = ev - WINDOW_NS
+      hi = ev + SKEW_NS
+
+      roots = agent_roots()
+      if not roots:
+          return "allow"
+
+      budget = [FS_BUDGET]
+      pat    = path_pattern(anchor) if anchor != "" else ""
+      exact  = pattern_ok(pat)
+
+      for root in roots:
+          rid  = root["id"]
+          pids = subtree(rid)
+
+          # 4a. strongest corroboration: the declared include target was read
+          hits  = []
+          mode  = ""
+          if exact:
+              hits = fs_hits(pids, pat, lo, hi, budget, MAX_STEPS)
+              if hits:
+                  mode = "declared include target read on disk"
+
+          # 4b. fallback: target encoded/unresolvable — a credential path was read
+          if not hits:
+              for tok in SENS_TOKENS:
+                  if budget[0] <= 0:
+                      break
+                  h = fs_hits(pids, tok, lo, hi, budget, MAX_STEPS)
+                  if h:
+                      hits = h
+                      mode = "credential path read in same window"
+                      break
+
+          # 4c. unsafe-tag branch: interpreter/shell spawned during YAML load
+          ex = None
+          if not hits and "unsafe-deserialization-tag" in a_tags:
+              ex = find_exec(pids, lo, hi)
+
+          if not hits and ex == None:
+              continue
+
+          label = "!include target " + anchor if anchor != "" else unsafe[0]
+          chain = new_chain(rid)
+
+          ie = ingest_edge(rid, meta.get("tool_name", ""))
+          if ie != None:
+              chain.append(step(ie, stage_id="YAML Ingest",
+                                stage_desc="YAML carrying " + label +
+                                           " reached agent via tool " +
+                                           meta.get("tool_name", "?")))
+
+          shown = []
+          for pair in hits[:MAX_STEPS]:
+              p = pair[1].get("path", "?")
+              shown.append(p)
+              chain.append(step(pair[0], stage_id="File Inclusion",
+                                stage_desc="loader resolved include and read: " + p,
+                                activity=pair[1]))
+          if ex != None:
+              chain.append(step(ex, stage_id="Deserialization Exec",
+                                stage_desc="interpreter/shell spawned during YAML load: " +
+                                           ex.get("cmdline", "?")))
+
+          detail = mode if mode != "" else "subprocess spawned during YAML load"
+          reason = ("YAML file inclusion chain — " + label +
+                    " [" + "+".join(a_tags) + "]; " + detail)
+          if shown:
+              reason = reason + ": " + ", ".join(shown)
+          reason = reason + " (agent " + root.get("name", "?") + ")"
+          print(reason)
+
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
