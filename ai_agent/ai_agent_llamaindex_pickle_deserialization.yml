@@ -1,0 +1,136 @@
+title: LlamaIndex Object Node Mapping Pickle Deserialization
+id: 3f6b1c92-4d7a-4a11-9e3c-8b5d0a2f7c64
+status: experimental
+level: high
+description: |
+  Detects a spawned process whose command line carries two independent,
+  co-located indicators of CWE-502 exploitation against llama_index
+  SimpleObjectNodeMapping / ObjectIndex persistence (fixed in 0.14.16 by
+  RestrictedUnpickler):
+
+    (a) an explicit Python unpickling primitive (pickle/dill/cloudpickle
+        load(s), Unpickler) together with llama_index object-node-mapping
+        context, OR
+    (b) an explicit unpickling primitive together with a classic pickle RCE
+        gadget (__reduce__, os.system/popen, subprocess.*, builtins.eval/exec,
+        or the raw opcode module/callable pairs cposix\nsystem,
+        cbuiltins\neval, csubprocess\nPopen), OR
+    (c) an inline serialized pickle payload -- base64 protocol-4/5 framing
+        (gASV/gAWV) or an escaped \x80\x0[2-5] protocol header -- passed to an
+        inline `python -c` interpreter or accompanied by llama_index context.
+
+  Scope note (answering the triage objection): the engine has no
+  deserialize_object / load_module event type and no DESERIALIZED_OBJECT,
+  EXECUTED_CODE or ARBITRARY_CODE_EXECUTION edge kind, so the unpickle-to-exec
+  transition itself is not representable. This rule therefore does NOT try to
+  correlate a generic child-process spawn back to a pickle call. It fires only
+  on the one artifact that IS representable -- the execute_process command line
+  -- and only when that single command line simultaneously contains the
+  deserialization primitive AND either the vulnerable component's identifiers
+  or a weaponized-payload marker. A bare subprocess spawn, a bare
+  `pickle.loads(`, or a bare `llama_index` reference never fires this rule.
+  Coverage is deliberately narrower than the CWE: it catches the operator/agent
+  that constructs or triggers the malicious unpickle in-line, not the
+  second-order shell the gadget ultimately spawns.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://docs.python.org/3/library/pickle.html#restricting-globals
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - cwe.502
+  - owasp.a08_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # ---- unpickling primitive actually invoked on the command line -------------
+  sel_deser_api:
+    command|re:
+      - '(?i)\b(?:c?pickle|_pickle|dill|cloudpickle)\s*\.\s*loads?\s*\('
+      - '(?i)\bUnpickler\s*\('
+
+  # ---- serialized pickle payload carried inline ------------------------------
+  sel_pickle_blob:
+    command|re:
+      - '\bgASV[A-Za-z0-9+/]{16,}'
+      - '\bgAWV[A-Za-z0-9+/]{16,}'
+      - '\\x80\\x0[2-5]'
+
+  # ---- vulnerable llama_index component identifiers --------------------------
+  sel_llama_ctx:
+    command|re:
+      - '(?i)\bSimpleObjectNodeMapping\b'
+      - '(?i)\bllama[_.-]?index\b'
+      - '(?i)\bobject[_-]?node[_-]?mapping\b'
+      - '(?i)\bbase_node_mapping\b'
+      - '(?i)\bObjectIndex\b'
+      - '(?i)\bfrom_persist_(?:dir|path)\s*\('
+
+  # ---- weaponized-pickle gadget markers --------------------------------------
+  sel_rce_gadget:
+    command|re:
+      - '(?i)\b__reduce__\b'
+      - '(?i)\bos\s*\.\s*(?:system|popen|execl|execv|execve|spawnl|spawnv)\s*\('
+      - '(?i)\bsubprocess\s*\.\s*(?:Popen|call|run|check_output|check_call)\s*\('
+      - '(?i)\b(?:builtins|__builtin__)\s*\.\s*(?:eval|exec|compile|__import__)\b'
+      - 'c(?:posix|nt|os)\\n(?:system|popen|execv|spawnv)'
+      - 'c(?:builtins|__builtin__)\\n(?:eval|exec|getattr|__import__)'
+      - 'csubprocess\\n(?:Popen|run|check_output|check_call)'
+
+  # ---- inline interpreter invocation ------------------------------------------
+  sel_python_inline:
+    command|re: '(?i:python)[0-9]*(?:\.[0-9]+)?(?:\.exe)?\s+(?:-[A-Za-z]+\s+){0,3}-c\s'
+
+  # ---- benign-context suppressors ---------------------------------------------
+  filter_pkg_mgmt:
+    command|re: '(?i)(?:^|[\s/])(?:pip[0-9]?|uv|poetry|conda|mamba|pipenv|pdm|hatch)\s+(?:[-\w]+\s+){0,3}(?:install|add|upgrade|update|sync|lock|show|list|index)\b'
+
+  filter_test_runner:
+    command|re: '(?i)(?:^|[\s/])(?:pytest|py\.test|tox|nox|unittest|coverage|hypothesis)\b'
+
+  filter_sast:
+    command|re: '(?i)(?:^|[\s/])(?:semgrep|bandit|pylint|ruff|mypy|codeql|snyk|trivy|grype|pip-audit|safety|osv-scanner|checkov|detect-secrets)\b'
+
+  filter_source_search:
+    command|re: '(?i)^\s*(?:sudo\s+)?(?:[\w./-]*/)?(?:grep|egrep|fgrep|rg|ag|ack|sift|find|ls|cat|less|more|head|tail|wc|diff|echo|printf|git)\s'
+
+  condition: >
+    sel_event and (
+      (sel_deser_api and sel_llama_ctx) or
+      (sel_deser_api and sel_rce_gadget) or
+      (sel_pickle_blob and sel_llama_ctx) or
+      (sel_pickle_blob and sel_python_inline)
+    ) and not (
+      filter_pkg_mgmt or filter_test_runner or filter_sast or filter_source_search
+    )
+
+falsepositives:
+  - Security engineer or AI agent grepping the llama_index source tree for the
+    vulnerable call site (e.g. `git grep -n "pickle.loads" -- llama_index/`) --
+    suppressed by filter_source_search.
+  - SCA / SAST tooling whose command line embeds the vulnerable pattern as a
+    query (e.g. `semgrep --pattern 'pickle.loads(...)'`, `pip-audit`,
+    `osv-scanner`) -- suppressed by filter_sast.
+  - Regression tests for the RestrictedUnpickler fix, which legitimately
+    construct pickle payloads next to SimpleObjectNodeMapping (e.g.
+    `pytest -k test_object_node_mapping`) -- suppressed by filter_test_runner.
+  - Remediation commands such as `pip install --upgrade "llama-index>=0.14.16"`
+    -- suppressed by filter_pkg_mgmt (and would not match sel_deser_api anyway).
+  - Legitimate ML pipelines that load a persisted llama_index ObjectIndex via
+    `from_persist_dir(...)` -- does NOT fire, because sel_llama_ctx alone is
+    never sufficient; an explicit unpickling primitive or an inline pickle blob
+    must also be present on the same command line.
+  - Data-science one-liners that unpickle a trusted local artifact
+    (`python -c "import pickle;pickle.load(open('model.pkl','rb'))"`) -- does
+    NOT fire, because neither llama_index context nor an RCE gadget nor an
+    inline serialized payload is present.
+
+action: report
