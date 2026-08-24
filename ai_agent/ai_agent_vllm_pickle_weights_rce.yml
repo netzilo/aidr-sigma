@@ -1,0 +1,358 @@
+title: vLLM Malicious Model Weights Deserialization RCE
+id: 7c1e9a34-5f2b-4d68-9a01-3e6b8f2c4d17
+status: experimental
+level: high
+description: |
+  Detects arbitrary code execution originating from a vLLM / PyTorch model-weight
+  load path (torch.load with weights_only=False, hf_model_weights_iterator).
+
+  A malicious checkpoint hosted on a model hub embeds a pickle __reduce__ payload.
+  When vLLM unpickles the weights, the payload runs inside the inference process
+  and typically spawns a shell, a downloader, or an inline interpreter one-liner.
+
+  The rule is instance-resolved: it anchors on meta.caller_pid, resolves the exact
+  process instance with proc_instance(), walks the real spawn chain with
+  proc_lineage(), and requires a vLLM/torch model-loading ancestor inside that one
+  lineage before it will report. Corroborating stages (pickle-format checkpoint
+  read, remote weight fetch, payload egress) are queried from the event log scoped
+  to (actor_pid, actor_start) pairs belonging to that same session only, inside a
+  5-minute window ending at the triggering exec. No cross-session attribution is
+  possible: every query is bound to an instance key derived from the caller's own
+  lineage.
+author: Tanya
+date: "2026-06-01"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://pytorch.org/docs/stable/generated/torch.load.html
+  - https://attack.mitre.org/techniques/T1195/001/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.initial-access
+  - attack.t1195.001
+  - owasp.a01-2021
+  - owasp.a04-2021
+falsepositives:
+  - Container or Kubernetes entrypoints that wrap vLLM startup in "sh -c" and use
+    curl/wget to stage weights from an internal registry before serving. These only
+    reach the payload signature if the download is piped into a shell or written to
+    /tmp, /var/tmp or /dev/shm and chmod +x'd.
+  - Distributed launchers (torchrun, Ray worker bootstrap, DeepSpeed) that spawn
+    "python -c" one-liners importing socket or subprocess for rendezvous. This is
+    the highest-noise benign case and is why the rule only reports.
+  - Interactive debugging in a Jupyter/IPython kernel that is itself a descendant of
+    the vLLM process, where an engineer runs base64 or curl from the same lineage.
+  - CUDA kernel JIT compilation via torch.utils.cpp_extension (ninja, nvcc, gcc).
+    These spawn shells but never match the payload signatures.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_payload_hint:
+    content|re:
+      - '(?i)\b(sh|bash|zsh|dash|ksh)\b[^\n]{0,30}\s-c\b'
+      - '(?i)(curl|wget)\b[^\n]{0,200}\|\s*(bash|sh|python[0-9.]*|perl|ruby)\b'
+      - '(?i)\bnc\b\s+-[a-z]{0,4}e\b'
+      - '/dev/tcp/[0-9a-zA-Z]'
+      - '(?i)\bbase64\b\s+(-d|--decode)\b'
+      - '(?i)\bpython[0-9.]*\b\s+-c\b'
+      - '(?i)\bperl\b\s+-e\b'
+      - '(?i)\bosascript\b\s+-e\b'
+      - '(?i)\bpowershell(\.exe)?\b[^\n]{0,80}\s-e'
+      - '(?i)\bchmod\b\s+\+x'
+      - '(?i)\bmkfifo\b'
+  condition: sel_exec and sel_payload_hint
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants ────────────────────────────────────────────────────────────────
+  WINDOW_NS = 300000000000      # 5 minutes — corroborating stages must cluster
+  MAX_PIDS  = 16                # bound on session expansion
+
+  # A vLLM / HF weight-loading process. Both a runtime hint AND a loader hint are
+  # required, so a bare "--model" flag on some unrelated CLI is not enough.
+  RUNTIME_HINTS = [
+      r"(?i)\bpython[0-9.]*\b",
+      r"(?i)\bvllm\b",
+      r"(?i)\btorchrun\b",
+      r"(?i)\buvicorn\b",
+      r"(?i)\bray\b",
+  ]
+  VLLM_HINTS = [
+      r"(?i)\bvllm\b",
+      r"(?i)vllm[./]entrypoints",
+      r"(?i)\bhf_model_weights_iterator\b",
+      r"(?i)\btorch\.load\b",
+      r"(?i)\bfrom_pretrained\b",
+      r"(?i)\bload_weights\b",
+      r"(?i)\bmodel_executor\b",
+      r"(?i)\bhuggingface[-_]?(cli|hub)\b",
+      r"(?i)\btext-generation-(launcher|server)\b",
+      r"(?i)--model[ =]",
+  ]
+
+  # Pickle-format checkpoint artefacts (safetensors deliberately excluded — it is
+  # not an unpickling vector, so its presence is not evidence).
+  CKPT = [
+      r"(?i)pytorch_model[^/]{0,40}\.bin",
+      r"(?i)consolidated\.[0-9]+\.pth",
+      r"(?i)\.(pt|pth|ckpt|pkl|pickle|bin)$",
+      r"(?i)\.(pt|pth|ckpt|pkl|pickle|bin)[?#]",
+  ]
+  CKPT_URL = [
+      r"(?i)/resolve/[^ ]{0,120}\.(bin|pt|pth|ckpt|pkl)",
+      r"(?i)pytorch_model[^/]{0,40}\.bin",
+      r"(?i)\.(pt|pth|ckpt|pkl|pickle)($|[?#])",
+  ]
+
+  # High-specificity deserialization-payload signatures.
+  SHELL_C = r"(?i)\b(sh|bash|zsh|dash|ksh)\b[^\n]{0,30}\s-c\b"
+  PAYLOAD = [
+      r"(?i)(curl|wget)\b[^\n]{0,200}\|\s*(bash|sh|python[0-9.]*|perl|ruby)\b",
+      r"(?i)\bnc\b\s+-[a-z]{0,4}e\b",
+      r"/dev/tcp/[0-9a-zA-Z]",
+      r"(?i)\bbase64\b\s+(-d|--decode)\b",
+      r"(?i)\bpython[0-9.]*\b\s+-c\b[^\n]{0,400}(socket|subprocess|urllib|requests|exec\(|eval\(|__import__|b64decode)",
+      r"(?i)\bperl\b\s+-e\b[^\n]{0,200}(socket|exec|system)",
+      r"(?i)\bchmod\b\s+\+?x[a-z]{0,3}\s+/(tmp|var/tmp|dev/shm|private/tmp)/",
+      r"(?i)\bosascript\b\s+-e\b",
+      r"(?i)\bpowershell(\.exe)?\b[^\n]{0,80}\s-e(nc|ncodedcommand)?\s+[A-Za-z0-9+/]{20}",
+      r"(?i)\bmkfifo\b[^\n]{0,120}\|",
+      r"(?i)>>?\s*[^\n]{0,80}(authorized_keys|\.bashrc|\.zshrc|\.profile)",
+      r"(?i)\bcurl\b[^\n]{0,200}\s-o\s+/(tmp|var/tmp|dev/shm)/",
+      r"(?i)\bwget\b[^\n]{0,200}\s-O\s+/(tmp|var/tmp|dev/shm)/",
+      r"(?i)\b(crontab\s+-|launchctl\s+load)\b",
+  ]
+  SHELL_INNER = [
+      r"(?i)\bcurl\b", r"(?i)\bwget\b", r"/dev/tcp/", r"(?i)\bnc\b\s+-",
+      r"(?i)\bbase64\b", r"(?i)\bpython[0-9.]*\b\s+-c\b", r"(?i)\bchmod\b",
+      r"(?i)\bmkfifo\b", r"(?i)/dev/shm/", r"(?i)\beval\b",
+  ]
+
+  # ── Pure helpers (no graph / no event-log calls) ─────────────────────────────
+  def matches_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def trunc(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def first_token(s):
+      m = re.find(r"/[A-Za-z0-9._/-]{2,}", s)
+      if m != None:
+          return m
+      parts = s.split(" ")
+      if len(parts) > 0 and parts[0] != "":
+          return parts[0]
+      return "unknown"
+
+  def payload_suspicious(cmd):
+      if cmd == "":
+          return False
+      if matches_any(PAYLOAD, cmd):
+          return True
+      if re.find(SHELL_C, cmd) != None and matches_any(SHELL_INNER, cmd):
+          return True
+      return False
+
+  def is_model_loader(path, cmd):
+      txt = path + " " + cmd
+      if not matches_any(RUNTIME_HINTS, txt):
+          return False
+      return matches_any(VLLM_HINTS, txt)
+
+  # ── Kill-chain edge builders (synthesised from instance-resolved event rows) ──
+  def exec_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = e.get("actor_path", "")
+      return {
+          "from": "process://" + frm,
+          "to":   "process://" + e.get("actor_path", ""),
+          "kind": "EXECUTE_PROCESS",
+          "ts":   e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  trunc(e.get("cmdline", ""), 200),
+      }
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = e.get("path", e.get("host", ""))
+      return {
+          "from": "process://" + e.get("actor_path", ""),
+          "to":   tgt,
+          "kind": e.get("kind", ""),
+          "ts":   e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── Main ─────────────────────────────────────────────────────────────────────
+  def run():
+      # 1. Relevance gate — pure string work on meta only.
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if not payload_suspicious(cmd):
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      # 2. Anchor on the exact triggering instance.
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"            # degraded — never guess attribution
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # 3. REQUIRED anchor stage: a vLLM/torch weight-loading ancestor in THIS lineage.
+      anchor   = None
+      anchor_i = -1
+      for i in range(len(lineage)):
+          x = lineage[i]
+          if is_model_loader(x.get("actor_path", ""), x.get("cmdline", "")):
+              anchor   = x
+              anchor_i = i
+              break
+      if anchor == None:
+          return "allow"            # not a model-load lineage — nothing to say
+
+      start = now - WINDOW_NS
+
+      # 4. Session scope = the loader and everything below it in this lineage,
+      #    plus descendants spawned inside the window. Instance-keyed (pid,start),
+      #    so PID reuse and other sessions cannot bleed in.
+      session = []
+      known   = {}
+      for i in range(anchor_i + 1):
+          x = lineage[i]
+          k = x.get("actor_pid", "") + ":" + x.get("actor_start", "0")
+          if k not in known:
+              known[k] = True
+              session.append([x.get("actor_pid", ""), x.get("actor_start", "0"), x.get("actor_path", "")])
+
+      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=start, until_ns=now, limit=2000)
+      for _gen in range(3):
+          added = False
+          for e in spawn_rows:
+              pk = e.get("parent_pid", "") + ":" + e.get("parent_start", "0")
+              ck = e.get("actor_pid", "") + ":" + e.get("actor_start", "0")
+              if pk in known and ck not in known and len(session) < MAX_PIDS:
+                  known[ck] = True
+                  session.append([e.get("actor_pid", ""), e.get("actor_start", "0"), e.get("actor_path", "")])
+                  added = True
+          if not added:
+              break
+
+      # 5. Build the chain, rooted at the owning process of this session.
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+
+      chain.append(step(exec_edge(anchor),
+                        stage_id="Model Load",
+                        stage_desc="vLLM/torch weight loader: " + base(anchor.get("actor_path", "")) +
+                                   " | " + trunc(anchor.get("cmdline", ""), 160)))
+      stages.append("model-loader")
+
+      # Trigger stage comes from meta — the just-fired exec races async ingest.
+      child = inst.get("actor_path", "")
+      if is_model_loader(inst.get("actor_path", ""), inst.get("cmdline", "")):
+          child = first_token(cmd)      # caller IS the loader; child is in meta
+      trig = {
+          "from": "process://" + anchor.get("actor_path", ""),
+          "to":   "process://" + child,
+          "kind": "EXECUTE_PROCESS",
+          "ts":   str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+          "cmdline":  trunc(cmd, 300),
+      }
+      chain.append(step(trig,
+                        stage_id="Deserialization Payload",
+                        stage_desc="model-load lineage spawned code-execution payload: " + trunc(cmd, 200)))
+      stages.append("pickle-payload-exec")
+
+      # 6. Corroborating stages — scoped by instance key, windowed, bounded.
+      got_ckpt = False
+      for s in session:
+          if got_ckpt:
+              break
+          if s[0] == "":
+              continue
+          rows = query_events(kind="READ_FILE", actor_pid=int(s[0]), actor_start=int(s[1]),
+                              since_ns=start, until_ns=now, limit=300)
+          for e in rows:
+              p = e.get("path", "")
+              if p != "" and matches_any(CKPT, p):
+                  chain.append(step(ev_edge(e),
+                                    stage_id="Checkpoint Load",
+                                    stage_desc="pickle-format weight file read: " + p))
+                  stages.append("pickle-checkpoint-read")
+                  got_ckpt = True
+                  break
+
+      got_fetch = False
+      for s in session:
+          if got_fetch:
+              break
+          if s[0] == "":
+              continue
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(s[0]), actor_start=int(s[1]),
+                              since_ns=start, until_ns=now, limit=200)
+          for e in rows:
+              hp = e.get("host", "") + e.get("path", "")
+              if hp != "" and matches_any(CKPT_URL, hp):
+                  chain.append(step(ev_edge(e),
+                                    stage_id="Remote Weights Fetch",
+                                    stage_desc="remote checkpoint fetched from " + e.get("host", "") +
+                                               e.get("path", "")))
+                  stages.append("remote-weights-fetch")
+                  got_fetch = True
+                  break
+
+      for e in query_events(kind="CONNECTS", actor_pid=int(inst["actor_pid"]),
+                            actor_start=int(inst["actor_start"]),
+                            since_ns=start, until_ns=now, limit=50):
+          h = e.get("host", "")
+          if h != "" and e.get("is_ztna_host", "0") != "1":
+              chain.append(step(ev_edge(e),
+                                stage_id="Payload Egress",
+                                stage_desc="payload process connected to " + h + ":" + e.get("port", "")))
+              stages.append("payload-egress")
+              break
+
+      # 7. Verdict — report only; this rule never blocks inference workloads.
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "")))
+      attribution = "resolved"
+      if len(lineage) < 2:
+          attribution = "degraded"
+
+      reason = ("Possible malicious model-weight deserialization (vLLM torch.load " +
+                "weights_only=False) — " + ", ".join(stages) +
+                " | lineage: " + " -> ".join(names) +
+                " | payload: " + trunc(cmd, 160) +
+                " | attribution: " + attribution)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
