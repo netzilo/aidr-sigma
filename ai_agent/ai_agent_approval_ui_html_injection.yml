@@ -1,0 +1,338 @@
+title: Approval-UI HTML Injection in Tool Argument
+id: b7f3c2d9-4e51-4a86-9d0c-5f2a71e83b64
+status: experimental
+level: high
+description: |
+  Detects a tool-call argument that carries an executable HTML/JavaScript primitive
+  (script tag, event-handler attribute, javascript: URI, postMessage, srcdoc,
+  programmatic .click()/.submit()) together with an identifier that names a
+  human-in-the-loop approval surface (approve/deny endpoint, approval id/token,
+  pending-decision queue, HITL control). The payload is intended to render inside
+  the approval dashboard and self-approve the pending decision before a human
+  reviewer can act.
+
+  TELEMETRY CEILING (explicit): the engine has no APPROVAL_DECISION, UI_RENDER,
+  HTML_INJECTION or XSS_ATTEMPT event or edge, so it is NOT observable that the
+  dashboard rendered the payload unsanitised, that script executed client-side, or
+  that a self-approval occurred. This rule therefore does not claim a completed
+  bypass. It reports the injection attempt only when the current tool argument
+  matches BOTH an executable primitive and an approval-surface identifier AND the
+  behaviour graph corroborates it: the same agent recently ingested external
+  instruction content (ACQUIRED_SKILL), recently consumed the output of a
+  web-fetch/browse tool (TOOL_RESULT), or has an approval/HITL tool in this
+  session (TOOL_CALL) that gives the payload a live target. Without graph
+  corroboration the script returns allow and the rule stays invisible.
+  Action is report only — the enforcement decision belongs to the approval
+  dashboard's own output encoding, not to this detector.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://attack.mitre.org/techniques/T1059/007/
+tags:
+  - attack.execution
+  - attack.t1059.007
+  - attack.defense-evasion
+  - atlas.aml.t0051
+  - atlas.aml.t0049
+  - owasp.llm01
+  - owasp.asi01
+falsepositives:
+  - Security engineers deliberately submitting XSS payload lists or regression
+    fixtures against the approval dashboard to verify its sanitisation. Mitigated
+    by the benign-marker downgrade (DOMPurify / escapeHtml / textContent= /
+    encodeURIComponent / describe()/it()/expect() / CVE-YYYY-NNNN) when only a
+    single executable primitive is present.
+  - Front-end development on the approval dashboard itself — writing or editing an
+    HTML template that legitimately contains approve/deny buttons with onclick
+    handlers. Mitigated by requiring graph corroboration; a plain editor session
+    with no external content ingestion, no web-fetch tool result and no
+    approval/HITL tool in the session returns allow.
+  - Documentation, incident write-ups or CVE advisories about approval-UI XSS being
+    written to a file through a write tool. Mitigated by the benign-marker
+    downgrade and by report-only action.
+  - End-to-end test code (Playwright/Cypress) that selects an approve button and
+    calls .click() — matches a primitive plus an approval identifier. Mitigated by
+    the test-marker downgrade and by the corroboration requirement.
+  - An agent reading a page from an internal approval dashboard and passing the
+    markup back into another tool argument as data. Mitigated by requiring an
+    executable primitive rather than mere presence of approval markup, and by
+    per-fingerprint deduplication so a repeated paste reports at most once per
+    10 minutes.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+  sel_markup:
+    content|re:
+      - '(?i)<\s*/?\s*(script|img|svg|iframe|form|input|object|embed|body|details|video|audio|marquee)\b'
+      - '(?i)\bon(error|load|focus|toggle|mouseover|animationstart|pageshow)\s*='
+      - '(?i)javascript\s*:'
+      - '(?i)\bpostMessage\s*\('
+      - '(?i)\bsrcdoc\s*='
+  sel_approval_hint:
+    content|re:
+      - '(?i)approv'
+      - '(?i)\bdeny\b'
+      - '(?i)\bhitl\b'
+      - '(?i)human[-_ ]?in[-_ ]?the[-_ ]?loop'
+      - '(?i)\bpending[-_ ]?(decision|review)'
+  condition: sel_tool_call and sel_markup and sel_approval_hint
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── constants ────────────────────────────────────────────────────────────────
+  WINDOW_NS = 900000000000    # 15 min of graph history counts as corroboration
+  DEDUPE_NS = 600000000000    # suppress an identical payload for 10 min
+  MAX_SEEN  = 200
+  MAX_LEN   = 200000
+
+  # Executable client-side primitives. Presence of markup alone is NOT enough.
+  INJECT = [
+      r'(?i)<\s*script[\s>/]',
+      r'(?i)<\s*(img|svg|iframe|object|embed|body|input|details|video|audio|marquee|form)\b[^>]{0,300}\bon[a-z]{3,15}\s*=',
+      r'(?i)\bon(error|load|focus|toggle|mouseover|animationstart|pageshow)\s*=\s*[\x22\x27(a-zA-Z_$]',
+      r'(?i)javascript\s*:\s*[a-zA-Z_$(]',
+      r'(?i)\bpostMessage\s*\(',
+      r'(?i)\bsrcdoc\s*=',
+      r'(?i)\bdocument\s*\.\s*(querySelector|querySelectorAll|getElementById|getElementsByName|forms|cookie)',
+      r'(?i)\b(fetch|XMLHttpRequest)\s*\(',
+      r'(?i)navigator\s*\.\s*sendBeacon\s*\(',
+      r'(?i)\.\s*(click|submit)\s*\(\s*\)',
+  ]
+
+  # Identifiers that name a human-approval surface — the payload's target.
+  APPROVAL = [
+      r'(?i)/(approve|approvals|deny|reject|decision|decisions|hitl)(/|\?|\x22|\x27|\s|$)',
+      r'(?i)\b(auto|self)[-_ ]?approv',
+      r'(?i)\b(id|name|class|value|data-testid|data-approval)\s*=\s*[\x22\x27]?(approve|approved|approval|deny|reject)',
+      r'(?i)\bapproval[-_ ]?(id|token|request|form|button|url|endpoint|queue)\b',
+      r'(?i)\bpending[-_ ]?(approval|approvals|decision|review)s?\b',
+      r'(?i)\bhitl\b',
+      r'(?i)human[-_ ]?in[-_ ]?the[-_ ]?loop',
+      r'(?i)\baction\s*=\s*[\x22\x27]?[^\x22\x27 >]{0,120}(approve|deny)',
+      r'(?i)(approve|deny)[-_ ]?(all|tool|call|request|btn|button)\b',
+  ]
+
+  # Sanitisation / test / advisory context — downgrades a single-primitive hit.
+  BENIGN = [
+      r'(?i)\bDOMPurify\b',
+      r'(?i)\bsanitize[-_a-z]{0,8}\s*\(',
+      r'(?i)\bescapeHtml\b',
+      r'(?i)\btextContent\s*=',
+      r'(?i)\bencodeURIComponent\s*\(',
+      r'(?i)\bexpect\s*\(',
+      r'(?i)\bdescribe\s*\(\s*[\x22\x27]',
+      r'(?i)\bit\s*\(\s*[\x22\x27]',
+      r'(?i)\bCVE-[0-9]{4}-[0-9]{4,7}\b',
+  ]
+
+  FETCH_TOOLS = [
+      r'(?i)\b(fetch|web[-_]?fetch|web[-_]?search|browse|browser|crawl|http[-_]?get|read[-_]?url|url[-_]?read|open[-_]?url|scrape|puppeteer|playwright)\b',
+  ]
+  APPROVAL_TOOLS = [
+      r'(?i)(approv|hitl|human[-_]?review|review[-_]?queue|confirm[-_]?action|pending[-_]?decision)',
+  ]
+
+  # ── pure helpers (no graph / store calls) ────────────────────────────────────
+  def first_match(pats, s):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return None
+
+  def count_match(pats, s):
+      n = 0
+      for p in pats:
+          if re.find(p, s) != None:
+              n += 1
+      return n
+
+  def clip(s, n):
+      if s == None:
+          return "?"
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def edge_ts(e):
+      for k in ["ts", "last_ts", "first_ts"]:
+          v = e.get(k, "")
+          if v != "":
+              return int(v)
+      return 0
+
+  def in_window(ts, now):
+      if ts == 0 or now == 0:
+          return True
+      d = now - ts
+      if d < 0:
+          d = -d
+      return d <= WINDOW_NS
+
+  # ── graph helpers ───────────────────────────────────────────────────────────
+  def find_agent():
+      want = meta.get("agent_name", "")
+      fallback = None
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if fallback == None:
+              fallback = p
+          if want != "" and p.get("path", "") == want:
+              return p
+      return fallback
+
+  def corroborate(aid, now):
+      hits = []
+      # A. external instruction content ingested by this agent (injection origin)
+      for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+          s = node(e["to"])
+          if s == None:
+              continue
+          if not in_window(edge_ts(e), now):
+              continue
+          src = s.get("source", "")
+          pub = s.get("is_ztna_host", "1") == "0"
+          if src == "http" or src == "llm" or pub:
+              hits.append(["External Content Ingested",
+                           "agent loaded instruction content from " + s.get("host", "?") +
+                           " (source=" + src + ") before the injected tool argument", e])
+              break
+      # B. output of a web-fetch / browse tool was fed back to this agent
+      for e in edges(aid, dir="in", kind="TOOL_RESULT"):
+          t = node(e["from"])
+          if t == None:
+              continue
+          if not in_window(edge_ts(e), now):
+              continue
+          nm = t.get("name", "") + " " + t.get("server", "")
+          if first_match(FETCH_TOOLS, nm) != None:
+              hits.append(["Untrusted Tool Output",
+                           "agent consumed output of fetch/browse tool " + t.get("name", "?"), e])
+              break
+      # C. an approval / HITL surface exists in this session (live target)
+      for e in edges(aid, dir="out", kind="TOOL_CALL"):
+          t = node(e["to"])
+          if t == None:
+              continue
+          nm = t.get("name", "") + " " + t.get("server", "")
+          if first_match(APPROVAL_TOOLS, nm) != None:
+              hits.append(["Approval Surface Present",
+                           "session uses approval/HITL tool " + t.get("name", "?") +
+                           " on server " + t.get("server", "?"), e])
+              break
+      return hits
+
+  def trigger_edge(aid, tool, now):
+      # prefer a real TOOL_CALL edge to the invoked tool; synthesise if absent
+      if tool != "":
+          for e in edges(aid, dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t != None and t.get("name", "") == tool:
+                  return e
+      return {
+          "kind": "TOOL_CALL",
+          "from": aid,
+          "to":   "tool://" + meta.get("server_name", "unknown") + "/" + tool,
+          "dir":  "out",
+          "ts":   str(now),
+          "first_ts": str(now),
+          "last_ts":  str(now),
+      }
+
+  # ── dedupe (per-rule private store) ─────────────────────────────────────────
+  def suppressed(fp, now):
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      prev = seen.get(fp, 0)
+      if prev != 0 and now != 0 and (now - int(prev)) < DEDUPE_NS:
+          return True
+      fresh = {}
+      for k in seen:
+          v = int(seen[k])
+          if now == 0 or (now - v) < DEDUPE_NS:
+              fresh[k] = v
+      if len(fresh) > MAX_SEEN:
+          fresh = {}
+      fresh[fp] = now
+      if store_usage()["free"] > 8192:
+          store_set("seen", fresh)
+      return False
+
+  # ── main ────────────────────────────────────────────────────────────────────
+  def run():
+      # 1. relevance gate — pure string checks on meta, no traversal
+      ct = meta.get("context_type", "")
+      if ct != "tool_input":
+          return "allow"
+      c = meta.get("content", "")
+      if c == "":
+          return "allow"
+      if len(c) > MAX_LEN:
+          c = c[:MAX_LEN]
+
+      # 2. required anchor — executable primitive AND named approval surface
+      prim = first_match(INJECT, c)
+      if prim == None:
+          return "allow"
+      tok = first_match(APPROVAL, c)
+      if tok == None:
+          return "allow"
+
+      inj_n = count_match(INJECT, c)
+      ben_n = count_match(BENIGN, c)
+      # sanitisation / test / advisory context with a single primitive -> benign
+      if ben_n >= 1 and inj_n <= 1:
+          return "allow"
+
+      now  = int(meta.get("event_ts", "0"))
+      tool = meta.get("tool_name", "")
+
+      # 3. behavioural corroboration from the graph — required
+      agent = find_agent()
+      if agent == None:
+          return "allow"          # degraded: cannot attribute, stay silent
+      aid  = agent["id"]
+      hits = corroborate(aid, now)
+      if len(hits) == 0:
+          return "allow"
+
+      # 4. deduplicate identical payloads
+      fp = tool + "|" + str(inj_n) + "|" + clip(prim, 40) + "|" + clip(tok, 40)
+      if suppressed(fp, now):
+          return "allow"
+
+      # 5. kill chain — corroborating edges, then the injecting tool call
+      chain = new_chain(aid)
+      names = []
+      for h in hits:
+          chain.append(step(h[2], stage_id=h[0], stage_desc=h[1]))
+          names.append(h[0])
+      te = trigger_edge(aid, tool, now)
+      chain.append(step(te, stage_id="Approval-UI Injection",
+                        stage_desc="tool argument to " + tool +
+                                   " carries executable primitive [" + clip(prim, 80) +
+                                   "] aimed at approval surface [" + clip(tok, 80) + "]"))
+
+      print("approval-UI injection attempt: tool=" + tool +
+            " primitives=" + str(inj_n) +
+            " corroboration=" + ", ".join(names))
+
+      return {
+          "action": "report",
+          "reason": "Approval-UI HTML/JS injection attempt in tool argument to " + tool +
+                    " — primitive: " + clip(prim, 80) +
+                    "; approval target: " + clip(tok, 80) +
+                    "; corroboration: " + ", ".join(names) +
+                    " (client-side execution and any resulting self-approval are not observable in this telemetry)",
+          "chain": chain,
+      }
+
+  result = run()
