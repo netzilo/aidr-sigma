@@ -1,0 +1,255 @@
+title: vLLM Unbounded Completion Multiplicity DoS
+id: b7c4e1a9-3f52-4d8e-9a61-0c7d5f2ab834
+status: experimental
+level: high
+description: |
+  Detects attempts to exhaust an OpenAI-compatible inference server (vLLM and
+  work-alikes) by sending completion requests with an unvalidated, astronomically
+  large multiplicity parameter (n / best_of / num_return_sequences). vLLM's
+  ChatCompletionRequest and CompletionRequest do not bound these fields, so the
+  server clones the request object n times on the heap before the scheduler ever
+  sees it, driving an immediate OOM and blocking the asyncio event loop.
+
+  This is a BEHAVIOURAL rule. The Sigma condition is only a cheap pre-filter; the
+  Starlark script does the work: it confirms the request targets a completion
+  endpoint, extracts the largest top-level multiplicity value from the body, then
+  traverses the behaviour graph (URL node -> inbound HTTP_REQUEST edges) to
+  attribute the requester and read the aggregate request count to that endpoint.
+  Per-rule storage tracks repeated oversized-n requests to the same host inside a
+  five-minute window, so a single unusual batch job is not enough to fire, while a
+  sustained amplification campaign is. Corroborating signals (self-hosted / ZTNA
+  inference endpoint, request flood to the same URL node) are added as kill-chain
+  stages.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://owasp.org/API-Security/editions/2023/en/0xa4-unrestricted-resource-consumption/
+  - https://attack.mitre.org/techniques/T1499/004/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - owasp.a05_2023
+  - owasp.a07_2023
+falsepositives:
+  - Capacity or throughput benchmarking against a lab inference endpoint (vLLM's own
+    benchmark_serving harness and similar tools deliberately push large n/best_of).
+    Such runs are repeated and will be reported - suppress by scheduling them or by
+    excluding the benchmark agent at policy level, not by widening this rule.
+  - Legitimate pass@k / self-consistency evaluation jobs that request dozens of
+    samples per prompt. The script requires n >= 24 and, below n = 256, at least one
+    corroborating graph or repetition signal before it reports.
+  - A prompt or attached document that itself contains a pretty-printed JSON snippet
+    with a large "n" field. Mitigated by requiring the key to be preceded by '{' or
+    ',' (string-escaped JSON inside a message body is preceded by a backslash) and by
+    requiring the request path to be a completions endpoint.
+  - A shared egress proxy or gateway that funnels many clients' completions to one
+    endpoint, inflating the HTTP_REQUEST edge count. The flood signal is only ever a
+    corroborating stage, never the sole trigger.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_completion_multiplicity:
+    event_type: http_request
+    content|re: '[{,]\s*"(?:n|best_of|num_return_sequences)"\s*:\s*[0-9]{2,}'
+  condition: sel_completion_multiplicity
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables ────────────────────────────────────────────────────────────────
+  WINDOW_NS    = 300000000000   # 5 minutes of repetition memory
+  ABUSE_N      = 256            # no real client asks for this many completions
+  SUSPICIOUS_N = 24             # needs corroboration below ABUSE_N
+  BURST_COUNT  = 20             # aggregate HTTP_REQUEST count to the same URL node
+  REPEAT_COUNT = 3              # oversized-n requests to same host in WINDOW_NS
+  MAX_STORE    = 64             # hosts remembered
+
+  INFER_PATHS = ["/chat/completions", "/completions", "/generate",
+                 "/v1/responses", "/v1/engines"]
+
+  # Top-level JSON parameter only: preceded by '{' or ',' so an escaped snippet
+  # embedded inside a string (\"n\": 999) does not match.
+  MULT_RE = r'[{,]\s*"(?:n|best_of|num_return_sequences)"\s*:\s*[0-9]+'
+  DIGITS  = r'[0-9]+'
+
+  def is_inference_path(p):
+      for ip in INFER_PATHS:
+          if ip in p:
+              return True
+      return False
+
+  # ── Relevance gate: pure string checks on meta, no graph / store calls ──────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      m = meta.get("method", "").lower()
+      if m != "" and m != "post" and m != "put":
+          return False
+      if not is_inference_path(meta.get("path", "").lower()):
+          return False
+      body = meta.get("content", "")
+      if body == "":
+          return False
+      return re.find(MULT_RE, body) != None
+
+  def max_multiplicity(body):
+      best = 0
+      for h in re.find_all(MULT_RE, body, 64):
+          d = re.find(DIGITS, h)
+          if d == None:
+              continue
+          v = int(d)
+          if v > best:
+              best = v
+      return best
+
+  # ── Graph: attribute the requester via the URL node's inbound edges ─────────
+  def find_requester(host):
+      target = None
+      for u in graph(type="URL"):
+          if u.get("host", "") == host:
+              target = u
+              break
+      if target == None:
+          return None
+      best = None
+      for e in edges(target["id"], dir="in", kind="HTTP_REQUEST"):
+          src = node(e["from"])
+          if src == None:
+              continue
+          cand = {"src": src, "edge": e, "url": target}
+          if src.get("_type", "") == "Process" and src.get("agent", "0") == "1":
+              return cand
+          if best == None:
+              best = cand
+          elif int(e.get("count", "0")) > int(best["edge"].get("count", "0")):
+              best = cand
+      return best
+
+  # ── Repetition memory (per-rule private store) ─────────────────────────────
+  def record(host, n, now):
+      hist = store_get("mult_hist")
+      if hist == None:
+          hist = {}
+      pruned = {}
+      for k in hist.keys():
+          v = hist[k]
+          last = int(v.get("last", 0))
+          if now > 0 and last > 0 and (now - last) > WINDOW_NS:
+              continue
+          pruned[k] = v
+
+      cnt = 0
+      mx = 0
+      first = now
+      prev = pruned.get(host, None)
+      if prev != None:
+          cnt = int(prev.get("count", 0))
+          mx = int(prev.get("max", 0))
+          first = int(prev.get("first", now))
+      cnt = cnt + 1
+      if n > mx:
+          mx = n
+      entry = {"count": cnt, "max": mx, "first": first, "last": now}
+      pruned[host] = entry
+
+      if len(pruned) > MAX_STORE:
+          oldest = ""
+          oldest_ts = 0
+          for k in pruned.keys():
+              t = int(pruned[k].get("last", 0))
+              if oldest == "" or t < oldest_ts:
+                  oldest = k
+                  oldest_ts = t
+          if oldest != "" and oldest != host:
+              pruned.pop(oldest)
+
+      if store_usage()["free"] > 8192:
+          store_set("mult_hist", pruned)
+      return entry
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      body = meta.get("content", "")
+      n = max_multiplicity(body)
+      if n < SUSPICIOUS_N:
+          return "allow"
+
+      host = meta.get("host", "")
+      path = meta.get("path", "")
+      verb = meta.get("method", "POST")
+      now = int(meta.get("event_ts", "0"))
+
+      hist = record(host, n, now)
+      repeats = int(hist.get("count", 0))
+      peak = int(hist.get("max", n))
+
+      req = find_requester(host)
+      burst = 0
+      internal = False
+      stages = []
+
+      if n >= ABUSE_N:
+          stages.append("unbounded multiplicity n=" + str(n))
+      if repeats >= REPEAT_COUNT:
+          stages.append("repeated x" + str(repeats) + " in " +
+                        str(WINDOW_NS // 1000000000) + "s")
+      if req != None:
+          burst = int(req["edge"].get("count", "0"))
+          internal = req["url"].get("is_ztna_host", "0") == "1"
+          if burst >= BURST_COUNT:
+              stages.append("request flood count=" + str(burst))
+          if internal:
+              stages.append("self-hosted inference endpoint")
+
+      # Below the absurd threshold we require at least one corroborating signal.
+      if n < ABUSE_N and len(stages) == 0:
+          return "allow"
+
+      reason = ("vLLM-style unbounded completion multiplicity (n/best_of=" + str(n) +
+                ") sent to " + host + path)
+      if len(stages) > 0:
+          reason = reason + " - " + ", ".join(stages)
+
+      if req == None:
+          print("oversized completion multiplicity to " + host + path +
+                " but requester not yet present in graph")
+          return {
+              "action": "report",
+              "reason": reason + " (attribution degraded: no URL node yet)",
+          }
+
+      src = req["src"]
+      e = req["edge"]
+      chain = new_chain(src["id"])
+      chain.append(step(e,
+          stage_id="Inference API Abuse",
+          stage_desc=verb + " " + path + " to " + host +
+                     " with completion multiplicity n=" + str(n) +
+                     " (unvalidated upper bound -> heap request cloning)"))
+      if internal:
+          chain.append(step(e,
+              stage_id="Target Exposure",
+              stage_desc="self-hosted inference endpoint " + host +
+                         " reached over the private/ZTNA path"))
+      if burst >= BURST_COUNT:
+          chain.append(step(e,
+              stage_id="Request Flood",
+              stage_desc=str(burst) + " HTTP requests to " + host + " from " +
+                         src.get("name", src["id"])))
+      if repeats >= REPEAT_COUNT:
+          chain.append(step(e,
+              stage_id="Sustained Amplification",
+              stage_desc=str(repeats) + " oversized-multiplicity requests to " + host +
+                         " within " + str(WINDOW_NS // 1000000000) +
+                         "s (peak n=" + str(peak) + ") - OOM / event-loop starvation risk"))
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
