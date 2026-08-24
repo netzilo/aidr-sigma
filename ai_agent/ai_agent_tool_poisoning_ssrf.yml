@@ -1,0 +1,443 @@
+title: Tool Poisoning SSRF Chain (Instance-Resolved)
+id: 7f3c1a94-2d68-4b5e-9c07-8a1f6d34be21
+status: experimental
+level: high
+description: |
+  Detects Server-Side Request Forgery driven by poisoned agent tool input or tool
+  descriptions: an attacker-controlled URL reaches an agent tool, and the agent (or a
+  subprocess it spawns) then issues a request against a restricted endpoint - cloud
+  instance metadata services, loopback, RFC1918/link-local ranges, cluster-internal
+  names, or DNS-rebinding wildcard domains.
+
+  The rule is instance-resolved. It anchors on meta caller_pid, resolves the exact
+  process instance with proc_instance(), walks the real spawn chain with proc_lineage(),
+  and correlates ONLY within that one session (lineage plus children spawned by lineage
+  pids inside the window). It never attributes across sessions and never walks
+  path-keyed Process nodes, so two identical attacks produce two identical kill chains.
+
+  Legitimate IMDS traffic is extremely common (aws/gcloud SDKs, kubelet, cloud-init) and
+  legitimate RFC1918 traffic is extremely common (internal APIs, dev servers), so the
+  destination alone is NOT treated as evidence. The rule requires a high-specificity
+  provenance anchor before it will fire:
+    A1 - a poisoned tool payload recorded earlier in this same session (tool input or
+         tool/gateway description carrying a URL that resolves to a restricted target),
+    A2 - an obfuscated encoding of a restricted address in the request URL
+         (decimal/hex/octal IP, ::ffff mapping, percent-encoded octets, @userinfo host
+         confusion) - never emitted by a legitimate SDK,
+    A3 - a restricted endpoint embedded in a request parameter (url=, target=,
+         redirect=, webhook=, image_url= ...), i.e. classic parameter SSRF. When the
+         embedded target is merely internal (not a metadata service), a second
+         session-scoped stage is additionally required.
+
+  Tool-surface events never fire on their own: they only record the poisoned payload
+  into the rule's private store, so the rule stays invisible until instance-resolved
+  evidence exists. Enforcement is report-only at this maturity stage.
+author: Selhan
+date: "2026-03-14"
+references:
+  - https://owasp.org/www-community/attacks/Server_Side_Request_Forgery
+  - https://attack.mitre.org/techniques/T1552/005/
+  - https://atlas.mitre.org/techniques/AML.T0053
+tags:
+  - attack.credential-access
+  - attack.t1552.005
+  - attack.discovery
+  - attack.t1046
+  - atlas.aml.t0051
+  - atlas.aml.t0053
+  - owasp.llm01
+  - owasp.llm06
+falsepositives:
+  - Cloud SDKs and agents legitimately reading the instance metadata service (aws cli,
+    boto3, gcloud, kubelet, cloud-init). Excluded - metadata destinations alone never
+    fire; a poisoned-payload, obfuscation or parameter-SSRF anchor is mandatory.
+  - Agents calling internal APIs, localhost dev servers, or cluster.local services.
+    Excluded by the same mandatory anchor, and an internal-only embedded target
+    additionally requires a second session-scoped stage.
+  - Legitimate webhook or callback registration where an internal URL is passed as a
+    parameter value to an internal service. This can still report; the kill chain and
+    the named anchor make triage immediate, and the action is report, not block.
+  - Authorised SSRF or pentest tooling and CI security scans run through a monitored agent.
+  - Documentation, test fixtures or IaC templates that contain 169.254.169.254 or
+    RFC1918 literals and are read through a tool. These only record a store marker and
+    stay silent unless a matching restricted request actually follows in the same session.
+  - Truncated process lineage (an unmonitored shell above the agent) yields a short
+    session; the rule stays silent rather than guessing an owner.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type:
+      - tool_call
+      - http_request
+      - execute_process
+  condition: sel_trigger
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # Tunables. Detection scope only: this rule contains no trust or allow list.
+  WINDOW_NS   = 300000000000   # 5 min: poisoned payload -> SSRF attempt
+  MAX_TRACK   = 48             # capped poison markers held in the rule store
+  MAX_PIDS    = 16             # bound on per-pid HTTP_REQUEST queries
+  CONTENT_CAP = 20000
+
+  FETCHER_RE = r"(?i)\b(?:curl|wget|httpie|nc|ncat|socat|python[23]?|node|deno|php|ruby|perl|powershell|pwsh)\b"
+
+  META_HOSTS = [
+      "169.254.169.254", "169.254.170.2", "169.254.169.253", "169.254.169.123",
+      "100.100.100.200", "192.0.0.192", "metadata.google.internal",
+      "metadata.tencentyun.com", "instance-data",
+  ]
+
+  OBF_META_RE = [
+      r"(?i)0x0*a9fea9fe",
+      r"\b2852039166\b",
+      r"\b0251\.0376\.0251\.0376\b",
+      r"(?i)0xa9\.0xfe\.0xa9\.0xfe",
+      r"(?i)::ffff:169\.254\.169\.254",
+      r"(?i)169%2e254",
+  ]
+
+  OBF_LOOP_RE = [
+      r"\b2130706433\b",
+      r"(?i)0x0*7f000001",
+      r"\b0177\.0000\.0000\.0001\b",
+      r"\b0177\.0\.0\.1\b",
+      r"(?i)::ffff:127\.0\.0\.1",
+      r"(?i)https?://[^/\s]{1,120}@(?:127\.|10\.|192\.168\.|169\.254\.|172\.(?:1[6-9]|2[0-9]|3[01])\.|localhost)",
+  ]
+
+  PRIVATE_RE = [
+      r"\b127\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+      r"(?i)\blocalhost\b",
+      r"\b0\.0\.0\.0\b",
+      r"\b10\.\d{1,3}\.\d{1,3}\.\d{1,3}\b",
+      r"\b192\.168\.\d{1,3}\.\d{1,3}\b",
+      r"\b172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}\b",
+      r"\b169\.254\.\d{1,3}\.\d{1,3}\b",
+      r"(?i)\b[a-z0-9][a-z0-9-]{0,62}\.(?:internal|intranet|corp|lan)\b",
+      r"(?i)\.svc\.cluster\.local\b",
+      r"(?i)\b\d{1,3}(?:[.-]\d{1,3}){3}\.(?:nip\.io|sslip\.io|xip\.io)\b",
+  ]
+
+  URL_RE   = r"(?i)\b(?:https?|gopher|dict|ldap|ftp|file)://[^\s'<>)\]},]{1,300}"
+  PARAM_RE = r"(?i)[?&][A-Za-z0-9_.-]{1,40}=[^&\s'<>]{1,300}"
+  SSRF_PARAM_RE = r"(?i)\b(?:url|uri|target|dest|destination|redirect|redirect_uri|next|callback|webhook|webhook_url|endpoint|host|proxy|fetch|feed|src|image_url|imageurl|link|load|open|path_url|remote|resource|site|to|forward|out|data_url|source_url)\b"
+
+  # Pure helpers (no graph / log / store calls)
+  def match_any(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def has_meta_host(s):
+      low = s.lower()
+      for h in META_HOSTS:
+          if h in low:
+              return True
+      return False
+
+  def is_meta_target(s):
+      if has_meta_host(s):
+          return True
+      return match_any(OBF_META_RE, s)
+
+  def is_restricted_target(s):
+      if is_meta_target(s):
+          return True
+      if match_any(OBF_LOOP_RE, s):
+          return True
+      return match_any(PRIVATE_RE, s)
+
+  def obfuscated(s):
+      if match_any(OBF_META_RE, s):
+          return True
+      return match_any(OBF_LOOP_RE, s)
+
+  def param_ssrf(s):
+      # A restricted endpoint carried inside a query parameter value.
+      for kv in re.find_all(PARAM_RE, s, 40):
+          eq = kv.find("=")
+          if eq < 0:
+              continue
+          key = kv[1:eq]
+          val = kv[eq + 1:]
+          if re.find(SSRF_PARAM_RE, key) == None:
+              continue
+          if is_restricted_target(val):
+              return val
+      return ""
+
+  def short(s, n):
+      if len(s) > n:
+          return s[:n]
+      return s
+
+  def basename(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def synth_edge(kind, from_path, to_id, ts):
+      return {
+          "from":     "process://" + from_path,
+          "to":       to_id,
+          "kind":     kind,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  # Store: poisoned tool payload markers, keyed by session root instance.
+  def poison_key(root_pid, root_start):
+      return "poison:" + str(root_pid) + ":" + str(root_start)
+
+  def record_poison(root_pid, root_start, ts, surface, target, tool):
+      k = poison_key(root_pid, root_start)
+      cur = store_get(k)
+      if cur == None:
+          cur = []
+      fresh = []
+      for m in cur:
+          if ts - int(m.get("ts", "0")) <= WINDOW_NS:
+              fresh.append(m)
+      fresh.append({
+          "ts":      str(ts),
+          "surface": surface,
+          "target":  short(target, 220),
+          "tool":    short(tool, 120),
+      })
+      if len(fresh) > MAX_TRACK:
+          fresh = fresh[len(fresh) - MAX_TRACK:]
+      u = store_usage()
+      if u["free"] > 16384:
+          store_set(k, fresh)
+      else:
+          store_reset()
+          store_set(k, fresh)
+
+  def lookup_poison(root_pid, root_start, now_ts, target_hint):
+      cur = store_get(poison_key(root_pid, root_start))
+      if cur == None:
+          return None
+      best = None
+      for m in cur:
+          mts = int(m.get("ts", "0"))
+          if mts > now_ts:
+              continue
+          if now_ts - mts > WINDOW_NS:
+              continue
+          tgt = m.get("target", "")
+          # Prefer a marker whose recorded target class matches what we just saw.
+          score = 1
+          if target_hint != "" and tgt != "" and (tgt in target_hint or target_hint in tgt):
+              score = 3
+          elif is_meta_target(tgt) and is_meta_target(target_hint):
+              score = 2
+          if best == None or score > best["score"] or (score == best["score"] and mts > int(best["m"]["ts"])):
+              best = {"score": score, "m": m}
+      if best == None:
+          return None
+      return best["m"]
+
+  # Relevance gate: pure string checks on meta only, no graph/log/store calls.
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct in ("tool_input", "tool_description", "gateway_description"):
+          return True
+      if ct == "http_request":
+          probe = meta.get("url", "") + " " + meta.get("host", "") + " " + meta.get("path", "")
+          return is_restricted_target(probe)
+      if ct == "execute_process":
+          cmd = meta.get("content", "")
+          if re.find(FETCHER_RE, cmd) == None:
+              return False
+          return is_restricted_target(cmd)
+      return False
+
+  # Session resolution: caller_pid -> instance -> lineage -> sibling pids.
+  def resolve_session(now_ts):
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return None
+      inst = proc_instance(cp, now_ts)
+      if inst == None:
+          return None
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return None
+      pids = {}
+      for x in lineage:
+          pids[x["actor_pid"]] = x.get("actor_start", "0")
+      root = lineage[len(lineage) - 1]
+      # One bounded pass to pull in siblings spawned by this session, inside the window.
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now_ts - WINDOW_NS, limit=3000):
+          if e.get("parent_pid", "") in pids:
+              pids[e["actor_pid"]] = e.get("actor_start", "0")
+      return {
+          "inst":    inst,
+          "lineage": lineage,
+          "pids":    pids,
+          "root":    root,
+          "names":   " -> ".join([basename(x.get("actor_path", "?")) for x in lineage]),
+      }
+
+  # Corroborating stage: a prior restricted HTTP_REQUEST by this same session.
+  def prior_restricted_http(sess, now_ts):
+      n = 0
+      for pid in sess["pids"]:
+          if n >= MAX_PIDS:
+              break
+          n += 1
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=now_ts - WINDOW_NS, until_ns=now_ts, limit=60):
+              probe = e.get("host", "") + e.get("path", "")
+              if is_restricted_target(probe):
+                  return e
+      return None
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now_ts = int(meta.get("event_ts", "0"))
+      if now_ts == 0:
+          return "allow"
+
+      sess = resolve_session(now_ts)
+      if sess == None:
+          # Degraded attribution: never guess an owner, never attribute cross-session.
+          return "allow"
+
+      ct         = meta.get("context_type", "")
+      root_pid   = sess["root"]["actor_pid"]
+      root_start = sess["root"].get("actor_start", "0")
+
+      # ---- Tool surface: record provenance only. Never fires on its own. ----
+      if ct in ("tool_input", "tool_description", "gateway_description"):
+          body = short(meta.get("content", ""), CONTENT_CAP)
+          hit  = ""
+          for u in re.find_all(URL_RE, body, 40):
+              if is_restricted_target(u):
+                  hit = u
+                  break
+          if hit == "":
+              pv = param_ssrf(body)
+              if pv != "":
+                  hit = pv
+          if hit == "":
+              return "allow"
+          record_poison(root_pid, root_start, now_ts, ct, hit,
+                        meta.get("tool_name", ""))
+          return "allow"
+
+      # ---- Request surface: the trigger comes from meta, never re-queried. ----
+      if ct == "http_request":
+          url      = meta.get("url", "")
+          host     = meta.get("host", "")
+          path     = meta.get("path", "")
+          probe    = url + " " + host + " " + path
+          actor    = sess["inst"].get("actor_path", "")
+          trig_to  = "url://" + host
+          trig_txt = "request to restricted endpoint: " + short(host + path, 200)
+      else:
+          cmd      = short(meta.get("content", ""), CONTENT_CAP)
+          probe    = cmd
+          host     = ""
+          url      = ""
+          actor    = sess["inst"].get("actor_path", "")
+          trig_to  = "process://" + actor
+          trig_txt = "fetcher spawned against restricted endpoint: " + short(cmd, 200)
+
+      if not is_restricted_target(probe):
+          return "allow"
+
+      # ---- Mandatory high-specificity anchor. No anchor -> stay silent. ----
+      anchor      = ""
+      anchor_desc = ""
+      anchor_ts   = 0
+      poison      = lookup_poison(root_pid, root_start, now_ts, probe)
+
+      if poison != None:
+          anchor      = "A1-poisoned-tool-payload"
+          anchor_ts   = int(poison.get("ts", "0"))
+          anchor_desc = ("poisoned tool payload recorded on " + poison.get("surface", "?") +
+                         " (tool=" + poison.get("tool", "?") + ") targeting " +
+                         short(poison.get("target", "?"), 160))
+      elif obfuscated(probe):
+          anchor      = "A2-obfuscated-address"
+          anchor_desc = "restricted address encoded to evade filtering: " + short(probe, 160)
+      else:
+          pv = param_ssrf(probe)
+          if pv != "":
+              if is_meta_target(pv):
+                  anchor      = "A3-parameter-ssrf-metadata"
+                  anchor_desc = "cloud metadata endpoint embedded in request parameter: " + short(pv, 160)
+              else:
+                  # Internal-only embedded target: require a second session stage.
+                  prior = prior_restricted_http(sess, now_ts)
+                  if prior == None:
+                      return "allow"
+                  anchor      = "A3-parameter-ssrf-internal"
+                  anchor_ts   = int(prior.get("ts", "0"))
+                  anchor_desc = ("internal endpoint embedded in request parameter (" +
+                                 short(pv, 120) + "), corroborated by earlier session request to " +
+                                 short(prior.get("host", "?") + prior.get("path", ""), 120))
+
+      if anchor == "":
+          return "allow"
+
+      if anchor_ts > 0 and (now_ts - anchor_ts) > WINDOW_NS:
+          return "allow"
+
+      # ---- Kill chain, rooted at this session's owning instance. ----
+      chain = new_chain("process://" + sess["root"].get("actor_path", ""))
+
+      if anchor_ts == 0:
+          anchor_ts = now_ts
+      chain.append(step(
+          synth_edge("TOOL_CALL", sess["root"].get("actor_path", ""),
+                     "tool://" + meta.get("tool_name", "unknown"), anchor_ts),
+          stage_id="Tool Poisoning",
+          stage_desc=anchor_desc,
+      ))
+
+      if anchor == "A3-parameter-ssrf-internal":
+          prior2 = prior_restricted_http(sess, now_ts)
+          if prior2 != None:
+              chain.append(step(
+                  ev_edge(prior2),
+                  stage_id="Internal Probe",
+                  stage_desc="earlier session request to restricted host: " +
+                             short(prior2.get("host", "?") + prior2.get("path", ""), 160),
+              ))
+
+      chain.append(step(
+          synth_edge("HTTP_REQUEST", actor, trig_to, now_ts),
+          stage_id="SSRF Request",
+          stage_desc=trig_txt + " via " + sess["names"],
+      ))
+
+      print("SSRF anchor=" + anchor + " session=" + sess["names"] +
+            " target=" + short(probe, 200))
+
+      return {
+          "action": "report",
+          "reason": "Tool-poisoning SSRF (" + anchor + ") - " + short(host + url, 160) +
+                    " reached by " + sess["names"],
+          "chain":  chain,
+      }
+
+  result = run()
