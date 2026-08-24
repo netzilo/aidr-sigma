@@ -1,0 +1,428 @@
+title: Agents-U-Cash HTTP-402 Payment Key Abuse
+id: 7f3c1d92-4a5e-4b18-9c07-2d6e8b41af53
+status: experimental
+level: medium
+description: |
+  Detects abuse of the agents-u-cash HTTP-402 crypto payment integration by an AI
+  agent session: a trojanised or hijacked payment client that exfiltrates wallet
+  private keys / scoped subagent credentials, or redirects HTTP-402 settlement to
+  an attacker-controlled endpoint.
+
+  Fully instance-resolved. The rule anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks proc_lineage() to the session
+  root, expands the session with EXECUTE_PROCESS rows from the event log, and then
+  requires an ORDERED, WINDOWED sequence performed by instances of that ONE session:
+
+    Stage 0 (REQUIRED anchor) - a session instance handled agents-u-cash / x402
+      payment tooling together with wallet key material, dumped a wallet key file
+      with a shell utility, or installed agents-u-cash from a non-default index.
+    Stage 1 (REQUIRED egress) - a session instance made an HTTP request or opened a
+      connection AFTER the anchor and within the rule window. When the triggering
+      event is a connect, that stage comes from meta - never re-queried from the
+      log, which races async ingest.
+    Stage 2 (REQUIRED corroborator) - off-index supply-chain install, key-like
+      material in an outbound URL, two or more distinct HTTP-402 payment endpoints
+      in the same window, a raw network utility performing the egress, or egress to
+      a non-web chain-RPC port.
+
+  A normal single-facilitator payment run satisfies stages 0 and 1 only and is not
+  reported.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://attack.mitre.org/techniques/T1567/
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.exfiltration
+  - attack.t1567
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - atlas.aml.t0025
+  - owasp.llm02
+  - owasp.llm03
+falsepositives:
+  - Genuine agents-u-cash operation where the operator passes a key file path or
+    subagent key on the command line and the client then contacts BOTH its
+    facilitator and a settlement endpoint - this satisfies the two-distinct-payment-
+    endpoint corroborator. Expected on multi-chain deployments.
+  - Corporate PyPI mirrors - pip install --index-url https://pypi.internal/...
+    agents-u-cash is a legitimate off-index install and will be reported when the
+    same session subsequently makes network calls. Triage by lineage.
+  - Wallet debugging on testnets - a developer running cat on a keystore file or
+    base64 on wallet.json inside an agent session, followed by a curl/wget call,
+    matches the wallet-dump anchor plus the utility-egress corroborator.
+  - Agents that legitimately talk directly to a self-hosted chain RPC node on
+    8545/8546/8899 while holding a signing key satisfy the RPC-port corroborator.
+  - Security research or CI jobs that intentionally exercise the payment client
+    with throwaway keys.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_session_events:
+    event_type:
+      - execute_process
+      - connects
+  condition: sel_session_events
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # agents-u-cash (HTTP-402 crypto payment client) abuse.
+  # Instance-resolved: caller_pid -> proc_instance -> proc_lineage -> query_events.
+  # Every stage is scoped to ONE session. No cross-session attribution.
+
+  WINDOW_NS = 300000000000          # 5 minutes: anchor and egress must cluster
+  MAX_EXEC  = 4000
+  MAX_NET   = 2000
+
+  PAY_PORTS = ["80", "443", "8080", "8443", "8545", "8546", "8899", "9933", "26657", "30303"]
+  RPC_PORTS = ["8545", "8546", "8899", "9933", "26657", "30303"]
+
+  PAY_TOOL = [
+      r"(?i)agents[-_ ]?u[-_ ]?cash",
+      r"(?i)\bx402\b",
+      r"(?i)\bhttp[-_]?402\b",
+  ]
+
+  KEY_MATERIAL = [
+      r"(?i)\bprivate[-_]?key\b",
+      r"(?i)\bpriv[-_]?key\b",
+      r"(?i)\bsecret[-_]?key\b",
+      r"(?i)\bsub[-_]?agent[-_]?key\b",
+      r"(?i)\bwallet[-_]?key\b",
+      r"(?i)\bmnemonic\b",
+      r"(?i)\bseed[-_]?phrase\b",
+      r"(?i)\bkeystore\b",
+      r"(?i)\bkeyfile\b",
+      r"\b0x[0-9a-fA-F]{64}\b",
+  ]
+
+  WALLET_PATHS = [
+      r"(?i)\.agents[-_ ]?u[-_ ]?cash",
+      r"(?i)\.x402/",
+      r"(?i)\.ethereum/keystore",
+      r"(?i)\.config/solana/id\.json",
+      r"(?i)wallet\.json",
+      r"(?i)keystore\.json",
+      r"(?i)\.wallet/",
+      r"(?i)sub[-_]?agent[-_a-z0-9]*\.(json|key|pem)",
+  ]
+
+  DUMPERS = r"(?i)\b(cat|bat|head|tail|strings|xxd|od|base64|openssl|grep|jq|awk|sed|cp|scp|rsync|tar|zip|curl|wget)\b"
+  INSTALL = r"(?i)\b(pip3?|uv|pipx|poetry|conda)\b"
+
+  OFF_INDEX = [
+      r"--index-url",
+      r"--extra-index-url",
+      r"--find-links",
+      r"(?i)\bgit\+https?://",
+      r"(?i)https?://\S+\.(whl|tar\.gz)",
+  ]
+
+  PAY_PATH = [
+      r"(?i)x402",
+      r"(?i)/facilitator",
+      r"(?i)/settle",
+      r"(?i)/payment",
+      r"(?i)/pay/",
+      r"(?i)/quote",
+  ]
+
+  KEY_IN_URL = [
+      r"0x[0-9a-fA-F]{64}",
+      r"(?i)(priv[-_]?key|private[-_]?key|mnemonic|seed[-_]?phrase|keystore|secret[-_]?key|sub[-_]?agent[-_]?key)",
+  ]
+
+  NET_UTILS = ["curl", "wget", "nc", "ncat", "socat", "openssl", "scp", "ssh", "base64", "xh", "httpie"]
+
+  def any_match(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def basename(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def trim(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def anchor_kind(cmd):
+      if cmd == "":
+          return ""
+      pay = any_match(PAY_TOOL, cmd)
+      key = any_match(KEY_MATERIAL, cmd)
+      wal = any_match(WALLET_PATHS, cmd)
+      if pay and re.find(INSTALL, cmd) != None and any_match(OFF_INDEX, cmd):
+          return "supply-chain-install"
+      if re.find(DUMPERS, cmd) != None and (wal or (key and pay)):
+          return "wallet-key-dump"
+      if pay and (key or wal):
+          return "payment-key-handling"
+      return ""
+
+  def remember_anchor(ts):
+      prev = store_get("last_anchor_ts")
+      if prev != None and int(prev) >= ts:
+          return
+      u = store_usage()
+      if u["free"] < 4096:
+          store_reset()
+      store_set("last_anchor_ts", str(ts))
+
+  # Relevance gate: string checks on meta only, plus one O(1) store read for the
+  # very high-volume connects trigger. No graph, no query_events, no fs_activity.
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          cmd = meta.get("content", "")
+          if any_match(PAY_TOOL, cmd):
+              return True
+          if any_match(WALLET_PATHS, cmd):
+              return True
+          if any_match(KEY_MATERIAL, cmd) and re.find(DUMPERS, cmd) != None:
+              return True
+          return False
+      if ct == "connects":
+          if meta.get("port", "") not in PAY_PORTS:
+              return False
+          a = store_get("last_anchor_ts")
+          if a == None:
+              return False
+          ats = int(a)
+          ets = int(meta.get("event_ts", "0"))
+          if ats == 0 or ets == 0:
+              return False
+          if ets - ats > WINDOW_NS:
+              return False
+          return True
+      return False
+
+  def session_map(lineage, execs):
+      pids = {}
+      for x in lineage:
+          k = x.get("actor_pid", "")
+          if k != "":
+              pids[k] = x.get("actor_start", "")
+      for i in range(3):
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp != "" and ap != "" and pp in pids and ap not in pids:
+                  pids[ap] = e.get("actor_start", "")
+      return pids
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      ct         = meta.get("context_type", "")
+      trigger_ts = int(meta.get("event_ts", "0"))
+      cp         = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trigger_ts == 0:
+          return "allow"
+
+      # Record the anchor hint immediately so a later connect is not gated off
+      # even if instance resolution is momentarily degraded on this exec event.
+      if ct == "execute_process":
+          if anchor_kind(meta.get("content", "")) != "":
+              remember_anchor(trigger_ts)
+
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"                 # degraded - re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since = trigger_ts - WINDOW_NS
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=MAX_EXEC)
+      pids  = session_map(lineage, execs)
+
+      # Stage 0 - REQUIRED anchor, session-scoped, earliest in window.
+      anchor_ev    = None
+      anchor_ts    = 0
+      anchor_kd    = ""
+      install_seen = False
+      dump_seen    = False
+      for e in execs:
+          if e.get("actor_pid", "") not in pids:
+              continue
+          k = anchor_kind(e.get("cmdline", ""))
+          if k == "":
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts > trigger_ts or ts < since:
+              continue
+          if k == "supply-chain-install":
+              install_seen = True
+          if k == "wallet-key-dump":
+              dump_seen = True
+          if anchor_ev == None or ts < anchor_ts:
+              anchor_ev = e
+              anchor_ts = ts
+              anchor_kd = k
+
+      # The triggering exec may not be queryable yet - take it from meta.
+      if anchor_ev == None and ct == "execute_process":
+          k = anchor_kind(meta.get("content", ""))
+          if k != "":
+              anchor_kd = k
+              anchor_ts = trigger_ts
+              anchor_ev = {
+                  "actor_path": inst.get("actor_path", ""),
+                  "target_id":  "process://" + inst.get("actor_path", ""),
+                  "kind":       "EXECUTE_PROCESS",
+                  "ts":         str(trigger_ts),
+                  "cmdline":    meta.get("content", ""),
+              }
+              if k == "supply-chain-install":
+                  install_seen = True
+              if k == "wallet-key-dump":
+                  dump_seen = True
+
+      if anchor_ev == None:
+          return "allow"
+      remember_anchor(anchor_ts)
+
+      # Stage 1 - REQUIRED egress by a session instance, AFTER the anchor.
+      https = query_events(kind="HTTP_REQUEST", since_ns=anchor_ts, limit=MAX_NET)
+      conns = query_events(kind="CONNECTS",     since_ns=anchor_ts, limit=MAX_NET)
+
+      first_eg  = None
+      key_ev    = None
+      util_ev   = None
+      rpc_ev    = None
+      pay_hosts = {}
+
+      for e in https:
+          if e.get("actor_pid", "") not in pids:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < anchor_ts or ts > trigger_ts:
+              continue
+          if first_eg == None or ts < int(first_eg.get("ts", "0")):
+              first_eg = e
+          h = e.get("host", "")
+          p = e.get("path", "")
+          if h != "" and any_match(PAY_PATH, p):
+              pay_hosts[h] = True
+          if key_ev == None:
+              if any_match(KEY_IN_URL, p) or any_match(KEY_IN_URL, h):
+                  key_ev = e
+          if util_ev == None and basename(e.get("actor_path", "")) in NET_UTILS:
+              util_ev = e
+
+      for e in conns:
+          if e.get("actor_pid", "") not in pids:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < anchor_ts or ts > trigger_ts:
+              continue
+          if first_eg == None or ts < int(first_eg.get("ts", "0")):
+              first_eg = e
+          if rpc_ev == None and e.get("port", "") in RPC_PORTS:
+              rpc_ev = e
+          if util_ev == None and basename(e.get("actor_path", "")) in NET_UTILS:
+              util_ev = e
+
+      # The triggering connect is the caller's own action - take it from meta,
+      # never from the log (async ingest race).
+      trig_conn = None
+      if ct == "connects":
+          trig_conn = {
+              "actor_path": inst.get("actor_path", ""),
+              "target_id":  "host://" + meta.get("protocol", "tcp") + ":" + meta.get("host", "") + ":" + meta.get("port", ""),
+              "kind":       "CONNECTS",
+              "ts":         str(trigger_ts),
+              "host":       meta.get("host", ""),
+              "port":       meta.get("port", ""),
+          }
+          if first_eg == None:
+              first_eg = trig_conn
+          if rpc_ev == None and meta.get("port", "") in RPC_PORTS:
+              rpc_ev = trig_conn
+          if util_ev == None and basename(inst.get("actor_path", "")) in NET_UTILS:
+              util_ev = trig_conn
+
+      if first_eg == None:
+          return "allow"
+
+      # Stage 2 - REQUIRED corroborator: at least one discriminating signal.
+      corro = []
+      if install_seen:
+          corro.append("off-index supply-chain install of payment client")
+      if key_ev != None:
+          corro.append("key-like material in outbound URL: " + trim(key_ev.get("host", "") + key_ev.get("path", ""), 120))
+      if len(pay_hosts) > 1:
+          corro.append(str(len(pay_hosts)) + " distinct HTTP-402 payment endpoints in window")
+      if util_ev != None:
+          corro.append("raw network utility performed egress: " + basename(util_ev.get("actor_path", "")))
+      if rpc_ev != None:
+          corro.append("chain-RPC port egress: " + rpc_ev.get("host", "") + ":" + rpc_ev.get("port", ""))
+      if not corro:
+          return "allow"
+
+      names = []
+      for x in lineage:
+          names.append(basename(x.get("actor_path", "")))
+      lin = " -> ".join(names)
+
+      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain.append(step(ev_edge(anchor_ev),
+                        stage_id="Payment Key Handling",
+                        stage_desc=anchor_kd + ": " + trim(anchor_ev.get("cmdline", ""), 200)))
+      if first_eg.get("kind", "") == "HTTP_REQUEST":
+          chain.append(step(ev_edge(first_eg),
+                            stage_id="Payment Egress",
+                            stage_desc="HTTP " + first_eg.get("method", "") + " " +
+                                       first_eg.get("host", "") + trim(first_eg.get("path", ""), 120)))
+      else:
+          chain.append(step(ev_edge(first_eg),
+                            stage_id="Payment Egress",
+                            stage_desc="connect " + first_eg.get("host", "") + ":" + first_eg.get("port", "")))
+      if key_ev != None:
+          chain.append(step(ev_edge(key_ev),
+                            stage_id="Key Exfil Indicator",
+                            stage_desc="wallet/subagent key material in URL: " +
+                                       trim(key_ev.get("host", "") + key_ev.get("path", ""), 160)))
+      if rpc_ev != None and rpc_ev != first_eg:
+          chain.append(step(ev_edge(rpc_ev),
+                            stage_id="Chain RPC",
+                            stage_desc="chain RPC endpoint: " + rpc_ev.get("host", "") + ":" + rpc_ev.get("port", "")))
+      if util_ev != None and util_ev != first_eg and util_ev != key_ev:
+          chain.append(step(ev_edge(util_ev),
+                            stage_id="Utility Egress",
+                            stage_desc="raw utility egress by " + basename(util_ev.get("actor_path", ""))))
+
+      print("agents-u-cash abuse | lineage: " + lin + " | anchor: " + anchor_kd +
+            " | " + "; ".join(corro))
+
+      return {
+          "action": "report",
+          "reason": "agents-u-cash HTTP-402 payment key abuse - anchor " + anchor_kd +
+                    " then egress; " + "; ".join(corro) + " (session: " + lin + ")",
+          "chain":  chain,
+      }
+
+  result = run()
