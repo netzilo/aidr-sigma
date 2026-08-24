@@ -1,0 +1,246 @@
+title: vLLM Unbounded Video Frame Flood (Multimodal Resource Exhaustion)
+id: 6b1f0a9c-42d7-4c3e-9a58-77f0d1c8e214
+status: experimental
+level: medium
+description: |
+  Detects an agent (or any monitored local process) POSTing a multimodal inference
+  request that carries a data: URI with a video/* media type whose base64 payload is a
+  comma-separated frame list far larger than the num_frames ceiling vLLM enforces on its
+  other code paths (default 32).
+
+  VideoMediaIO.load_base64() splits the payload on commas without any frame-count limit
+  and decodes every frame into a numpy array before stacking them, so a request carrying
+  thousands of JPEG frames forces the server to materialise gigabytes at once and OOM.
+
+  The engine has no memory_allocation / process_crash event type and no ALLOCATE_MEMORY /
+  CAUSE_DENIAL_OF_SERVICE edge kind, so the crash itself is not observable. The only
+  telemetry is the outbound http_request. This rule therefore does not fire on "a large
+  request" - it parses the data URI out of the body, counts the comma-separated base64
+  frames, verifies the segments are real encoded frames (average segment size), and only
+  then reports. It is anchored on caller_pid so the payload is attributed to the exact
+  process instance and its own session lineage, never across sessions.
+author: Egemen
+date: "2026-02-19"
+references:
+  - https://github.com/vllm-project/vllm
+  - https://attack.mitre.org/techniques/T1499/
+tags:
+  - attack.impact
+  - attack.t1499
+  - atlas.aml.t0050
+  - owasp.asi07
+falsepositives:
+  - Video-understanding agents that legitimately sample more than 64 frames from a long
+    clip and inline them as a video/jpeg data URI. Confirm the destination host is an
+    approved inference endpoint and that the frame count matches the configured sampler.
+  - Benchmark, load-test or capacity-planning harnesses that deliberately push oversized
+    multimodal payloads at a self-hosted vLLM instance.
+  - Security validation of the fix for this exact issue (regression tests that replay the
+    malicious payload against a patched server).
+  - A client that inlines an animated sequence converted frame-by-frame to JPEG rather
+    than uploading a container file and passing a URL.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_video_data_uri:
+    event_type: http_request
+    content|contains: 'data:video'
+  condition: sel_video_data_uri
+action: execute
+on_timeout: report
+on_error:   report
+script: |
+  # ---- thresholds (this rule's own, never stored) --------------------------------
+  FRAME_ALERT   = 64          # 2x vLLM's default num_frames ceiling of 32
+  MIN_AVG_FRAME = 64          # bytes; proves the comma-separated segments are real
+                              # base64 frames and not a comma-heavy text blob
+  WINDOW_NS     = 300000000000  # 5 minutes - session clustering window
+  MAX_URIS      = 20            # bounded scan of data: URIs in one body
+
+  # ---- pure helpers (no graph / log / fs calls) -----------------------------------
+  def norm(body):
+      if body.find("\\/") >= 0:
+          return body.replace("\\/", "/")
+      return body
+
+  def analyze(body):
+      # returns [frames, blob_bytes, media_type, avg_frame_bytes]
+      best = [0, 0, "", 0]
+      low  = body.lower()
+      pos  = 0
+      for i in range(MAX_URIS):
+          idx = low.find("data:video", pos)
+          if idx < 0:
+              return best
+          pos = idx + 10
+          mt   = "video"
+          semi = low.find(";", idx)
+          if semi > idx and semi - idx < 64:
+              mt = body[idx + 5:semi]
+          b = low.find("base64,", idx)
+          if b < 0 or b - idx > 64:
+              continue
+          start = b + 7
+          end   = body.find('"', start)
+          if end < 0:
+              end = len(body)
+          blob = body[start:end]
+          if len(blob) == 0:
+              continue
+          n   = blob.count(",") + 1
+          avg = (len(blob) - (n - 1)) // n
+          if n > best[0]:
+              best = [n, len(blob), mt, avg]
+          pos = end
+      return best
+
+  def base_name(p):
+      if p == "":
+          return "unknown"
+      return p.split("/")[-1]
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "count":    "1",
+          "method":   e.get("method", ""),
+      }
+
+  # ---- relevance gate: pure string checks on meta only ----------------------------
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      body = meta.get("content", "")
+      if body == "":
+          return False
+      if body.lower().find("data:video") < 0:
+          return False
+      return True
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      body = norm(meta.get("content", ""))
+      info = analyze(body)
+      frames = info[0]
+      blen   = info[1]
+      mt     = info[2]
+      avg    = info[3]
+
+      # ANCHOR STAGE (required, high specificity): frame count far beyond the
+      # num_frames ceiling AND segments large enough to be genuine encoded frames.
+      if frames <= FRAME_ALERT:
+          return "allow"
+      if avg < MIN_AVG_FRAME:
+          return "allow"
+
+      host   = meta.get("host", "")
+      path   = meta.get("path", "")
+      method = meta.get("method", "")
+      ev_ts  = int(meta.get("event_ts", "0"))
+      cp     = int(meta.get("caller_pid", "0"))
+
+      # ---- instance resolution: caller_pid -> proc_instance -> proc_lineage --------
+      inst    = None
+      lineage = []
+      if cp != 0:
+          inst = proc_instance(cp, ev_ts)
+      if inst != None:
+          lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+
+      actor_path = meta.get("agent_name", "")
+      if inst != None:
+          actor_path = inst.get("actor_path", actor_path)
+      root_path = actor_path
+      if lineage:
+          root_path = lineage[len(lineage) - 1].get("actor_path", actor_path)
+
+      attribution = "resolved"
+      if inst == None or not lineage:
+          attribution = "degraded"
+
+      names = base_name(actor_path)
+      if lineage:
+          parts = []
+          for x in lineage:
+              parts.append(base_name(x.get("actor_path", "")))
+          names = " -> ".join(parts)
+
+      # ---- session scoping: lineage pids + children they spawned in-window --------
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      if cp != 0:
+          session[str(cp)] = "0"
+
+      since = 0
+      if ev_ts > WINDOW_NS:
+          since = ev_ts - WINDOW_NS
+
+      if session:
+          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+              if e.get("parent_pid", "") in session:
+                  session[e["actor_pid"]] = e.get("actor_start", "0")
+
+      # ---- optional prior stage: earlier requests to the same inference host ------
+      # scoped by actor_pid + window, so nothing is attributed across sessions.
+      prior = None
+      prior_n = 0
+      for pid in session:
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=since, until_ns=ev_ts, limit=100):
+              if host != "" and e.get("host", "") != host:
+                  continue
+              if int(e.get("ts", "0")) >= ev_ts:
+                  continue
+              prior_n = prior_n + 1
+              if prior == None:
+                  prior = e
+
+      # ---- kill chain --------------------------------------------------------------
+      chain = new_chain("process://" + root_path)
+
+      if prior != None:
+          chain.append(step(ev_edge(prior),
+              stage_id="Repeated Inference Load",
+              stage_desc="same session already sent " + str(prior_n) +
+                         " request(s) to inference host " + host +
+                         " within the last 5 minutes (pid " + prior.get("actor_pid", "?") + ")"))
+
+      # TRIGGER STAGE comes from meta, never from a log lookup (async ingest race).
+      trig = {
+          "from":     "process://" + actor_path,
+          "to":       "https://" + host,
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(ev_ts),
+          "first_ts": str(ev_ts),
+          "last_ts":  str(ev_ts),
+          "count":    "1",
+          "method":   method,
+      }
+      chain.append(step(trig,
+          stage_id="Unbounded Frame Payload",
+          stage_desc=method + " " + path + " -> " + host + " carrying " + str(frames) +
+                     " comma-separated base64 frames in a " + mt + " data URI (" +
+                     str(blen) + " payload bytes, ~" + str(avg) + " bytes/frame) - " +
+                     "exceeds the num_frames ceiling VideoMediaIO.load_base64() does not enforce"))
+
+      reason = ("vLLM multimodal frame flood: " + str(frames) + " base64 " + mt +
+                " frames (" + str(blen) + " bytes) sent to " + host + path +
+                " by " + names + " [attribution: " + attribution + "]")
+      print(reason)
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
