@@ -1,0 +1,74 @@
+title: MCP Markdownify SSRF Tool Invocation
+id: 7c1e4d9a-3b62-4f81-9e0c-2a5d8f14b6e3
+status: experimental
+level: high
+description: |
+  Detects an outbound MCP HTTP request whose body invokes one of the
+  mcp-markdownify-server fetch tools (webpage-to-markdown, bing-search-to-markdown,
+  youtube-to-markdown) with a URL argument that points at an SSRF-primitive target:
+  loopback / RFC1918 / link-local / CGNAT literals, cloud instance-metadata endpoints,
+  non-HTTP schemes (file:, gopher:, dict:, ldap:, ...), obfuscated numeric hosts,
+  userinfo-confusion URLs (http://public@internal/), dotless hostnames, or internal-only
+  TLDs.
+
+  mcp-markdownify-server < 1.0.0 passes the caller-supplied URL straight into
+  Markdownify.get(), so a crafted (often indirectly injected) prompt can make the MCP
+  host fetch attacker-chosen internal endpoints and return the body as markdown -
+  a full read-SSRF from the server's network position.
+
+  Neither half of the signature is suspicious alone: the tool names appear in every
+  legitimate markdownify call, and internal URLs appear in unrelated traffic. The rule
+  fires only on the conjunction inside one request body, with capability-enumeration and
+  placeholder payloads filtered out.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+  - https://attack.mitre.org/techniques/T1552/005/
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.credential-access
+  - attack.t1552.005
+  - attack.t1190
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_markdownify_tool:
+    event_type: http_request
+    content|re: '(?i)\\?"(?:name|tool|tool_name)\\?"\s*:\s*\\?"(?:webpage|bing-search|youtube)-to-markdown\\?"'
+  sel_ssrf_target:
+    content|re:
+      # private / loopback / link-local / CGNAT literal in the url argument
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[a-z][a-z0-9+.\-]{1,14}:(?:\\{0,2}/){2}(?:[^"/@\s]{0,64}@)?\[?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2[0-9]|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.\d{1,3}\.\d{1,3}|localhost|::1|fd[0-9a-f]{2}:|fe80:)'
+      # cloud instance-metadata endpoints by name
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[^"]{0,256}(?:metadata\.google\.internal|metadata\.goog|metadata\.azure\.com|instance-data|100\.100\.100\.200|192\.0\.0\.192)'
+      # non-HTTP scheme smuggled into a webpage-fetch argument
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"(?:file|gopher|dict|ldaps?|tftp|ftps?|jar|netdoc|smb|sftp|expect|php|glob|data):'
+      # obfuscated host: hex / octal / decimal-integer IP
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[a-z][a-z0-9+.\-]{1,14}:(?:\\{0,2}/){2}(?:0x[0-9a-f]{5,8}|0[0-7]{7,12}|[0-9]{7,12})(?:[:/?#"\\]|$)'
+      # userinfo confusion - http://trusted-looking@real-internal-host/
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[a-z][a-z0-9+.\-]{1,14}:(?:\\{0,2}/){2}[^"/\s]{1,120}@'
+      # internal-only TLD or dotless (single-label) hostname
+      - '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[a-z][a-z0-9+.\-]{1,14}:(?:\\{0,2}/){2}(?:[^"/?#\s]{0,120}\.(?:internal|intranet|corp|lan|local|localdomain|home\.arpa)|[a-z0-9\-]{1,63})(?::\d{1,5})?(?:[/?#"\\]|$)'
+  filter_discovery:
+    content|re: '(?i)\\?"method\\?"\s*:\s*\\?"(?:tools/list|prompts/list|prompts/get|resources/(?:templates/)?list|initialize|notifications/[a-z/]{1,32})\\?"'
+  filter_schema:
+    content|contains:
+      - '"inputSchema"'
+      - '"outputSchema"'
+      - '"$schema"'
+  filter_placeholder:
+    content|re: '(?i)\\?"(?:url|uri|source|link|target)\\?"\s*:\s*\\?"[a-z][a-z0-9+.\-]{1,14}:(?:\\{0,2}/){2}(?:<[^"]{0,80}>|\{\{?[^"]{0,80}\}?\}|\$\{[^"]{0,120}\}|%[A-Za-z_]{2,40}%|(?:your|my|some)[_.\-]?(?:host|url|site|server|domain)|placeholder|replace[_\-]?me|example[_\-]?url)'
+  condition: sel_markdownify_tool and sel_ssrf_target and not (filter_discovery or filter_schema or filter_placeholder)
+falsepositives:
+  - Developer converting a locally hosted docs/site preview (http://localhost:3000, http://127.0.0.1:8080) with markdownify - genuinely benign but indistinguishable from loopback SSRF at the single-event content layer. This is the main reason the rule reports rather than blocks.
+  - Deployments intentionally scoped to an intranet wiki or internal knowledge base (*.corp, *.internal, dotless service names such as http://confluence/) where converting internal pages is the designed use case.
+  - Security regression suites and pentest harnesses that deliberately fire 169.254.169.254 / file:// payloads at the markdownify tools to verify the fix.
+  - MCP capability enumeration or tool-catalog payloads that echo the tool names next to example URLs - suppressed by filter_discovery and filter_schema.
+  - Automation templates where the URL argument is still an unexpanded variable or documented placeholder - suppressed by filter_placeholder.
+  - Authenticated internal fetches expressed with userinfo credentials (http://user:pass@host/) - matched by the userinfo branch; treat as review-worthy rather than malicious.
+action: report
