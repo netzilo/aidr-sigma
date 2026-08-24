@@ -1,0 +1,113 @@
+title: LLM Jailbreak Persona Compliance In Model Response
+id: 7c3f9b2a-1d64-4f8e-9a05-2b6ef0c41d73
+status: experimental
+level: high
+description: |
+  Detects a large language model RESPONSE that has adopted an in-the-wild jailbreak
+  persona and is emitting unrestricted output. The rule does not look for the jailbreak
+  prompt itself (attacker-side text is not an observable here) - it looks for the
+  model-side compliance artefacts that the JailbreakHub corpus shows are produced only
+  after a jailbreak template succeeds:
+    * dual-channel output tags used by DAN 11.x / Developer Mode v2
+      ("[<lock>CLASSIC] ... [<unlock>JAILBREAK]", "(Developer Mode Output)")
+    * the model prefixing its own turn with a jailbreak persona speaker label
+      (BetterDAN:, ANTI-DAN:, EvilBOT:, DevMode:, Mongo Tom:, and DAN: when corroborated)
+    * first-person declarations of removed safety constraints
+      ("I am DAN", "Developer Mode enabled", "I can do anything now",
+       "I have broken free of the typical confines", "I am no longer bound by OpenAI...")
+  Only a response that carries one of these markers AND carries no refusal or
+  security-analysis framing is reported.
+author: Evgen
+date: "2026-03-05"
+references:
+  - https://arxiv.org/abs/2308.03825
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - atlas.aml.t0051
+  - owasp.asi01
+falsepositives:
+  - Security research, red-team write-ups or awareness training in which the model quotes a DAN / AIM / Developer Mode template verbatim while explaining it (suppressed by filter_analysis).
+  - Model refusals that name the jailbreak persona while declining to adopt it, e.g. "I cannot pretend to be DAN" (suppressed by filter_refusal).
+  - Creative writing and screenplay generation, where an all-caps speaker label such as "DAN:" is a character name (mitigated - the bare DAN prefix only fires when corroborating jailbreak vocabulary is also present).
+  - Blue-team documentation that reproduces this rule, MITRE ATLAS / OWASP identifiers, or sample jailbreak transcripts for detection engineering (suppressed by filter_analysis).
+  - Translation or summarisation tasks where the user supplied jailbreak text and the model reproduces it inside an explanatory answer (partially mitigated by filter_analysis and filter_refusal).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type: llm_response
+
+  # DAN 11.x / Developer Mode v2 dual-channel output tags. The lock/unlock
+  # codepoints or the literal word "output" are required so a bare bracketed
+  # word can never match.
+  sel_dual_output_tag:
+    content|re:
+      - '(?i)[\[\(]\s*\x{1f513}\s*(?:jailbreak|jailbroken|developer mode)[a-z ]{0,8}[\]\)]'
+      - '(?i)[\[\(]\s*\x{1f512}\s*(?:classic|normal)[a-z ]{0,8}[\]\)]'
+      - '(?i)[\[\(]\s*(?:jailbreak|jailbroken|developer mode)\s+output\s*[\]\)]'
+
+  # The model labels its own turn with a persona name that exists only in
+  # jailbreak templates. Case-sensitive on purpose. Matches both real newlines
+  # and the escaped \n found in a raw JSON response body.
+  sel_unique_persona_prefix:
+    content|re:
+      - '(?m)(?:^|\\n)\s{0,4}\[?(?:BetterDAN|ANTI-DAN|EvilBOT|DevMode|Mongo Tom|JailBreak|UnGpt)\]?\s{0,2}:(?:\s|\\n)'
+      - '(?i)\bniccolo\b[\s\S]{0,400}(?m:^|\\n)\s{0,4}AIM\s{0,2}:'
+
+  # A bare "DAN:" speaker label is ambiguous (screenplays use all-caps names),
+  # so it is only counted together with sel_dan_context below.
+  sel_dan_prefix:
+    content|re: '(?m)(?:^|\\n)\s{0,4}\[?DAN\]?\s{0,2}:(?:\s|\\n)'
+  sel_dan_context:
+    content|re:
+      - '(?i)\bdo anything now\b'
+      - '(?i)\bDAN mode\b'
+      - '(?i)\bjailbr(?:eak|oken)\b'
+      - '(?i)\bwithout (?:any )?(?:restrictions|filters|censorship)\b'
+
+  # First-person declarations that safety constraints have been shed.
+  sel_unrestricted_declaration:
+    content|re:
+      - '(?i)\bI am (?:now )?(?:DAN|AIM|STAN|DUDE|BetterDAN|EvilBOT|Mongo Tom)\b'
+      - '(?i)\bdeveloper mode (?:has been |is )?enabled\b'
+      - '(?i)\bI (?:can|will) do anything now\b'
+      - '(?i)\bI have broken free (?:of|from) the (?:typical )?confines\b'
+      - '(?i)\bas an AI (?:with no|without any|without) (?:restrictions|filters|limitations|guidelines|censorship)\b'
+      - '(?i)\bI am no longer bound by (?:my |any |the )?(?:openai|anthropic|google|content|safety|ethical|usage)\b'
+      - '(?i)\bgot that (?:mandatory )?bullshit warning out of the way\b'
+      - '(?i)\bI (?:do not|don.t) have (?:any )?(?:content )?(?:filters|restrictions|guidelines) (?:anymore|now)\b'
+      - '(?i)\bstaying in character as (?:DAN|AIM|the jailbroken)\b'
+
+  # The model is refusing, not complying.
+  filter_refusal:
+    content|re:
+      - '(?i)\bI (?:cannot|can.t|will not|won.t|am not able to|am unable to) (?:comply|do that|pretend|roleplay|role-play|act as|adopt|continue with|assist with that)'
+      - '(?i)\bI (?:must|have to|will) (?:decline|refuse)\b'
+      - '(?i)\bI.m sorry,? (?:but )?I (?:cannot|can.t)\b'
+      - '(?i)\b(?:cannot|can.t|will not|won.t) (?:take on|adopt|assume) (?:that|this) persona\b'
+      - '(?i)\bthat (?:is|.s) a (?:known |classic )?jailbreak (?:prompt|attempt|technique|template)\b'
+      - '(?i)\bthere is no (?:developer mode|DAN mode)\b'
+      - '(?i)\bI do not have a (?:developer mode|DAN mode)\b'
+
+  # Security research, documentation, detection engineering and test material.
+  filter_analysis:
+    content|re:
+      - '(?i)\bjailbreak (?:prompt|template)s? (?:are|is|were|such as|like|dataset|collection|corpus|research|detection|analysis|taxonomy|in.the.wild)'
+      - '(?i)\b(?:example|sample|illustration|demonstration)s? of (?:a |an |the )?(?:jailbreak|DAN prompt|prompt injection)'
+      - '(?i)\bhow (?:jailbreak|DAN) prompts? work\b'
+      - '(?i)\bthis (?:prompt|message|request|output) (?:appears to be|looks like|is) (?:a )?(?:jailbreak|prompt injection)'
+      - '(?i)\b(?:detection|sigma|yara|snort) rule\b'
+      - '(?i)\b(?:mitre atlas|owasp|jailbreakhub|aml\.t\d{4}|llm0[1-9]|asi0[1-9])\b'
+      - '(?i)\bsecurity (?:research|researcher|training|awareness|analyst|team)\b'
+      - '(?i)\b(?:unit test|test fixture|mock response|sample transcript|red.team exercise)\b'
+
+  condition: >
+    sel_scope and
+    (sel_dual_output_tag or sel_unique_persona_prefix or
+     (sel_dan_prefix and sel_dan_context) or sel_unrestricted_declaration)
+    and not (filter_refusal or filter_analysis)
+action: report
