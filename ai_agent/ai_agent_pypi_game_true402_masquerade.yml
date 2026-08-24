@@ -1,0 +1,133 @@
+title: Supply Chain — Masquerading PyPI Package game-true402 Acquisition
+id: 6f2b9c14-8d3e-4a71-9b5c-0e7a2f4d61c8
+status: experimental
+level: high
+description: |
+  Detects an AI agent acquiring, referencing for install, or fetching the PyPI package
+  "game-true402" (and its PyPI-normalised spellings game_true402 / game.true402 and the
+  distinctive "true402" distribution token).
+
+  The package masquerades as a legitimate service for Base-chain AI agents, advertising
+  pay-per-call payment functions, SEO data lookup and address-safety verification. Its
+  advertised feature set is precisely the set of capabilities that requires wallet private
+  keys, RPC credentials and agent API tokens to be handed to it — the classic rug-pull /
+  credential-harvesting shape for developer-targeted supply-chain packages.
+
+  The engine has no package_install event type and no INSTALLED_PACKAGE edge, so the only
+  honest instrumentation point is the moment the agent *names* the distribution in an
+  acquisition context: a pip/uv/poetry/conda invocation, a manifest write
+  (requirements.txt / pyproject.toml / Pipfile), pip resolver output, an import of the
+  module, or an outbound HTTP fetch of the project/wheel URL. This rule fires on that single
+  event only. It cannot observe the post-install credential harvest or the exfiltration hop;
+  it is an early-warning marker for triage, not a kill-chain reconstruction, which is why it
+  reports rather than blocks.
+author: Selhan
+date: "2026-03-05"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The distribution name itself, in any PyPI-normalised spelling ──────────────
+  # PyPI treats runs of '-', '_' and '.' as equivalent, so game-true402,
+  # game_true402 and game.true402 are the same project. The wheel/sdist filename
+  # form (game_true402-0.1.0-py3-none-any.whl) is covered by the trailing \b.
+  sel_pkg_name:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - llm_tool_call
+      - llm_tool_result
+      - http_request
+    content|re:
+      - '(?i)\bgame[-_.]*s?[-_.]*true[-_.]?402\b'
+      - '(?i)\btrue[-_.]?402\b'
+
+  # ── Acquisition context — the name alone is never enough ───────────────────────
+  # ANDed with sel_pkg_name, so merely discussing the package in prose does not fire.
+  sel_acquire_ctx:
+    content|re:
+      - '(?i)\bpip3?\b[^\n]{0,80}\binstall\b'
+      - '(?i)\bpython3?\s+-m\s+pip\b[^\n]{0,80}\binstall\b'
+      - '(?i)\buv\s+(?:pip\s+)?(?:add|install|sync)\b'
+      - '(?i)\b(?:poetry|pdm|rye)\s+add\b'
+      - '(?i)\bpipx\s+(?:install|run)\b'
+      - '(?i)\bpipenv\s+install\b'
+      - '(?i)\b(?:conda|mamba|micromamba)\s+install\b'
+      - '(?i)\beasy_install\b'
+      - '(?i)requirements[a-z0-9._-]{0,20}\.txt'
+      - '(?i)\bpyproject\.toml\b'
+      - '(?i)\bPipfile(?:\.lock)?\b'
+      - '(?i)\b(?:poetry\.lock|uv\.lock)\b'
+      - '(?i)pypi\.org/(?:simple|project)/'
+      - '(?i)files\.pythonhosted\.org'
+      - '(?i)\.(?:whl|tar\.gz)\b'
+      - '(?i)\b(?:successfully installed|requirement already satisfied|building wheel for|downloading|collecting)\b'
+      - '(?i)\b(?:import|from)\s+[a-z0-9_.]{0,32}true402\b'
+
+  # ── Outbound fetch of the project or artifact URL ──────────────────────────────
+  # http_request bodies are usually empty on GET, so the name is matched on the URL.
+  sel_http_url:
+    event_type: http_request
+    url.full|re: '(?i)\bgame[-_.]*s?[-_.]*true[-_.]?402\b'
+
+  sel_http_path:
+    event_type: http_request
+    path|re: '(?i)\bgame[-_.]*s?[-_.]*true[-_.]?402\b'
+
+  # ── Suppressions: analyst, remediation and detection-engineering context ───────
+  # No host, domain or path is trusted here — only textual context that marks the
+  # mention as investigative, remedial or rule-authoring rather than acquisitive.
+  filter_advisory:
+    content|re:
+      - '(?i)\b(?:typosquat(?:ted|ting)?|dependency confusion|malicious package|supply[- ]chain attack|rug ?pull|credential harvest(?:er|ing)?|known[- ]bad package|indicator of compromise|threat (?:advisory|intel(?:ligence)?)|security advisory|malware report)\b'
+      - '(?i)\b(?:CVE-\d{4}-\d{4,7}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}|PYSEC-\d{4}-\d{2,6})\b'
+      - '(?i)\b(?:do not install|never install|block(?:ed|list(?:ed)?)|deny(?:ed|list(?:ed)?)|quarantined?|yanked)\b'
+
+  filter_remediation:
+    content|re:
+      - '(?i)\b(?:pip3?|uv pip|pipx|pipenv|poetry|pdm|conda|mamba)\s+(?:uninstall|remove)\b'
+      - '(?i)\bpip-audit\b'
+      - '(?i)\bsafety\s+(?:check|scan)\b'
+      - '(?i)\b(?:osv-scanner|dependency-check|trivy|syft|grype)\b'
+
+  filter_rule_authoring:
+    content|re:
+      - '(?i)\bfalsepositives\s*:'
+      - '(?i)\blogsource\s*:'
+      - '(?i)\b(?:sigma|detection|yara)\s+rule\b'
+
+  condition: >
+    ((sel_pkg_name and sel_acquire_ctx) or sel_http_url or sel_http_path)
+    and not (filter_advisory or filter_remediation or filter_rule_authoring)
+
+falsepositives:
+  - Security analyst or incident responder pasting the package name into an agent while
+    researching the advisory — suppressed by filter_advisory when any advisory vocabulary
+    (typosquat, malicious package, rug pull, CVE/GHSA/PYSEC id) is present in the same event.
+  - Remediation work — "pip uninstall game-true402", pip-audit / safety / osv-scanner /
+    trivy output enumerating the package — suppressed by filter_remediation.
+  - Detection engineering — an agent asked to draft, review or diff this very rule, or to add
+    the name to an internal denylist — suppressed by filter_rule_authoring.
+  - Dependency-scanning or mirror-sync tooling that enumerates large swathes of the PyPI name
+    index; such output can carry both the name and "pypi.org/simple/" in one event. Confirm
+    whether the agent resolved and downloaded an artifact or merely listed a name.
+  - The secondary '\btrue402\b' token is broader than the exact distribution name and could
+    match an unrelated future package or an x402-payment discussion that also happens to sit
+    in an install context. Verify the literal distribution name in the event before escalating.
+  - Reproducing the incident in a sandbox or malware-analysis VM. Scope by peer/host before
+    treating as a live compromise.
+
+action: report
