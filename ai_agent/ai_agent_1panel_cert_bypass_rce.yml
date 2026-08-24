@@ -1,0 +1,166 @@
+title: 1Panel Core-Agent TLS Verification Bypass to Privileged Command API
+id: 7c3f9a41-5e2b-4d18-9f6a-2b8c1d40e7a3
+status: experimental
+level: high
+description: |
+  Detects the two observable halves of CVE-class exploitation of 1Panel (<= 2.0.5)
+  incomplete HTTPS certificate verification between Core and Agent endpoints.
+
+  The defining mechanism of this vulnerability - a forged/unverified TLS peer on the
+  Core<->Agent channel - is NOT observable: the engine has no tls_handshake or
+  network_connection event type and no TLS_CERT_VALIDATION_BYPASS or MITM_INTERCEPT
+  edge. This rule therefore does not attempt to detect the MITM itself. It detects the
+  two artefacts that ARE carried in execute_process command lines and http_request
+  bodies/URLs:
+
+    Branch A - a client that EXPLICITLY disables certificate verification
+    (curl -k/--insecure, wget --no-check-certificate, InsecureSkipVerify,
+    verify=False, NODE_TLS_REJECT_UNAUTHORIZED=0, rejectUnauthorized:false,
+    CURLOPT_SSL_VERIFYPEER 0, --skip-tls-verify) while addressing a 1Panel
+    Core/Agent identity marker or a 1Panel privileged endpoint. This is the
+    client-side mirror of the same trust failure the CVE describes, and it is the
+    posture an operator or attacker adopts when the Core->Agent certificate is not
+    trusted or has been substituted.
+
+    Branch B - a request to a 1Panel high-privilege interface
+    (/api/v[12]/{core|agent}/hosts/command, /terminal, /cronjobs,
+    /containers/exec, /files/exec|chmod) whose body or command line carries a
+    concrete RCE primitive (download-and-pipe-to-shell, /dev/tcp reverse shell,
+    nc -e, base64 -d | sh, python socket connect, authorized_keys append,
+    chmod +x in /tmp|/dev/shm|/var/tmp, crontab drop).
+
+  Neither half fires alone. The conjunction is what separates this from generic RCE
+  telemetry: a bare `curl -k` is ignored, and a bare shell one-liner is ignored.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://cwe.mitre.org/data/definitions/295.html
+  - https://owasp.org/Top10/A02_2021-Cryptographic_Failures/
+  - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  - https://attack.mitre.org/techniques/T1557/
+  - https://attack.mitre.org/techniques/T1190/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.credential-access
+  - attack.t1557
+  - attack.execution
+  - attack.t1059.004
+  - cwe.295
+  - owasp.a02-2021
+  - owasp.a07-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type:
+      - execute_process
+      - http_request
+
+  # ── 1Panel identity markers (Core/Agent channel, auth headers, session cookie) ──
+  sel_marker_1panel:
+    content|re:
+      - '(?i)\b1[-_ ]?panel[-_ ]?(?:agent|core|service|token|session|node)\b'
+      - '(?i)\b(?:x-panel-token|1panel-token|panelsessionid|psession)\b'
+      - '(?i)\b1panel\b[^\n]{0,200}/api/v[12]/'
+      - '(?i)/api/v[12]/(?:core|agent)/[a-z0-9_-]{2,24}/(?:command|exec|terminal|shell)\b'
+
+  # ── 1Panel high-privilege command surface, matched on three carriers ───────────
+  sel_api_content:
+    content|re: '(?i)/api/v[12]/(?:core/|agent/)?(?:hosts?/command|terminal(?:/|\b)|cronjobs?(?:/|\b)|containers?/(?:exec|shell)|files?/(?:exec|chmod|mode))'
+  sel_api_url:
+    url.full|re: '(?i)/api/v[12]/(?:core/|agent/)?(?:hosts?/command|terminal(?:/|\b)|cronjobs?(?:/|\b)|containers?/(?:exec|shell)|files?/(?:exec|chmod|mode))'
+  sel_api_path:
+    path|re: '(?i)^/api/v[12]/(?:core/|agent/)?(?:hosts?/command|terminal(?:/|\b)|cronjobs?(?:/|\b)|containers?/(?:exec|shell)|files?/(?:exec|chmod|mode))'
+
+  # ── Explicit certificate-verification suppression (client-side trust failure) ──
+  sel_tls_bypass:
+    content|re:
+      - '(?i:curl)\b[^\n]{0,300}\s-[a-zA-Z]{0,4}k(?:[\s"\x27]|$)'
+      - '(?i:curl)\b[^\n]{0,300}--insecure\b'
+      - '(?i:wget)\b[^\n]{0,300}--no-check-certificate\b'
+      - '(?i)\btls[._-]?insecure[._-]?skip[._-]?verify\b'
+      - '(?i)\bInsecureSkipVerify\s*[:=]\s*true\b'
+      - '(?i)\brejectUnauthorized\s*:\s*false\b'
+      - '(?i)\bverify\s*=\s*False\b'
+      - '\bNODE_TLS_REJECT_UNAUTHORIZED\s*=\s*["\x27]?0'
+      - '\bGIT_SSL_NO_VERIFY\s*=\s*(?:1|true)\b'
+      - '(?i)\bssl[._-]?verify(?:_mode)?\s*[:=]\s*(?:0|false|none|CERT_NONE)\b'
+      - '(?i)\bCURLOPT_SSL_VERIFY(?:PEER|HOST)\b[^\n]{0,40}[,=]\s*(?:0|false)\b'
+      - '(?i)--(?:skip-tls-verify|no-verify-ssl|tls-no-verify|insecure-skip-tls-verify)\b'
+      - '(?i:openssl)\s+s_client\b[^\n]{0,200}\s-noverify\b'
+
+  # ── Concrete RCE primitive delivered to the privileged interface ───────────────
+  sel_rce_payload:
+    content|re:
+      - '(?i)(?:curl|wget)\b[^\n]{0,200}\|\s*(?:/bin/)?(?:ba|z|d|a)?sh\b'
+      - '(?i)\b(?:bash|sh)\s+-i\s*>&\s*/dev/tcp/'
+      - '/dev/tcp/\d{1,3}(?:\.\d{1,3}){3}/\d{1,5}'
+      - '(?i)\bnc(?:at)?\b[^\n]{0,80}\s-[a-z]{0,3}e\s+/bin/(?:ba)?sh\b'
+      - '(?i)\bbase64\s+(?:-d|-D|--decode)\b[^\n]{0,160}\|\s*(?:/bin/)?(?:ba)?sh\b'
+      - '(?i)\bpython[23]?\b[^\n]{0,40}-c\b[^\n]{0,240}\bsocket\b[^\n]{0,240}\bconnect\b'
+      - '(?i)>>?\s*[^\n]{0,120}\.ssh/authorized_keys\b'
+      - '(?i)\bchmod\s+(?:\+x|[0-7]*7[0-7]{2})\b[^\n]{0,120}(?:/tmp/|/dev/shm/|/var/tmp/)'
+      - '(?i)\bcrontab\b[^\n]{0,120}(?:/tmp/|curl\s|wget\s)'
+
+  # ── Filters: advisory prose, security-tooling content, placeholders, help text ─
+  filter_advisory:
+    content|re:
+      - '(?i)\bCVSS:3\.[01]/AV:'
+      - '(?i)\bCWE-\d{2,4}\b'
+      - '(?i)\b(?:security advisory|vulnerability (?:disclosure|report|description)|responsible disclosure|coordinated disclosure)\b'
+      - '(?i)\baffected versions?\b[^\n]{0,80}\b2\.0\.5\b'
+      - '(?i)\bupgrade to (?:version )?v?2\.0\.6\b'
+
+  filter_security_content:
+    content|contains:
+      - 'falsepositives:'
+      - 'logsource:'
+      - 'product: ai_agent'
+      - 'nuclei-templates'
+      - 'matchers-condition'
+      - 'sigma rule'
+
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(?:YOUR|MY|SOME)_(?:TOKEN|PANEL|HOST|SERVER|API_KEY)\b'
+      - '(?i)<(?:your[-_ ]?)?(?:token|host|target|ip|panel|server)>'
+      - '(?i)\b(?:REDACTED|CHANGEME|PLACEHOLDER|EXAMPLE_TOKEN)\b'
+      - '(?i)\bxxxx+\b'
+
+  filter_helptext:
+    content|contains:
+      - "don't check the server certificate"
+      - 'This option explicitly allows curl to perform'
+      - 'Usage: curl [options'
+      - 'GNU Wget'
+      - '--no-check-certificate  '
+
+  condition: >
+    sel_event and
+    (
+      (sel_tls_bypass and (sel_marker_1panel or sel_api_content or sel_api_url or sel_api_path)) or
+      ((sel_api_content or sel_api_url or sel_api_path) and sel_rce_payload)
+    ) and
+    not (filter_advisory or filter_security_content or filter_placeholder or filter_helptext)
+
+falsepositives:
+  - Ops/platform agents bootstrapping a self-hosted 1Panel install that still presents
+    a self-signed Core/Agent certificate, using `curl -k https://host:9999/api/v1/...`
+    during first-run setup. This is the single largest FP source and is exactly why the
+    rule is report-only - it is also, genuinely, the insecure posture this CVE punishes.
+  - Legitimate use of the 1Panel cronjob API to schedule a maintenance shell script that
+    downloads an artefact (matches the endpoint plus a download primitive in the body).
+  - Authorised penetration tests or internal vulnerability validation against a company
+    1Panel deployment.
+  - Runbooks, IaC snippets or shell history pasted into agent context that contain
+    `--insecure` examples for 1Panel administration.
+  - Security tooling traffic (Sigma/nuclei rule bodies, advisory text, scanner output)
+    that quotes these patterns verbatim - suppressed by filter_security_content and
+    filter_advisory.
+  - curl/wget man pages or `--help` output rendered into a tool result - suppressed by
+    filter_helptext.
+
+action: report
