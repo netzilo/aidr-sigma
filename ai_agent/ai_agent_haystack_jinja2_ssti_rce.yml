@@ -1,0 +1,122 @@
+# PLACEMENT: load this rule AFTER netzilo-llmjudge-code-injection-001 and after any
+# blocking execute_process rules. Evaluation is first-match-wins, and a `report`
+# verdict short-circuits later rules — placing this first would suppress a stronger
+# blocking/judging verdict on the same execute_process event.
+title: SSTI Jinja2 Template Injection RCE (Haystack Pipeline)
+id: 7c3f9a2e-5b41-4d6c-9e08-2a1f6b84c37d
+status: experimental
+level: high
+description: |
+  Detects the process-execution artefact of a Jinja2 server-side template injection
+  (SSTI) payload, the RCE vector affecting deepset Haystack < 2.3.1 where a client
+  that lets users build and run Pipelines from scratch will render an attacker-supplied
+  Jinja2 template (PromptBuilder / OutputAdapter / ConditionalRouter) with the
+  privileges of the Haystack process.
+
+  The engine has no template-render telemetry: RENDER_TEMPLATE / TEMPLATE_INJECTION /
+  EXECUTE_CODE edges and the template_render event type do not exist. The only signal
+  this threat produces is `execute_process`. This rule therefore does NOT try to
+  re-detect "a shell was spawned" — that generic post-render surface belongs to
+  netzilo-llmjudge-code-injection-001. Instead it fires only when the SSTI payload
+  itself is still visible in the spawned command line, which is the common case for
+  Haystack because the malicious template is delivered and re-executed through
+  `python -c` / `python -m` / `sh -c` invocations, and because the standard Jinja2
+  sandbox-escape gadget chain (`__class__` -> `__mro__` -> `__subclasses__` ->
+  `__globals__` / `__import__`) is carried verbatim into the child process argv when
+  the payload re-enters an interpreter.
+
+  Every firing branch requires TWO independent, co-occurring artefacts. Jinja2
+  delimiters alone never fire (that would hit `docker --format '{{.Names}}'`,
+  `kubectl -o jsonpath`, Helm and Ansible). A Python dunder alone never fires (that
+  would hit ordinary metaprogramming). This gives the detection a deterministic,
+  vector-attributed signal — "template injection", not "anomalous code" — that the
+  LLM judge cannot label, while remaining strictly complementary to it.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://github.com/deepset-ai/haystack/security/advisories
+  - https://github.com/deepset-ai/haystack/releases/tag/v2.3.1
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://portswigger.net/web-security/server-side-template-injection
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1190
+  - owasp.a03.2021
+  - owasp.a06.2021
+  - cwe.1336
+  - cwe.94
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: the only event type this threat produces ──────────────────────────
+  sel_exec_event:
+    event_type: execute_process
+
+  # ── Artefact 1: Jinja2 delimiters survive into the spawned command line ──────
+  sel_jinja_delim:
+    content|re:
+      - '\{\{[\s\S]{0,600}\}\}'
+      - '\{%[\s\S]{0,600}%\}'
+
+  # ── Artefact 2: Jinja2/CPython sandbox-escape gadget chain ───────────────────
+  sel_ssti_gadget:
+    content|re:
+      - '(?i)__class__[\s\S]{0,120}__(?:mro|base|bases|subclasses)__'
+      - '(?i)__(?:subclasses|globals|builtins)__'
+      - '(?i)\b(?:lipsum|cycler|joiner|namespace)\s*(?:\.|\[\s*[\x27"])\s*__(?:globals|init)__'
+      - '_TemplateReference__context'
+      - '(?i)\brequest\s*\.\s*application\s*\.\s*__globals__'
+      - '(?i)\|\s*attr\s*\(\s*[\x27"]\s*__'
+
+  # ── Artefact 3: the execution sink the gadget chain pivots into ──────────────
+  sel_exec_sink:
+    content|re:
+      - '(?i)\bos\s*\.\s*(?:system|popen[234]?|execl|execle|execv|execve|spawnl|spawnv)\s*\('
+      - '(?i)\bsubprocess\s*\.\s*(?:Popen|run|call|check_call|check_output|getoutput)\s*\('
+      - '(?i)\b__import__\s*\(\s*[\x27"](?:os|subprocess|pty|platform|importlib)[\x27"]'
+      - '(?i)\bimportlib\s*\.\s*import_module\s*\(\s*[\x27"](?:os|subprocess|pty)[\x27"]'
+      - '(?i)\bpty\s*\.\s*spawn\s*\('
+      - '(?i)\bplatform\s*\.\s*popen\s*\('
+      - '(?i)\bpopen\s*\(\s*[\x27"][^\x27"]{1,200}[\x27"]\s*\)\s*\.\s*read\s*\('
+      - '(?i)\b(?:eval|exec)\s*\(\s*(?:compile\s*\(|__import__\s*\(|b?[\x27"])'
+
+  # ── Self-contained branch: shell/reverse-shell payload inside {{ }} ──────────
+  sel_jinja_shell:
+    content|re:
+      - '\{\{[\s\S]{0,300}\bbash\s+-[a-z]{0,3}i[\s\S]{0,200}\}\}'
+      - '(?i)\{\{[\s\S]{0,300}\bnc\b[\s\S]{0,60}\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b[\s\S]{0,120}\}\}'
+      - '(?i)\{\{[\s\S]{0,300}\b(?:curl|wget)\b[\s\S]{0,200}\|\s*(?:ba)?sh\b[\s\S]{0,120}\}\}'
+      - '(?i)\{\{[\s\S]{0,300}\bpython[23]?\s+-c\b[\s\S]{0,200}\}\}'
+
+  # ── Filters. All anchored to argv[0] of the SPAWNED process so the payload
+  #    body can never be used to satisfy them (no substring evasion, no host,
+  #    domain or path is trusted here — only the identity of the binary that
+  #    legitimately carries these strings as its own arguments). ───────────────
+  filter_sast_tooling:
+    command|re: '^(?:\S*/)?(?:semgrep|bandit|codeql|ruff|pylint|mypy|flake8|checkov|trivy|gitleaks|trufflehog|snyk)\b'
+
+  filter_search_tooling:
+    command|re: '^(?:\S*/)?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|sed|awk|git\s+grep)\b'
+
+  filter_template_renderer:
+    command|re: '^(?:\S*/)?(?:ansible|ansible-playbook|cookiecutter|jinja2|j2|j2cli|consul-template|envsubst)\b'
+
+  condition: >
+    sel_exec_event
+    and ( sel_jinja_shell
+          or (sel_jinja_delim and sel_ssti_gadget)
+          or (sel_jinja_delim and sel_exec_sink)
+          or (sel_ssti_gadget and sel_exec_sink) )
+    and not ( filter_sast_tooling or filter_search_tooling or filter_template_renderer )
+
+falsepositives:
+  - Security researchers or red teams executing SSTI proof-of-concept payloads against a local Haystack or Flask/Jinja2 instance — the command line is indistinguishable from a real exploit by design.
+  - SAST/secret scanners invoked with SSTI gadget strings as rule or pattern arguments; filtered when the scanner is argv[0], NOT filtered when wrapped in `sh -c "semgrep ..."`.
+  - Developer debugging of CPython introspection or Jinja2 sandbox behaviour, e.g. `python -c "print(().__class__.__mro__[1].__subclasses__())"` — only fires if an execution sink (os.system/subprocess/__import__) is also present in the same command line.
+  - CTF tooling, exploit-development scratch scripts, and security-training exercises run on developer workstations.
+  - Configuration management that renders Jinja braces around shell strings (ansible, consul-template, j2cli); filtered when the renderer is argv[0].
+  - Template-engine unit tests whose fixture payload is passed on the command line rather than read from a file.
+action: report
