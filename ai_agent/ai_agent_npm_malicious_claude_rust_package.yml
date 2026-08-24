@@ -1,0 +1,57 @@
+title: Malicious NPM Package Claude Code Rust Native Binary
+id: 6f3c9a41-8d2b-4e57-b0a9-1c74e2f5ad38
+status: experimental
+level: medium
+description: |
+  Single-event IOC detection for the suspicious npm package family
+  @srothgan/claude-code-rust-* (observed variant: darwin-arm64), which claims to
+  ship "Claude Code Rust" native binaries and a private Bun bridge runtime.
+
+  Scope note (answering triage dissent): the engine exposes no package-install
+  telemetry — there is no INSTALL_DEPENDENCY / ACQUIRED_PACKAGE edge and no
+  package_install event type, and file_write has no live producer. This rule
+  therefore makes NO attempt to correlate a spawned process back to a package
+  installation. It is a pure command-line IOC match on execute_process: the
+  package specifier itself is the only high-specificity string that exists in
+  live telemetry. It fires when the literal scoped name appears on a spawned
+  command line — an install/exec invocation (npm/pnpm/yarn/bun), a lifecycle
+  script whose argv carries the node_modules path, or direct execution of the
+  vendored binary. It does not claim the payload is malicious; it claims this
+  named artifact was touched on this host, which is exactly what an unverified
+  supply-chain report justifies. Action is report, not block, because the
+  package's behaviour is unconfirmed and remediation/inspection of the same
+  string is a legitimate response activity.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_pkg_scoped:
+    content|re: '(?i)@srothgan/claude-code-rust[a-z0-9.-]*'
+  sel_pkg_tarball:
+    content|re: '(?i)\bclaude-code-rust-(?:darwin|linux|win32|windows)-(?:arm64|x64|amd64|ia32)-[0-9]+\.[0-9]+\.[0-9]+[a-z0-9.+-]*\.tgz\b'
+  filter_remediation:
+    content|re:
+      - '(?i)\bnpm\b[^|;&]{0,200}\b(?:uninstall|remove|rm|audit|why|ls|view|info|pack|dedupe)\b'
+      - '(?i)\b(?:pnpm|yarn|bun)\b[^|;&]{0,200}\b(?:remove|uninstall|why|info|audit|list)\b'
+  filter_inspection:
+    content|re: '(?i)(?:^|[\s"''/])(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|jq|yq|osqueryi|semgrep|trivy|syft|grype|osv-scanner|snyk|clamscan|shasum|sha256sum|sigmac)\b'
+  condition: sel_event and (sel_pkg_scoped or sel_pkg_tarball) and not (filter_remediation or filter_inspection)
+falsepositives:
+  - Incident responders or malware analysts deliberately fetching or unpacking the package in a sandbox to triage it (the IOC string is unavoidable in that workflow).
+  - Dependency/SBOM scanners, IOC sweeps and vulnerability tooling that pass the package name as an argv token — the common ones are suppressed by filter_inspection, but an in-house wrapper script will still match.
+  - Developers removing or auditing the package as part of remediation — suppressed by filter_remediation, but only when the verb and the package name are in the same shell segment.
+  - Shell history replay, CI log playback, or a documentation/runbook command that echoes the package specifier back onto a command line.
+  - A future, legitimately maintained package published under the same scope and name — the rule is a name-based IOC and cannot distinguish provenance.
+action: report
