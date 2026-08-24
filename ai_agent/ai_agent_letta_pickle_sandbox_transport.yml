@@ -1,0 +1,134 @@
+title: Unsafe Pickle Serialization in Sandbox Tool Result Transport
+id: b7f3c1d2-9a4e-4f61-8c25-3d0e6a7b1f48
+status: experimental
+level: high
+description: |
+  Detects a monitored agent spawning a Python interpreter whose command line carries
+  pickle serialization/deserialization of sandbox tool-result data — the transport
+  pattern used by Letta < 0.16.8, where tool results were pickled inside the sandbox
+  and unpickled by the server. An attacker able to influence the tool result can embed
+  a __reduce__ gadget or a base64-wrapped pickle stream that executes arbitrary code at
+  load time. The fixed versions transport results as JSON, so a live sandbox wrapper
+  that still references pickle.dumps/pickle.loads indicates either an unpatched
+  deployment or an injected payload.
+
+  Single-event content rule on execute_process (content = spawned command line).
+  The engine exposes no deserialize/receive-data event or edge kind, so the spawned
+  interpreter command line is the only verified observable for this transport.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://atlas.mitre.org/techniques/AML.T0051.000
+  - https://github.com/letta-ai/letta
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0051.000
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_process:
+    event_type: execute_process
+
+  # Explicit pickle-family serialization or deserialization call in the command line.
+  # torch.load / joblib.load / pandas.read_pickle are deliberately NOT matched — they
+  # are the dominant benign unpickling paths in ML workflows.
+  sel_pickle_serde:
+    content|re:
+      - '\b(?:pickle|cPickle|_pickle|dill|cloudpickle)\.(?:loads?|dumps?)\s*\('
+      - '\b(?:pickle|dill)\.Unpickler\s*\('
+      - '\bUnpickler\s*\([^\n]{0,80}\)\s*\.\s*load\s*\('
+      - '\bfrom\s+(?:pickle|cPickle|_pickle|dill|cloudpickle)\s+import\s+[^\n]{0,60}\b(?:loads?|dumps?)\b'
+
+  # An actual interpreter/eval vector in the same command line.
+  sel_exec_vector:
+    content|re:
+      - '(?i:python)[0-9.]*(?:\s+-[A-Za-z]+)*\s+-c[\s"\x27]'
+      - '(?i:python)[0-9.]*(?:\s+-[A-Za-z]+)*\s+-m\s+(?:pickle|base64)\b'
+      - '\|\s*(?:[^\s|]*/)?(?i:python)[0-9.]*\b'
+      - '\b(?:exec|eval|compile)\s*\('
+      - '\bos\.(?:system|popen|execv?p?e?)\s*\('
+      - '\bsubprocess\.(?:run|Popen|call|check_output|check_call)\s*\('
+
+  # Letta sandbox / tool-execution transport context.
+  sel_letta_context:
+    content|re:
+      - '(?i)\bletta\b'
+      - '(?i)letta[/_.-](?:sandbox|local_sandbox|tool_execution|tool_executor|tools|client|server|schemas)\b'
+
+  # Classic pickle RCE gadget markers.
+  sel_reduce_gadget:
+    content|re:
+      - '__reduce__'
+      - '__reduce_ex__'
+      - '\\x80\\x0[2-5]'
+      - '\bfind_class\s*\('
+
+  # Base64-wrapped pickle stream: protocol 2-5 opcode prefixes encode to gAJ./gAN./gAS./gAW.
+  sel_b64_pickle_blob:
+    content|re:
+      - '\bgA(?:J|N|S|W)(?:9|V|d|c|K|X)[A-Za-z0-9+/]{20,}={0,2}'
+
+  # ── Benign-case suppression ────────────────────────────────────────────────
+
+  # Source auditing: grep/rg/git over code that mentions pickle, with no pipe into python.
+  filter_readonly_inspect:
+    content|re:
+      - '(?i)(?:^|[\s/])(?:grep|egrep|fgrep|rg|ripgrep|ag|ack)\b[^|]{0,300}(?:pickle|__reduce__|gAS|gAW)'
+      - '(?i)(?:^|[\s/])git\s+(?:grep|log|show|diff|blame)\b'
+      - '(?i)(?:^|[\s/])(?:find|fd)\b[^|]{0,200}\s-name\b'
+
+  # Test harnesses and fixture data that exercise the pickle path on purpose.
+  filter_test_harness:
+    content|re:
+      - '(?i)\s-m\s+(?:pytest|unittest|coverage|tox|nox)\b'
+      - '(?i)(?:^|[\s/])(?:pytest|tox|nox)\b[^|]{0,200}(?:tests?/|test_[A-Za-z0-9_]+\.py|conftest\.py)'
+      - '(?i)(?:^|[\s"\x27/])(?:tests?|fixtures?|examples?)/[^\s"\x27]{0,120}pickle'
+
+  # SAST / dependency scanners that flag or parse pickle usage.
+  filter_security_tooling:
+    content|re:
+      - '(?i)(?:^|[\s/])(?:bandit|semgrep|codeql|pip-audit|safety|trufflehog|pylint|flake8|ruff|mypy|sonar-scanner)\s+(?:-{1,2}[A-Za-z]|scan\b|check\b|run\b)'
+
+  # Advisory / changelog / migration references rather than live deserialization.
+  filter_doc_reference:
+    content|re:
+      - '\bCVE-[0-9]{4}-[0-9]{4,7}\b'
+      - '(?i)\bGHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}\b'
+      - '(?i)\b(?:changelog|release[-_ ]notes|security[-_ ]advisory|migration[-_ ]guide)\b'
+
+  condition: >
+    sel_process and
+    (
+      (sel_pickle_serde and (sel_exec_vector or sel_letta_context or sel_reduce_gadget))
+      or
+      (sel_b64_pickle_blob and (sel_exec_vector or sel_letta_context))
+    )
+    and not (
+      filter_readonly_inspect or filter_test_harness or
+      filter_security_tooling or filter_doc_reference
+    )
+
+falsepositives:
+  - Data-science and ML one-liners that legitimately pickle/unpickle a local cache or
+    feature artifact via `python -c` (e.g. cache warmers, notebook export scripts).
+    Not filtered by name because the pattern is indistinguishable from the vulnerable
+    transport; torch.load, joblib.load and pandas.read_pickle are excluded from the
+    match list precisely to keep the common ML paths quiet.
+  - Engineers auditing Letta or another codebase for pickle usage with grep/rg/git grep
+    (suppressed by filter_readonly_inspect).
+  - Letta's own test suite and packaged fixtures exercising the legacy pickle path
+    (suppressed by filter_test_harness).
+  - Bandit / Semgrep / CodeQL runs that echo `pickle.loads(` from a rule pattern into a
+    command line (suppressed by filter_security_tooling).
+  - Remediation work during the 0.16.8 upgrade — one-off scripts converting pickled
+    caches to JSON will report. This is expected and desirable during the patch window.
+  - A legitimate base64 blob whose first characters coincide with a pickle opcode prefix.
+    Requires 20+ contiguous base64 characters AND an interpreter/Letta context to fire.
+
+action: report
