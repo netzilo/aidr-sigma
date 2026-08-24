@@ -1,0 +1,340 @@
+title: Reversible Anonymization Proxy Relaying Data To LLM Inference
+id: 6f1c9a52-3d84-4b7e-9c02-71ae5d4f8b13
+status: experimental
+level: high
+description: |
+  Detects the anonproxy tradecraft: a reversible anonymization / pseudonymization
+  proxy is launched on the endpoint (or installed from a package index) and, inside
+  the same short window, LLM-inference-shaped HTTP egress leaves the host.
+
+  The discriminator is the ANCHOR, not the egress. Every agent talks to inference
+  APIs constantly, so outbound HTTP alone is worthless; this rule only evaluates
+  the egress leg once an execute_process command line has named a reversible
+  anonymization proxy (anonproxy / anon-proxy / anonymization-proxy /
+  de-anonymize / re-identify), or a generic anonymizer invoked together with a
+  reversal or token-mapping artefact (--reverse, --restore, --deanon,
+  --mapping=, token_map.json, vault). That anchor is a behaviour the generic
+  exfiltration rule does not consider at all: it consumes "process sent a payload
+  to an untrusted host" and is blind to the fact that the payload was passed
+  through a two-way pseudonymization mapping that is retained locally. Reversible
+  pseudonymization is not de-identification - the engagement data still leaves the
+  organisation in a re-identifiable form, and the key stays on the operator's box.
+
+  "Obtained from PyPI" is covered without the non-existent package_install event:
+  pip / pipx / uv / poetry / conda install lines are ordinary execute_process
+  command lines and are recorded as a Supply Chain stage in the kill chain.
+  ACQUIRED_SKILL is never used as a trigger - it is read from the graph only, as
+  corroboration that security-testing artefacts were loaded into agent context.
+
+  Report-only by design: the tool has a legitimate operator use, and the finding is
+  a data-governance decision for a human, not an enforcement one.
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1567/
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://atlas.mitre.org/techniques/AML.T0025
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - atlas.aml.t0025
+  - owasp.llm02
+  - owasp.llm03
+falsepositives:
+  - Sanctioned use. A security engineer running anonproxy exactly as intended to
+    pseudonymize engagement data before an approved LLM review. The rule reports
+    this deliberately - reversible pseudonymization still moves re-identifiable
+    client data to a third party and the mapping is retained locally - and it should
+    be closed as accepted risk with a ticket reference, not silently suppressed.
+  - CI or unit-test runs of the anonproxy package itself (pipx run anonproxy --help,
+    pytest driving the CLI) on a workstation where a coding agent independently calls
+    an inference API inside the same 15-minute window.
+  - Unrelated GDPR/DSAR anonymization utilities (anonymize.py --restore,
+    pseudonymizer --mapping=map.json). These only reach the report path if
+    inference-shaped egress also occurs in the window; the generic-anonymizer branch
+    additionally requires an explicit reversal or token-mapping artefact.
+  - pip install anonproxy pulled in during dependency resolution. An install with no
+    subsequent proxy run and no inference egress never reports - it is only cached as
+    a Supply Chain stage for a later chain.
+  - Documentation demos, conference reproductions and blog write-ups executed against
+    synthetic scan output.
+  - Busy multi-user or CI hosts, where the egress stage can be contributed by a
+    process unrelated to the proxy. The reason string names the relaying process and
+    the endpoint so triage can dismiss it in seconds.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Windows / throttles. The window lives in the rule, never in storage.
+  # ---------------------------------------------------------------------------
+  WINDOW_NS   = 900000000000   # 15 min - proxy launch <-> inference egress
+  COOLDOWN_NS = 600000000000   # 10 min - one report per campaign, not per exec
+  THROTTLE_NS = 15000000000    # 15 s   - cap graph work while an anchor is live
+
+  # Anchor A: the tool is named. High specificity - this is the threat itself.
+  ANON_PROXY_PATS = [
+      r"(?i)\banon[-_ ]?proxy\b",
+      r"(?i)\banonymi[sz]ation[-_ ]?proxy\b",
+      r"(?i)\breversible[-_ ]anonymi",
+      r"(?i)\bde[-_ ]?anonymi[sz]",
+      r"(?i)\bre[-_ ]?identif(y|ier|ication)\b",
+  ]
+  # Anchor B: a generic anonymizer, but only when a reversal/mapping artefact is
+  # present too - that is what makes the sanitisation a fig leaf.
+  GENERIC_ANON_PATS = [
+      r"(?i)\banonymi[sz]er?\b",
+      r"(?i)\bpseudonymi[sz]",
+      r"(?i)\bscrubber?\b",
+      r"(?i)\bredactor\b",
+      r"(?i)\bobfuscat(e|or)\b",
+  ]
+  REVERSIBLE_PATS = [
+      r"(?i)--?(reverse|restore|deanon[a-z]*|unmap|rehydrate|re[-_]?identify)\b",
+      r"(?i)--?(map|mapping|vault|keystore|keyfile|token[-_]?map)[=\s]",
+      r"(?i)\b(mapping|token[-_]map|anon[-_]?map)\.(json|db|sqlite3?|ya?ml|csv)\b",
+  ]
+  # Supply-chain leg: package_install is unknown to the engine, so the install is
+  # observed as what it actually is - an execute_process command line.
+  INSTALL_PATS = [
+      r"(?i)\b(pip[0-9]*|pipx|uv|poetry|conda)\s+(install|add)\b[^\n]{0,180}\banon[-_ ]?proxy\b",
+      r"(?i)\bpython[0-9.]*\s+-m\s+pip\s+install\b[^\n]{0,180}\banon[-_ ]?proxy\b",
+  ]
+  # Corroborators - they enrich the reason, they never gate the detection.
+  PENTEST_PATS = [
+      r"(?i)\b(nmap|nessus|burpsuite|burp|metasploit|msfconsole|msfvenom|sqlmap|nuclei|openvas|acunetix|zaproxy)\b",
+      r"(?i)\b[\w./-]+\.(nessus|gnmap|nmap|pcap|har)\b",
+      r"(?i)\b(pentest|pen[-_]test|red[-_]?team|engagement|findings|loot|hashdump|creds?[-_]?dump|scan[-_]?report)\b",
+  ]
+  # SUSPICIOUS destinations, not a trust list. Nothing here is permitted by being
+  # listed - these tokens only make an HTTP_REQUEST edge count as inference egress.
+  LLM_HOST_TOKENS = [
+      "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com",
+      "aiplatform.googleapis.com", "openai.azure.com", "bedrock-runtime",
+      "api.mistral.ai", "api.cohere.ai", "api.cohere.com", "api.groq.com",
+      "api.together.xyz", "api.deepseek.com", "api.perplexity.ai",
+      "openrouter.ai", "api-inference.huggingface.co", "api.fireworks.ai",
+      "api.replicate.com", "api.x.ai", "inference",
+  ]
+  LLM_PATH_TOKENS = [
+      "/v1/chat/completions", "/chat/completions", "/v1/messages",
+      "/v1/completions", "/v1/responses", "/v1/embeddings",
+      "/api/generate", "/api/chat", ":generatecontent", "/invocations",
+      "/converse", "/predict",
+  ]
+  SKILL_TOKENS = [
+      "pentest", "pen-test", "nessus", "burp", "nmap", "recon", "engagement",
+      "findings", "loot", "exploit", "vuln", "scan-report", "scanreport",
+  ]
+
+  # ---------------------------------------------------------------------------
+  # Pure helpers - no graph, no store, string work only.
+  # ---------------------------------------------------------------------------
+  def matched(s, pats):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return ""
+
+  def has_any(s, pats):
+      return matched(s, pats) != ""
+
+  def has_token(s, toks):
+      low = s.lower()
+      for t in toks:
+          if t in low:
+              return True
+      return False
+
+  def is_inference_endpoint(u):
+      if u == None:
+          return False
+      if has_token(u.get("host", ""), LLM_HOST_TOKENS):
+          return True
+      return has_token(u.get("path", ""), LLM_PATH_TOKENS)
+
+  def edge_ts(e):
+      t = int(e.get("last_ts", "0"))
+      if t == 0:
+          t = int(e.get("first_ts", "0"))
+      if t == 0:
+          t = int(e.get("ts", "0"))
+      return t
+
+  def synth(src, dst, ts, cmdline):
+      return {"from": src, "to": dst, "kind": "EXECUTE_PROCESS",
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
+              "cmdline": cmdline}
+
+  def remember(key, value):
+      if store_usage()["free"] < 8192:
+          store_reset()
+      store_set(key, value)
+
+  # ---------------------------------------------------------------------------
+  def run():
+      # 1. RELEVANCE GATE - pure string work on meta, no traversal.
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+
+      cmd   = meta.get("content", "")
+      ts    = int(meta.get("event_ts", "0"))
+      apath = meta.get("agent_name", "")
+
+      tool = matched(cmd, ANON_PROXY_PATS)
+      if tool == "":
+          g = matched(cmd, GENERIC_ANON_PATS)
+          if g != "" and has_any(cmd, REVERSIBLE_PATS):
+              tool = g
+      installed = has_any(cmd, INSTALL_PATS)
+      is_run    = tool != "" and not installed
+
+      if installed:
+          remember("install", {"ts": str(ts), "cmd": cmd[:300]})
+
+      if is_run:
+          remember("anchor", {
+              "ts":      str(ts),
+              "cmd":     cmd[:400],
+              "tool":    tool,
+              "agent":   apath,
+              "pentest": "1" if has_any(cmd, PENTEST_PATS) else "0",
+              "reverse": "1" if has_any(cmd, REVERSIBLE_PATS) else "0",
+          })
+
+      anchor = store_get("anchor")
+      if anchor == None:
+          return "allow"                     # no proxy launch seen - nothing to correlate
+      a_ts = int(anchor.get("ts", "0"))
+      if a_ts == 0 or ts - a_ts > WINDOW_NS:
+          return "allow"                     # stale anchor - not a live campaign
+
+      last = store_get("last_report_ts")
+      if last != None and ts - int(last) < COOLDOWN_NS:
+          return "allow"                     # already reported this campaign
+
+      if not is_run:
+          ls = store_get("last_scan_ts")
+          if ls != None and ts - int(ls) < THROTTLE_NS:
+              return "allow"                 # cap graph work on exec bursts
+
+      # 2. Kill-chain root: the monitored agent owning this exec, if resolvable.
+      root = ""
+      for p in graph(type="Process"):
+          if p.get("agent", "0") != "1":
+              continue
+          if apath != "" and p.get("path", "") == apath:
+              root = p["id"]
+              break
+          if root == "":
+              root = p["id"]
+
+      # 3. Egress leg. The proxy is a separate process, so HTTP_REQUEST edges are
+      #    searched across every process node, not just the agent.
+      relay_edge = None
+      relay_url  = None
+      relay_proc = None
+      endpoints  = []
+      for p in graph(type="Process"):
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if not is_inference_endpoint(u):
+                  continue
+              if edge_ts(e) < a_ts - WINDOW_NS:
+                  continue
+              h = u.get("host", "")
+              if h not in endpoints:
+                  endpoints.append(h)
+              if relay_edge == None:
+                  relay_edge = e
+                  relay_url  = u
+                  relay_proc = p
+
+      if relay_edge == None:
+          remember("last_scan_ts", str(ts))
+          return "allow"                     # proxy running, no inference egress yet
+
+      if root == "":
+          root = relay_proc["id"]
+
+      # 4. Corroboration from the graph only - ACQUIRED_SKILL never triggers.
+      skill_edge = None
+      skill_node = None
+      for e in edges(root, dir="out", kind="ACQUIRED_SKILL"):
+          s = node(e["to"])
+          if s == None:
+              continue
+          if int(e.get("ts", "0")) < a_ts - WINDOW_NS:
+              continue
+          if has_token(s.get("name", "") + " " + s.get("host", ""), SKILL_TOKENS):
+              skill_edge = e
+              skill_node = s
+              break
+
+      # 5. Kill chain.
+      chain = new_chain(root)
+      inst  = store_get("install")
+      if inst != None and ts - int(inst.get("ts", "0")) <= WINDOW_NS:
+          chain.append(step(
+              synth(root, "process://index:anonproxy", int(inst.get("ts", "0")), inst.get("cmd", "")),
+              stage_id="Supply Chain",
+              stage_desc="anonymization proxy pulled from a package index: " + inst.get("cmd", "")))
+
+      chain.append(step(
+          synth(root, "process://" + anchor.get("tool", "anonproxy"), a_ts, anchor.get("cmd", "")),
+          stage_id="Reversible Anonymizer Launched",
+          stage_desc="reversible anonymization proxy invoked: " + anchor.get("cmd", "")))
+
+      chain.append(step(
+          relay_edge,
+          stage_id="LLM Relay",
+          stage_desc="pseudonymized payload relayed by " + relay_proc.get("name", "?") +
+                     " to inference endpoint " + relay_url.get("host", "?") +
+                     relay_url.get("path", "")))
+
+      if skill_edge != None:
+          chain.append(step(
+              skill_edge,
+              stage_id="Engagement Context",
+              stage_desc="security-testing artefact loaded into agent context: " +
+                         skill_node.get("name", "?") + " from " + skill_node.get("host", "?")))
+
+      # 6. Reason.
+      notes = []
+      if anchor.get("reverse", "0") == "1":
+          notes.append("reversal/token-mapping artefact on the command line")
+      if anchor.get("pentest", "0") == "1":
+          notes.append("pentest tooling or engagement artefact named in the command line")
+      if inst != None and ts - int(inst.get("ts", "0")) <= WINDOW_NS:
+          notes.append("package installed from an index in the same window")
+      if skill_edge != None:
+          notes.append("security-testing content acquired as a skill")
+      if len(endpoints) > 1:
+          notes.append(str(len(endpoints)) + " distinct inference endpoints")
+      if relay_url.get("is_ztna_host", "0") == "1":
+          notes.append("destination is an internal/tunnelled gateway - confirm its own upstream")
+
+      reason = ("Reversible anonymization proxy relaying data to inference endpoint " +
+                relay_url.get("host", "?") + " via " + relay_proc.get("name", "?") +
+                " - pseudonymized, not de-identified: the mapping is retained locally")
+      if notes:
+          reason = reason + " (" + "; ".join(notes) + ")"
+
+      remember("last_report_ts", str(ts))
+      remember("last_scan_ts", str(ts))
+      print("anonproxy chain: " + anchor.get("cmd", "") + " -> " + relay_url.get("host", "?"))
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
