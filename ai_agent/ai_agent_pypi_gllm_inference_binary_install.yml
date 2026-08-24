@@ -1,0 +1,105 @@
+title: Supply Chain PyPI Install of gllm-inference-binary
+id: 7f3c1a94-2d6b-4c58-9e07-b4d1f6a83c52
+status: experimental
+level: medium
+description: |
+  Detects an agent-spawned process whose command line installs, fetches, or executes
+  the PyPI distribution 'gllm-inference-binary' (and its normalized separator/case
+  variants gllm_inference_binary / gllm.inference.binary).
+
+  The package presents as a component library for generative-AI model inference and
+  carries a '-binary' suffix appended to an existing AI inference namespace, the
+  canonical shape of a namespace-adjacent typosquat. Python package installation runs
+  arbitrary attacker-controlled code at build/install time (setup.py, PEP 517 backend,
+  post-install console scripts), so the install invocation itself is the point of
+  untrusted code execution.
+
+  No public security research documents a specific payload in this distribution. This
+  rule is therefore an IOC-pinned observability rule scoped to one named artifact, and
+  is intentionally report-only. It complements — it does not replace — the generic
+  typosquat-heuristic rule on install command lines: this rule additionally covers
+  direct wheel/sdist/VCS artifact fetches and post-install module and console-script
+  execution, which a generic 'pip install <suspicious-name>' pattern does not see.
+
+  Only execute_process telemetry is used; the engine exposes no package_install event
+  type and no INSTALLED_PACKAGE / EXECUTED_CODE / NETWORK_REQUEST edge kinds, so the
+  install -> execute -> egress chain is deliberately not modelled here.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  sel_pkg:
+    content|re: '(?i)\bgllm[-_.]inference[-_.]binary\b'
+
+  sel_installer:
+    content|re:
+      - '(?i)\bpip[0-9]*(\.[0-9]+)?\b[^\n]{0,240}\binstall\b'
+      - '(?i)\b(uv|pipx|poetry|pdm|rye|conda|mamba|micromamba)\b[^\n]{0,240}\b(install|add|sync)\b'
+      - '(?i)\beasy_install\b'
+      - '(?i)\bpython[0-9.]*\b[^\n]{0,120}\bsetup\.py\b[^\n]{0,60}\b(install|develop)\b'
+
+  sel_artifact:
+    content|re:
+      - '(?i)gllm[-_.]inference[-_.]binary[^\s"]{0,80}\.(whl|tar\.gz|tgz|zip)\b'
+      - '(?i)(https?://|git\+|file://)[^\s"]{0,200}gllm[-_.]inference[-_.]binary'
+
+  sel_module_exec:
+    content|re:
+      - '(?i)-m\s+gllm[-_.]inference[-_.]binary\b'
+      - '(?i)\bimport\s+gllm[-_.]inference[-_.]binary\b'
+      - '(?i)(^|[;&|]\s*|[/\\])gllm[-_.]inference[-_.]binary(\s|$)'
+
+  filter_removal:
+    content|re: '(?i)\b(uninstall|--uninstall|remove|purge)\b'
+
+  filter_inspection:
+    content|re: '(?i)\b(pip[0-9.]*|uv|poetry|pdm|conda)\b[^\n]{0,120}\b(show|list|search|freeze|inspect|tree|why)\b'
+
+  filter_dry_run:
+    content|re: '(?i)(--dry-run|--dryrun)'
+
+  filter_audit_tooling:
+    content|re: '(?i)(^|[\s;&|/])(pip[-_]audit|safety|osv[-_]scanner|trivy|grype|syft|snyk|guarddog|bandit|semgrep|dependency[-_]check)\b'
+
+  filter_text_inspection:
+    content|re: '(?i)(^|[\s;&|:,{[])(/[^\s"]{0,60}/)?(grep|egrep|fgrep|rg|ack|awk|sed|cat|head|tail|less|more|echo|printf|jq|diff|wc)\b'
+
+  condition: >
+    sel_event
+    and ((sel_pkg and (sel_installer or sel_artifact)) or sel_module_exec)
+    and not (filter_removal or filter_inspection or filter_dry_run
+             or filter_audit_tooling or filter_text_inspection)
+
+falsepositives:
+  - A developer or CI job deliberately installing this vendor distribution as a
+    sanctioned dependency (for example restoring a pinned requirements.txt, poetry.lock
+    or uv.lock that already references it). The event is a true observation of the
+    install; triage confirms whether the dependency is approved.
+  - Malware analysts or supply-chain researchers pulling the wheel/sdist into a sandbox
+    for inspection. Invocations through recognised audit tooling (pip-audit, safety,
+    osv-scanner, trivy, grype, syft, snyk, guarddog, bandit, semgrep) are suppressed by
+    filter_audit_tooling, but a plain 'pip download' in a research VM still reports.
+  - Dependency-resolution previews and lockfile refreshes that never execute package
+    code — suppressed by filter_dry_run (--dry-run) and filter_inspection
+    (pip show / list / search / freeze, poetry why, pdm tree).
+  - Cleanup and remediation runs (pip uninstall, poetry remove, conda remove) —
+    suppressed by filter_removal.
+  - Reading, grepping or echoing the package name out of a requirements file, README,
+    SBOM or log line — suppressed by filter_text_inspection.
+action: report
