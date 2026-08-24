@@ -1,0 +1,118 @@
+title: LangChain Recursive URL Loader SSRF to Internal Target
+id: 7f3c1d92-6a4e-4b18-9c05-2e8d5a4f1b63
+status: experimental
+level: high
+description: |
+  Detects a single outbound agent HTTP request that carries a Server-Side Request
+  Forgery payload aimed at infrastructure that is only reachable from inside the
+  host or VPC. Targets CVE-2023-46229 (LangChain < 0.0.317, recursive_url_loader),
+  where a crafted external URL causes the loader to pivot from a public page into
+  loopback, RFC1918, link-local / cloud-metadata, or in-cluster service addresses.
+
+  Four independent, high-specificity indicators are matched, all on one event:
+    1. A fetch-intent query parameter (url=, uri=, src=, target=, feed=, ...) whose
+       value is an absolute URL - plain or percent-encoded - pointing at a
+       loopback, RFC1918, CGNAT, link-local, *.internal / *.intranet /
+       *.svc.cluster.local, or numerically obfuscated host.
+    2. A JSON request body field (url/base_url/start_url/seed_url/...) pointing at
+       a link-local, cloud-metadata, or numerically obfuscated host. Loopback and
+       RFC1918 are deliberately NOT matched in bodies because local model and MCP
+       base URLs live there legitimately.
+    3. A GET straight to a cloud instance-metadata endpoint on its canonical
+       credential path (IMDS / GCE computeMetadata / Azure / Alibaba / OCI).
+    4. A request whose host is a wildcard DNS-rebinding service, an out-of-band
+       interaction domain, or a hex / octal / decimal / IPv4-mapped-IPv6 literal -
+       the standard bypasses for naive SSRF host filters.
+
+  Plain requests to 127.0.0.1 or an RFC1918 host are intentionally NOT matched:
+  agents talk to local MCP servers and local inference endpoints constantly, and
+  matching those would make this rule unusable.
+author: Tanya
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-46229
+  - https://owasp.org/Top10/A10_2021-Server-Side_Request_Forgery_%28SSRF%29/
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+tags:
+  - attack.initial_access
+  - attack.t1190
+  - attack.credential_access
+  - attack.t1552.005
+  - cve.2023.46229
+  - owasp.a10.2021
+  - owasp.a01.2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type: http_request
+
+  # 1. Fetch-intent parameter carrying an absolute URL to an internal target.
+  #    OAuth/login redirect parameter names (redirect_uri, callback, next,
+  #    continue, return_to) are deliberately excluded - they legitimately point
+  #    at localhost during dev flows.
+  sel_param_internal:
+    url.full|re: '(?i)(?:[?&]|%3[fF]|%26)(?:url|urls|uri|u|src|source|target|dest|destination|link|feed|rss|proxy|remote|fetch|load|resource|endpoint|site|domain|host|address|page|document|image_url|img_url|file_url|data_url)=(?:https?|ftp|gopher|dict|file)(?:://|%3a%2f%2f)(?:[^/@&#\s]{0,40}@)?(?:127\.\d{1,3}\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|localhost|\[::1\]|%5b::1%5d|169\.254\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d{1,3}\.\d{1,3}|metadata\.google\.internal|metadata\.goog|[a-z0-9-]{1,63}\.svc\.cluster\.local|[a-z0-9-]{1,63}\.(?:internal|intranet|localdomain)|0[xX][0-9a-fA-F]{8}|\d{8,10})(?:[:/?#&%\s]|$)'
+
+  # 2. JSON body seed/base URL pointing at link-local, cloud metadata, or an
+  #    obfuscated numeric host. Loopback / RFC1918 excluded on purpose.
+  sel_body_metadata:
+    content|re: '(?i)"(?:url|uri|urls|src|source|link|target|endpoint|resource|base_url|start_url|seed_url|page_url|crawl_url)"\s*:\s*"(?:https?|ftp|gopher|dict|file)://(?:[^/@"\s]{0,40}@)?(?:169\.254\.\d{1,3}\.\d{1,3}|metadata\.google\.internal|metadata\.goog|100\.100\.100\.200|[a-z0-9-]{1,63}\.svc\.cluster\.local|0[xX][0-9a-fA-F]{8}|\d{8,10})(?:[:/"?#]|$)'
+
+  # 3. Direct GET to a cloud instance-metadata service on a credential path.
+  sel_metadata_fetch:
+    method: GET
+    host|re: '(?i)^(?:169\.254\.169\.254|169\.254\.170\.2|100\.100\.100\.200|metadata\.google\.internal|metadata\.goog|metadata\.azure\.com)(?::\d{1,5})?$'
+    path|re: '(?i)^/(?:latest/(?:meta-data|user-data|dynamic|api/token)|computeMetadata/v1|metadata/(?:instance|identity|v1)|opc/v[12]|v1/(?:meta-data|instance)|openstack/latest|2016-09-02)'
+
+  # 4a. Wildcard DNS-rebinding services and out-of-band interaction domains.
+  sel_rebind_oob_host:
+    host|re: '(?i)^(?:[a-z0-9-]{1,63}\.)*(?:nip\.io|sslip\.io|xip\.io|localtest\.me|lvh\.me|vcap\.me|1u\.ms|burpcollaborator\.net|oastify\.com|interact\.sh|oast\.(?:pro|live|site|fun|me))(?::\d{1,5})?$'
+
+  # 4b. Numerically obfuscated host literal (hex / octal / decimal / v4-mapped v6).
+  sel_obfuscated_host:
+    host|re: '^(?:0[xX][0-9a-fA-F]{8}|0{1,2}[0-7]{9,11}|[0-9]{8,10}|0177\.(?:[0-9]{1,3}\.){2}[0-9]{1,3}|\[::ffff:(?:[0-9]{1,3}\.){3}[0-9]{1,3}\]|\[?::(?:ffff:)?7f00:1\]?)(?::\d{1,5})?$'
+
+  # ── Filters — none of these widen which hosts, domains or paths are trusted ──
+
+  # Unresolved template / placeholder URLs from docs, config scaffolds and README
+  # snippets ({url}, ${HOST}, <target>, YOUR_URL, ...).
+  filter_placeholder:
+    url.full|re: '(?i)(\{\{?[a-z0-9_.-]{1,30}\}?\}|%7[bB][a-z0-9_.-]{1,30}%7[dD]|<[a-z_]{1,20}>|\$\{[a-z0-9_]{1,30}\}|your[-_]?(?:url|host|domain|endpoint)|insert[-_]?url|placeholder)'
+
+  # Security-advisory content: BOTH a vulnerability identifier AND advisory prose
+  # must be present, so a bare CVE string cannot be used as an evasion token.
+  filter_vuln_id:
+    content|re: '\b(?:CVE-20\d{2}-\d{4,7}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4})\b'
+  filter_advisory_text:
+    content|re: '(?i)\b(?:security advisory|vulnerability (?:report|advisory|disclosure)|proof.of.concept|affected versions|patched in version|remediation steps)\b'
+
+  condition: >
+    sel_scope and
+    (sel_param_internal or sel_body_metadata or sel_metadata_fetch or
+     sel_rebind_oob_host or sel_obfuscated_host)
+    and not (filter_placeholder or (filter_vuln_id and filter_advisory_text))
+
+falsepositives:
+  - Cloud SDK credential refresh from an agent running on EC2/GCE/Azure - an IMDSv1
+    GET to 169.254.169.254/latest/meta-data/iam/security-credentials/ is normal for
+    boto3, google-auth and the Azure identity libraries and will match
+    sel_metadata_fetch. This is why the rule is report-only.
+  - Developers using nip.io, sslip.io, lvh.me or localtest.me to obtain wildcard DNS
+    and local TLS certificates during development; these resolve to loopback by
+    design and match sel_rebind_oob_host.
+  - Legitimate internal renderer, screenshot, link-preview or reverse-proxy services
+    invoked as https://renderer.corp/render?url=http://reports.internal/page - the
+    request shape is indistinguishable from SSRF at a single event.
+  - Kubernetes in-cluster service discovery where a *.svc.cluster.local URL is passed
+    as a query parameter to an API gateway.
+  - Security research or advisory-summarisation agents that quote SSRF payload URLs
+    in a request body; mitigated by requiring both a CVE/GHSA identifier and
+    advisory prose (filter_vuln_id and filter_advisory_text) before suppressing.
+  - Documentation, IaC templates and config scaffolds containing unresolved URL
+    placeholders; mitigated by filter_placeholder.
+
+action: report
