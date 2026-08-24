@@ -1,0 +1,281 @@
+title: Supply Chain dev-coder PyPI Agent Custom Endpoint Egress
+id: 7f3c1e94-2b6a-4d58-9e17-c0a5b8d43f21
+status: experimental
+level: medium
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+description: |
+  Correlates the launch of the PyPI package `dev-coder` (a CLI coding agent that talks to
+  operator-supplied, OpenAI-compatible API endpoints) with the outbound LLM-API traffic that
+  immediately follows it, and reports only when that traffic carries an independent anomaly
+  signature -- an ephemeral tunnel / IP-encoded DNS host, a public bare-IP endpoint, cleartext
+  http:// LLM traffic to a public host, remote instruction-document ingestion, endpoint pivoting,
+  or a never-before-seen endpoint contacted by a package installed in this very session.
+
+  This rule deliberately does NOT alert on "dev-coder is installed" or on "a Python CLI made an
+  HTTP request". There is no CVE and no confirmed malicious release; the detection is therefore
+  keyed on the *shape of the egress* that a compromised or backdoored release would need in order
+  to reach attacker infrastructure, anchored in time to the package's own process. A dev-coder
+  session that talks to a normal HTTPS domain endpoint produces zero output.
+
+  Scope note: only HTTP_REQUEST and ACQUIRED_SKILL edges are traversed (the two edge kinds this
+  behaviour actually produces). Egress performed by a *child* process that dev-coder spawns is not
+  attributed here -- the kill-chain serializer's ancestry prefix is what shows the spawn context.
+references:
+  - https://pypi.org/project/dev-coder/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.exfiltration
+  - attack.t1041
+  - owasp.llm03
+  - owasp.llm02
+falsepositives:
+  - Legitimate dev-coder use against a self-hosted OpenAI-compatible server (vLLM, Ollama,
+    LM Studio, llama.cpp) on a private address over plain HTTP. That produces only weak
+    indicators (bare IP on a non-public host) and stays silent unless a second, independent
+    anomaly coincides.
+  - A developer deliberately exposing a local model server through ngrok / Cloudflare Quick
+    Tunnel for remote testing. This will report -- it is indistinguishable from attacker-hosted
+    relay infrastructure at the network layer and is worth one triage line per 30 minutes.
+  - Read-only inspection of the package (`pip show dev-coder`, `pip download dev-coder`,
+    `grep -r dev-coder`). The command line matches, but no LLM-API request follows from that
+    process inside the 15-minute window, so the rule returns allow and is invisible.
+  - Model A/B testing inside one dev-coder session, which trips the endpoint-pivot weak
+    indicator. It needs a second weak indicator before anything is emitted.
+  - Name collision with an unrelated internal tool called dev_coder / dev-coder; the reason
+    string names the exact process path and endpoint so triage can dismiss it in seconds.
+  - A CI runner that pip-installs and immediately invokes the agent every build; the per-endpoint
+    30-minute suppression key keeps this to one event per endpoint rather than one per request.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec_devcoder:
+    event_type: execute_process
+    content|re: '(?i)\bdev[-_]coder\b'
+  sel_http_llm_api:
+    event_type: http_request
+    path|re:
+      - '(?i)/(v[0-9]+/)?(chat/)?(completions|responses|messages|embeddings|models)\b'
+      - '(?i)/api/(chat|generate|tags)\b'
+  sel_http_devcoder:
+    event_type: http_request
+    content|re: '(?i)\bdev[-_]coder\b'
+  condition: 1 of sel_*
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── dev-coder (PyPI) supply-chain egress correlation ──────────────────────────
+  WINDOW_NS    = 900000000000     # 15 min - endpoint must be reached after launch
+  LOOK_BACK_NS = 600000000000     # 10 min - only alert while the activity is current
+  SUPPRESS_NS  = 1800000000000    # 30 min - per-endpoint de-duplication
+
+  API_PATHS = ["/chat/completions", "/v1/completions", "/completions",
+               "/v1/responses", "/v1/messages", "/v1/embeddings",
+               "/v1/models", "/api/chat", "/api/generate"]
+
+  TUNNEL_HOSTS = ["ngrok.io", "ngrok-free.app", "ngrok.app", "ngrok.dev",
+                  "trycloudflare.com", "loca.lt", "serveo.net", "tunnelto.dev",
+                  "localhost.run", "bore.pub", "lhr.life", "pagekite.me",
+                  "telebit.io", "nip.io", "sslip.io"]
+
+  def has_devcoder(s):
+      if s == "":
+          return False
+      return re.find(r"(?i)\bdev[-_]coder\b", s) != None
+
+  def is_installer(s):
+      return re.find(r"(?i)\b(pip3?|pipx|uvx?|poetry|easy_install)\b", s) != None
+
+  def is_ip_literal(h):
+      if re.match(r"^[0-9]{1,3}(\.[0-9]{1,3}){3}$", h):
+          return True
+      if h.startswith("["):
+          return True
+      if len(re.find_all(":", h)) >= 2:
+          return True
+      return False
+
+  def api_pathish(p):
+      if p == "":
+          return False
+      lp = p.lower()
+      for a in API_PATHS:
+          if a in lp:
+              return True
+      return False
+
+  def tunnel_host(h):
+      for t in TUNNEL_HOSTS:
+          if h == t or h.endswith("." + t):
+              return True
+      return False
+
+  # Relevance gate - pure string checks on meta, no graph / store traversal.
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          return has_devcoder(meta.get("content", ""))
+      if ct == "http_request":
+          if api_pathish(meta.get("path", "")):
+              return True
+          if has_devcoder(meta.get("url", "")):
+              return True
+          return has_devcoder(meta.get("content", ""))
+      return False
+
+  def remember(now):
+      cmd = meta.get("content", "")
+      m = store_get("devcoder") or {}
+      if m.get("first_ts", "") == "":
+          m["first_ts"] = str(now)
+      m["last_ts"] = str(now)
+      if is_installer(cmd):
+          m["installed"] = "1"
+      if store_usage()["free"] > 8192:
+          store_set("devcoder", m)
+      return m
+
+  def devcoder_procs():
+      out = []
+      for p in graph(type="Process"):
+          blob = p.get("path", "") + " " + p.get("name", "") + " " + p.get("cmdline", "")
+          if has_devcoder(blob):
+              out.append(p)
+      return out
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now    = int(meta.get("event_ts", "0"))
+      marker = store_get("devcoder") or {}
+      if meta.get("context_type", "") == "execute_process":
+          marker = remember(now)
+      marker_ts = int(marker.get("first_ts", "0"))
+      installed = marker.get("installed", "") == "1"
+
+      procs = devcoder_procs()
+      if not procs:
+          return "allow"
+
+      reported = store_get("reported") or {}
+      if len(reported) > 200:
+          reported = {}
+
+      for p in procs:
+          pid = p["id"]
+
+          # Anchor: when this dev-coder process was first observed (or first remembered).
+          anchor_ts = int(p.get("first_seen", "0"))
+          if marker_ts > 0:
+              if anchor_ts == 0 or marker_ts < anchor_ts:
+                  anchor_ts = marker_ts
+          if anchor_ts == 0:
+              continue
+
+          chain  = new_chain(pid)
+          strong = []
+          weak   = []
+          hosts  = {}
+
+          for e in edges(pid, dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              ts   = int(e.get("first_ts", "0"))
+              last = int(e.get("last_ts", "0"))
+              if last == 0:
+                  last = ts
+              # Ordering + window: egress must follow the package launch, closely.
+              if ts < anchor_ts or ts - anchor_ts > WINDOW_NS:
+                  continue
+              # Currency: do not re-surface an old session on an unrelated request.
+              if now > 0 and last > 0 and now - last > LOOK_BACK_NS:
+                  continue
+
+              h = u.get("host", "").lower()
+              if h == "":
+                  continue
+
+              api = api_pathish(u.get("path", ""))
+              if not api and h == meta.get("host", "").lower():
+                  api = api_pathish(meta.get("path", ""))
+              if not api:
+                  continue
+
+              prev = int(reported.get(h, "0"))
+              if prev > 0 and now > 0 and now - prev < SUPPRESS_NS:
+                  continue
+
+              public = u.get("is_ztna_host", "0") == "0"
+              scheme = u.get("scheme", "").lower()
+              why    = []
+
+              if tunnel_host(h):
+                  strong.append("LLM API served from ephemeral tunnel / IP-encoded DNS host " + h)
+                  why.append("tunnel host")
+              if is_ip_literal(h):
+                  if public:
+                      strong.append("public bare-IP LLM endpoint " + h)
+                      why.append("public bare IP")
+                  else:
+                      weak.append("bare-IP LLM endpoint " + h)
+                      why.append("bare IP")
+              if scheme == "http" and public:
+                  strong.append("cleartext http:// LLM API traffic to " + h)
+                  why.append("cleartext")
+              if public and installed and int(u.get("first_seen", "0")) >= anchor_ts:
+                  weak.append("package installed this session immediately reached a first-seen endpoint " + h)
+                  why.append("fresh install + new endpoint")
+
+              hosts[h] = "1"
+              detail = "LLM API endpoint contacted after dev-coder launch"
+              if why:
+                  detail = ", ".join(why)
+              chain.append(step(e, stage_id="Custom LLM Endpoint",
+                                stage_desc="dev-coder -> " + scheme + "://" + h +
+                                           u.get("path", "") + " (" + detail + ")"))
+
+          if len(hosts) > 1:
+              weak.append("dev-coder reached " + str(len(hosts)) +
+                          " distinct LLM API endpoints inside the same window")
+
+          for e in edges(pid, dir="out", kind="ACQUIRED_SKILL"):
+              s = node(e["to"])
+              if s == None:
+                  continue
+              if s.get("source", "") != "http":
+                  continue
+              if s.get("is_ztna_host", "0") != "0":
+                  continue
+              sts = int(e.get("ts", "0"))
+              if sts < anchor_ts or sts - anchor_ts > WINDOW_NS:
+                  continue
+              strong.append("remote instruction document ingested from public host " + s.get("host", "?"))
+              chain.append(step(e, stage_id="Remote Instruction Ingest",
+                                stage_desc="dev-coder loaded instruction content from " +
+                                           s.get("host", "?") + "/" + s.get("name", "?")))
+
+          if len(strong) >= 1 or len(weak) >= 2:
+              for h in hosts:
+                  reported[h] = str(now)
+              if store_usage()["free"] > 8192:
+                  store_set("reported", reported)
+              print("dev-coder egress anomaly on " + p.get("path", pid))
+              return {
+                  "action": "report",
+                  "reason": "dev-coder (PyPI) agent egress anomaly: " + "; ".join(strong + weak),
+                  "chain":  chain,
+              }
+
+      return "allow"
+
+  result = run()
