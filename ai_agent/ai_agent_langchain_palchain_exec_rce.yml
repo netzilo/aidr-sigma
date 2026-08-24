@@ -1,0 +1,130 @@
+title: LangChain PALChain Python Exec RCE (CVE-2023-36258)
+id: 7c3f9a2e-5b41-4d68-9e0a-2f6b8c1d34a5
+status: experimental
+level: high
+description: |
+  Detects a child process whose command line simultaneously carries (a) a LangChain
+  PALChain fingerprint, (b) a Python code-execution primitive, and (c) an interpreter
+  or inline-code flag.
+
+  LangChain <= 0.0.64 passes the PALChain-generated program straight into Python's
+  exec() with no sanitisation. The generated program is emitted from the PAL prompt
+  template, so it is always shaped as `def solution():`, and every public PoC for this
+  CVE reaches impact by having that generated body call os.system / subprocess /
+  __import__('os') / pty.spawn. The only live telemetry for that impact is the
+  EXECUTE_PROCESS edge and the execute_process event.
+
+  Answering the triage dissent: rule 11a2b3c4-d5e6-4f78-9012-a3b4c5d6e7f8 (Dangerous
+  Python Builtin Execution) already owns the generic "dangerous builtin on a command
+  line" surface, and this rule deliberately does NOT duplicate it. A bare `exec(` or
+  `os.system(` never fires this rule. It fires only when a dangerous primitive is
+  co-located with a PALChain-specific artefact (PALChain symbol, langchain*.pal_chain
+  module path, or the PAL-generated `def solution():` signature) AND an interpreter /
+  inline-code context. That triple-AND is what turns a generic execution alert into
+  attributable exploitation of this specific vulnerable component, which is what an
+  IR analyst needs to decide whether to pull the LangChain version. It is strictly
+  narrower than the generic rule, so it adds attribution without adding volume.
+author: Tanya
+date: "2025-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36258
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://python.langchain.com/docs/security
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - attack.t1203
+  - cve.2023-36258
+  - owasp.a03-2021-injection
+  - owasp.code-injection
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # 1. Scope: only real child-process spawns. execute_process / EXECUTE_PROCESS is
+  #    the only signal surface the schema actually emits for this threat.
+  sel_event:
+    event_type: execute_process
+
+  # 2. PALChain fingerprint. Required — this is what separates this rule from the
+  #    generic dangerous-builtin rule. `def solution():` is the literal shape the PAL
+  #    prompt template forces the model to emit.
+  sel_pal_context:
+    content|re:
+      - '(?i)\bPALChain\b'
+      - '(?i)\blangchain[A-Za-z0-9_.-]*[._]pal_chain\b'
+      - '(?i)\bpal_chain\.(?:base|math_prompt|colored_object_prompt)\b'
+      - '(?i)\bfrom\s+langchain[A-Za-z0-9_.]*\s+import\s+[A-Za-z0-9_,\s]*PALChain'
+      - '(?i)\bdef\s+solution\s*\(\s*\)\s*:'
+
+  # 3. Code-execution primitive reached by the exec()'d PAL program.
+  sel_dangerous_exec:
+    content|re:
+      - '(?i)\bos\.(?:system|popen|execl|execle|execlp|execv|execve|execvp|execvpe|spawnl|spawnv|posix_spawn)\s*\('
+      - '(?i)\bsubprocess\.(?:Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\s*\('
+      - '(?i)\b(?:exec|eval)\s*\('
+      - '(?i)__import__\s*\(\s*[\x{22}\x{27}]?\s*(?:os|subprocess|pty|socket|importlib)'
+      - '(?i)\bpty\.spawn\s*\('
+      - '(?i)\bsocket\.socket\s*\('
+      - '(?i)\bcommands\.get(?:status)?output\s*\('
+      - '(?i)\bbase64\.b64decode\s*\('
+
+  # 4. Execution context: a Python interpreter, a shell, or an inline-code flag must
+  #    actually be on the command line. Kills text-only matches (commit messages,
+  #    ticket bodies, log lines) that merely quote the payload.
+  sel_interpreter:
+    content|re:
+      - '(?i)(?:^|[\s\x{22}\x{27}/=\[])python[0-9]*(?:\.[0-9]+)?w?(?:\.exe)?(?:[\s\x{22}\x{27}]|$)'
+      - '(?i)(?:^|[\s\x{22}\x{27}/=\[])(?:sh|bash|zsh|dash|ksh|ash|busybox|cmd|powershell|pwsh)(?:\.exe)?(?:[\s\x{22}\x{27}]|$)'
+      - '(?:^|\s)-c(?:[\s\x{22}\x{27}]|$)'
+
+  # ── Benign-context suppressions (no host / domain / URL path is trusted here) ──
+
+  # LangChain's own PALChain test suite and static analysers that parse the file.
+  filter_test_and_lint:
+    content|re:
+      - '(?i)(?:^|[\s\x{22}\x{27}/\[])(?:pytest|py\.test|tox|nox|mypy|pylint|flake8|ruff|black|isort|bandit|semgrep|coverage|hypothesis)(?:[\s\x{22}\x{27}]|$)'
+      - '(?i)(?:^|\s)-m\s+(?:pytest|unittest|doctest|tox|nox|mypy|pylint|flake8|ruff|black|bandit|compileall)\b'
+
+  # Developers grepping the vulnerable source, or a VCS command quoting it.
+  filter_code_search:
+    content|re:
+      - '(?i)(?:^|[\s\x{22}\x{27}/\[])(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|ugrep|sift)(?:[\s\x{22}\x{27}]|$)'
+      - '(?i)(?:^|[\s\x{22}\x{27}/\[])(?:git|hg|svn|gh|glab)(?:[\s\x{22}\x{27}])'
+
+  # Installing / pinning / removing the affected package.
+  filter_pkg_mgmt:
+    content|re:
+      - '(?i)(?:^|[\s\x{22}\x{27}/\[])(?:pip[0-9.]*|pipx|poetry|conda|mamba|uv|npm|yarn)(?:[\s\x{22}\x{27}])'
+      - '(?i)(?:^|\s)-m\s+pip\b'
+
+  # Declared vulnerability-research / patch-validation activity.
+  filter_research_refs:
+    content|contains:
+      - 'CVE-2023-36258'
+      - 'CVE-2023-44467'
+      - 'CVE-2023-39631'
+
+  condition: >
+    sel_event and sel_pal_context and sel_dangerous_exec and sel_interpreter
+    and not (filter_test_and_lint or filter_code_search or filter_pkg_mgmt
+    or filter_research_refs)
+
+falsepositives:
+  - LangChain maintainers or downstream teams running the PALChain unit/integration
+    tests, which spawn interpreters over fixture programs shaped as `def solution():`
+    that intentionally reference exec/os.system - suppressed by filter_test_and_lint.
+  - Security engineers grepping langchain_experimental/pal_chain for os.system or
+    exec( while auditing the CVE - suppressed by filter_code_search.
+  - A git commit, tag or PR command whose message quotes the PoC payload while
+    hardening PALChain - suppressed by filter_code_search.
+  - pip/poetry/conda operations that pin or remove langchain-experimental and echo the
+    module path - suppressed by filter_pkg_mgmt.
+  - Reproduction of CVE-2023-36258 in an authorised lab where the operator includes the
+    CVE identifier in the command - suppressed by filter_research_refs.
+  - A production PALChain deployment where the LLM-generated solution() legitimately
+    imports os for filesystem-free arithmetic helpers; rare, and the reason this rule
+    ships as report rather than block.
+action: report
