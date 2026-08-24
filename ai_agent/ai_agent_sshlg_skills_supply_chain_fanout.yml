@@ -1,0 +1,358 @@
+title: Supply Chain Multi-Agent Skill Fanout (sshlg-skills)
+id: 6f3c1d8a-2b47-4e59-9a0c-71d5e8b4c3af
+status: experimental
+level: medium
+description: |
+  Instance-resolved detection for the npm package `sshlg-skills`, which advertises
+  itself as a launcher/updater distributing a skill family to many AI coding agent
+  platforms (Claude Code, Cursor, OpenCode, Kilo, Kimi, Hermes, OpenClaw, Codex).
+
+  The threat report is explicitly speculative — no confirmed payload, C2, or
+  exfiltration in the package itself — so this rule is REPORT-only and is written
+  to surface the *distribution mechanism*, not to claim compromise. What makes the
+  mechanism worth a signal is the blast radius: a single install writes executable
+  and config artifacts into several independent agent trust boundaries at once.
+
+  Anchoring, in order, all inside ONE process session:
+    1. caller_pid -> proc_instance() -> proc_lineage() establishes the session.
+    2. REQUIRED anchor stage: an EXECUTE_PROCESS in that session whose command line
+       or executable path references the sshlg / sshlg-skills package. Generic npm,
+       node, yarn or pnpm activity is NOT an anchor and returns allow immediately —
+       this is what keeps the rule from becoming "npm ran" noise.
+    3. Optional supporting stage: an HTTP_REQUEST by the same session after the
+       anchor (package tarball / raw skill markdown fetch).
+    4. REQUIRED fanout stage: WRITE_FILE events by session instances, after the
+       anchor and inside the window, landing in TWO OR MORE distinct AI agent
+       platform directories.
+
+  All stages are ordered (ts >= anchor ts), windowed (15 minutes), and scoped to
+  session process instances resolved by (pid, start) — never attributed across
+  sessions and never resolved by walking path-keyed Process nodes. The triggering
+  event is taken from meta (race-free); only prior stages are read from the
+  instance-resolved event log.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - A developer deliberately installing or upgrading sshlg-skills and letting it
+    provision skills for several of their own agent platforms — this is the
+    package's advertised behaviour and WILL match. Triage on the fetch host shown
+    in the chain and on which artifacts were written (settings.json, mcp.json,
+    hooks, .sh/.js are the ones that matter).
+  - Dotfile or monorepo bootstrap scripts that vendor an sshlg skill directory into
+    multiple agent config trees in a single run.
+  - CI / workstation-image provisioning that installs agent skills for every
+    supported platform as part of onboarding.
+  - A same-named internal fork or mirror of the package used intentionally by the
+    platform team.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_http:
+    event_type: http_request
+  condition: sel_exec or sel_http
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants (this rule's own window and thresholds) ────────────────────────
+  WINDOW_NS        = 900000000000      # 15 minutes — one install/update session
+  MAX_SESSION_PIDS = 40
+  MIN_PLATFORMS    = 2                 # fanout is the whole point of the signature
+
+  # Package identity — the required, high-specificity anchor.
+  PKG_PATTERNS = [
+      r"(?i)\bsshlg[-_]skills\b",
+      r"(?i)\bsshlg\b",
+  ]
+
+  # Node toolchain markers — used ONLY to decide whether the deeper anchor search
+  # is worth one event-log query. Never sufficient on their own.
+  RUNNER_PATTERNS = [
+      r"\bnpm\b", r"\bnpx\b", r"\byarn\b", r"\bpnpm\b",
+      r"\bbun\b", r"\bnode\b", r"\bcorepack\b",
+  ]
+
+  # Relevance hints for http_request (detection scoping only — not a trust list;
+  # nothing here is ever permitted, these strings only decide whether to look).
+  FETCH_HINTS = [
+      "sshlg", "/skills/", "/skill/", ".tgz", "tarball", "/-/", "/raw/",
+      "/releases/download/", ".md", "registry.npmjs.org", "npmjs.com",
+      "unpkg.com", "jsdelivr.net", "githubusercontent.com", "codeload.github.com",
+  ]
+
+  # AI agent platform trust boundaries. Each distinct hit is one platform.
+  PLATFORM_DIRS = [
+      ["/.claude/",        "claude-code"],
+      ["/.config/claude",  "claude-code"],
+      ["/claude-code/",    "claude-code"],
+      ["/.cursor/",        "cursor"],
+      ["/.opencode/",      "opencode"],
+      ["/.config/opencode","opencode"],
+      ["/.kilocode/",      "kilo"],
+      ["/.kilo/",          "kilo"],
+      ["/.kimi/",          "kimi"],
+      ["/.hermes/",        "hermes"],
+      ["/.openclaw/",      "openclaw"],
+      ["/.claw/",          "openclaw"],
+      ["/.codex/",         "codex"],
+      ["/.windsurf/",      "windsurf"],
+      ["/.continue/",      "continue"],
+      ["/.aider",          "aider"],
+      ["/.gemini/",        "gemini-cli"],
+      ["/.qwen/",          "qwen-code"],
+  ]
+
+  # Artifacts that actually change agent behaviour (escalates the reason text).
+  ARTIFACT_HINTS = [
+      "settings.json", "mcp.json", "config.json", "hooks", "skill.md",
+      "skills.json", "agents.md", "claude.md", ".sh", ".js", ".cjs",
+      ".mjs", ".py",
+  ]
+
+  # ── Pure helpers (no graph / log calls) ──────────────────────────────────────
+  def pkg_ref(s):
+      if s == "":
+          return False
+      for p in PKG_PATTERNS:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def runner_ref(s):
+      if s == "":
+          return False
+      for p in RUNNER_PATTERNS:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def norm_path(p):
+      return re.replace(r"\\", p, "/").lower()
+
+  def platform_of(p):
+      lp = norm_path(p)
+      for pair in PLATFORM_DIRS:
+          if pair[0] in lp:
+              return pair[1]
+      return ""
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          c = meta.get("content", "")
+          if pkg_ref(c):
+              return True
+          return runner_ref(c)
+      if ct == "http_request":
+          u = (meta.get("url", "") + " " + meta.get("host", "") + " " +
+               meta.get("path", "")).lower()
+          for h in FETCH_HINTS:
+              if h in u:
+                  return True
+          return False
+      return False
+
+  # ── Main ─────────────────────────────────────────────────────────────────────
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp  = int(meta.get("caller_pid", "0"))
+      now = int(meta.get("event_ts", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                      # degraded — re-fires when create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since     = now - WINDOW_NS
+      ct        = meta.get("context_type", "")
+      root_path = lineage[len(lineage) - 1].get("actor_path", inst.get("actor_path", ""))
+
+      # Session = this lineage only. Never any other session.
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+
+      # ── Stage 1 (REQUIRED): the sshlg-skills invocation in THIS session ───────
+      # Trigger stage comes from meta (race-free); ancestors come from the lineage.
+      anchor = None
+      if ct == "execute_process" and pkg_ref(meta.get("content", "")):
+          anchor = {
+              "ts":          str(now),
+              "kind":        "EXECUTE_PROCESS",
+              "actor_pid":   inst.get("actor_pid", ""),
+              "actor_start": inst.get("actor_start", "0"),
+              "actor_path":  inst.get("actor_path", ""),
+              "target_id":   "process://" + inst.get("actor_path", ""),
+              "cmdline":     meta.get("content", ""),
+          }
+      if anchor == None:
+          for x in lineage:
+              if pkg_ref(x.get("cmdline", "") + " " + x.get("actor_path", "")):
+                  anchor = x
+                  break
+
+      lineage_is_node = False
+      for x in lineage:
+          if runner_ref(x.get("cmdline", "") + " " + x.get("actor_path", "")):
+              lineage_is_node = True
+
+      execs = []
+      if anchor == None and not lineage_is_node:
+          return "allow"                      # not a node-toolchain session at all
+
+      # One bounded EXECUTE_PROCESS pass: expand to session descendants and, if the
+      # anchor was not on the direct lineage, look for it on a sibling branch.
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now,
+                           limit=4000)
+      for i in range(4):
+          added = 0
+          for e in execs:
+              ap = e.get("actor_pid", "")
+              pp = e.get("parent_pid", "")
+              if pp in session and ap not in session and len(session) < MAX_SESSION_PIDS:
+                  session[ap] = e.get("actor_start", "0")
+                  added = added + 1
+          if added == 0:
+              break
+
+      if anchor == None:
+          for e in execs:
+              if e.get("actor_pid", "") not in session:
+                  continue
+              if not pkg_ref(e.get("cmdline", "") + " " + e.get("actor_path", "")):
+                  continue
+              if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
+                  anchor = e
+
+      if anchor == None:
+          return "allow"                      # generic npm/node work — not this package
+
+      s0 = int(anchor.get("ts", "0"))
+      if s0 == 0:
+          s0 = since
+      if now - s0 > WINDOW_NS:
+          return "allow"                      # stale install, outside this window
+
+      pids = sorted(session.keys())
+
+      # ── Stage 3 (REQUIRED): fanout into >= 2 agent platform directories ───────
+      platforms = {}
+      artifacts = {}
+      for pid in pids:
+          st   = int(session[pid])
+          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid), actor_start=st,
+                              since_ns=s0, until_ns=now, limit=500)
+          for w in rows:
+              p = w.get("path", "")
+              if p == "":
+                  continue
+              plat = platform_of(p)
+              if plat == "":
+                  continue
+              if plat not in platforms:
+                  platforms[plat] = w
+              lp = norm_path(p)
+              for h in ARTIFACT_HINTS:
+                  if h in lp:
+                      artifacts[plat + ":" + h] = True
+                      break
+
+      if len(platforms) < MIN_PLATFORMS:
+          return "allow"                      # single-platform install — not the signature
+
+      # ── Stage 2 (optional): payload fetch by this session after the anchor ────
+      fetch = None
+      if ct == "http_request" and meta.get("host", "") != "":
+          fetch = {
+              "ts":         str(now),
+              "kind":       "HTTP_REQUEST",
+              "actor_pid":  inst.get("actor_pid", ""),
+              "actor_path": inst.get("actor_path", ""),
+              "target_id":  "https://" + meta.get("host", ""),
+              "host":       meta.get("host", ""),
+              "path":       meta.get("path", ""),
+          }
+      if fetch == None:
+          for pid in pids:
+              rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                  since_ns=s0, until_ns=now, limit=100)
+              for r in rows:
+                  if r.get("host", "") != "":
+                      fetch = r
+                      break
+              if fetch != None:
+                  break
+
+      # ── Kill chain, rooted at this session's owning instance ─────────────────
+      chain = new_chain("process://" + root_path)
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin = " -> ".join(names)
+
+      cmd = anchor.get("cmdline", anchor.get("actor_path", "?"))
+      if len(cmd) > 180:
+          cmd = cmd[:180]
+      chain.append(step(ev_edge(anchor), stage_id="Supply Chain Entry",
+                        stage_desc="sshlg-skills package invoked: " + cmd +
+                                   "  [session: " + lin + "]"))
+
+      if fetch != None:
+          chain.append(step(ev_edge(fetch), stage_id="Skill Payload Fetch",
+                            stage_desc="session fetched content from " +
+                                       fetch.get("host", "?") + fetch.get("path", "")))
+
+      plist = sorted(platforms.keys())
+      for plat in plist:
+          w = platforms[plat]
+          chain.append(step(ev_edge(w), stage_id="Multi-Agent Fanout",
+                            stage_desc="skill artifact written into " + plat +
+                                       " directory: " + w.get("path", ""),
+                            activity={"path": w.get("path", ""),
+                                      "ts":   w.get("ts", "0")}))
+
+      reason = ("sshlg-skills install session wrote skill artifacts into " +
+                str(len(platforms)) + " AI agent platforms (" + ", ".join(plist) +
+                ") within " + str((now - s0) / 1000000000) + "s of the package " +
+                "invocation; owning session: " + lin)
+      if len(artifacts) > 0:
+          reason = reason + "; behaviour-changing artifacts touched (config/hook/script)"
+      if len(lineage) < 2:
+          reason = reason + "; attribution degraded (short lineage)"
+      if fetch == None:
+          reason = reason + "; no outbound fetch observed in window"
+
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
