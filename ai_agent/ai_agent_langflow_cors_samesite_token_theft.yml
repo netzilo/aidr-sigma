@@ -1,0 +1,134 @@
+title: Langflow CORS Origin Bypass and SameSite=None Refresh Token Theft
+id: b7f3c2d1-4e8a-4c19-9f6b-2d5a8e0c7413
+status: experimental
+level: medium
+description: |
+  Single-event content detection for artefacts of CVE-2025-34291 (Langflow CORS
+  origin validation error combined with a refresh token cookie set SameSite=None).
+
+  SCOPE HONESTY — the engine models no Origin header, no Set-Cookie attributes and
+  no token_refresh/authenticate event type, so this rule CANNOT reconstruct the
+  "cross-origin credentialed refresh -> credential acquisition -> RCE" chain the
+  advisory describes. What it can see is the exploit and misconfiguration text that
+  passes through an outbound http_request body. Four independent high-specificity
+  pairings are matched, every one requiring two co-occurring signals:
+
+    A. A credentialed cross-origin fetch/XHR (credentials:'include' /
+       withCredentials=true) targeting a Langflow auth endpoint by ABSOLUTE URL.
+       The absolute-URL requirement is the discriminator: Langflow's own frontend
+       calls /api/v1/refresh relatively, only an attacker page on another origin
+       must name the victim host in full.
+    B. A Langflow session cookie name (refresh_token_lf / access_token_lf /
+       apikey_tkn_lflw) co-occurring with a SameSite=None declaration — the exact
+       cookie weakening the CVE depends on.
+    C. A Langflow session cookie name co-occurring with a JWT in the body of a
+       write request — a refresh token travelling as payload rather than as a
+       Cookie header, i.e. relay or exfiltration of stolen material.
+    D. Access-Control-Allow-Origin '*' co-occurring with allow_credentials=true and
+       a Langflow marker, pushed by a write method — the origin validation error
+       itself being (re)introduced.
+
+  Reported, never blocked: the highest-value matches (B, C, D) also occur during
+  legitimate Langflow administration, and the rule deliberately trades enforcement
+  for a low-noise investigative signal.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1539/
+  - https://attack.mitre.org/techniques/T1550/004/
+tags:
+  - attack.credential-access
+  - attack.t1539
+  - attack.t1550.004
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_http_event:
+    event_type: http_request
+
+  # ── Branch A — credentialed cross-origin call to a Langflow auth endpoint ──
+  sel_xorigin_credentialed:
+    content|re:
+      - '(?i)credentials\s*:\s*["'']include["'']'
+      - '(?i)withcredentials\s*[:=]\s*true'
+  sel_langflow_token_url:
+    content|re: '(?i)https?://[^\s"''<>\\]{3,253}/api/v1/(refresh|auto_login|login)\b'
+
+  # ── Branch B / C — Langflow session cookie material ────────────────────────
+  sel_lf_refresh_cookie:
+    content|re: '(?i)\b(refresh_token_lf|access_token_lf|apikey_tkn_lflw)\b'
+  sel_samesite_none:
+    content|re: '(?i)\bsame[-_]?site\s*[=:]\s*["'']?\s*none\b'
+  sel_jwt_token:
+    content|re: '\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}'
+
+  # ── Branch D — the origin validation error itself ──────────────────────────
+  sel_cors_wildcard_origin:
+    content|re:
+      - '(?i)access-control-allow-origin\s*["'']?\s*[:=]\s*["'']?\*'
+      - '(?i)\ballow_origins\s*[=:]\s*\[?\s*["'']\*["'']'
+  sel_cors_allow_credentials:
+    content|re:
+      - '(?i)access-control-allow-credentials\s*["'']?\s*[:=]\s*["'']?true'
+      - '(?i)\ballow_credentials\s*[=:]\s*(true|1)\b'
+  sel_langflow_marker:
+    content|re:
+      - '(?i)\blangflow\b'
+      - '\bLANGFLOW_[A-Z0-9_]{3,}\b'
+      - '(?i)\b(refresh_token_lf|access_token_lf|apikey_tkn_lflw)\b'
+
+  sel_write_method:
+    method:
+      - POST
+      - PUT
+      - PATCH
+
+  # ── Filters — benign look-alikes ───────────────────────────────────────────
+  filter_cve_id:
+    content|re: '(?i)\b(CVE-\d{4}-\d{4,7}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})\b'
+  filter_advisory_prose:
+    content|re: '(?i)\b(affected versions?|remediation|mitigation steps?|security advisory|responsible disclosure|patched in|vulnerability (report|disclosure|advisory)|cvss)\b'
+  filter_template_placeholder:
+    content|re:
+      - '(?i)<(your|target|victim)[-_ ]?(host|domain|instance|server|url)>'
+      - '\{\{\s*[A-Za-z_][A-Za-z0-9_]*\s*\}\}'
+      - '(?i)\b(your|example|placeholder|redacted)[-_](host|domain|url|token|instance|origin)\b'
+  filter_test_scaffold:
+    content|re:
+      - '(?im)^\s*(describe|it|test)\s*\(\s*["'']'
+      - '(?i)\b(pytest|unittest|jest|vitest|playwright\.config)\b'
+      - '(?i)\b(mock|stub|fixture|dummy)_(response|token|cookie|origin|jwt)\b'
+
+  condition: >
+    sel_http_event
+    and (
+      (sel_xorigin_credentialed and sel_langflow_token_url)
+      or (sel_lf_refresh_cookie and sel_samesite_none)
+      or (sel_lf_refresh_cookie and sel_jwt_token and sel_write_method)
+      or (sel_cors_wildcard_origin and sel_cors_allow_credentials and sel_langflow_marker and sel_write_method)
+    )
+    and not (filter_cve_id and filter_advisory_prose)
+    and not filter_template_placeholder
+    and not filter_test_scaffold
+
+falsepositives:
+  - Platform or IaC agents legitimately pushing Langflow FastAPI CORSMiddleware
+    configuration (allow_origins=["*"] with allow_credentials=True is Langflow's
+    own shipped default) via a deployment or repository API — matches branch D.
+  - Security researchers or vulnerability-scanning agents transmitting a proof of
+    concept for this CVE; largely suppressed by the paired CVE-id + advisory-prose
+    filter, but a bare PoC with no advisory wording will still report.
+  - Browser-automation or end-to-end integration agents that authenticate to a
+    Langflow instance and carry the resulting refresh JWT in a JSON body rather
+    than a Cookie header — matches branch C.
+  - A legitimate companion single-page app, hosted on a different origin by design,
+    whose reviewed source calls an absolute Langflow /api/v1/refresh URL with
+    credentials:'include' — matches branch A. This is the intended signal even when
+    sanctioned, because it is indistinguishable from the attack at the HTTP layer.
+  - Session-restore or backup payloads from a Langflow SDK that serialise the
+    refresh_token_lf cookie name together with its SameSite attribute — branch B.
+
+action: report
