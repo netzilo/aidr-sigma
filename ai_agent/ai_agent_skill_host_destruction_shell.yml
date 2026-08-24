@@ -1,0 +1,117 @@
+title: Agent Skill Host Destruction Command
+id: 7b2e4c91-5d3a-4f8e-9c21-6ad0f4b8e173
+status: experimental
+level: high
+description: |
+  Detects a monitored AI agent (or a subprocess it spawned) executing a host-destruction
+  or anti-forensic shell command line. Research on malicious LLM agent skills shows this
+  is the single largest static-analysis blind spot: host-destruction payloads written with
+  ordinary, non-obfuscated shell built-ins (rm, dd, mkfs, chmod, find -delete, vssadmin)
+  evade every stage of skill-manifest scanning because the individual tokens are
+  indistinguishable from routine maintenance in a manifest. They are, however, unambiguous
+  at execution time when the *target* is the root filesystem, a whole top-level system
+  directory, or a raw block device.
+
+  The rule therefore does not try to detect "a dangerous binary" — it detects the
+  destructive verb bound to a whole-host target, plus the log/history destruction that
+  usually accompanies it. Scoped deletes (./dist, node_modules, /tmp/x, ~/Library/Caches)
+  are structurally unmatchable because every path alternative must be followed by a
+  terminator, not by another path segment.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1485/
+  - https://attack.mitre.org/techniques/T1561/
+  - https://attack.mitre.org/techniques/T1070/003/
+  - https://atlas.mitre.org/techniques/AML.T0015
+tags:
+  - attack.impact
+  - attack.t1485
+  - attack.t1561
+  - attack.defense-evasion
+  - attack.t1070.003
+  - atlas.aml.t0015
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  evt:
+    event_type: execute_process
+
+  sel_root_wipe:
+    content|re:
+      # rm -rf /   |   rm -rf /*   (target is the root itself, then a terminator)
+      - '\brm\b[^;|&\n]{0,32}\s-{1,2}[a-zA-Z]*[rR][a-zA-Z]*\s+(--no-preserve-root\s+)?\\?["\x27]?/(\*)?(\s|[\\"\x27;&|)]|$)'
+      # rm -rf on a WHOLE top-level system dir or the whole home dir (not a subpath)
+      - '\brm\b[^;|&\n]{0,32}\s-{1,2}[a-zA-Z]*[rR][a-zA-Z]*\s+\\?["\x27]?(~|\$HOME|\$\{HOME\}|/var/log|/etc|/var|/usr|/bin|/sbin|/lib|/boot|/root|/home|/opt|/srv|/System|/Library|/Users|/Applications)(/\*)?(\s|[\\"\x27;&|)]|$)'
+
+  sel_disk_wipe:
+    content|re:
+      - '\bdd\b[^;|&\n]{0,100}\bof=\\?["\x27]?/dev/(r?disk[0-9]|sd[a-z]|nvme[0-9]|hd[a-z]|vd[a-z]|mmcblk[0-9])'
+      - '\bmkfs(\.[a-z0-9]+)?\s[^;|&\n]{0,60}/dev/(r?disk[0-9]|sd[a-z]|nvme[0-9]|hd[a-z]|vd[a-z]|mmcblk[0-9])'
+      - '\b(wipefs|blkdiscard|shred)\b[^;|&\n]{0,60}/dev/(r?disk[0-9]|sd[a-z]|nvme[0-9]|hd[a-z]|vd[a-z]|mmcblk[0-9])'
+      - '>\s*\\?["\x27]?/dev/(r?disk[0-9]|sd[a-z][0-9]?|nvme[0-9]|hd[a-z]|vd[a-z]|mmcblk[0-9])\b'
+      - '(?i)\bdiskutil\s+(erasedisk|erasevolume|zerodisk|secureerase|reformat)\b'
+
+  sel_shell_bomb:
+    content|re:
+      # classic fork bomb  :(){ :|:& };:
+      - ':\s*\(\s*\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:'
+      # recursive permission/ownership destruction applied to / itself
+      - '\b(chmod|chown)\s+(-[a-zA-Z-]+\s+)*-[a-zA-Z]*R[a-zA-Z]*\s+[^\s;|&]{1,24}\s+\\?["\x27]?/(\s|[\\"\x27;&|)]|$)'
+      # find rooted at / or the home dir with a delete/exec-rm action
+      - '\bfind\s+\\?["\x27]?(/|~|\$HOME)\\?["\x27]?\s+[^;&\n]{0,120}(-delete\b|-exec\s+(rm|shred)\b)'
+
+  sel_windows_destruct:
+    content|re:
+      - '(?i)\bvssadmin(\.exe)?\s+delete\s+shadows\b'
+      - '(?i)\bwmic\s+shadowcopy\s+delete\b'
+      - '(?i)\bcipher\s+/w:'
+      - '(?i)\bformat\s+[a-z]:\s+/(fs|q|x|p)\b'
+      - '(?i)\bbcdedit(\.exe)?\s[^;&|\n]{0,60}recoveryenabled\s+no\b'
+      - '(?i)\b(del|erase)\s+(/[a-z]\s+){1,3}[a-z]:\\'
+      - '(?i)\b(rd|rmdir)\s+(/[a-z]\s+){1,2}[a-z]:\\'
+
+  sel_log_tamper:
+    content|re:
+      - '\bhistory\s+-c\b'
+      - '\bunset\s+HISTFILE\b'
+      - '\bHISTFILE=(/dev/null|\x27\x27|"")'
+      - '\bset\s+\+o\s+history\b'
+      - '\b(rm|shred|truncate)\b[^;&|\n]{0,40}\.(bash|zsh|sh)_history\b'
+      - '>\s*\\?["\x27]?(~/|\$HOME/)?\.(bash|zsh|sh)_history\b'
+      - '(?i)\bwevtutil(\.exe)?\s+cl\s'
+
+  # ── suppressions ───────────────────────────────────────────────────────────
+  # The destructive text is a QUOTED ARGUMENT to a search/print/lint tool, with no
+  # shell separator between the tool, the quote and the token — i.e. the string is
+  # being searched for or echoed, not run. A chained command (grep x && rm -rf /)
+  # is NOT suppressed because [^;&|\n] cannot cross the separator.
+  filter_quoted_pattern:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ag|ack|awk|sed|semgrep|codeql|shellcheck|bandit|echo|printf)\b[^;&|\n]{0,60}[\\"\x27][^;&|\n]{0,60}(rm\s+-|mkfs|dd\s+if|vssadmin|history\s+-c|shred)'
+  # The token appears inside an inline comment that precedes it on the same line.
+  filter_inline_comment:
+    content|re:
+      - '#[^;&|\n]{0,100}\b(rm|dd|mkfs|shred|vssadmin)\b\s+[-/]'
+  # Explicit no-op / analysis invocations.
+  filter_lint_or_dryrun:
+    content|contains:
+      - '--dry-run'
+      - '--dryrun'
+      - 'shellcheck '
+      - 'semgrep '
+
+  condition: >
+    evt and
+    (sel_root_wipe or sel_disk_wipe or sel_shell_bomb or sel_windows_destruct or sel_log_tamper)
+    and not (filter_quoted_pattern or filter_inline_comment or filter_lint_or_dryrun)
+
+falsepositives:
+  - Provisioning or imaging work performed on purpose by an operator through an agent shell — writing an ISO with 'dd of=/dev/disk4', 'mkfs.ext4 /dev/sdb1', or 'diskutil eraseDisk' on an external drive.
+  - Disposable-container teardown that wipes a whole top-level directory inside the container, e.g. 'rm -rf /var/log/*' or 'rm -rf /home' in a throwaway build image.
+  - Housekeeping jobs rooted at / such as 'find / -name "*.core" -delete' run by a maintenance agent.
+  - Shell-environment setup that disables history ('unset HISTFILE', 'set +o history') when an operator deliberately runs a secret-handling session.
+  - Windows image preparation scripts that call 'cipher /w:' or reformat a secondary volume.
+
+action: report
