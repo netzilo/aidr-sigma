@@ -1,0 +1,81 @@
+title: Supply Chain Unsafe Index Resolution During Package Install
+id: 7c1f4a2e-9d63-4b58-8f0a-2ec5d1b73a94
+status: experimental
+level: high
+description: |
+  Detects the single observable moment of the vLLM / flashinfer-jit-cache dependency
+  confusion attack: a Python package installer invoked on a command line that also
+  carries an unsafe multi-index resolution setting (UV_INDEX_STRATEGY=unsafe-best-match
+  or --index-strategy unsafe-best-match), or an install that names the attacker-pinned
+  flashinfer-jit-cache==0.6.11.post2 artifact.
+
+  Scope note (deliberate): the engine models no package_install or container_build event
+  and no DEPENDENCY_RESOLVED / EXECUTE_WITH_PRIVILEGE / EXFILTRATE_DATA edges, so the
+  causal chain "malicious PyPI copy preferred over vendor index -> root code exec at
+  build time -> backdoored image" is structurally unobservable. This rule therefore does
+  not claim to detect the exploitation; it detects the one concrete artifact that is
+  emitted as an execute_process command line - the resolver being placed into the
+  confusable state, and the known-bad version pin. It is a report-only
+  configuration/IOC detection, not a chain detection.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://docs.astral.sh/uv/concepts/indexes/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.002
+  - owasp.a08_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  sel_installer:
+    content|re: '(?i)\b(uv\s+(pip\s+(install|compile|sync)|sync|add|lock|export|run)|(python[0-9.]*\s+-m\s+)?pip[0-9]*\s+install|poetry\s+(add|install|lock|update)|pdm\s+(add|install|lock)|rye\s+(add|sync))\b'
+
+  sel_unsafe_strategy:
+    content|re: '(?i)(uv[_-]index[_-]strategy\s*[:=]\s*|--index[-_]strategy[=\s]+)["\x27\\]{0,2}unsafe-(best|first|any)-match'
+
+  sel_target_pkg:
+    content|re: '(?i)\bflashinfer[-_]jit[-_]cache\b'
+
+  sel_known_bad_pin:
+    content|re: '(?i)\bflashinfer[-_]jit[-_]cache[^\s;|&]{0,16}0\.6\.11\.post2\b'
+
+  filter_inspection:
+    content|re: '(?i)\b(cat|head|tail|less|more|bat|grep|egrep|fgrep|rg|diff|strings|hexdump|jq)\b[^|&;\n]{0,160}(dockerfile|containerfile|\.lock|\.toml|\.txt|\.ya?ml|\.md|\.rst|\.json|\.cfg|\.ini)\b'
+
+  filter_no_execution:
+    content|contains:
+      - '--dry-run'
+      - '--help'
+      - 'uv help'
+      - 'man uv'
+
+  filter_sca_tooling:
+    content|re: '(?i)\b(trivy|grype|syft|snyk|osv-scanner|pip-audit|safety\s+check|semgrep|checkov|hadolint|dependency-check)\b'
+
+  condition: >
+    sel_exec
+    and (sel_known_bad_pin or ((sel_installer or sel_target_pkg) and sel_unsafe_strategy))
+    and not (filter_inspection or filter_no_execution or filter_sca_tooling)
+falsepositives:
+  - Upstream vLLM and flashinfer container builds that genuinely set
+    UV_INDEX_STRATEGY=unsafe-best-match to mix PyPI with the vendor wheel index. This is
+    the exact configuration the rule exists to surface for review, so it is a true
+    positive on the configuration even when the installed package is legitimate - triage
+    by confirming which index served flashinfer-jit-cache.
+  - Internal monorepo builds that intentionally blend a private index with PyPI using the
+    unsafe resolver for legacy pinning reasons.
+  - CI jobs that lint, print or grep a Dockerfile / uv.lock containing the flag rather than
+    executing an install (suppressed by filter_inspection).
+  - Resolution experiments run with --dry-run or --help while an engineer tunes index
+    settings (suppressed by filter_no_execution).
+  - SCA and container scanners whose command lines echo a lockfile entry for the package
+    (suppressed by filter_sca_tooling).
+action: report
