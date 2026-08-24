@@ -1,0 +1,111 @@
+title: OpenManus Prompt-Handler OS Command Injection via python_execute
+id: 7b3f2c9e-5a41-4d8b-9f16-2c0d84e7a153
+status: experimental
+level: high
+description: |
+  Detects the realised exploitation of the unpatched OS command injection in
+  mannaandpoem OpenManus (app/tool/python_execute.py). Attacker-controlled text
+  submitted through the Prompt Handler is passed unsanitised into the Python
+  executor, which then reaches an OS command-execution primitive
+  (os.system / os.popen / subprocess.* / shell=True / pty.spawn / __import__('os')).
+
+  Fires on a single execute_process event whose command line shows BOTH the Python
+  inline-execution vector (interpreter + -c/-command flag) AND an OS exec primitive
+  AND a genuine attack payload (reverse shell, download-pipe-to-shell, credential
+  file access, encoded PowerShell, destructive rm). A second, product-scoped branch
+  fires when the command line names the vulnerable OpenManus component itself
+  alongside an OS exec primitive.
+
+  Report-only on first deployment so the false-positive rate can be measured before
+  any escalation to enforcement.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://github.com/mannaandpoem/OpenManus
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.t1059.006
+  - owasp.a03_2021_injection
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event_exec:
+    event_type: execute_process
+
+  sel_python_interpreter:
+    content|re:
+      - '(?i)\bpythonw?[0-9.]{0,4}\b'
+      - '(?i)\bpypy[0-9.]{0,4}\b'
+
+  sel_inline_code_flag:
+    content|re:
+      - '(?:^|\s)-c\b'
+      - '(?i)(?:^|\s)/c\b'
+      - '(?i)(?:^|\s)-{1,2}command\b'
+
+  sel_os_exec_primitive:
+    content|re:
+      - '(?i)\bos\.(?:system|popen[234]?|exec[lv]p?e?|spawn[lv]p?e?|posix_spawn|startfile)\s*\('
+      - '(?i)\bsubprocess\.(?:Popen|run|call|check_call|check_output|getoutput|getstatusoutput)\s*\('
+      - '(?i)__import__\s*\(\s*[''"](?:os|subprocess|pty|commands)[''"]\s*\)'
+      - '(?i)\bpty\.spawn\s*\('
+      - '(?i)\bcommands\.get(?:status)?output\s*\('
+      - '(?i)\bos\.dup2\s*\('
+      - '(?i)\bshell\s*=\s*True\b'
+
+  sel_shell_payload:
+    content|re:
+      - '(?i)/dev/tcp/[0-9a-z.\-]{1,64}/\d{1,5}'
+      - '(?i)\bnc(?:at)?(?:\.exe)?\b[^\n]{0,60}\s-[a-z]{0,3}e\b'
+      - '(?i)(?:curl|wget|fetch)\b[^\n]{0,300}\|\s*(?:/(?:usr/)?bin/)?(?:ba|da|z|k|a)?sh\b'
+      - '(?i)\bbase64\b[^\n]{0,80}\|\s*(?:/(?:usr/)?bin/)?(?:ba|z)?sh\b'
+      - '(?i)\b(?:ba|z|k)?sh\s+-i\b'
+      - '(?i)\bmkfifo\b[^\n]{0,120}\|'
+      - '(?i)\bos\.dup2\s*\('
+      - '(?i)\bpty\.spawn\s*\('
+      - '(?i)\bsocket\.socket\s*\([^\n]{0,160}\bconnect\s*\('
+      - '(?i)-enc(?:odedcommand)?\s+[A-Za-z0-9+/=]{24,}'
+      - '(?i)\bcertutil(?:\.exe)?\b[^\n]{0,120}-urlcache'
+      - '(?i)\brm\s+-[a-z]{0,3}r[a-z]{0,3}f?\s+(?:/|~|\$HOME)'
+      - '(?i)(?:^|[\s"''(])/etc/(?:passwd|shadow|sudoers)\b'
+      - '(?i)[\\/]\.ssh[\\/](?:id_[a-z0-9]{2,10}|authorized_keys)\b'
+      - '(?i)[\\/]\.aws[\\/]credentials\b'
+      - '(?i)\bwhoami\b'
+
+  sel_openmanus_component:
+    content|re:
+      - '(?i)\bopenmanus\b'
+      - '(?i)app[\\/]tool[\\/]python_execute(?:\.py)?\b'
+
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(?:your[_ -]?(?:command|payload|code)[_ -]?here|placeholder|redacted|dummy[_ -]?payload|sample[_ -]?payload)\b'
+      - '(?i)<(?:your[ _-]?)?(?:command|payload|cmd|shell[ _-]?command)>'
+
+  filter_static_analysis:
+    content|re:
+      - '(?i)\b(?:semgrep|bandit|codeql|snyk|sonar-scanner|trivy)\b[^\n]{0,300}\s--?(?:pattern|config|rules?|lang|severity|recursive|sarif|json|scan)\b'
+      - '(?i)\bpythonw?[0-9.]{0,4}\s+-m\s+(?:bandit|pylint|flake8|ruff|mypy|py_compile|compileall|pytest|unittest)\b'
+
+  filter_search_tool:
+    content|re:
+      - '(?i)"(?:path|exe|executable|binary)"\s*:\s*"[^"]{0,240}[\\/](?:grep|egrep|fgrep|rg|ag|ack|ack-grep|findstr|awk|sed)(?:\.exe)?"'
+      - '(?i)^(?:[^\s"]{0,240}[\\/])?(?:grep|egrep|fgrep|rg|ack|findstr)\s+-'
+
+  condition: >
+    sel_event_exec and ((sel_python_interpreter and sel_inline_code_flag and sel_os_exec_primitive and sel_shell_payload) or (sel_openmanus_component and sel_os_exec_primitive)) and not (filter_placeholder or filter_static_analysis or filter_search_tool)
+
+falsepositives:
+  - Developers or SREs running a deliberate one-liner such as `python -c "import os; os.system('whoami')"` while debugging the OpenManus sandbox or verifying tool permissions.
+  - Security researchers and red-team operators reproducing the public OpenManus proof-of-concept on a lab host; the command line is identical to the real exploit and cannot be distinguished by content alone.
+  - CI provisioning steps that shell out from Python with `subprocess.run(..., shell=True)` to fetch and pipe an installer script; mitigated only partially, since the download-pipe-to-shell payload marker is intentionally retained.
+  - Static-analysis and linting runs whose arguments quote the vulnerable code pattern (semgrep/bandit/codeql rule bodies, `python -m bandit`); suppressed by filter_static_analysis.
+  - Grep/ripgrep/findstr searches through the OpenManus source tree where the search expression contains `os.system(` or `shell=True`; suppressed by filter_search_tool, which only matches when the executable itself is a search utility.
+  - Documentation generators, snippet renderers, or automation templates that still carry unsubstituted placeholders such as `<your-command>`; suppressed by filter_placeholder.
+action: report
