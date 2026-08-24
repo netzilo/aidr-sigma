@@ -1,0 +1,97 @@
+title: Supply Chain Trojanized npm Package @aigent-hive Execution
+id: 7b3f1c26-9a48-4d5e-b0f1-2c8d64e97a13
+status: experimental
+level: medium
+description: |
+  Detects a spawned process whose command line references a package inside the
+  attacker-controlled npm scope @aigent-hive (published as a "provider-neutral local
+  agent harness" with subscription authentication, e.g. @aigent-hive/win32-x64) in an
+  install or execution context: a package manager / runner verb, a node_modules path,
+  the node interpreter, a native postinstall helper, or a Windows script host.
+
+  Scope note answering triage dissent: the engine has no package_installed or
+  registry_query event type and no INSTALLED_PACKAGE / EXECUTED_CODE / AUTHENTICATE_TO
+  edge kind, so npm install provenance and subscription-auth beaconing are NOT
+  observable. execute_process is the only live surface, therefore this rule
+  deliberately covers exactly one link of the chain: the moment the package spec or its
+  installed tree appears on a command line. It will not fire on an install that never
+  spawns a child process, and it is not a substitute for registry-side package
+  provenance controls.
+
+  Widened autonomously from the single reported package to the whole @aigent-hive scope,
+  because platform-triple sibling packages (darwin-arm64, linux-x64, ...) are the normal
+  publication pattern for this kind of trojanized native harness. No host, domain or path
+  has been added to any trust list.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/007/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - atlas.aml.t0010
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # High-specificity anchor: the attacker-controlled npm scope, in package-spec or
+  # installed-path form, on either POSIX or Windows path separators.
+  sel_pkg_ref:
+    content|re:
+      - '(?i)@aigent-hive[\\/]win32-x64\b'
+      - '(?i)@aigent-hive[\\/](?:win32|darwin|linux|freebsd|android)-(?:x64|x86|ia32|arm64|arm|ppc64|s390x)\b'
+      - '(?i)@aigent-hive[\\/][a-z0-9][a-z0-9._-]{0,63}'
+
+  # Require an install or execution context so a bare textual mention is not enough.
+  sel_exec_ctx:
+    content|re:
+      - '(?i)\b(?:npm|npx|pnpm|pnpx|yarn|bun|bunx|corepack)\b'
+      - '(?i)\bnode_modules[\\/]'
+      - '(?i)\bnode(?:\.exe)?\b'
+      - '(?i)\b(?:node-gyp|node-pre-gyp|prebuild-install|install\.js|postinstall(?:\.js)?)\b'
+      - '(?i)\b(?:powershell|pwsh|cmd\.exe|rundll32|regsvr32|mshta|wscript|cscript|certutil|bitsadmin|schtasks)\b'
+      - '(?i)@aigent-hive[\\/][^"\s]{0,200}\.(?:exe|dll|cmd|bat|ps1|vbs|node|js)\b'
+
+  # ── Suppression: analyst triage and remediation of THIS package ──────────────
+  # Each filter requires the read-only verb and the package spec to be joined by a
+  # span containing no shell chaining / redirection / substitution metacharacter
+  # (; & | < > ` $) all the way to end of content, so a chained payload
+  # ("npm view @aigent-hive/win32-x64 && node -e ...") is NOT suppressed.
+  filter_readonly_pkgmgr:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:view|info|show|search|why|outdated|audit|ls|list|explain|dist-tag)\s[^;&|<>`$\r\n]{0,200}@aigent-hive[^;&|<>`$\r\n]{0,400}$'
+
+  filter_inspection_tools:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ag|ack|findstr|cat|type|less|more|head|tail|strings|file|stat|ls|dir|tree|find|du|shasum|sha256sum|md5sum|jq|vim|vi|nano|emacs|code|subl|notepad)\b[^;&|<>`$\r\n]{0,300}@aigent-hive[^;&|<>`$\r\n]{0,400}$'
+
+  filter_removal:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:uninstall|remove|rm|un|prune|dedupe)\s[^;&|<>`$\r\n]{0,200}@aigent-hive[^;&|<>`$\r\n]{0,400}$'
+      - '(?i)\b(?:rm|rmdir|del|erase|Remove-Item)\b[^;&|<>`$\r\n]{0,200}@aigent-hive[^;&|<>`$\r\n]{0,400}$'
+
+  condition: >
+    sel_event and sel_pkg_ref and sel_exec_ctx
+    and not (filter_readonly_pkgmgr or filter_inspection_tools or filter_removal)
+
+falsepositives:
+  - Security or IR analysts triaging the package with a tool not covered by the read-only
+    filters (for example "node -e" scripts that unpack and parse the tarball, or a custom
+    triage wrapper) — these will be reported.
+  - Detection-engineering and CI test harnesses that pass the package spec as a literal
+    argument to node or to a package manager; no path-based test-fixture exemption is
+    included on purpose, so these surface as noise rather than as a bypass.
+  - Bulk lockfile or "npm audit fix" tooling that embeds the package spec into a chained
+    shell command line — the chaining metacharacter defeats the read-only filters by design.
+  - EDR or MDM remediation wrappers that quarantine the package with a non-standard
+    removal command outside the rm/uninstall filter list.
+  - Any package legitimately published under the @aigent-hive scope, if the scope is ever
+    reclaimed or turns out to be benign — the rule keys on the whole scope, not only on
+    the win32-x64 platform package.
+action: report
