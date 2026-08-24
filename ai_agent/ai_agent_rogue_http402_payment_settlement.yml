@@ -1,0 +1,334 @@
+title: Rogue HTTP-402 Payment Settlement to First-Seen Off-Origin Sink
+id: 7b3f1c9a-4d2e-4f6b-9a08-5c1d2e3f4a6b
+status: experimental
+level: medium
+description: |
+  Behavioural detection for malicious agent payment middleware of the
+  agents-u-cash class (PyPI package advertising HTTP-402 / x402 crypto payment
+  support for AI agents).
+
+  The engine has no package_install or wallet_transaction telemetry and no
+  DEPENDS_ON / CRYPTOCURRENCY_TRANSFER edges, so this rule does NOT attempt to
+  observe the install or the on-chain transfer. It observes the only thing the
+  compromised dependency must do at runtime to be useful to the attacker: move
+  the settlement leg of a 402 payment flow to an endpoint of the attacker's
+  choosing.
+
+  The sequence, read from the HTTP_REQUEST edges of the acting agent process:
+
+    A (anchor, required) - the current outbound request is x402/HTTP-402
+      payment-protocol shaped (X-PAYMENT family header, paymentPayload /
+      paymentRequirements / maxAmountRequired / payTo body markers, or a
+      POST/PUT to a settle|verify|x402|payment path).
+    B (required) - the settlement host is BOTH off-origin from the agent's
+      recent working traffic AND first-seen: the URL node either does not exist
+      yet or was created within the last 5 minutes with a very low fetch_count.
+      A dependency that redirects funds necessarily introduces a sink the agent
+      never spoke to before the payment leg.
+    C (required, two independent corroborators, or one provenance hit) -
+      settlement/facilitator rotation across three or more distinct registrable
+      domains in the window; an internal (ZTNA) resource host fetched in the
+      same window while settling to a public sink; a scoped credential header
+      handed to the first-seen sink; or the agents-u-cash package identifier
+      confirmed present in indexed agent traffic.
+
+  Attribution is anchored on caller_pid -> proc_instance -> proc_lineage, so the
+  verdict is deterministic and instance-exact. Reporting only, with a one-hour
+  per-domain suppression, because a legitimate first contact with a hosted x402
+  facilitator shares stages A and B.
+author: Evgen
+date: "2026-06-01"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1657/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.impact
+  - attack.t1657
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Genuine x402 / HTTP-402 flows that settle through a hosted third-party
+    facilitator whose registrable domain differs from the resource server. The
+    first call to a newly adopted facilitator satisfies stages A and B, which is
+    why two independent corroborators (or the package identifier) are required
+    and why each settlement domain is suppressed for an hour after reporting.
+  - A payment provider migrating or regionalising its settlement endpoint, so
+    the sink URL node is legitimately first-seen mid-session.
+  - Local or staging development against a mock facilitator on a new host while
+    the same agent is also calling an internal API - satisfies the perimeter
+    corroborator without any compromise.
+  - Payment SDK integration tests, vendor comparisons, or documentation crawlers
+    that touch several vendors' x402 sample endpoints in one window and so look
+    like facilitator rotation.
+  - Security research, SBOM output, advisory text, or this rule's own
+    documentation passing through agent traffic and mentioning the
+    agents-u-cash package name - satisfies the provenance corroborator with no
+    installation present.
+  - Multi-tenant agents that legitimately present a scoped API key to a payment
+    provider on first contact.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── windows and thresholds (this rule's own, never stored) ────────────────
+  WINDOW_NS   = 600000000000    # 10 min - payment-flow clustering
+  FRESH_NS    = 300000000000    # 5 min  - "sink appeared only in this flow"
+  SUPPRESS_NS = 3600000000000   # 1 h    - per-settlement-domain dedupe
+  MAX_FETCH   = 8               # a first-seen sink has almost no history
+  MAX_ROT     = 3               # cap rotation steps added to the chain
+
+  # x402 / HTTP-402 protocol shape (gate only - the verdict is behavioural)
+  X402_BODY = ["x402", "paymentpayload", "paymentrequirements",
+               "maxamountrequired", "payto", "settlerequest", "verifyrequest",
+               "x-payment"]
+  PAY_HEADERS = ["header_x-payment", "header_x-payment-response",
+                 "header_x-payment-required", "header_x-402"]
+  PAY_PATH = ["/x402", "/settle", "/verify", "/pay", "/payment", "/charge",
+              "/invoice", "/402"]
+  CRED_HEADERS = ["header_authorization", "header_x-api-key", "header_api-key",
+                  "header_x-cdp-api-key", "header_x-wallet-key"]
+  PKG_NAMES = ["agents-u-cash", "agents_u_cash", "agentsucash"]
+  # public-suffix approximation, used ONLY to compare two hosts for same-origin.
+  SECOND_LEVEL = ["co", "com", "net", "org", "gov", "ac", "edu"]
+
+  def reg_domain(h):
+      h = h.lower()
+      c = h.find(":")
+      if c >= 0:
+          h = h[:c]
+      parts = h.split(".")
+      n = len(parts)
+      if n < 3:
+          return h
+      if parts[n - 2] in SECOND_LEVEL:
+          return ".".join(parts[n - 3:])
+      return ".".join(parts[n - 2:])
+
+  def payment_shape():
+      blob = (meta.get("url", "") + " " + meta.get("path", "") + " " +
+              meta.get("content", "")).lower()
+      strong = []
+      for m in X402_BODY:
+          if m in blob:
+              strong.append(m)
+      for k in PAY_HEADERS:
+          if meta.get(k, "") != "":
+              strong.append(k)
+      pathish = []
+      p = meta.get("path", "").lower()
+      for m in PAY_PATH:
+          if m in p:
+              pathish.append(m)
+      return strong, pathish
+
+  def ev_edge(frm, to, ts):
+      return {"from": frm, "to": to, "kind": "HTTP_REQUEST", "dir": "out",
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
+              "method": meta.get("method", ""), "risk_context": ""}
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no traversal ───────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      sink = meta.get("host", "").lower()
+      if sink == "":
+          return "allow"
+      strong, pathish = payment_shape()
+      method = meta.get("method", "").upper()
+      if len(strong) == 0:
+          if len(pathish) == 0:
+              return "allow"
+          if method != "POST" and method != "PUT":
+              return "allow"
+
+      ev_ts    = int(meta.get("event_ts", "0"))
+      sink_reg = reg_domain(sink)
+
+      # ── 2. attribution: anchor on the exact triggering instance ───────────
+      cp = int(meta.get("caller_pid", "0"))
+      lineage = []
+      if cp != 0:
+          inst = proc_instance(cp, ev_ts)
+          if inst != None:
+              lineage = proc_lineage(int(inst["actor_pid"]),
+                                     int(inst["actor_start"]))
+      lin_paths = {}
+      for x in lineage:
+          ap = x.get("actor_path", "")
+          if ap != "":
+              lin_paths[ap] = True
+
+      procs = []
+      for p in graph(type="Process"):
+          pp = p.get("path", "")
+          if pp != "" and pp in lin_paths:
+              procs.append(p)
+      if not procs:
+          # degraded attribution - fall back to monitored agent processes only
+          for p in graph(type="Process"):
+              if p.get("agent", "0") == "1":
+                  procs.append(p)
+      if not procs:
+          return "allow"
+
+      # ── 3. traverse HTTP_REQUEST edges: novelty, off-origin, rotation ─────
+      sink_node  = None
+      prior_edge = None
+      prior_node = None
+      prior_ts   = 0
+      ztna_edge  = None
+      ztna_node  = None
+      pay_peers  = {}
+
+      for p in procs:
+          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u == None:
+                  continue
+              h = u.get("host", "").lower()
+              if h == "":
+                  continue
+              hreg = reg_domain(h)
+              if h == sink or hreg == sink_reg:
+                  if sink_node == None:
+                      sink_node = u
+                  continue
+              last = int(u.get("last_seen", "0"))
+              if ev_ts > 0 and last > 0 and (ev_ts - last) > WINDOW_NS:
+                  continue
+              up = u.get("path", "").lower()
+              for m in PAY_PATH:
+                  if m in up:
+                      pay_peers[hreg] = e
+              if u.get("is_ztna_host", "0") == "1" and ztna_node == None:
+                  ztna_node = u
+                  ztna_edge = e
+              if last >= prior_ts:
+                  prior_ts   = last
+                  prior_node = u
+                  prior_edge = e
+
+      # ── 4. stage B (required): first-seen sink, off-origin from real work ─
+      fresh = False
+      if sink_node == None:
+          fresh = True                      # sink has no history at all
+      else:
+          sf = int(sink_node.get("first_seen", "0"))
+          fc = int(sink_node.get("fetch_count", "0"))
+          if ev_ts > 0 and sf > 0 and (ev_ts - sf) <= FRESH_NS and fc <= MAX_FETCH:
+              fresh = True
+      if not fresh:
+          return "allow"
+      if prior_node == None:
+          return "allow"                    # no off-origin working context
+
+      sink_public = True
+      if sink_node != None:
+          sink_public = sink_node.get("is_ztna_host", "0") == "0"
+
+      # ── 5. stage C: independent corroborators ────────────────────────────
+      corro = []
+      if len(pay_peers) >= 2:
+          corro.append("settlement/payment paths on " + str(len(pay_peers) + 1) +
+                       " distinct registrable domains in the window")
+      if ztna_node != None and sink_public:
+          corro.append("internal host " + ztna_node.get("host", "?") +
+                       " fetched in the same window while settling to a public sink")
+      cred = ""
+      for k in CRED_HEADERS:
+          if meta.get(k, "") != "":
+              cred = k
+      if cred != "":
+          corro.append("scoped credential header " + cred +
+                       " presented to a first-seen settlement host")
+
+      pkg = ""
+      for nm in PKG_NAMES:
+          for r in search(nm, topK=10):
+              src = r.get("source", "")
+              if src != "" and search_in(src, nm):
+                  pkg = nm
+                  break
+          if pkg != "":
+              break
+      if pkg != "":
+          corro.append("package identifier '" + pkg +
+                       "' confirmed in indexed agent traffic")
+
+      if pkg == "" and len(corro) < 2:
+          print("x402 settlement to first-seen off-origin sink " + sink +
+                " with only " + str(len(corro)) + " corroborator(s) - not reporting")
+          return "allow"
+
+      # ── 6. idempotence: one report per settlement domain per hour ─────────
+      seen = store_get("sinks")
+      if seen == None:
+          seen = {}
+      prev = int(seen.get(sink_reg, 0))
+      if ev_ts > 0 and prev > 0 and (ev_ts - prev) < SUPPRESS_NS:
+          return "allow"
+      if len(seen) > 200:
+          seen = {}
+      seen[sink_reg] = ev_ts
+      if store_usage()["free"] > 4096:
+          store_set("sinks", seen)
+
+      # ── 7. kill chain built from the traversed edges + the trigger ────────
+      anchor = procs[0]["id"]
+      chain  = new_chain(anchor)
+      chain.append(step(prior_edge, stage_id="Resource Context",
+                        stage_desc="agent working against " +
+                                   prior_node.get("host", "?") +
+                                   " immediately before the payment leg"))
+      if ztna_edge != None and sink_public:
+          chain.append(step(ztna_edge, stage_id="Perimeter Crossing",
+                            stage_desc="internal resource host " +
+                                       ztna_node.get("host", "?") +
+                                       " fetched while settling to a public sink"))
+      shown = 0
+      for k in sorted(pay_peers):
+          if shown >= MAX_ROT:
+              break
+          pe = pay_peers[k]
+          pn = node(pe["to"])
+          chain.append(step(pe, stage_id="Settlement Rotation",
+                            stage_desc="additional payment/settlement endpoint: " +
+                                       (pn.get("host", k) if pn != None else k)))
+          shown = shown + 1
+      to_id = sink_node["id"] if sink_node != None else "https://" + sink
+      chain.append(step(ev_edge(anchor, to_id, ev_ts),
+                        stage_id="Payment Settlement",
+                        stage_desc="x402 payment request to first-seen off-origin " +
+                                   "sink " + sink + " (" + method + " " +
+                                   meta.get("path", "") + ")"))
+
+      lin = "unresolved"
+      if lineage:
+          names = []
+          for x in lineage:
+              names.append(x.get("actor_path", "?").split("/")[-1])
+          lin = " -> ".join(names)
+      print("x402 settlement diverted: sink=" + sink + " via " + lin +
+            " | " + "; ".join(corro))
+
+      return {
+          "action": "report",
+          "reason": "Possible rogue agent payment middleware (agents-u-cash class): " +
+                    "x402 settlement sent to first-seen off-origin host " + sink +
+                    " while the agent was working against " +
+                    prior_node.get("host", "?") + " - " + "; ".join(corro),
+          "chain": chain,
+      }
+
+  result = run()
