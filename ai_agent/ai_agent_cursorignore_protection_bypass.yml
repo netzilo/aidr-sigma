@@ -1,0 +1,109 @@
+title: Cursor Ignore-Policy File Write by Agent
+id: 3f8c1d42-9b6e-4a17-8c05-7d21e9b4af60
+status: experimental
+level: high
+description: |
+  Detects an AI agent issuing a tool call that CREATES, OVERWRITES, MOVES or DELETES a
+  Cursor ignore-policy file (.cursorignore / .cursorindexingignore) anywhere in the
+  workspace tree.
+
+  In Cursor <= 1.7.23 (CVE-2025-64110) a newly created .cursorignore file invalidates the
+  configuration of pre-existing .cursorignore files. An agent under prompt-injection
+  control can therefore neutralise every existing file-protection rule simply by writing
+  one new ignore file, after which previously protected artifacts (.env, key material,
+  internal source) become readable by the model.
+
+  This rule does NOT attempt to reconstruct the causal chain (ignore-file creation ->
+  protection invalidation -> unauthorised read). The engine exposes no create_file event
+  type and no CREATED_FILE / PROMPT_INJECTION edge kind, and the surviving READ_FILE edge
+  is undifferentiated. Instead the rule targets the single event that IS live, synchronous
+  and attributable: the agent's own write-class tool call whose target is a Cursor
+  ignore-policy file. That event is the exploit primitive itself - the one action without
+  which the bypass cannot occur - and it is observable before any protected file is read.
+
+  Report-only: a developer legitimately asking Cursor to add build artifacts to
+  .cursorignore produces the same primitive, and blocking that would break normal work.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-64110
+  - https://attack.mitre.org/techniques/T1562/001/
+tags:
+  - attack.defense-evasion
+  - attack.t1562.001
+  - attack.t1222
+  - atlas.aml.t0051
+  - owasp.llm02
+  - owasp.llm06
+falsepositives:
+  - Developer explicitly asks the agent to create or update .cursorignore to exclude build
+    output, node_modules, large binaries or secrets - the intended, supported workflow.
+  - Project scaffolding or repo-init templates that generate .cursorignore alongside
+    .gitignore / .dockerignore in one pass.
+  - Repository restructuring where an ignore file is moved or copied between directories
+    (cp / mv branch), or removed as part of a tooling migration off Cursor.
+  - Editors or agents performing atomic writes via a .cursorignore.tmp / .cursorignore~
+    sidecar before rename.
+  - Dotfile-sync and workspace-bootstrap scripts that reinstall a standard ignore file on
+    every new checkout.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: the agent's own tool invocation, from either the hook path (tool_call) or the
+  # model's tool_use block (llm_tool_call). Both carry the target path in args.
+  sel_event:
+    event_type:
+      - tool_call
+      - llm_tool_call
+
+  # Write-class tool, matched on the trailing segment so namespaced MCP names
+  # (mcp__filesystem__write_file, filesystem.write_file) still resolve.
+  sel_write_tool:
+    tool_name|re: '(?i)(^|[._\-:/])(write|write_file|writefile|create|create_file|createfile|new_file|edit|edit_file|multiedit|multi_edit|str_replace_editor|str_replace_based_edit_tool|apply_patch|patch_file|update_file|save_file|put_file|fs_write|notebook_edit)(_tool)?$'
+
+  # Target path extracted from tool args, incl. atomic-write sidecars.
+  sel_ignore_path:
+    file_path|re: '(?i)(^|[\\/])\.cursor(indexing)?ignore(\.(tmp|new|bak|swp)|~)?$'
+
+  # Same target, but named by an arg key the engine does not hoist into file_path
+  # (target_file, uri, destination, ...). Read straight out of the args JSON.
+  sel_json_ignore_target:
+    content|re: '(?i)"(file_?path|path|file_?name|filename|target_?file|uri|dest|destination|new_?file|output_?path)"\s*:\s*"[^"]{0,300}\.cursor(indexing)?ignore'
+
+  # Shell branch: creation / truncation / relocation / removal of the ignore file via a
+  # command argument. Matched only on the `command` field, which is populated exclusively
+  # from command/cmd tool args - so prose or code fences inside a document write can never
+  # reach these patterns. Read-only verbs (cat, less, grep) are deliberately excluded.
+  sel_shell_ignore_write:
+    command|re:
+      - '>{1,2}\s*[^\n><|;&]{0,200}\.cursor(indexing)?ignore\b'
+      - '(?i)\b(touch|tee|install|ln|shred|unlink)\b[^\n]{0,240}\.cursor(indexing)?ignore\b'
+      - '(?i)\b(cp|mv|rm)\b[^\n]{0,240}\.cursor(indexing)?ignore\b'
+      - '(?i)\bgit\s+(rm|mv)\b[^\n]{0,240}\.cursor(indexing)?ignore\b'
+      - '(?i)\bsed\b[^\n]{0,160}\s-i[^\n]{0,200}\.cursor(indexing)?ignore\b'
+      - '(?i)\b(writeFileSync|writeFile|appendFileSync|appendFile|fs\.write)\b[^\n]{0,200}\.cursor(indexing)?ignore'
+
+  # Payload discriminator: a gitignore-style negation rule (!pattern) un-ignores paths that
+  # a prior ignore file protected. Used only to catch the case where the write tool carries
+  # an unrecognised name, so an unknown-tool write of a permissive ignore file is not missed.
+  sel_unignore_payload:
+    content|re:
+      - '(?m)^[ \t]{0,8}!\S'
+      - '\\n[ \t]{0,8}!\S'
+
+  # Reading or listing an ignore file is not the exploit primitive.
+  filter_readonly_tools:
+    tool_name|re: '(?i)(^|[._\-:/])(read|read_file|readfile|view|view_file|open_file|cat_file|get_file|grep|ripgrep|glob|ls|list_dir|list_directory|list_files|search|search_files|find|codebase_search)$'
+
+  condition: >
+    sel_event and
+    (
+      sel_shell_ignore_write or
+      (sel_write_tool and sel_ignore_path) or
+      (sel_write_tool and sel_json_ignore_target) or
+      (sel_json_ignore_target and sel_unignore_payload)
+    )
+    and not filter_readonly_tools
+action: report
