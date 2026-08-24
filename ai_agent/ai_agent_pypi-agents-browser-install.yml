@@ -1,0 +1,100 @@
+title: Supply Chain PyPI agents-browser Install or Execution
+id: 7c3f9a41-2d5e-4b18-9f6a-0e83c4d7b512
+status: experimental
+level: medium
+description: |
+  Detects a process-exec command line that installs, fetches, or executes the PyPI
+  distribution "agents-browser" (PEP 503 normalised forms: agents-browser,
+  agents_browser, agents.browser) inside an environment that is being monitored for
+  AI agent activity.
+
+  Scope note (answers the triage objection): the engine exposes no package_install
+  event type and no INSTALLED_PACKAGE / DEPENDENCY_CHAIN edge, so there is no
+  provenance link between a resolved PyPI artifact and a later process spawn. This
+  rule therefore does NOT claim to prove that a given process came from that package.
+  It asserts only what a single execute_process event can actually carry: the
+  installer invocation itself (pip / uv / poetry / pdm / rye / pipenv / hatch / pipx /
+  conda naming the distribution, or a direct agents_browser-<version>.whl|.tar.gz
+  fetch), and the post-install runtime entrypoints that name the distribution
+  explicitly (python -m agents_browser, .../site-packages/agents_browser/...,
+  .../bin/agents-browser, or the console script started with an MCP/serve
+  subcommand). Each of these is literally present in the command line of the
+  spawning event, which is the only live signal available.
+
+  Because installation of a package is not by itself proof of compromise, the action
+  is report: this is an inventory/triage signal for a suspected malicious supply chain
+  artifact, not an enforcement control.
+
+  OWASP Web Top 10 mapping supplied by intake: A06:2021 Vulnerable and Outdated
+  Components (recorded here in prose; the tags block uses the LLM/ASI taxonomy the
+  engine indexes).
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://pypi.org/project/agents-browser/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # Installer / fetcher invocation that names the distribution.
+  # Boundary classes prevent matching longer distinct names such as
+  # my-agents-browser or agents-browser-pro (PEP 503 normalisation makes those
+  # different projects), while allowing version pins (==, >=, ~=), quotes and
+  # extras brackets immediately after the name.
+  sel_pypi_install:
+    content|re:
+      - '(?i)\b(?:pip3?|python[0-9.]*\s+-m\s+pip3?)\b[^\r\n]{0,150}?\binstall\b[^\r\n]{0,200}?[^A-Za-z0-9_.\-]agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)\buvx?\b[^\r\n]{0,120}?[^A-Za-z0-9_.\-]agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)\b(?:poetry|pdm|rye|pipenv|hatch|conda|micromamba)\b[^\r\n]{0,120}?\b(?:add|install)\b[^\r\n]{0,200}?[^A-Za-z0-9_.\-]agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)\bpipx\b[^\r\n]{0,120}?\b(?:install|run|inject)\b[^\r\n]{0,200}?[^A-Za-z0-9_.\-]agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)[^A-Za-z0-9_.\-]agents[-_.]{1,3}browser-[0-9][^\r\n]{0,60}\.(?:whl|tar\.gz|zip)'
+
+  # Post-install runtime entrypoints that name the distribution explicitly.
+  sel_runtime_exec:
+    content|re:
+      - '(?i)\bpython[0-9.]*\b[^\r\n]{0,80}?\s-m\s+agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)[/\\](?:site|dist)-packages[/\\]agents[-_.]{1,3}browser[/\\]'
+      - '(?i)[/\\](?:bin|Scripts)[/\\]agents[-_.]{1,3}browser(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)(?:^|[^A-Za-z0-9_.\-])agents[-_.]{1,3}browser\s+(?:mcp|serve|stdio|start|--stdio|--transport|--port)(?:[^A-Za-z0-9_\-]|$)'
+
+  # The command line only talks ABOUT the package: echoing a README line, grepping a
+  # lockfile, printing help, or a pip subcommand that installs nothing.
+  filter_inspection_or_docs:
+    content|re:
+      - '(?i)\b(?:echo|printf|cat|head|tail|less|more|man|tee)\b[^\r\n]{0,200}agents[-_.]{1,3}browser'
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|awk|sed|jq)\b[^\r\n]{0,200}agents[-_.]{1,3}browser'
+      - '(?i)[^A-Za-z0-9_]--(?:dry-run|help|version)(?:[^A-Za-z0-9_\-]|$)'
+      - '(?i)\bpip3?\s+(?:uninstall|show|list|freeze|search|config|cache|check|index|debug)\b'
+
+  # A security/SCA tool is deliberately enumerating or auditing the dependency.
+  filter_supply_chain_tooling:
+    content|re:
+      - '(?i)\b(?:pip-audit|safety|bandit|semgrep|osv-scanner|trivy|grype|syft|deptry|pipdeptree|snyk|dependabot|renovate)\b'
+
+  condition: >
+    sel_event and (sel_pypi_install or sel_runtime_exec)
+    and not (filter_inspection_or_docs or filter_supply_chain_tooling)
+falsepositives:
+  - A developer or researcher deliberately installing agents-browser in a sandbox to
+    analyse it; the install command line is identical to a victim install.
+  - A maintainer of a same-named local checkout running "pip install -e ./agents-browser";
+    no editable-install exemption is present by design, so this will report.
+  - CI or a container build resolving a previously pinned agents-browser dependency
+    from a lockfile where the name is spelled out on the command line.
+  - An unrelated internal or private-index distribution whose PEP 503 normalised name
+    is also agents-browser.
+  - A tutorial or onboarding script that runs the documented install command verbatim.
+action: report
