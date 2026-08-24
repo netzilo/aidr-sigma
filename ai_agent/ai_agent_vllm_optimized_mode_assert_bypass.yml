@@ -1,0 +1,129 @@
+title: vLLM Assert-Stripped Activation Function Load
+id: 7c3f1d2e-9a54-4b61-8f27-0d5a6e3b91c4
+status: experimental
+level: medium
+description: |
+  Detects a vLLM process being launched with Python assertions disabled
+  (python -O / -OO, or PYTHONOPTIMIZE set to a truthy value), which strips the
+  assert-based allowlist check inside vLLM's get_act_fn(). With that check gone,
+  an attacker-controlled HuggingFace config.json field (activation_fn /
+  sbert_ce_default_activation_function) is passed straight to
+  resolve_obj_by_qualname(), giving an unrestricted import gadget and arbitrary
+  code execution with vLLM process privileges.
+
+  Two independent evidence arms, both scoped to a single execute_process event:
+    A) a vLLM entrypoint launched with asserts disabled (the exploit precondition)
+    B) a vLLM entrypoint whose command line carries an activation-function
+       override pointing at a known code-execution gadget module
+       (os.system, subprocess.*, builtins.*, importlib.*, pty.spawn, ...)
+
+  Reported, not blocked: arm A is a misconfiguration that is also a legitimate
+  (if unwise) performance setting, and blocking an inference server launch has a
+  large blast radius.
+
+  Related OWASP Top 10 (web) mappings from the advisory triage, recorded here
+  because the tags: block only accepts LLM/ASI identifiers:
+  A03:2021 - Injection, A06:2021 - Vulnerable and Outdated Components.
+author: Haibo
+date: "2026-03-14"
+references:
+  - https://docs.python.org/3/using/cmdline.html#cmdoption-O
+  - https://docs.python.org/3/using/cmdline.html#envvar-PYTHONOPTIMIZE
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  # The spawned process is a vLLM entrypoint (CLI, -m module, package path, image).
+  sel_vllm_launch:
+    content|re:
+      - '(?i)(?:^|[\s"/=])vllm(?:\.exe)?[\s/]+(?:serve|chat|complete|bench|entrypoints|run-batch)\b'
+      - '(?i)(?:^|\s)-m\s+vllm(?:\.|\s|"|$)'
+      - '(?i)\bvllm\.entrypoints\.'
+      - '(?i)[/\\]vllm[/\\]entrypoints[/\\]'
+      - '(?i)\bvllm[-_](?:openai|api[-_]server)\b'
+
+  # Arm A: assertions are disabled for this interpreter invocation.
+  sel_optimized_interpreter:
+    content|re:
+      # python[3.x] [other flags] -O|-OO   (uppercase O only; -o is not a python flag)
+      - '(?:^|[\s"/\\])python[0-9.]*(?:\.exe)?\s+(?:-[^\sm][^\s]*\s+)*-OO?(?:\s|"|$)'
+      # -O ... -m vllm  (covers interpreters invoked via env/absolute odd paths)
+      - '(?:^|[\s"])-OO?\s+(?:-[^\sm][^\s]*\s+)*-m\s+vllm\b'
+      # PYTHONOPTIMIZE set to a value that actually enables optimisation
+      - '(?i)\bPYTHONOPTIMIZE\s*=\s*(?:[1-9][0-9]*|true|yes|on)\b'
+
+  # Arm B: activation-function override naming a code-execution gadget.
+  # Both keys are distinct field|modifier pairs, so they AND within this selection.
+  sel_actfn_gadget:
+    content|re: '(?i)(?:sbert_ce_default_activation_function|activation_fn|resolve_obj_by_qualname)'
+    content|contains:
+      - 'os.system'
+      - 'os.popen'
+      - 'os.execv'
+      - 'os.spawn'
+      - 'posix.system'
+      - 'subprocess.'
+      - 'builtins.'
+      - '__builtin__.'
+      - 'importlib.'
+      - 'runpy.'
+      - 'pty.spawn'
+      - 'socket.socket'
+      - 'ctypes.'
+      - 'pickle.loads'
+      - 'shutil.rmtree'
+      - 'commands.getoutput'
+      - 'eval('
+      - 'exec('
+
+  # ── Filters: benign command shapes that mention the same strings ─────────────
+
+  # The spawned binary is a source-inspection / VCS / editor tool, i.e. somebody
+  # is grepping the vLLM tree or reading the advisory, not starting a server.
+  # Anchored at the start of the command line (plain or JSON-wrapped) so a
+  # "bash -c '...; python -O -m vllm ...'" wrapper is NOT suppressed.
+  filter_source_inspection:
+    content|re: '(?i)(?:^|"(?:cmdline|command|args|argv)"\s*:\s*"|\[")(?:[^\s"]*[/\\])?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|man|less|more|head|tail|cat|find|fd|awk|sed|diff|git|code|nano|vim|vi|bat)\b'
+
+  # Usage/version/dry-run probes never load a model.
+  filter_help_or_version:
+    content|re: '(?:^|\s)(?:--help|--version|--dry-run)(?:\s|"|$)'
+
+  # Test harnesses: vLLM CI and regression suites routinely exercise -O builds
+  # and the exact strings above.
+  filter_test_harness:
+    content|re: '(?i)(?:^|[\s"/\\])(?:pytest|py\.test|tox|nox|coverage|unittest|hypothesis)\b'
+
+  condition: >
+    sel_exec and sel_vllm_launch and
+    (sel_optimized_interpreter or sel_actfn_gadget) and
+    not (filter_source_inspection or filter_help_or_version or filter_test_harness)
+
+falsepositives:
+  - Deliberate performance tuning — an operator running a vLLM inference server
+    under python -O or PYTHONOPTIMIZE=1 with only locally built, trusted model
+    weights. This is the dominant benign case and the reason the rule reports
+    rather than blocks.
+  - Container base images that export PYTHONOPTIMIZE=1 globally, so every vLLM
+    process spawned inside them inherits the flag on its command line.
+  - Security researchers or platform engineers reproducing this advisory in a
+    sandbox; the launch is indistinguishable from the real exploit by design.
+  - Benchmark and profiling scripts (vllm bench, custom throughput harnesses)
+    that intentionally disable assertions to remove check overhead.
+  - An internal serving wrapper that legitimately passes a custom activation
+    callable through --hf-overrides whose module path happens to contain one of
+    the gadget tokens (e.g. a package named ctypes_ops).
+
+action: report
