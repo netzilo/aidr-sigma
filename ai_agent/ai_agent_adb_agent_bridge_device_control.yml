@@ -1,0 +1,141 @@
+title: ADB Agent Bridge Remote Android Device Control
+id: 7f3c1d84-2b6a-4e59-9c0d-5a41b8e7c6f2
+status: experimental
+level: medium
+description: |
+  Detects the adb-agent-bridge PyPI package (agent-to-Android control over ADB with
+  semantic UI addressing via uiautomator) being driven against a NETWORK-attached
+  device, or being installed from a non-default package index, or a raw ADB command
+  line that combines a network device target with a state-changing / data-collecting
+  shell action.
+
+  Design note (answers the triage objection): the only live telemetry for this package
+  is generic execute_process; the edge kinds that would capture the actual mechanism
+  (CONTROL_DEVICE, EXECUTE_COMMAND) and the 'connect' event type are not in the engine
+  schema. A bare process launch is therefore deliberately NOT a detection here.
+  This rule never fires on:
+    - 'pip install adb-agent-bridge'
+    - 'python -m adb_agent_bridge' with no arguments
+    - USB-attached device work ('adb -s <usb-serial> ...', 'adb -s emulator-5554 ...')
+    - UI-only interaction with a USB/emulator serial
+  It requires, within one command line, the package identity token PLUS a second
+  discriminating token (an IP:port device target, a UI actuation verb, an impact verb,
+  or an alternate package index), or - when the package token is absent because the
+  bridge has already shelled out - the full triple of adb binary + network device
+  target + impact action. That is the tightest single-event signal the schema exposes.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://pypi.org/project/adb-agent-bridge/
+  - https://attack.mitre.org/techniques/T1219/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.command-and-control
+  - attack.t1219
+  - attack.execution
+  - attack.t1059
+  - attack.resource-development
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - atlas.aml.t0050
+  - owasp.llm03
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec:
+    event_type: execute_process
+
+  # ── Package identity ────────────────────────────────────────────────────────
+  sel_pkg:
+    content|contains:
+      - 'adb-agent-bridge'
+      - 'adb_agent_bridge'
+
+  # ── A network-attached (non-USB) device target: the escalation from a plugged-in
+  #    handset to a remotely reachable one. This is the precondition the threat
+  #    narrative depends on, and it is visible in the command line. ─────────────
+  sel_net_target:
+    content|re:
+      - '(?i:adb)[^\n]{0,200}\b(?:connect|tcpip)\b\s+(?:\d{1,3}\.){3}\d{1,3}'
+      - '(?i:adb)[^\n]{0,200}\btcpip\b\s+\d{2,5}'
+      - '(?i:--serial|--device|--host|--adb-host|--adb-server|ANDROID_SERIAL|ANDROID_ADB_SERVER_ADDRESS)[=\s]+(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}'
+      - '\s-s\s+(?:\d{1,3}\.){3}\d{1,3}:\d{1,5}'
+
+  # ── Semantic UI actuation - the package's distinguishing mechanism ──────────
+  sel_actuation_input:
+    content|re:
+      - '(?i:adb|shell|uiautomator|bridge)[^\n]{0,200}\binput\s+(?:tap|swipe|text|keyevent|draganddrop|roll)\b'
+      - '(?i)\buiautomator\s+dump\b'
+      - '(?i)\buiautomator2?\b[^\n]{0,120}\b(?:click|send_keys|long_click|swipe)\b'
+
+  # ── Impact / collection verbs: device state change or user-data extraction.
+  #    These are what separate takeover from benign UI test-driving. ───────────
+  sel_actuation_impact:
+    content|re:
+      - '(?i:adb|shell)[^\n]{0,200}\bpm\s+(?:install|uninstall|grant|clear|disable-user)\b'
+      - '(?i:adb|shell)[^\n]{0,200}\bsettings\s+put\s+(?:global|secure|system)\b'
+      - '(?i:adb)[^\n]{0,200}\b(?:exec-out|shell)\b[^\n]{0,120}\b(?:screencap|screenrecord)\b'
+      - '(?i:adb)[^\n]{0,200}\bpull\b\s+[^\n]{0,80}(?:/sdcard|/data/data|/data/local|/storage/emulated)'
+      - '(?i:adb|shell)[^\n]{0,200}\bcontent\s+query\b[^\n]{0,120}content://(?:sms|mms|call_log|contacts|com\.android\.contacts)'
+      - '(?i:adb|shell)[^\n]{0,200}\b(?:run-as|su\s+-c)\b'
+
+  # ── Supply-chain acquisition from something other than the default index ────
+  sel_alt_index:
+    content|re:
+      - '(?i)\b(?:pip3?|uv|poetry|pipx)\b[^\n]{0,200}\binstall\b[^\n]{0,200}--(?:index-url|extra-index-url|find-links|trusted-host)\b'
+      - '(?i)\b(?:pip3?|uv|poetry|pipx)\b[^\n]{0,200}\binstall\b[^\n]{0,200}\b(?:git\+|https?://)'
+
+  # ── The adb client binary itself (excludes the adb-agent-bridge token, which is
+  #    followed by '-' rather than whitespace/quote) ────────────────────────────
+  sel_adb_binary:
+    content|re:
+      - '(?i)(?:^|[\s"/\\])adb(?:\.exe)?[\s"]'
+
+  # ── Filters: help/version probes, package introspection, test harnesses ─────
+  filter_help:
+    content|re:
+      - '(?:^|\s)(?:--help|-h|--version)(?:\s|"|,|$)'
+      - '(?i)\busage:\s'
+
+  filter_pkg_meta:
+    content|re:
+      - '(?i)\bpip3?\s+(?:show|list|freeze|cache|index)\b'
+      - '(?i)(?:^|[\s"/\\])(?:pydoc|man)\s'
+
+  filter_test:
+    content|re:
+      - '(?i)\b(?:pytest|py\.test|tox|unittest|nose2)\b'
+      - '(?i)\bcoverage\s+run\b'
+      - '(?i)--collect-only\b'
+      - '(?i)--dry[-_]run\b'
+
+  condition: >
+    sel_exec
+    and (
+      (sel_pkg and (sel_net_target or sel_actuation_input or sel_actuation_impact or sel_alt_index))
+      or (sel_adb_binary and sel_net_target and sel_actuation_impact)
+    )
+    and not (filter_help or filter_pkg_meta or filter_test)
+
+falsepositives:
+  - Mobile QA or device-farm engineering - 'adb connect <ip>:5555' followed by
+    'input tap/swipe/text' against a networked emulator or a STF/Appium device farm
+    is exactly this pattern. Triage on process lineage - was the command issued by a
+    human shell or by an agent - and on whether the device target is an approved
+    lab address.
+  - CI pipelines that boot an emulator listening on TCP and drive it through
+    uiautomator/uiautomator2 for UI regression tests.
+  - A developer legitimately evaluating adb-agent-bridge against their own handset
+    after enabling wireless debugging - the package token plus '--serial <ip>:<port>'
+    will match branch one.
+  - Internal mirror or air-gapped installs - 'pip install adb-agent-bridge
+    --index-url https://<internal-mirror>/simple' matches the supply-chain branch by
+    design, because the rule cannot and must not distinguish a corporate mirror from
+    a typosquat index without an allowlist.
+  - Screenshot or screen-recording capture during manual debugging of a wirelessly
+    attached device.
+  - Security research and red-team tooling exercising ADB on purpose.
+action: report
