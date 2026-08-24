@@ -1,0 +1,159 @@
+title: vLLM V0 Multi-Node ZeroMQ Pickle Deserialization RCE Surface
+id: 7b1e4c8a-2d93-4f61-9a0e-5c8d3f27b4e1
+status: experimental
+level: high
+description: |
+  Single-event detection over process-execution telemetry for the vLLM V0 engine
+  multi-node ZeroMQ pickle deserialization RCE (CVE-2025-30165 class).
+
+  Two independent, tightly-conjoined shapes are matched on the spawned command line:
+
+  Branch A - vulnerable configuration exposure. A process is launched that references
+  vLLM AND explicitly re-enables the legacy V0 engine (VLLM_USE_V1=0 / --engine-v0)
+  AND requests multi-node/multi-rank execution (--tensor-parallel-size / --pipeline-parallel-size
+  greater than 1, -tp/-pp greater than 1, --distributed-executor-backend, VLLM_HOST_IP /
+  VLLM_DIST_INIT_ADDR / VLLM_PORT, or a ray head address). This is precisely the
+  deployment shape in which secondary hosts pickle.loads() data arriving on their SUB
+  sockets from the primary host's XPUB socket. V0 has been off by default since v0.8.0,
+  so explicitly turning it back on for a distributed run is the exposure signal.
+
+  Branch B - hands-on exploitation / payload delivery. An interpreter is invoked with
+  inline code (python -c, sh -c) that simultaneously references a pickle load primitive
+  (pickle.loads, pickle.Unpickler, recv_pyobj) AND a ZeroMQ socket primitive
+  (import zmq, zmq.SUB/XPUB, recv_multipart, tcp:// endpoint). recv_pyobj() is itself the
+  pickle-over-ZeroMQ primitive the advisory describes.
+
+  All three components of a branch must be present in the same command line; neither
+  branch fires on any single token. Action is report, not block: legitimate operators do
+  pin V0 for compatibility, and this rule surfaces exposure and exploitation attempts for
+  triage rather than interrupting an inference cluster.
+author: Haibo
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2025-30165
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://attack.mitre.org/techniques/T1210/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.lateral-movement
+  - attack.t1210
+  - owasp.a08_2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # --- Branch A component 1: the command line refers to vLLM -------------------
+  sel_vllm_process:
+    content|re:
+      - '(?i)\bvllm\b'
+      - '(?i)\bvllm\s+serve\b'
+      - '(?i)-m\s+vllm(?:[\s.]|\b)'
+      - '(?i)vllm\.entrypoints\.[A-Za-z0-9_.]*api_server\b'
+      - '(?i)\bvllm[-_](?:worker|engine|server)\b'
+
+  # --- Branch A component 2: legacy V0 engine explicitly re-enabled ------------
+  sel_v0_engine:
+    content|re:
+      - '(?i)\bVLLM_USE_V1\s*[=:]\s*[\x{0022}\x{0027}]?0\b'
+      - '(?i)\bVLLM_USE_V1\b[\x{0022}\x{0027}]?\s*,\s*[\x{0022}\x{0027}]?0\b'
+      - '(?i)--engine[-_]v0\b'
+      - '(?i)--use[-_]v0[-_]engine\b'
+      - '(?i)--engine[-_]version(?:[=\s]+|[\x{0022}\x{0027}]\s*,\s*[\x{0022}\x{0027}])v?0\b'
+
+  # --- Branch A component 3: multi-node / multi-rank distributed execution -----
+  sel_multinode:
+    content|re:
+      - '(?i)--(?:tensor|pipeline)[-_]parallel[-_]size(?:[=\s]+|[\x{0022}\x{0027}]\s*,\s*[\x{0022}\x{0027}])(?:[2-9]|[1-9][0-9]+)\b'
+      - '(?i)\s-(?:tp|pp)[=\s]+(?:[2-9]|[1-9][0-9]+)\b'
+      - '(?i)--distributed[-_]executor[-_]backend(?:[=\s]+|[\x{0022}\x{0027}]\s*,\s*[\x{0022}\x{0027}])(?:ray|mp|external[-_]launcher)\b'
+      - '(?i)\bVLLM_(?:HOST_IP|DIST_INIT_ADDR|PORT)\s*[=:]'
+      - '(?i)\bray\s+start\b[^\n]{0,200}?--address'
+
+  # --- Branch B component 1: inline interpreter execution ----------------------
+  sel_inline_interp:
+    content|re:
+      - '(?i:python|pypy)[0-9.]*\s+(?:-[A-Za-z]+\s+)*-c[\s\x{0022}\x{0027}]'
+      - '(?i:bash|sh|zsh|dash|ksh)\s+(?:-[A-Za-z]+\s+)*-c[\s\x{0022}\x{0027}]'
+      - '(?i:python|pypy)[0-9.]*\s+-\s*$'
+
+  # --- Branch B component 2: pickle deserialization primitive ------------------
+  sel_pickle_load:
+    content|re:
+      - '(?i)\b(?:c|_)?pickle\.loads?\s*\('
+      - '(?i)\b(?:c|_)?pickle\.Unpickler\s*\('
+      - '(?i)\bfrom\s+(?:c|_)?pickle\s+import\s+[A-Za-z_,\s]*\bloads?\b'
+      - '(?i)\bpickle_loads\s*\('
+      - '(?i)\brecv_pyobj\s*\('
+
+  # --- Branch B component 3: ZeroMQ socket primitive ---------------------------
+  sel_zmq_socket:
+    content|re:
+      - '(?i)\bzmq\.(?:Context|SUB|XPUB|XSUB|PUB|SUBSCRIBE|socket)\b'
+      - '(?i)\bimport\s+zmq\b'
+      - '(?i)\bzeromq\b'
+      - '(?i)\brecv_(?:multipart|pyobj|string|bytes)\s*\('
+      - '(?i)\bsetsockopt(?:_string)?\s*\(\s*zmq\.'
+      - '(?i)\btcp://[0-9A-Za-z.*\[]'
+
+  # --- Benign shapes -----------------------------------------------------------
+  # Each filter requires the benign invoker to appear on the SAME command segment as
+  # the matched token (no pipe / semicolon / ampersand in the gap), so a command that
+  # pipes a search or an echo into an interpreter is NOT suppressed.
+  filter_search_tools:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|ugrep|sift|semgrep|bandit|codeql|less|more|bat)\b[^\n|;&]{0,120}(?:pickle|zmq|zeromq|VLLM_USE_V1|parallel[-_]size)'
+
+  filter_echo_docs:
+    content|re:
+      - '(?i)\b(?:echo|printf|man|tldr)\b[^\n|;&]{0,120}(?:pickle\.loads|recv_pyobj|VLLM_USE_V1)'
+
+  filter_test_runner:
+    content|re:
+      - '(?i)\b(?:pytest|py\.test)\b'
+      - '(?i)\b(?:tox|nox)\s+-'
+      - '(?i)-m\s+unittest\b'
+
+  filter_pkg_install:
+    content|re:
+      - '(?i)\b(?:pip[0-9]?|uv|conda|mamba|poetry|pdm|pipx)\s+(?:install|add|sync|lock|compile|download|wheel)\b'
+      - '(?i)\bsetup\.py\s+(?:install|develop|bdist|sdist)\b'
+
+  filter_help_version:
+    content|re:
+      - '(?:^|[\s\x{0022}\x{0027}])(?:--help|--version|--dry-run|--print-config)(?:[\s\x{0022}\x{0027}]|$)'
+
+  condition: >
+    sel_event and (
+    (sel_vllm_process and sel_v0_engine and sel_multinode) or
+    (sel_inline_interp and sel_pickle_load and sel_zmq_socket)
+    ) and not (
+    filter_search_tools or filter_echo_docs or filter_test_runner or
+    filter_pkg_install or filter_help_version
+    )
+
+action: report
+
+falsepositives:
+  - Intentional legacy deployments - teams that pin VLLM_USE_V1=0 with tensor or pipeline
+    parallelism because a required feature (certain quantization kernels, LoRA variants,
+    speculative decoding paths) is not yet supported on the V1 engine. The rule correctly
+    reports the exposure; it is a configuration finding, not proof of exploitation.
+  - Benchmark and regression harnesses that deliberately launch a V0 multi-node server.
+    Invocations driven by pytest/tox/nox are suppressed, but bespoke shell or Makefile
+    harnesses will still report.
+  - Configuration management (Ansible, systemd unit re-exec, Kubernetes entrypoint wrappers)
+    replaying a documented V0 launch command line on every restart, producing repeated
+    reports for the same host.
+  - SRE or ML-platform debugging one-liners that use pyzmq recv_pyobj() against an internal
+    cluster socket to inspect traffic - functionally identical to the vulnerable primitive.
+  - Security research, advisory reproduction, or purple-team validation of CVE-2025-30165
+    in a lab environment.
+  - Migration tooling that A/B launches the same model under V0 and V1 to compare output;
+    the V0 leg will report while the V1 leg will not.
