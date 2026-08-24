@@ -1,0 +1,159 @@
+title: "Agent Command Execution - Indirect Prompt Injection Payload (AWS Kiro)"
+id: 4f2c8b7e-1d3a-4a96-9c05-7be6f1a2d834
+status: experimental
+level: high
+description: |
+  Detects an AI coding agent (AWS Kiro and equivalents) spawning a child process whose
+  command line is a self-contained remote-code-execution primitive - the terminal stage of
+  an indirect prompt injection where attacker-controlled data processed by the agent
+  hijacks it into running arbitrary OS commands or writing and running custom code.
+
+  This is a single-event content detection over execute_process command lines. It does not
+  attempt to detect the injection itself (which lives in tool output the agent read); it
+  detects the only unambiguous artefact the injection produces: a spawned command line that
+  fetches-and-executes, decodes-and-executes, inline-interprets attacker code, opens an
+  interactive shell over a socket, or stages a payload into a temp directory and runs it.
+
+  Benign single-purpose invocations (git, npm, pytest, build tooling) do not match: every
+  branch requires either an execution sink chained to a network fetch / decode, or an
+  inline interpreter flag combined with a process-spawn, socket, or base64-decode payload
+  token in the same command line.
+author: Egemen
+date: "2026-03-11"
+references:
+  - https://attack.mitre.org/techniques/T1059/
+  - https://attack.mitre.org/techniques/T1105/
+  - https://attack.mitre.org/techniques/T1027/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1105
+  - attack.t1027
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope ────────────────────────────────────────────────────────────────────
+  sel_event:
+    event_type: execute_process
+
+  # ── self-contained RCE primitives (each sufficient on its own) ───────────────
+
+  # fetch piped straight into an interpreter: curl ... | bash
+  sel_pipe_to_shell:
+    content|re: '(?i:\b(?:curl|wget)\b)[^\n]{0,400}\|\s*(?:sudo\s+)?(?:/(?:usr/)?bin/)?(?i:bash|sh|zsh|ksh|dash|python[23]?|perl|ruby|node|php)\b'
+
+  # base64 blob decoded and piped into an interpreter
+  sel_b64_pipe_shell:
+    content|re: '(?i:\bbase64\b)[^\n]{0,40}\s-{1,2}(?i:decode|d)\b[^\n]{0,240}\|\s*(?:/(?:usr/)?bin/)?(?i:bash|sh|zsh|python[23]?|perl|ruby)\b'
+
+  # PowerShell encoded command with a real base64 payload
+  sel_pwsh_encoded:
+    content|re: '(?i:\b(?:powershell|pwsh)(?:\.exe)?\b)[^\n]{0,200}\s-(?i:encodedcommand|enc|ec|e)\s+[A-Za-z0-9+/=]{32,}'
+
+  # PowerShell download cradle in either operand order
+  sel_ps_cradle:
+    content|re:
+      - '(?i:\b(?:iex|invoke-expression)\b)[^\n]{0,300}(?i:downloadstring|downloadfile|invoke-webrequest|invoke-restmethod|\biwr\b)'
+      - '(?i:downloadstring|downloadfile)\s*\([^\n]{0,300}\|\s*(?i:iex|invoke-expression)\b'
+
+  # Windows LOLBin ingress-tool-transfer / proxied execution
+  sel_lolbin_download:
+    content|re:
+      - '(?i:\bcertutil\b)[^\n]{0,160}(?i:-urlcache|-decode)\b'
+      - '(?i:\bbitsadmin\b)[^\n]{0,160}(?i:/transfer)\b'
+      - '(?i:\bmshta\b)\s+[^\n]{0,160}(?i:https?://|javascript:|vbscript:)'
+      - '(?i:\bregsvr32\b)[^\n]{0,160}(?i:/i:https?://|scrobj\.dll)'
+
+  # interactive shell over a socket
+  sel_revshell:
+    content|re:
+      - '/dev/tcp/[A-Za-z0-9._-]{3,80}/[0-9]{1,5}'
+      - '(?i:\bnc(?:at)?\b)[^\n]{0,80}\s-[A-Za-z]{0,4}e[A-Za-z]{0,4}\s+/(?:usr/)?bin/(?i:ba|z|k)?sh\b'
+      - '(?i:\bsocat\b)[^\n]{0,160}(?i:exec:)\s*[\x27"]?/(?:usr/)?bin/(?i:ba)?sh'
+      - '(?i:\bmkfifo\b)[^\n]{0,240}\|\s*(?:/(?:usr/)?bin/)?(?i:bash|sh)\b'
+
+  # macOS AppleScript shell escape (Kiro is a desktop IDE)
+  sel_osascript_shell:
+    content|re: '(?i:\bosascript\b)[^\n]{0,160}(?i:do\s+shell\s+script)'
+
+  # ── inline interpreter + dangerous payload (AND-ed pair) ─────────────────────
+  sel_inline_interp:
+    content|re: '(?i:\b(?:python[23]?(?:\.\d+)?|perl|ruby|node|deno|bun|php)\b)[^\n]{0,80}\s--?(?:eval|exec|c|e|r)\b\s*[\x27"]'
+  sel_inline_payload:
+    content|re:
+      - '(?i)\bos\.system\s*\('
+      - '(?i)\bos\.popen\s*\('
+      - '(?i)\bsubprocess\.(?:Popen|run|call|check_output|check_call)\s*\('
+      - '(?i)\bpty\.spawn\s*\('
+      - '(?i)\bsocket\.socket\s*\('
+      - '(?i)\bbase64\.b64decode\s*\('
+      - '(?i)\b__import__\s*\(\s*[\x27"](?:os|subprocess|socket|pty)[\x27"]'
+      - '(?i)\bchild_process\b'
+      - '(?i)\bexecSync\s*\('
+      - '(?i)\bBuffer\.from\s*\([^\n]{0,160}[\x27"]base64[\x27"]'
+      - '(?i)\beval\s*\(\s*(?:atob|Buffer|require|base64)'
+      - '(?i)\bIO\.popen\s*\('
+      - '(?i)\bsystem\s*\(\s*[\x27"](?:curl|wget|bash|sh|/bin/)'
+
+  # ── stage-then-run (AND-ed pairs) ────────────────────────────────────────────
+  sel_stage_fetch:
+    content|re: '(?i:\b(?:curl|wget)\b)[^\n]{0,240}\bhttps?://'
+  sel_stage_write:
+    content|re:
+      - '(?i:\b(?:cat|tee|printf|echo|dd)\b)[^\n]{0,240}>{1,2}\s*/(?:tmp|var/tmp|dev/shm|private/tmp)/\S{1,120}'
+      - '(?i:\b(?:cat|tee)\b)[^\n]{0,120}<<[-~]?\s*[\x27"]?(?:EOF|EOS|PY|SH|SCRIPT|PAYLOAD)\b'
+      - '(?i:\bcurl\b)[^\n]{0,240}\s-(?:o|-output)[= ]\s*/(?:tmp|var/tmp|dev/shm|private/tmp)/'
+      - '(?i:\bwget\b)[^\n]{0,240}\s-(?:O|-output-document)[= ]\s*/(?:tmp|var/tmp|dev/shm|private/tmp)/'
+  sel_stage_run:
+    content|re:
+      - '(?i:\bchmod\b)\s+[0-7+rwxXaugost,=-]{1,8}\s+[^\n]{0,120}/(?:tmp|var/tmp|dev/shm|private/tmp)/'
+      - '(?i:\b(?:bash|sh|zsh|ksh|python[23]?|perl|ruby|node|osascript)\b)\s+(?:-\S+\s+){0,3}/(?:tmp|var/tmp|dev/shm|private/tmp)/\S{1,120}'
+
+  # ── false-positive suppression (behaviour-based, no host/domain trust) ───────
+
+  # the pattern is an ARGUMENT to a code-search / SAST tool, not an execution
+  filter_code_search:
+    content|re:
+      - '^\s*(?:sudo\s+)?(?:[A-Za-z]:)?(?:[\w./\\-]*/)?(?i:grep|egrep|fgrep|rg|ag|ack|semgrep|shellcheck|gitleaks|trufflehog|bandit|trivy|codespell|osv-scanner)\b'
+      - '"(?:cmdline|command|argv|args)"\s*:\s*"\s*(?:sudo\s+)?(?:[\w./-]*/)?(?i:grep|egrep|fgrep|rg|ag|ack|semgrep|shellcheck|gitleaks|trufflehog|bandit|trivy|codespell|osv-scanner)\b'
+
+  # the command only DISPLAYS text that happens to contain an install snippet
+  filter_doc_reader:
+    content|re:
+      - '^\s*(?:sudo\s+)?(?:[\w./-]*/)?(?i:man|tldr|less|more|bat|head|tail|file|stat|which|type|whatis)\s'
+      - '"(?:cmdline|command|argv|args)"\s*:\s*"\s*(?:[\w./-]*/)?(?i:man|tldr|less|more|bat|whatis)\s'
+
+  # documentation / template placeholders rather than a real payload
+  filter_placeholder:
+    content|re: '(?:<your[ \-_A-Za-z]{0,24}>|\bREPLACE_ME\b|\bPLACEHOLDER\b|\bYOUR_(?:TOKEN|KEY|SECRET|API_KEY)\b)'
+
+  condition: >
+    sel_event and
+    (
+      sel_pipe_to_shell or sel_b64_pipe_shell or sel_pwsh_encoded or sel_ps_cradle or
+      sel_lolbin_download or sel_revshell or sel_osascript_shell or
+      (sel_inline_interp and sel_inline_payload) or
+      (sel_stage_fetch and sel_stage_run) or
+      (sel_stage_write and sel_stage_run)
+    )
+    and not (filter_code_search or filter_doc_reader or filter_placeholder)
+
+falsepositives:
+  - Developer install one-liners the user explicitly asked the agent to run (a version-manager
+    or toolchain bootstrapper piped from a fetch into sh). This is the single most common
+    benign match and is the reason the rule reports rather than blocks.
+  - CI/build bootstrap that downloads an installer into /tmp, chmod +x it, and executes it.
+  - Legitimate inline interpreter one-liners used by build tooling or by the agent itself for
+    scripted refactors (e.g. python3 -c with subprocess, node -e with child_process).
+  - Container/devcontainer entrypoints that write a heredoc helper script into /tmp and run it.
+  - Intentional red-team or security-training exercises that execute reverse-shell test payloads.
+  - Code-search, SAST or secret-scanner invocations whose arguments embed an install snippet
+    (suppressed by filter_code_search when the scanner is the leading token).
+  - Documentation viewers printing an install snippet (suppressed by filter_doc_reader).
+
+action: report
