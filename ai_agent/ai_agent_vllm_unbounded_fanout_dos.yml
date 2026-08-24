@@ -1,0 +1,296 @@
+title: vLLM Unbounded Fan-Out Parameter DoS Attempt
+id: 7a2f4c18-9d63-4e5b-b1a7-0c8e5d34f962
+status: experimental
+level: high
+description: |
+  Detects an agent (or a subprocess it spawned) POSTing an OpenAI-compatible
+  completion request that carries an unbounded sampling fan-out parameter
+  ("n", "best_of", "num_return_sequences") to a vLLM-style inference endpoint.
+
+  vLLM's OpenAI API server does not enforce an upper bound on `n`. The engine
+  layer fans the request out in a for-loop, copy()-ing the request object once
+  per sequence. A single request with a large `n` monopolises the single-threaded
+  asyncio event loop (blocking every other connection) while RSS grows by
+  gigabytes per second until the OS OOM killer terminates the server process.
+
+  Only the HTTP_REQUEST layer is observable for this attack: there is no
+  DENIAL_OF_SERVICE or MEMORY_EXHAUSTION edge kind, and no memory_allocation or
+  process_termination event type in the engine. Detection therefore anchors on
+  the outbound request itself and resolves *who* sent it via the instance-
+  resolved event log (caller_pid -> proc_instance -> proc_lineage), so the
+  finding names an exact process instance and its session rather than a
+  path-collapsed graph node.
+
+  The Sigma block is only a cheap pre-filter; the Starlark script is the
+  authoritative detector and returns "allow" (invisible, no event) for every
+  request whose fan-out value is within sane bounds.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/770.html
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - owasp.llm10
+falsepositives:
+  - Best-of-N / self-consistency sampling harnesses that legitimately request
+    hundreds of completions from a dedicated local vLLM instance. Raise
+    FANOUT_REPORT in the script for those hosts rather than allow-listing them.
+  - Capacity or load testing of a self-hosted vLLM deployment (benchmark_serving.py,
+    lm-eval-harness sweeps) driven by a platform engineer through an agent shell.
+  - Reranking / candidate-generation pipelines that set best_of high on purpose;
+    these show a steady cadence of identical requests rather than a single
+    astronomical value, and are surfaced as "excessive" rather than "astronomical".
+  - A JSON body that happens to contain an unrelated top-level key literally named
+    "n" with a large numeric value; mitigated by requiring POST plus a
+    completions-style URL path before the body is parsed at all.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_completion_endpoint:
+    path|contains:
+      - '/completions'
+      - '/v1/chat'
+      - '/v1/responses'
+      - '/generate'
+  sel_fanout_param:
+    content|re:
+      - '[{,]\s*"n"\s*:\s*[0-9]{3,}'
+      - '[{,]\s*"best_of"\s*:\s*[0-9]{3,}'
+      - '[{,]\s*"num_return_sequences"\s*:\s*[0-9]{3,}'
+      - '[{,]\s*"(?:n|best_of|num_return_sequences)"\s*:\s*[0-9]+(?:\.[0-9]+)?[eE]'
+  condition: sel_http and sel_completion_endpoint and sel_fanout_param
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Rule-local thresholds (never sourced from storage) ────────────────────
+  FANOUT_REPORT = 128            # sane sampling is 1..64; 128+ is anomalous
+  FANOUT_HUGE   = 10000          # reliably OOMs a vLLM worker
+  BIG_DIGITS    = 15             # >15 digits: beyond any legitimate request
+  WINDOW_NS     = 300000000000   # 5 minutes — session clustering window
+  MAX_PRIOR     = 4
+
+  COMPLETION_PATHS = ["/completions", "/v1/chat", "/v1/responses", "/generate"]
+
+  INT_PATTERNS = [
+      ["n",                    r'[{,]\s*"n"\s*:\s*[0-9]+'],
+      ["best_of",              r'[{,]\s*"best_of"\s*:\s*[0-9]+'],
+      ["num_return_sequences", r'[{,]\s*"num_return_sequences"\s*:\s*[0-9]+'],
+  ]
+
+  SCI_PATTERN = r'[{,]\s*"(?:n|best_of|num_return_sequences)"\s*:\s*[0-9]+(?:\.[0-9]+)?[eE]\+?[0-9]+'
+
+  def as_int(s):
+      if s == None or s == "":
+          return 0
+      if not re.match(r'[0-9]+$', s):
+          return 0
+      return int(s)
+
+  def short(p):
+      if p == None or p == "":
+          return "?"
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def value_after_colon(m):
+      idx = m.rfind(":")
+      if idx < 0:
+          return m
+      return m[idx + 1:].strip()
+
+  def last_int(m):
+      ds = re.find_all(r'[0-9]+', m)
+      if not ds:
+          return ""
+      return ds[len(ds) - 1]
+
+  def worst_fanout(body):
+      # -> [param, value, raw]; value == -1 means astronomical / exponent form
+      sci = re.find(SCI_PATTERN, body)
+      if sci != None:
+          name = "n"
+          k = re.find(r'"[a-z_]+"', sci)
+          if k != None:
+              name = k.replace('"', '')
+          return [name, -1, value_after_colon(sci)]
+      param = ""
+      val   = 0
+      raw   = ""
+      for p in INT_PATTERNS:
+          for m in re.find_all(p[1], body, 25):
+              ds = last_int(m)
+              if ds == "":
+                  continue
+              if len(ds) > BIG_DIGITS:
+                  return [p[0], -1, ds]
+              v = int(ds)
+              if v > val:
+                  param = p[0]
+                  val   = v
+                  raw   = ds
+      return [param, val, raw]
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "HTTP_REQUEST"),
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+          "method":   e.get("method", ""),
+      }
+
+  # ── Relevance gate: pure string checks on meta, no graph/log calls ────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      m = meta.get("method", "").upper()
+      if m != "" and m != "POST":
+          return False
+      p = meta.get("path", "")
+      u = meta.get("url", "")
+      for c in COMPLETION_PATHS:
+          if c in p or c in u:
+              return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      body = meta.get("content", "")
+      if body == "":
+          return "allow"
+
+      hit   = worst_fanout(body)
+      param = hit[0]
+      val   = hit[1]
+      raw   = hit[2]
+      if param == "":
+          return "allow"
+      if val != -1 and val <= FANOUT_REPORT:
+          return "allow"
+
+      host  = meta.get("host", "")
+      path  = meta.get("path", "")
+      ev_ts = as_int(meta.get("event_ts", "0"))
+
+      sev       = "excessive"
+      count_txt = raw
+      if val == -1:
+          sev       = "astronomical"
+          count_txt = "an unbounded number of"
+      elif val >= FANOUT_HUGE:
+          sev = "astronomical"
+      label = param + "=" + raw
+
+      # ── Anchor on the exact triggering instance ───────────────────────────
+      cp = as_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return {
+              "action": "report",
+              "reason": "vLLM " + sev + " fan-out parameter " + label +
+                        " POSTed to " + host + path +
+                        " — attribution unavailable (no caller pid on this event)",
+          }
+
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          return {
+              "action": "report",
+              "reason": "vLLM " + sev + " fan-out parameter " + label +
+                        " POSTed to " + host + path + " by pid " + str(cp) +
+                        " — attribution degraded (process instance not yet in event log)",
+          }
+
+      lineage = proc_lineage(as_int(inst.get("actor_pid", "0")),
+                             as_int(inst.get("actor_start", "0")))
+      if not lineage:
+          lineage = [inst]
+      root  = lineage[len(lineage) - 1]
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      lin_txt = " -> ".join(names)
+
+      # ── Session scope: lineage instances + their direct children only ─────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+      for e in query_events(kind="EXECUTE_PROCESS",
+                            since_ns=ev_ts - WINDOW_NS, until_ns=ev_ts,
+                            limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e.get("actor_pid", "")] = e.get("actor_start", "")
+
+      # ── Prior requests to the SAME host by THIS session only ──────────────
+      prior = []
+      for pid in session:
+          if len(prior) >= MAX_PRIOR:
+              break
+          ipid = as_int(pid)
+          if ipid == 0:
+              continue
+          for e in query_events(kind="HTTP_REQUEST",
+                                actor_pid=ipid,
+                                actor_start=as_int(session[pid]),
+                                since_ns=ev_ts - WINDOW_NS, until_ns=ev_ts,
+                                limit=25):
+              if host != "" and e.get("host", "") != host:
+                  continue
+              prior.append(e)
+              if len(prior) >= MAX_PRIOR:
+                  break
+
+      # ── Kill chain rooted at the session owner ────────────────────────────
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      np = len(prior)
+      for i in range(np):
+          e = prior[np - 1 - i]
+          chain.append(step(ev_edge(e),
+                            stage_id="Repeated Inference Request",
+                            stage_desc="prior request to " + host + e.get("path", "") +
+                                       " by " + short(e.get("actor_path", ""))))
+
+      scheme = "https"
+      if meta.get("url", "").startswith("http://"):
+          scheme = "http"
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       scheme + "://" + host,
+          "kind":     "HTTP_REQUEST",
+          "ts":       str(ev_ts),
+          "first_ts": str(ev_ts),
+          "last_ts":  str(ev_ts),
+          "method":   meta.get("method", ""),
+          "callid":   meta.get("callid", ""),
+      }
+      chain.append(step(trig,
+                        stage_id="Unbounded Fan-Out Parameter",
+                        stage_desc=sev + " sampling fan-out " + label +
+                                   " POSTed to " + host + path +
+                                   " — engine duplicates the request object " +
+                                   count_txt + " times (event-loop stall + OOM)"))
+
+      print("vLLM fan-out DoS attempt: " + label + " -> " + host + path +
+            " via " + lin_txt + " (session prior requests: " + str(np) + ")")
+
+      return {
+          "action": "report",
+          "reason": "Unbounded vLLM fan-out: " + label + " sent to " + host + path +
+                    " by " + lin_txt +
+                    " — unvalidated n/best_of causes request-object duplication, " +
+                    "asyncio event-loop starvation and OOM on the inference server",
+          "chain":  chain,
+      }
+
+  result = run()
