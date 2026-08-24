@@ -1,0 +1,98 @@
+title: Stealth Browser SDK Cykani Install or Invocation
+id: 7f3c1b2e-9d64-4a17-b0e5-2c8a41d6f9b3
+status: experimental
+level: medium
+description: |
+  Detects a monitored agent (or a subprocess it spawned) installing or directly
+  invoking the 'cykani' stealth browser-automation SDK distributed on PyPI.
+
+  The only live telemetry for this threat is execute_process: the engine has no
+  package_install event type and no INSTALLED_PACKAGE / EXECUTE_BROWSER edge
+  kinds, so installation and browser-driving can only be observed as a command
+  line. This rule therefore anchors on the ONE high-specificity token that is
+  unique to this supply-chain artefact -- the distributor's package name -- and
+  requires it to co-occur with an actual package-manager install/add verb or a
+  direct python -m / python -c import of the module. It deliberately does NOT
+  match on generic 'stealth' branding, so ordinary use of playwright-stealth,
+  undetected-chromedriver, selenium or puppeteer produces no event at all.
+
+  Because the malicious payload is unproven (the concern is capability, not a
+  demonstrated C2 or exfil), the verdict is report-only: this rule records that
+  the SDK entered the environment and which agent brought it in, so a behavioural
+  rule (subprocess -> CONNECTS, credential read -> HTTP) can attribute later
+  activity to it. It must never block developer work on branding alone.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - attack.defense-evasion
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # The distinctive supply-chain token. Trailing \b prevents matching longer
+  # unrelated identifiers (e.g. "cykanix", "mycykaniform").
+  sel_pkg_token:
+    content|re: '(?i)\bcykani(?:[._-](?:stealth|browser|sdk|driver|automation|agent|client|py))?\b'
+
+  # Vector 1: a real package-manager install/add verb on the same command line.
+  sel_installer:
+    content|re: '(?i)\b(?:pip3?|pipx|uv|poetry|pdm|rye|conda|micromamba)\b[^\n]{0,200}?\b(?:install|add|sync)\b'
+
+  # Vector 2: direct module execution -- python -m cykani[.stealth]
+  sel_python_module:
+    content|re: '(?i)\bpython[0-9.]*\s[^\n]{0,200}?-m\s+cykani'
+
+  # Vector 3: inline import in a one-liner -- python -c "from cykani import ..."
+  sel_python_inline:
+    content|re: '(?i)\bpython[0-9.]*\s[^\n]{0,200}?-c\s[^\n]{0,600}(?:import\s+cykani|from\s+cykani)'
+
+  # Removal, audit and inventory commands are remediation, not adoption.
+  filter_readonly:
+    content|re:
+      - '(?i)\bpip3?\s+(?:show|list|freeze|download|index|cache|search)\b'
+      - '(?i)\b(?:uninstall|pipdeptree)\b'
+      - '(?i)pip-audit'
+      - '(?i)safety\s+(?:check|scan)'
+      - '--dry-run'
+      - '--help'
+
+  # Someone searching the codebase / scanning for the indicator is defence work.
+  filter_investigation:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|semgrep|osv-scanner|trivy|snyk|clamscan|virustotal)\b'
+
+  # Printing the command as documentation, NOT piping it into a shell:
+  # the [^|\n] class means "echo pip install cykani | sh" is still reported.
+  filter_display:
+    content|re: '(?i)\b(?:echo|printf)\s+[^|\n]{0,200}cykani'
+
+  condition: >
+    sel_event and sel_pkg_token and
+    (sel_installer or sel_python_module or sel_python_inline)
+    and not (filter_readonly or filter_investigation or filter_display)
+falsepositives:
+  - Security researcher or malware analyst installing the package inside a sandbox
+    to reproduce and analyse it. Expected and desirable to record; triage by the
+    spawning agent and host.
+  - Developer legitimately evaluating browser-automation SDKs during a bake-off.
+    Reported, never blocked, so the evaluation is not interrupted.
+  - Internal mirror or vendored fork of the package installed by a CI job from a
+    private index; the command line is identical to the public install.
+  - Onboarding scripts or READMEs that print the install command as an example
+    (suppressed by filter_display unless the printed command is piped to a shell).
+  - Cleanup, inventory or vulnerability-audit commands that name the package
+    (suppressed by filter_readonly).
+  - NOT a false-positive source, by construction - generic stealth-automation
+    packages (playwright-stealth, undetected-chromedriver, selenium-stealth,
+    puppeteer-extra-plugin-stealth) contain none of the matched tokens and will
+    never fire this rule.
+action: report
