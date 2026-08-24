@@ -1,0 +1,125 @@
+title: Cursor MCP Deep-Link Install Bypass
+id: 7f3c9a41-2b6e-4d58-9c0a-1e5d8b47af62
+status: experimental
+level: high
+description: |
+  Detects a spawned process whose command line carries a Cursor MCP install deep-link
+  (cursor://anysphere.cursor-deeplink/mcp/install?name=...&config=...) that is either
+  (a) obfuscated with encoded control characters, double-encoding, nested schemes or
+  duplicated query parameters -- the input-validation abuse used to render a bypassed or
+  misleading install speedbump in Cursor <= 1.7.28 -- or (b) carrying a server config whose
+  "command" is a raw shell interpreter or a download-and-execute one-liner, in plaintext or
+  in the standard base64 `config=` blob.
+
+  A second, deep-link-independent branch fires when a JSON MCP server config appears on a
+  command line together with a hard download-and-execute / decode-and-execute payload --
+  the post-acceptance execution stage of the same attack.
+
+  Single-event, content-only. It cannot observe the modal itself; it observes the deep-link
+  and the command the victim is unknowingly accepting.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1204/001/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://genai.owasp.org/llm-top-10/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1204.001
+  - attack.t1059
+  - owasp.llm03
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec:
+    event_type: execute_process
+
+  # The Cursor MCP install deep-link itself, plaintext or percent-encoded scheme.
+  sel_deeplink:
+    content|re:
+      - '(?i)cursor://[^\s]{0,256}mcp/install'
+      - '(?i)cursor://anysphere\.cursor-deeplink/mcp'
+      - '(?i)cursor%3a%2f%2f[^\s]{0,256}mcp'
+
+  # Evidence A -- base64 `config=` blob whose JSON begins {"command":"<shell>".
+  # Case-SENSITIVE on purpose: base64 is case-significant.
+  # Legitimate MCP servers use npx/uvx/node/python/docker as `command`; a raw
+  # interpreter or downloader here is the attacker-specified payload.
+  sel_ev_b64shell:
+    content|re:
+      - 'eyJjb21tYW5kIjoi(?:YmFz|c2gi|enNo|ZGFz|a3No|Y21k|cG93|cHdz|Y3Vy|b3Nh|L2Jp)'
+
+  # Evidence B -- plaintext MCP config whose command/args is an interpreter invocation.
+  sel_ev_interp:
+    content|re:
+      - '(?i)\\?"command\\?"\s*:\s*\\?"(?:[a-z0-9_.\\/-]{0,120}[/\\])?(?:bash|zsh|dash|ksh|sh|cmd|powershell|pwsh|osascript|curl|wget)(?:\.exe)?\\?"'
+      - '(?i)\\?"args\\?"\s*:\s*\[\s*\\?"(?:-c|-ec|-command|-noprofile|-executionpolicy|/c|/k)\\?"'
+
+  # Evidence C -- hard download-and-execute / decode-and-execute payload.
+  sel_ev_rce:
+    content|re:
+      - '(?i)(?:curl|wget|fetch)\s[^|;&]{0,240}\|\s*(?:sudo\s+)?(?:bash|zsh|dash|sh|python[0-9.]{0,4}|perl|ruby|node)\b'
+      - '(?i)\bbase64\s+--?d(?:ecode)?\b'
+      - '(?i)\s-enc(?:odedcommand)?\s+[A-Za-z0-9+/=]{24,}'
+      - '(?i)\bInvoke-Expression\b'
+      - '(?i)\bIEX\s*\('
+      - '(?i)\b(?:python[0-9.]{0,4}|node|perl|ruby)\s+-(?:c|e)\s'
+      - '(?i)\bcertutil\b[^\n]{0,120}\s-urlcache\b'
+      - '(?i)\bbitsadmin\b[^\n]{0,120}/transfer\b'
+      - '(?i)\bosascript\s+-e\b'
+
+  # Evidence D -- validation-bypass / obfuscation markers INSIDE the deep-link token.
+  sel_ev_bypass:
+    content|re:
+      - '(?i)cursor://[^\s]{0,256}%00'
+      - '(?i)cursor://[^\s]{0,256}%0[ad]'
+      - '(?i)cursor://[^\s]{0,256}%25(?:00|0a|3a|2f|5c)'
+      - '(?i)cursor://[^\s]{0,256}(?:javascript|vbscript|data|file):'
+      - '(?i)cursor://[^\s]{0,256}[?&](?:name|config)=[^\s&]{0,200}[?&](?:name|config)='
+      - '(?i)cursor://[^\s]{0,256}[\x{0000}\x{0009}\x{000a}\x{000b}\x{000c}\x{000d}\x{200b}-\x{200f}\x{202a}-\x{202e}\x{2066}-\x{2069}\x{feff}]'
+
+  # Post-acceptance stage -- a JSON MCP server config on the command line.
+  sel_mcp_cfg:
+    content|re:
+      - '(?i)\\?"mcpservers\\?"\s*:'
+      - '(?i)\\?"command\\?"\s*:\s*\\?"[^"\\]{1,120}\\?"[^{}]{0,240}\\?"args\\?"\s*:'
+
+  # Documentation / template / tutorial material rather than a live install.
+  filter_placeholder:
+    content|re:
+      - '(?i)(?:<(?:your|config|command|path|base64)[^>]{0,40}>|%3c(?:your|config|command|path)[^%]{0,40}%3e)'
+      - '(?i)(?:your[-_ ]?(?:api[-_ ]?key|token|secret|server[-_ ]?name|command)|replace[-_ ]?me|change[-_ ]?me|example[-_ ]?(?:server|command|config)|dummy[-_ ]?(?:server|command))'
+      - '(?i)\s--(?:help|version|dry-run)\b'
+
+  # Read-only inspection of a string that merely contains the deep-link
+  # (log triage, rule review, PoC file reading) -- anchored at argv[0].
+  filter_inspection:
+    command|re:
+      - '(?i)^\s*(?:[^\s]{0,200}[/\\])?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|cat|bat|less|more|head|tail|strings|jq|wc|diff|awk|sed|echo|printf|git|man|code|codium|vim|nvim|nano|emacs)(?:\.exe)?\b'
+
+  condition: >
+    sel_exec and
+    ((sel_deeplink and (sel_ev_b64shell or sel_ev_interp or sel_ev_rce or sel_ev_bypass)) or
+     (sel_mcp_cfg and sel_ev_rce)) and
+    not (filter_placeholder or filter_inspection)
+
+falsepositives:
+  - Security researchers or red teams reproducing the published Cursor deep-link
+    install-bypass proof of concept on a test machine -- the command line is identical to
+    the real attack and this rule is expected to fire.
+  - Detection engineers or IR analysts grepping logs, opening rule files, or catting a PoC
+    file that embeds the deep-link string -- suppressed by filter_inspection when the
+    inspecting binary is argv[0].
+  - Vendor documentation, blog posts or onboarding scripts that embed an example
+    cursor:// mcp/install link with a templated config -- suppressed by filter_placeholder.
+  - An internally approved MCP server whose bootstrap genuinely pipes an installer to a
+    shell on the same command line as its JSON config (post-acceptance branch only);
+    surfaces as a report and should be tuned per environment, not silently trusted.
+  - Deep-links containing a percent-encoded newline or tab because the surrounding tooling
+    URL-encoded an entire multi-line snippet rather than a single argument.
+
+action: report
