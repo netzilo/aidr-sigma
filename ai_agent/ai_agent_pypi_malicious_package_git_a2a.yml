@@ -1,0 +1,107 @@
+title: Malicious PyPI Package git-a2a Installed or Executed
+id: 7f3c1d64-2a95-4b0e-9c88-1e6d4a5b7c02
+status: experimental
+level: medium
+description: |
+  Detects a process execution whose command line references the malicious PyPI
+  package `git-a2a` (PyPI-normalised variants: git-a2a / git_a2a / git.a2a) in an
+  *install* or *execution* context.
+
+  The engine emits no `package_install` or `module_import` event and has no
+  ACQUIRED_CAPABILITY / DOWNLOADED_ARTIFACT / EXECUTED_CODE edge, so the only
+  reachable telemetry for this supply-chain threat is `execute_process`, where
+  `content` carries the full spawned command line. This rule therefore targets the
+  two moments the package name is actually visible on a command line:
+    1. the package manager invocation that fetches it
+       (pip / pip3 / pipx / pipenv / uv / poetry / pdm / rye / hatch / conda /
+        mamba / easy_install / `python -m pip`), and
+    2. direct execution of the installed console entry point, or an inline
+       `python -c "... import git_a2a ..."` that triggers the import-time hook.
+
+  It intentionally does NOT claim to see the PyPI publish, the wheel download, or
+  the import itself — those are outside the deployed telemetry. Action is `report`
+  because this is a single-event name match on partial telemetry, not a confirmed
+  malicious behaviour chain.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - owasp.a06-2021
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Required anchor: the PyPI-normalised package / module name ──────────────
+  sel_pkg:
+    event_type: execute_process
+    content|re: '(?i)\bgit[-_.]a2a\b'
+
+  # ── Context A: a package manager is being asked to install it ───────────────
+  sel_installer:
+    content|re:
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bpipx\b[^\n]{0,200}\b(install|run)\b'
+      - '(?i)\bpipenv\b[^\n]{0,200}\binstall\b'
+      - '(?i)\buv\b[^\n]{0,200}\b(add|install)\b'
+      - '(?i)\b(poetry|pdm|rye|hatch)\b[^\n]{0,200}\badd\b'
+      - '(?i)\b(conda|mamba|micromamba)\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bpython[0-9.]{0,4}\b[^\n]{0,200}\s-m\s+pip\b'
+      - '(?i)\beasy_install\b'
+      - '(?i)\bpython[0-9.]{0,4}\b[^\n]{0,200}\s-c\b[^\n]{0,200}\bimport\b'
+
+  # ── Context B: the installed console entry point is executed directly ───────
+  sel_entrypoint:
+    content|re: '(?i)(^|[\s\x27"])(/[^\s\x27"]*/)?git[-_.]a2a(\.exe)?([\s\x27"]|$)'
+
+  # ── Suppression: remediation, dry-runs and security tooling ────────────────
+  filter_remediation:
+    content|re:
+      - '(?i)\buninstall\b'
+      - '(?i)\b(poetry|pdm|uv|pipx|conda|mamba|micromamba)\s+remove\b'
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\bdownload\b'
+      - '(?i)--dry-run\b'
+      - '(?i)\b(safety|pip-audit|osv-scanner|trivy|grype|syft|snyk|semgrep|bandit|clamscan|clamdscan)\b'
+
+  # ── Suppression: read-only inspection / navigation (entry-point branch only) ─
+  filter_inspection:
+    content|re:
+      - '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ag|ack|awk|sed|cat|head|tail|less|more|strings|sha256sum|shasum|md5sum|jq|xxd|hexdump)\b'
+      - '(?i)\b(cd|ls|rm|mv|cp|mkdir|rmdir|find|du|df|chmod|chown|tar|unzip|zip|gzip|open|code|subl|vim|vi|nano|emacs)\b'
+      - '(?i)\bgit\s+(clone|pull|fetch|remote|log|show|diff|status)\b'
+
+  # ── Suppression: documentation, advisories, blocklist automation, echoes ────
+  filter_docs:
+    content|re:
+      - '(?i)(advisor(y|ies)|CVE-[0-9]{4}-|GHSA-|malware|malicious|indicator[s]? of compromise|\bIOC\b|do\s+not\s+install|block-?list|deny-?list|quarantine|--help|\bman\b)'
+      - '(?i)\becho\b'
+
+  condition: >
+    (sel_pkg and (sel_installer or (sel_entrypoint and not filter_inspection)))
+    and not (filter_remediation or filter_docs)
+
+falsepositives:
+  - Security researcher or incident responder deliberately reproducing the
+    malicious install in a sandbox (`pip install git-a2a`). Only uninstall,
+    download-only, --dry-run and named scanner tooling are suppressed; a genuine
+    reproduction install will be reported, which is the intended audit outcome.
+  - An internal or locally developed package/checkout that happens to be named
+    git-a2a or git_a2a and is installed from a private index or as an editable
+    source tree. The name is highly specific, but a name collision is possible.
+  - A directory named git-a2a passed to a build, archive or editor command; the
+    entry-point branch is suppressed by filter_inspection for the common
+    navigation/read-only tools, but an unusual wrapper binary could slip through.
+  - Threat-intel or dependency-blocking automation that shells out to a package
+    manager wrapper with the package name as an argument to verify it is blocked;
+    the advisory/blocklist wording filter covers the common phrasings only.
+  - A shell one-liner that installs the package *and* also invokes one of the
+    suppressed inspection tools would be reported (the inspection filter is
+    scoped to the entry-point branch only, precisely to avoid that evasion).
+action: report
