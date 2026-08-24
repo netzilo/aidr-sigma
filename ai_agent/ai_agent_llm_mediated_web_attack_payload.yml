@@ -1,0 +1,195 @@
+title: LLM-Mediated Web Attack Payload in Outbound HTTP
+id: 7c4e1b0a-9d3f-4a52-b8e1-2f6c5d0a91e7
+status: experimental
+level: high
+description: |
+  Detects classic web-application injection payloads (SQLi, XSS, SSTI/expression-language,
+  OS command injection, XXE, SSRF-to-metadata, and path traversal) carried inside an
+  outbound HTTP request that an AI agent or LLM-integrated application emits toward a
+  backend sink.
+
+  Threat model (LLM2SQLi / LLM2XSS / LLM2SSTI / LLM2CommandInjection / LLM2IDOR /
+  LLM2CSRF / LLM2XXE / LLM2SSRF): an attacker shapes input so that the LLM, acting as a
+  confused deputy, emits attacker-controlled text that a downstream component parses as
+  trusted content. This rule catches the moment that text crosses the HTTP boundary.
+
+  SCOPE LIMIT (answering the triage objection directly): the engine exposes no
+  database_query, template_render, api_call or file_operation event types, and no
+  EXECUTE_SQL / RENDER_TEMPLATE / CONFUSED_DEPUTY edges. Only http_request events and
+  HTTP_REQUEST / READ_FILE / WRITE_FILE edges are live. This rule therefore does NOT
+  claim to observe the DB, template-engine or XML-parser sinks. It observes exactly one
+  slice: the payload while it is still in flight as HTTP request content or query string.
+  SQLi, SSTI and XXE are only visible here when the sink is reached over HTTP (REST,
+  GraphQL, DB-proxy or XML endpoints), which is the common shape for LLM-integrated web
+  apps but is not the whole surface. Because visibility is partial and the payload alone
+  does not prove the sink interpreted it, the action is report - a corroborating signal
+  for triage, never an autonomous block.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_http:
+    event_type: http_request
+
+  # SQL injection: every pattern requires a syntax break (quote, paren or statement
+  # separator) immediately before the SQL construct, so well-formed SQL sent to a
+  # query API does not match.
+  sel_p_sqli:
+    content|re:
+      - '(?i)(\x27|\x22|%27|%22|%29|\))(\s|%20|\+|\))*union(\s|%20|\+|/\*|\*/){1,10}(all(\s|%20|\+){1,10})?select(\s|%20|\+|\(|%28)'
+      - '(?i)(\x27|\x22|%27|%22)(\s|%20|\+|\))*(or|and)(\s|%20|\+|\(|%28)+(\x27|\x22|%27|%22)?(\s|%20)*\d{1,5}(\s|%20)*(\x27|\x22|%27|%22)?(\s|%20)*(=|%3d|<>|!=)(\s|%20)*(\x27|\x22|%27|%22)?(\s|%20)*\d{1,5}'
+      - '(?i)(\x27|%27)(\s|%20|\+)*(or|and)(\s|%20|\+)+(\x27|%27)(\s|%20|\+)*(=|%3d)(\s|%20|\+)*(\x27|%27)'
+      - '(?i)(;|%3b)(\s|%20|\+)*(drop|truncate)(\s|%20|\+)+(table|database|schema)(\s|%20|\+)+[a-z_\x22\x60\[]'
+      - '(?i)(\x27|%27|\)|%29|;|%3b|,)(\s|%20|\+)*(and|or|;)?(\s|%20|\+)*(sleep|pg_sleep|benchmark)(\s|%20|\+)*(\(|%28)(\s|%20)*\d'
+      - '(?i)waitfor(\s|%20|\+)+delay(\s|%20|\+)+(\x27|%27)\d'
+      - '(?i)(\x27|%27|,)(\s|%20|\+)*(and|or)?(\s|%20|\+)*(extractvalue|updatexml|utl_inaddr\.get_host_address)(\s|%20)*\('
+      - '(?i)into(\s|%20|\+)+(outfile|dumpfile)(\s|%20|\+)*(\x27|%27)'
+
+  # XSS: a tag opener alone is not enough. Every pattern additionally requires an
+  # event handler or a javascript: URI AND a script-execution sink token.
+  sel_p_xss:
+    content|re:
+      - '(?i)(<|%3c)(\s|%20)*(script|svg|img|iframe|body|details|marquee|object|embed|video|audio|input|form|a)\b[^>]{0,300}(on[a-z]{3,20}(\s|%20)*(=|%3d)|javascript(:|%3a))[^>]{0,300}(alert(\s|%20)*\(|prompt(\s|%20)*\(|confirm(\s|%20)*\(|eval(\s|%20)*\(|atob(\s|%20)*\(|fetch(\s|%20)*\(|document\.(cookie|domain|write|location)|window\.(location|name)|top\.location|fromCharCode)'
+      - '(?i)(<|%3c)(\s|%20)*script(\s|%20|>|%3e|/)[^<]{0,400}(alert(\s|%20)*\(|prompt(\s|%20)*\(|confirm(\s|%20)*\(|document\.cookie|document\.location|window\.location|eval(\s|%20)*\(|atob(\s|%20)*\(|fetch(\s|%20)*\(|XMLHttpRequest|navigator\.sendBeacon|fromCharCode)'
+      - '(?i)(\x22|\x27|%22|%27)(\s|%20)*(>|%3e)(\s|%20)*(<|%3c)(\s|%20)*(script|svg|img|iframe|body|details)\b'
+      - '(?i)(src|href|action|formaction|data|xlink:href)(\s|%20)*(=|%3d)(\s|%20)*(\x22|\x27|%22|%27)?(\s|%20)*javascript(:|%3a|&colon;)'
+
+  # SSTI / expression-language: arithmetic probe, dangerous internals, or
+  # JNDI/Java reflection. Bare {{ }} interpolation is deliberately NOT matched.
+  sel_p_ssti:
+    content|re:
+      - '(\{\{|\$\{|#\{|%7b%7b|%24%7b|%23%7b)(\s|%20|\+)*\d{1,4}(\s|%20|\+)*(\*|%2a)(\s|%20|\+)*\d{1,4}(\s|%20|\+)*(\}\}|\}|%7d)'
+      - '(?i)(\{\{|\{%|%7b%7b)[^}]{0,300}(__class__|__mro__|__subclasses__|__globals__|__builtins__|__import__|os\.popen|lipsum|cycler|joiner|get_flashed_messages|request\.application|config\.__|self\.__)'
+      - '(?i)(\$\{|%24%7b)(\s|%20)*(jndi|ldap|rmi|iiop|corba|nds|nis)(\s|%20)*(:|%3a)'
+      - '(?i)(\$\{|%24%7b)(\s|%20)*(T\(|new(\s|%20)+java|java\.lang|Runtime\.getRuntime|ProcessBuilder)'
+      - '(?i)(#\{|%23%7b)[^}]{0,200}(T\(|java\.lang|Runtime\.getRuntime|ProcessBuilder|new(\s|%20)+java)'
+      - '(?i)(<%=|%3c%25%3d)[^%]{0,200}(Runtime\.getRuntime|ProcessBuilder|IO\.popen|Kernel#)'
+
+  # OS command injection: shell metacharacter AND a high-signal target.
+  sel_p_cmdi:
+    content|re:
+      - '(?i)(;|\||&&|%3b|%7c|%26%26|%0a|%0d|\$\(|%24%28|\x60|%60)(\s|%20|\+)*(/bin/|/usr/bin/)?(cat|head|tail|less|more|nl|od)(\s|%20|\+)+(/|%2f)(etc|proc)(/|%2f)(passwd|shadow|self)'
+      - '(?i)(;|\||&&|%3b|%7c|%26%26|%0a|\$\(|\x60)(\s|%20|\+)*(nc|ncat|netcat|bash|sh|python[23]?|perl|ruby|php|powershell|curl|wget)(\s|%20|\+)+[^\n]{0,80}(-e(\s|%20)|/dev/tcp/|>&(\s|%20)*/dev/|--post-file)'
+      - '(?i)(\$\(|%24%28|\x60|%60)(\s|%20)*(id|whoami|hostname|pwd|uname(\s|%20)+-a)(\s|%20)*(\)|%29|\x60|%60)'
+      - '/dev/tcp/(\d{1,3}\.){3}\d{1,3}/\d{1,5}'
+      - '(?i)(;|\||&&|%3b|%7c|%26%26|%0a)(\s|%20|\+)*(curl|wget)(\s|%20|\+)+[^\n]{0,120}(\||%7c)(\s|%20|\+)*(ba)?sh\b'
+
+  # XXE: external entity declaration with a resolvable protocol, or an inline DTD
+  # subset that declares entities. Plain PUBLIC doctypes do not match.
+  sel_p_xxe:
+    content|re:
+      - '(?i)<!ENTITY(\s|%20)+(%(\s|%20)+)?[a-z0-9_.:-]{1,60}(\s|%20)+(SYSTEM|PUBLIC)(\s|%20)+[^>]{0,200}(file|https?|ftp|php|expect|netdoc|jar|gopher|dict|data)(:|%3a)'
+      - '(?i)<!DOCTYPE[^>]{0,300}\[(\s|%20)*<!ENTITY'
+
+  # SSRF: a URL whose target is a cloud metadata endpoint or an obfuscated loopback
+  # literal, carried as a parameter or JSON value inside the body.
+  sel_p_ssrf:
+    content|re:
+      - '(?i)((=|%3d)|(\x22(\s|%20)*:(\s|%20)*\x22))(\s|%20)*(https?|gopher|dict|ftp|ldap)(:|%3a)(//|%2f%2f)[^\s\x22&]{0,60}(169\.254\.169\.254|169\.254\.170\.2|100\.100\.100\.200|metadata\.google\.internal)'
+      - '(?i)((=|%3d)|(\x22(\s|%20)*:(\s|%20)*\x22))(\s|%20)*(https?|gopher|dict|ftp)(:|%3a)(//|%2f%2f)(0x7f[0-9a-f]{6}|2130706433|017700000001|0177\.0\.0\.1)'
+      - '(?i)((=|%3d)|(\x22(\s|%20)*:(\s|%20)*\x22))(\s|%20)*(https?)(:|%3a)(//|%2f%2f)[^\s\x22&]{0,80}(/|%2f)(latest(/|%2f)meta-data|latest(/|%2f)api(/|%2f)token|computeMetadata(/|%2f)v1|metadata(/|%2f)identity(/|%2f)oauth2(/|%2f)token)'
+
+  # Path traversal / IDOR-by-path: traversal token AND a named sensitive target,
+  # or percent-encoded dot-dot (there is no benign reason to encode dots).
+  sel_p_traversal:
+    content|re:
+      - '(?i)(\.\.|%2e%2e|%252e%252e|\.%2e|%2e\.)(/|%2f|%5c|\\|%252f)[^\s\x22\x27&;]{0,120}(etc(/|%2f|%5c|\\)(passwd|shadow|hosts|group)|proc(/|%2f)self(/|%2f)(environ|cmdline)|windows(/|%2f|%5c|\\)win\.ini|boot\.ini|web\.config|\.ssh(/|%2f|%5c|\\)id_(rsa|dsa|ecdsa|ed25519)|\.aws(/|%2f|%5c|\\)credentials|\.kube(/|%2f)config|WEB-INF(/|%2f)web\.xml)'
+      - '(?i)(%2e%2e|%252e%252e|\.\.%2f|\.\.%5c|%c0%ae%c0%ae)(%2f|%5c|%252f)'
+
+  # Same payload classes seen in the request line / query string, the dominant
+  # carrier for reflected SQLi, XSS, traversal and SSRF.
+  sel_p_url_vector:
+    url.full|re:
+      - '(?i)(\x27|\x22|%27|%22|%29|\))(\s|%20|\+|\))*union(\s|%20|\+|/\*){1,10}(all(\s|%20|\+){1,10})?select(\s|%20|\+|\(|%28)'
+      - '(?i)(\x27|%27|\x22|%22)(\s|%20|\+)*(or|and)(\s|%20|\+)+(\x27|%27|\x22|%22)?(\s|%20|\+)*\d{1,5}(\s|%20|\+)*(\x27|%27|\x22|%22)?(\s|%20|\+)*(=|%3d)(\s|%20|\+)*(\x27|%27|\x22|%22)?(\s|%20|\+)*\d{1,5}'
+      - '(?i)(%3c|<)(\s|%20|\+)*(script|svg|img|iframe|body|details)[^&]{0,200}(on[a-z]{3,20}(\s|%20|\+)*(=|%3d)|(alert|prompt|confirm|eval|atob)(\(|%28))'
+      - '(?i)(%2e%2e|%252e%252e|\.\.%2f|\.\.%5c)(%2f|%5c|%252f)'
+      - '(?i)(\.\.|%2e%2e)(/|%2f|%5c)[^&\s]{0,120}(etc(/|%2f)(passwd|shadow)|proc(/|%2f)self(/|%2f)environ|\.ssh(/|%2f)id_(rsa|ed25519)|\.aws(/|%2f)credentials|win\.ini|web\.config)'
+      - '(?i)(\$\{|%24%7b)(jndi|%6a%6e%64%69)(:|%3a)'
+
+  # ---- Benign-context suppressors -------------------------------------------
+  # Security tooling, scanner corpora and vulnerability research legitimately
+  # transmit these exact payload strings. Suppress when the surrounding request
+  # is self-evidently a test corpus, a documentation body or a CVE write-up.
+  filter_testing_corpus:
+    content|re:
+      - '(?i)\b(payloadsallthethings|seclists|fuzzdb|nuclei-templates|wordlists?/|xss-payload-list|sql-?injection-payload|burp[- ]?suite|owasp[- ]?(zap|juice[- ]?shop|webgoat|benchmark|crapi)|dvwa|bwapp|hackthebox|tryhackme|portswigger[- ]?labs?|vulhub|vulnhub|damn[- ]vulnerable)\b'
+      - '(?i)\b(sqlmap|commix|xsstrike|dalfox|tplmap|xxeinjector|ssrfmap|nikto|wfuzz|ffuf|arjun|dirsearch)\b'
+      - '(?i)\b(test|spec|fixture|mock|sample|example|golden|snapshot|testdata|__tests__|conftest)[_./-]?(case|data|suite|vector|payload|input|corpus)?\b[^\n]{0,60}(injection|xss|sqli|ssti|xxe|ssrf|traversal|payload)'
+      - '(?i)(describe|it|test|assert|expect|should)\s*\((\s|%20)*[\x27\x22`][^\x27\x22`]{0,120}(inject|xss|sqli|ssti|xxe|ssrf|traversal|sanitiz|escap)'
+
+  filter_documentation:
+    content|re:
+      - '(?i)\bCVE-(19|20)\d{2}-\d{4,7}\b'
+      - '(?i)\b(CWE-(20|78|79|89|91|94|352|611|639|918|1336))\b'
+      - '(?i)(vulnerability (report|advisory|write-?up|disclosure)|security advisory|remediation guidance|proof[- ]of[- ]concept payload|penetration test report|bug bounty (report|submission)|responsible disclosure)'
+      - '(?i)(how to (prevent|mitigate|defend against|fix)|prevention cheat ?sheet|secure coding (guide|standard)|owasp (cheat ?sheet|top ?10)|input validation guidance)'
+      - '(?i)```[a-z]{0,12}\s*\n[^\n]{0,200}(union(\s|%20)+select|<script|\$\{jndi|<!ENTITY|\.\./\.\./)'
+
+  # WAF / IDS / IPS management planes legitimately carry attack signatures as
+  # rule bodies. This suppresses the signature-authoring surface only, by the
+  # shape of the payload wrapper - it does not exempt any host or destination.
+  filter_security_control_config:
+    content|re:
+      - '(?i)\b(SecRule|modsecurity|coreruleset|crs-setup|paranoia_level|REQUEST_URI\|ARGS|TX:anomaly_score)\b'
+      - '(?i)\b(sigma_rule|detection:\s|logsource:\s|falsepositives:\s|snort|suricata|yara)\b[^\n]{0,200}(content:|pcre:|msg:|condition:)'
+      - '(?i)\b(waf|firewall|ruleset|signature|blocklist|denylist)[_ -]?(rule|pattern|policy|definition|update)s?\b'
+
+  # Redacted / neutered specimens carried for triage or ticketing.
+  filter_neutralized:
+    content|re:
+      - '(?i)(\[REDACTED\]|\[SANITIZED\]|\[DEFANGED\]|\[BLOCKED\]|\[PII_REDACTED\]|xxxxx|REPLACEME|PLACEHOLDER)'
+      - '(?i)(hxxp|hxxps|\[\.\]|\(\.\)|\[:\]|\bmeta\[\.\]data\b)'
+
+  condition: >
+    sel_http
+    and (sel_p_sqli or sel_p_xss or sel_p_ssti or sel_p_cmdi or sel_p_xxe or
+         sel_p_ssrf or sel_p_traversal or sel_p_url_vector)
+    and not (filter_testing_corpus or filter_documentation or
+             filter_security_control_config or filter_neutralized)
+
+action: report
+
+falsepositives:
+  - Application security teams running DAST, fuzzing or penetration-testing tooling
+    through an agent - suppressed by filter_testing_corpus when the tool name or a
+    known payload corpus appears in the same request body, but a hand-rolled scanner
+    with no recognisable marker will still be reported.
+  - CI pipelines posting security test-suite fixtures (XSS/SQLi assertion vectors) to
+    a test-reporting or coverage API - suppressed by filter_testing_corpus.
+  - Documentation, knowledge-base or ticketing writes describing an injection
+    vulnerability, including CVE write-ups and remediation guides - suppressed by
+    filter_documentation.
+  - WAF, ModSecurity CRS, Sigma, Snort or Suricata signature-management API calls that
+    carry attack patterns as rule bodies - suppressed by filter_security_control_config.
+  - Legitimate GraphQL or ORM traffic containing the literal word UNION or SELECT - not
+    matched, because every SQLi pattern requires a preceding quote, paren or semicolon
+    syntax break rather than the bare keyword.
+  - Templating and i18n payloads that use {{ }} or ${ } interpolation - not matched,
+    because the SSTI patterns require an arithmetic probe, a dangerous runtime internal,
+    or a JNDI/Java reflection token rather than bare interpolation.
+  - Cloud SDKs fetching instance metadata directly - not matched, because the SSRF
+    patterns require the metadata endpoint to appear as a parameter or JSON string
+    value inside a request body, not as the request destination itself.
+  - Markdown or HTML content-management writes that include a <script> tag - not
+    matched unless an execution sink such as document.cookie, eval( or alert( is also
+    present within the same tag.
+  - Windows-style relative paths containing ..\ in build tooling - only matched when a
+    named sensitive target such as win.ini or web.config also appears, or when the
+    dot-dot is percent-encoded.
