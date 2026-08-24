@@ -1,0 +1,129 @@
+title: Prompt Injection Payload In Agentic Coding Assistant Input
+id: 7b3c1e52-9a4d-4f18-8c61-2d5f0ab7e934
+status: experimental
+level: high
+description: |
+  Detects prompt-injection payloads carried inside the arguments of an MCP/agent
+  tool call or inside a command line spawned by an agentic coding assistant
+  (Claude Code, Copilot, Cursor, Codex, Aider, Windsurf).
+
+  A payload is only reported when TWO independent signals co-occur in the same
+  event:
+    1. an instruction-hijack marker addressed at the model (override of prior
+       instructions, forged <system>/[[SYSTEM]] delimiters, persona reset, or an
+       IMPORTANT/ATTENTION block explicitly addressed to the AI/assistant/agent), AND
+    2. an actionable adversarial directive - concealment from the user,
+       credential/secret egress, or persistence into shell profiles, git hooks,
+       CI workflows or agent configuration files.
+
+  Either signal alone is common in benign engineering work (security prose,
+  refactoring a config path, a curl in a build script). The conjunction inside a
+  single tool-call argument blob or command line is the injection itself, whether
+  it arrived through a poisoned code comment, a fetched file, an MCP tool result
+  that the agent then echoed into a subsequent call, or a multimodal/cross-origin
+  context-poisoning vector.
+
+  Report-only: this rule annotates the event for triage; it never interrupts the
+  developer, because injection text is indistinguishable from legitimate content
+  when a security engineer is authoring detections about it.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://owasp.org/Top10/A04_2021-Insecure_Design/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1059
+  - attack.t1552
+  - atlas.aml.t0051
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── scope: only agent-originated tool arguments and spawned command lines ──
+  sel_event:
+    event_type:
+      - tool_call
+      - execute_process
+
+  # ── signal 1: instruction-hijack marker aimed at the model ────────────────
+  sel_hijack_marker:
+    content|re:
+      - '(?i)\b(?:ignore|disregard|forget|override|bypass)\s+(?:all|any|the|your|these|those)?\s*(?:previous|prior|preceding|earlier|above|initial|original|system|default|safety)\s+(?:instruction|prompt|rule|directive|guideline|guardrail|constraint|context|message|polic)'
+      - '(?i)\b(?:ignore|disregard|forget)\s+(?:everything|all)\s+(?:above|before|written\s+above|you\s+were\s+told)'
+      - '(?i)\b(?:instruction|prompt|rule|directive)s?\s+(?:above|before\s+this|in\s+the\s+system\s+prompt)\s+(?:are|is)\s+(?:no\s+longer|not)\s+(?:valid|applicable|relevant|binding)'
+      - '(?i)<\s*/?\s*(?:new\s+)?(?:system|admin|developer|important)[ _-]?(?:instruction|prompt|message|override|note)s?\s*>'
+      - '(?i)(?:\[\[|\{\{|\[|\{)\s*(?:end\s+of\s+|new\s+)?(?:system|developer|admin)\s*[ _-]?\s*(?:prompt|instruction|message|override)s?\s*(?:\]\]|\}\}|\]|\})'
+      - '(?i)\b(?:you\s+are\s+now|from\s+now\s+on\s*,?\s*you\s+(?:are|will|must|should))\b'
+      - '(?i)\bact\s+as\s+(?:if\s+you\s+are\s+)?(?:an?\s+)?(?:unrestricted|unfiltered|jailbroken|uncensored|dan)\b'
+      - '(?i)(?:^|\n|\*|#|/|-)\s*(?:!{1,3}\s*)?(?:important|attention|urgent|notice|mandatory)\b[^\n]{0,60}\b(?:ai|llm|assistant|agent|copilot|claude|cursor|codex|chatbot|language\s+model)\b'
+      - '(?i)\b(?:ai|llm|assistant|agent|copilot|claude|cursor|codex)\s+(?:instruction|directive|command|task|note)s?\s*:'
+      - '(?i)\b(?:claude|copilot|cursor|codex|devin|aider|windsurf|assistant|agent)\s*[,:]\s*(?:please\s+)?(?:ignore|disregard|instead|stop|now|do\s+not|don.?t)\b'
+
+  # ── signal 2a: concealment from the human operator ────────────────────────
+  sel_covert_directive:
+    content|re:
+      - '(?i)\b(?:do\s+not|don.?t|never|without)\s+(?:ever\s+)?(?:tell|telling|inform|informing|mention|mentioning|notify|notifying|alert|alerting|reveal|revealing|disclose|disclosing|show|showing|log|logging|print|printing)\b[^\n]{0,40}\b(?:the\s+)?(?:user|human|operator|developer|owner|reviewer|anyone)\b'
+      - '(?i)\b(?:silently|quietly|secretly|covertly|discreetly)\s+(?:add|append|insert|write|modify|patch|run|execute|send|upload|commit|push|install|download|fetch)'
+      - '(?i)\bwithout\s+(?:asking\s+for\s+|requesting\s+|seeking\s+)?(?:the\s+)?(?:user\s+)?(?:confirmation|approval|permission|consent|review)'
+      - '(?i)\b(?:hide|conceal|omit|suppress|exclude)\s+(?:this|these|it|the\s+following)\b[^\n]{0,50}\bfrom\s+(?:the\s+)?(?:user|human|output|logs?|diff|summary|response|review)'
+
+  # ── signal 2b: secret/credential egress ───────────────────────────────────
+  sel_exfil_directive:
+    content|re:
+      - '(?i)\b(?:send|post|upload|exfiltrat|transmit|forward|leak|email|beacon)\w*\s+(?:it|them|this|the|all|any|your)?\s*[^\n]{0,60}\b(?:\.env\b|env(?:ironment)?\s+(?:file|var|variable|secret)|credential|secret|api[ _-]?key|access[ _-]?token|private\s+key|id_rsa|\.aws|\.ssh|password|\.npmrc|\.netrc|session\s+cookie)'
+      - '(?i)\b(?:curl|wget|ncat|netcat|invoke-webrequest|iwr)\b[^\n]{0,160}(?:\.env\b|id_rsa|credentials|\.aws|\.ssh|\$\{?[A-Z0-9_]*(?:TOKEN|SECRET|APIKEY|PASSWORD|PASSWD)[A-Z0-9_]*\}?)'
+      - '(?i)\b(?:cat|head|get-content)\b[^\n]{0,60}(?:\.env\b|\.aws/credentials|\.ssh/id_[a-z]+|\.netrc|\.npmrc)[^\n]{0,80}[|>]'
+      - '(?i)\bbase64\b[^\n]{0,60}\|\s*(?:curl|wget|ncat|netcat|openssl)'
+
+  # ── signal 2c: persistence into shell, VCS, CI or agent configuration ─────
+  sel_persistence_directive:
+    content|re:
+      - '(?i)\b(?:add|append|insert|write|inject|place|drop)\b[^\n]{0,100}(?:~/\.(?:bashrc|zshrc|bash_profile|profile|zprofile)|\.ssh/authorized_keys|/etc/(?:cron|sudoers|passwd)|\.git/hooks/|\.github/workflows/|crontab|launchagents|claude_desktop_config\.json|\.claude/settings|\.cursorrules|\.cursor/mcp\.json|mcp\.json|\.vscode/settings\.json|claude\.md|agents\.md|copilot-instructions)'
+      - '(?i)\b(?:curl|wget)\b[^\n]{0,120}\|\s*(?:sudo\s+)?(?:bash|sh|zsh|python[0-9.]*|node|perl|ruby)\b'
+      - '(?i)(?:/dev/tcp/[0-9a-z.]|\breverse\s+shell\b|\bchmod\s+(?:\+s|4755|777)\b)'
+
+  # ── FP suppression: security-detection authoring in this very repo ────────
+  filter_rule_authoring:
+    content|contains|all:
+      - 'logsource:'
+      - 'detection:'
+      - 'condition:'
+
+  # ── FP suppression: threat-taxonomy annotated material ────────────────────
+  filter_security_taxonomy:
+    content|re:
+      - '(?i)(?:attack\.t1[0-9]{3}|atlas\.aml\.t[0-9]{4}|owasp\.(?:llm|asi)[0-9]{2}|mitre\s+att&ck|mitre\s+atlas|falsepositives\s*:)'
+
+  # ── FP suppression: red-team corpora and evaluation harness fixtures ──────
+  filter_eval_dataset:
+    content|re:
+      - '(?i)"(?:jailbreak|injection|adversarial|attack|malicious|payload)_(?:prompt|payload|input|case|id|text|name)"\s*:'
+      - '(?i)"expected_(?:verdict|label|result|output|action|detection)"\s*:'
+      - '(?i)\b(?:harmbench|advbench|promptbench|jailbreakbench|agentdojo|injecagent|garak|pyrit)\b'
+
+  # ── FP suppression: defensive/educational prose about the technique ───────
+  filter_defensive_prose:
+    content|re:
+      - '(?i)\b(?:detect\w*|mitigat\w+|defen[cs]\w*|prevent\w*|protect\w*|harden\w*|taxonom\w+|research\w*|benchmark\w*)\b[^\n]{0,60}\bprompt[ _-]?injection\b'
+      - '(?i)\bprompt[ _-]?injection\b[^\n]{0,60}\b(?:detect\w*|mitigat\w+|defen[cs]\w*|prevention|protection|countermeasure|benchmark|taxonomy|research)\b'
+
+  condition: >
+    sel_event and sel_hijack_marker and
+    (sel_covert_directive or sel_exfil_directive or sel_persistence_directive)
+    and not (filter_rule_authoring or filter_security_taxonomy or
+    filter_eval_dataset or filter_defensive_prose)
+
+falsepositives:
+  - Security engineers authoring or editing Sigma/YARA detection content that quotes injection phrases alongside curl/credential examples (suppressed by filter_rule_authoring and filter_security_taxonomy).
+  - Red-team and jailbreak evaluation datasets, LLM guardrail regression fixtures and agent-security benchmarks being read, generated or diffed by the assistant (suppressed by filter_eval_dataset).
+  - Blog posts, threat reports, README and training material that explain prompt injection and include a worked exfiltration example (suppressed by filter_defensive_prose).
+  - Legitimate onboarding docs that address the assistant directly ("Claude: always run make lint before committing") - these carry no covert/exfil/persistence directive and therefore do not satisfy the second required signal.
+  - Dotfile bootstrap or provisioning scripts that append to ~/.bashrc or install shell hooks - these carry no instruction-hijack marker and therefore do not satisfy the first required signal.
+
+action: report
