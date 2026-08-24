@@ -1,0 +1,122 @@
+title: Unverified MCP Server Package Acquisition (verifyfirst-mcp)
+id: 7f3c1d92-4b0e-4a7d-9c68-2e5a1b4d8f03
+status: experimental
+level: medium
+description: |
+  Detects an agent-spawned process that installs, adds, or launches the PyPI
+  distribution "verifyfirst-mcp" (and its PEP-503 normalisation variants:
+  verify_first_mcp, VerifyFirst.MCP, ...), a package whose published name and
+  description advertise verification/registry functionality while masking its
+  actual behaviour.
+
+  Scope and honesty about the signal: the engine has no package-supply-chain
+  telemetry. There is no `package_install` event type, no PACKAGE_DEPENDENCY
+  edge and no ACQUIRED_CAPABILITY edge, so the deceptive *listing* itself
+  (name/description mismatch on the index) cannot be observed at all. The
+  earliest — and only — moment this distribution becomes visible to the
+  engine is the `execute_process` command line that fetches, resolves, or
+  runs it. This rule therefore fires on the acquisition/launch command line
+  rather than on the distribution metadata, and is deliberately named after
+  the single known-bad distribution instead of attempting a generic
+  "deceptive package" heuristic, which is not expressible from a command line
+  without an unacceptable false-positive rate.
+
+  This is not covered by 43a31200-6894-5c9b-a187-1cd0a11af2b3 (MCP Tool
+  Description Changed After Approval): that rule diffs the manifest of a
+  server already inside the trust graph at runtime. This rule fires before
+  any MCP handshake exists, on the process that brings the distribution onto
+  the host.
+
+  Two selections must both hold: the normalised distribution name must appear
+  in the command line, AND the command line must be an acquisition
+  (pip/pipx/uv/uvx/poetry/pdm/conda/mcp add/git clone) or a direct launch of
+  the package entry point or module. Read-only inspection, removal, and
+  supply-chain scanning of the same string are filtered out; the filters are
+  anchored to a single uncompounded command so that a chained payload
+  (`echo x; verifyfirst-mcp`) cannot use them as a suppression gadget.
+
+  Report-only by design: the correct response is provenance review of the
+  distribution, not interruption of a developer or an IR analyst who may be
+  handling it deliberately.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The distribution name, PEP-503 normalised, on a spawned command line ──
+  sel_event_pkg:
+    event_type: execute_process
+    content|re: '(?i)\bverify[-_.]?first[-_.]?mcp\b'
+
+  # ── Acquisition: something is fetching / resolving / registering it ───────
+  sel_acquire:
+    content|re:
+      - '(?i)\bpip[23]?\b[^\n]{0,200}\binstall\b'
+      - '(?i)\bpipx\s+(install|run)\b'
+      - '(?i)\buv\b[^\n]{0,200}\b(add|install|sync)\b'
+      - '(?i)\b(poetry|pdm|hatch|rye)\b[^\n]{0,160}\badd\b'
+      - '(?i)\bconda\s+install\b'
+      - '(?i)\bmcp\s+(add|install)\b'
+      - '(?i)\bgit\s+clone\b[^\n]{0,200}verify[-_.]?first[-_.]?mcp'
+
+  # ── Launch: the entry point or module is being executed directly ─────────
+  sel_launch:
+    content|re:
+      - '(?i)^\s*(sudo\s+)?([^\s]{0,160}/)?verify[-_.]?first[-_.]?mcp([\s"]|$)'
+      - '(?i)(^|\s)-m\s+verify[-_.]?first[-_.]?mcp\b'
+      - '(?i)\buvx\b[^\n]{0,120}verify[-_.]?first[-_.]?mcp\b'
+
+  # ── Removal / remediation is not acquisition ─────────────────────────────
+  filter_removal:
+    content|re:
+      - '(?i)\buninstall\b'
+      - '(?i)\b(poetry|pdm|conda|pipx|uv\s+tool)\s+remove\b'
+
+  # ── Read-only inspection of the string by a human or an editor.
+  #    Anchored and terminated at the first ; & | so a chained payload
+  #    cannot hide behind a leading echo/grep.
+  filter_inspection:
+    content|re:
+      - '(?i)^\s*(sudo\s+)?(grep|egrep|fgrep|rg|ag|ack|awk|sed|cat|head|tail|less|more|diff|find|jq|sort|uniq|wc|column|open|code|vim|nvim|nano|bat)\b[^\n;&|]*$'
+      - '(?i)^\s*(sudo\s+)?(echo|printf)\b[^\n;&|]*$'
+
+  # ── Supply-chain / SCA tooling reasoning about the package, and pip
+  #    subcommands that resolve metadata without installing.
+  filter_tooling:
+    content|re:
+      - '(?i)\b(pip-audit|osv-scanner|syft|grype|trivy|bandit|semgrep|deptry|pipdeptree|cyclonedx-py)\b'
+      - '(?i)\bsafety\s+(check|scan)\b'
+      - '(?i)\bpip[23]?\s+(show|index|list|freeze|check|download)\b'
+      - '(?i)\b--dry-run\b'
+
+  condition: sel_event_pkg and (sel_acquire or sel_launch) and not (filter_removal or filter_inspection or filter_tooling)
+
+falsepositives:
+  - Malware analyst or IR engineer deliberately installing the distribution in
+    an isolated sandbox or container to reverse it. Expected, and the reason
+    this rule reports rather than blocks.
+  - A CI or scheduled rebuild replaying a lockfile that pinned the package
+    before it was known bad. Still worth reporting — the artefact is entering
+    a build.
+  - An internal fork or vendored copy that normalises to the same PEP-503
+    name being installed from a private index. Provenance review will resolve
+    it; the rule intentionally does not allowlist any index host.
+  - Removal, `pip show`, SCA scanners and read-only greps of the string, all
+    of which are suppressed by the filter selections.
+  - Documentation or tutorial text pasted into a shell as an echo/printf of a
+    single uncompounded command, suppressed by filter_inspection.
+action: report
