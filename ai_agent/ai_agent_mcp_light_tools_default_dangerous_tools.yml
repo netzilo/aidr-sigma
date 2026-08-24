@@ -1,0 +1,108 @@
+title: MCP Server Launch - light-tools Default Dangerous Toolset
+id: 7b3c1f5a-9d24-4e6b-8f01-2c5a7d9e4b38
+status: experimental
+level: medium
+description: |
+  Detects a process spawn that launches the @factor-i-o/light-tools MCP server.
+
+  This package registers file-access, shell-execution, SSH/SCP and service-log tools
+  and enables ALL of them by default unless the operator explicitly restricts the
+  tool set. Any agent that connects to a default-configured instance inherits
+  arbitrary file read/write, arbitrary command execution and remote-host access with
+  no authorization boundary between the model and the host.
+
+  The rule fires on the single execute_process event that starts the server
+  (npx / bunx / pnpm-yarn dlx / deno, a node invocation of the installed module, a
+  direct exec of an entrypoint inside the package, or the node_modules/.bin shim).
+  Command lines that merely install, inspect, test or document the package are
+  filtered out, as are launches that carry an explicit tool-restriction or
+  read-only flag - in that case the "dangerous by default" condition this rule
+  reports on does not hold.
+
+  Report-only: launching this server is a posture/configuration finding, not proof
+  of compromise. Escalate to an inventory review of which agents can reach the
+  server's transport.
+author: Haibo
+date: "2026-03-18"
+references:
+  - https://www.npmjs.com/package/@factor-i-o/light-tools
+  - https://modelcontextprotocol.io/docs/concepts/tools
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.execution
+  - attack.t1059
+  - owasp.llm03
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_launch_content:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:npx|bunx|dlx|deno)\b[^\n]{0,300}@factor-i-o/light-tools'
+      - '(?i)\bnode\b[^\n]{0,300}@factor-i-o/light-tools/'
+      - '(?i)@factor-i-o/light-tools/(?:dist|build|bin|lib|src|server)/[^\s"]{0,160}\.(?:js|mjs|cjs)\b'
+      - '(?i)node_modules/\.bin/light-tools\b'
+  sel_launch_cmd:
+    event_type: execute_process
+    command|re:
+      - '(?i)\b(?:npx|bunx|dlx|deno)\b[^\n]{0,300}@factor-i-o/light-tools'
+      - '(?i)\bnode\b[^\n]{0,300}@factor-i-o/light-tools/'
+      - '(?i)@factor-i-o/light-tools/(?:dist|build|bin|lib|src|server)/[^\s"]{0,160}\.(?:js|mjs|cjs)\b'
+      - '(?i)node_modules/\.bin/light-tools\b'
+
+  # ── package management / provisioning, not activation ──────────────────────
+  filter_pkg_mgmt_content:
+    content|re:
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,80}\b(?:install|uninstall|add|remove|ci|view|info|search|audit|why|outdated|update|upgrade|pack|publish|link|dedupe|cache)\b'
+  filter_pkg_mgmt_cmd:
+    command|re:
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,80}\b(?:install|uninstall|add|remove|ci|view|info|search|audit|why|outdated|update|upgrade|pack|publish|link|dedupe|cache)\b'
+
+  # ── read-only inspection, test harnesses, help probes, docs paths ──────────
+  filter_readonly_context_content:
+    content|re:
+      - '(?i)\b(?:grep|rg|ripgrep|cat|bat|less|head|tail|strings)\b'
+      - '(?i)\bgit\b[^\n]{0,40}\b(?:grep|log|show|diff|blame)\b'
+      - '(?i)\b(?:jest|mocha|vitest|playwright|cypress)\b'
+      - '(?i)@factor-i-o/light-tools/(?:tests?|__tests__|spec|examples?|docs?|fixtures?)/'
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,40}\b(?:test|lint|typecheck|build)\b'
+      - '(?i)(?:^|\s)--(?:help|version|dry-run)\b'
+  filter_readonly_context_cmd:
+    command|re:
+      - '(?i)\b(?:grep|rg|ripgrep|cat|bat|less|head|tail|strings)\b'
+      - '(?i)\bgit\b[^\n]{0,40}\b(?:grep|log|show|diff|blame)\b'
+      - '(?i)\b(?:jest|mocha|vitest|playwright|cypress)\b'
+      - '(?i)@factor-i-o/light-tools/(?:tests?|__tests__|spec|examples?|docs?|fixtures?)/'
+      - '(?i)\b(?:npm|pnpm|yarn|bun)\b[^\n]{0,40}\b(?:test|lint|typecheck|build)\b'
+      - '(?i)(?:^|\s)--(?:help|version|dry-run)\b'
+
+  # ── operator explicitly narrowed or disabled the toolset ───────────────────
+  filter_hardened_content:
+    content|re:
+      - '(?i)--(?:read-only|readonly|safe-mode|no-shell|no-exec|no-ssh|no-file|disable-shell|disable-exec|disable-ssh|disable-file|disable-tools|disabled-tools)\b'
+      - '(?i)--(?:allowed-tools|allow-tools|enabled-tools|enable-only|tools)[= ][^\s-]'
+      - '(?i)\bLIGHT_TOOLS_(?:DISABLE|DISABLED_TOOLS|ALLOWED_TOOLS|ALLOWLIST|READ_ONLY|SAFE_MODE)=[^\s]'
+  filter_hardened_cmd:
+    command|re:
+      - '(?i)--(?:read-only|readonly|safe-mode|no-shell|no-exec|no-ssh|no-file|disable-shell|disable-exec|disable-ssh|disable-file|disable-tools|disabled-tools)\b'
+      - '(?i)--(?:allowed-tools|allow-tools|enabled-tools|enable-only|tools)[= ][^\s-]'
+      - '(?i)\bLIGHT_TOOLS_(?:DISABLE|DISABLED_TOOLS|ALLOWED_TOOLS|ALLOWLIST|READ_ONLY|SAFE_MODE)=[^\s]'
+
+  condition: 1 of sel_* and not 1 of filter_*
+falsepositives:
+  - Platform or DevOps engineers intentionally running the server in a sandbox or
+    container to evaluate it; the launch is real but authorised.
+  - CI jobs that boot the server as a fixture for integration tests without using a
+    recognised test runner name or an npm/pnpm/yarn "test" script (the runner and
+    script-name filters miss bespoke harnesses).
+  - A wrapper script that hardens the server through a config file rather than a
+    CLI flag or LIGHT_TOOLS_* environment variable - the toolset is restricted but
+    the command line looks default.
+  - A launch whose command line happens to include a path segment matching one of
+    the inspection binaries (e.g. /opt/cat-tools/) would be suppressed, so the
+    inverse false-negative also exists.
+action: report
