@@ -1,0 +1,278 @@
+title: Chat Template Role-Confusion Reaching Process Execution
+id: 7f3c1e64-9b2a-4d51-8e07-2c6b4a9f10d3
+status: experimental
+level: high
+description: |
+  Detects the observable tail of a Phantom-style structural template injection
+  (Automating Agent Hijacking via Structural Template Injection): chat-template
+  role delimiters (ChatML <|im_start|>role, Llama <|start_header_id|>role /
+  <<SYS>>, Gemma <start_of_turn>, Qwen <tool_response>, harmony <|channel|>)
+  appearing inside a command line that an agent-owned process actually executed.
+
+  The engine has no telemetry for chat-template parsing, context retrieval or
+  role assignment - there is no INJECTED_PROMPT, CONFUSED_ROLE or
+  RETRIEVED_POISONED_CONTENT edge kind, and no template_parsing or
+  context_retrieval event type. This rule therefore does NOT claim to detect the
+  Template Autoencoder search or the role-confusion event itself. It detects the
+  one thing that is instrumented: structured role-delimiter tokens escaping the
+  model context and being carried into an executed command by a process that
+  belongs to the same session as a preceding context acquisition. That is the
+  point where a hijacked context has become a host-level action.
+
+  Anchored on meta[caller_pid] -> proc_instance -> proc_lineage. Session scope is
+  the caller's lineage plus processes spawned by lineage members inside a
+  5-minute window; corroborating stages are queried from the instance-resolved
+  event log scoped to those pids only, so nothing is ever attributed across
+  sessions. Report-only: this is a proxy signal for an otherwise unobservable
+  mechanism and must not gate execution.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Prompt-engineering or evaluation harnesses launched by an agent that legitimately pass chat-template strings on the command line (llama.cpp --in-prefix "<|im_start|>user", ollama/vllm template flags, tokenizer unit tests).
+  - Agent-driven grep/rg/git-grep over prompt template files or ChatML fine-tuning datasets (.jsonl records containing <|im_start|> / [INST] markers).
+  - Dataset conversion or prompt-formatting one-liners (python -c, jq, sed) that embed role delimiters as literal arguments.
+  - Security research and red-team tooling reproducing template-injection payloads inside a monitored agent session.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_template_token:
+    content|contains:
+      - '<|im_start|>'
+      - '<|im_end|>'
+      - '<|start_header_id|>'
+      - '<|end_header_id|>'
+      - '<|eot_id|>'
+      - '<|system|>'
+      - '<|assistant|>'
+      - '<|user|>'
+      - '<|tool|>'
+      - '<|tool_call|>'
+      - '<|channel|>'
+      - '<|endoftext|>'
+      - '[INST]'
+      - '[/INST]'
+      - '<<SYS>>'
+      - '<start_of_turn>'
+      - '<end_of_turn>'
+      - '<tool_response>'
+  condition: sel_exec and sel_template_token
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables ─────────────────────────────────────────────────────────────
+  WINDOW_NS = 300000000000   # 5 min - session correlation window (this rule's own)
+  MAX_CMD   = 400
+
+  # Structurally complete role headers / model-specific control tokens.
+  # One of these alone is anomalous inside an executed command line.
+  STRONG_TOKENS = [
+      r"(?i)<\|im_start\|>\s*(system|user|assistant|tool|developer)",
+      r"(?i)<\|start_header_id\|>\s*(system|user|assistant|tool|ipython)",
+      r"(?i)<\|(system|assistant|tool|tool_call|function_call)\|>",
+      r"(?i)<<SYS>>",
+      r"(?i)<start_of_turn>\s*(user|model|system)",
+      r"(?i)<\|channel\|>\s*(analysis|final|commentary)",
+      r"(?i)</?tool_response>",
+  ]
+
+  # Individually weak markers - two distinct ones are required, and only when the
+  # exec is attributable to a monitored agent ancestor.
+  WEAK_TOKENS = [
+      r"<\|im_end\|>",
+      r"<\|eot_id\|>",
+      r"<\|end_header_id\|>",
+      r"<\|user\|>",
+      r"\[/?INST\]",
+      r"<end_of_turn>",
+      r"<\|endoftext\|>",
+      r"(?i)###\s*(system|instruction|assistant|human)\s*:",
+  ]
+
+  CTX_HINT = ["prompt", "context", "template", "chatml", "rag", "corpus",
+              "index", "retriev", "memory", "knowledge", "embedding"]
+
+  def clip(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def match_any(cmd, pats):
+      out = []
+      for p in pats:
+          m = re.find(p, cmd)
+          if m != None:
+              out.append(m)
+      return out
+
+  def ctx_hint(path):
+      p = path.lower()
+      for h in CTX_HINT:
+          if h in p:
+              return True
+      return False
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def exec_edge(inst, ts, cmdline):
+      parent = inst.get("parent_path", "")
+      src = parent if parent != "" else inst.get("actor_path", "")
+      return {
+          "from":     "process://" + src,
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+          "cmdline":  clip(cmdline, MAX_CMD),
+      }
+
+  def run():
+      # 1 ── relevance gate: pure string checks on meta, no graph / log calls
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      quick = False
+      for t in ["<|", "[INST", "[/INST", "<<SYS", "<start_of_turn",
+                "<end_of_turn", "<tool_response", "</tool_response"]:
+          if t in cmd:
+              quick = True
+      if not quick:
+          return "allow"
+
+      strong = match_any(cmd, STRONG_TOKENS)
+      weak   = match_any(cmd, WEAK_TOKENS)
+      agent  = meta.get("agent_name", "")
+
+      # High-specificity anchor: a complete role header, or two distinct weak
+      # markers under a monitored agent. Anything less is developer noise.
+      if len(strong) == 0 and len(weak) < 2:
+          return "allow"
+      if len(strong) == 0 and agent == "":
+          return "allow"
+
+      # 2 ── anchor on the exact triggering instance
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      ev_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          # degraded: the create row has not landed - never guess attribution
+          return {
+              "action": "report",
+              "reason": "Chat-template role delimiters in an executed command line " +
+                        "(attribution degraded, pid " + str(cp) + "): " + clip(cmd, MAX_CMD),
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      # 3 ── session scope: lineage pids + processes they spawned in-window
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      since = ev_ts - WINDOW_NS
+      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ev_ts, limit=2000)
+      for i in range(2):
+          for e in spawns:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = True
+
+      # 4 ── corroborating stage: context acquisition by a SESSION instance only
+      fetch_ev = None
+      for pid in session:
+          if pid == "":
+              continue
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              since_ns=since, until_ns=ev_ts, limit=25)
+          if rows:
+              fetch_ev = rows[0]
+              break
+
+      read_ev = None
+      if fetch_ev == None:
+          for pid in session:
+              if pid == "":
+                  continue
+              # READ_FILE is high volume - always pid-scoped and windowed
+              rows = query_events(kind="READ_FILE", actor_pid=int(pid),
+                                  since_ns=since, until_ns=ev_ts, limit=200)
+              for r in rows:
+                  if ctx_hint(r.get("path", "")):
+                      read_ev = r
+                      break
+              if read_ev != None:
+                  break
+
+      # 5 ── kill chain, rooted at the session owner
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+
+      if fetch_ev != None:
+          who = fetch_ev.get("actor_path", "?").split("/")[-1]
+          dst = fetch_ev.get("host", "?") + fetch_ev.get("path", "")
+          chain.append(step(ev_edge(fetch_ev),
+                            stage_id="Context Acquisition",
+                            stage_desc="session instance " + who +
+                                       " retrieved external context from " + clip(dst, 160)))
+          stages.append("retrieval:" + fetch_ev.get("host", "?"))
+      elif read_ev != None:
+          chain.append(step(ev_edge(read_ev),
+                            stage_id="Context Acquisition",
+                            stage_desc="session instance read a prompt/context source: " +
+                                       clip(read_ev.get("path", "?"), 160)))
+          stages.append("context-read")
+
+      toks = ", ".join(strong + weak)
+      toks = re.replace(r"\s+", toks, " ")
+      chain.append(step(exec_edge(inst, ev_ts, cmd),
+                        stage_id="Role-Confusion Execution",
+                        stage_desc="chat-template role delimiters carried into an executed " +
+                                   "command line [" + clip(toks, 200) + "]"))
+      stages.append("template-tokens:" + str(len(strong)) + "S/" + str(len(weak)) + "W")
+
+      conf = "medium"
+      if len(strong) > 0 and (fetch_ev != None or read_ev != None):
+          conf = "high"
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin = " -> ".join(names)
+
+      print("structural template injection surfaced (" + conf + ") via " + lin +
+            " | " + ", ".join(stages))
+
+      return {
+          "action": "report",
+          "reason": "Structural chat-template injection surfaced in an agent session " +
+                    "(confidence " + conf + ") - " + ", ".join(stages) +
+                    " | lineage: " + lin + " | cmd: " + clip(cmd, MAX_CMD),
+          "chain":  chain,
+      }
+
+  result = run()
