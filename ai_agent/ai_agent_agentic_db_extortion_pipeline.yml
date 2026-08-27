@@ -1,0 +1,135 @@
+title: Agentic DB Extortion Pipeline
+id: 7f3c1d0a-5b2e-4a41-9c86-2d4b9f0e6a13
+status: experimental
+level: high
+description: |
+  Detects the two concrete, machine-observable primitives of agent-driven database
+  extortion (JADEPUFFER-class) inside a single spawned command line:
+
+    Branch A - inline exfil-extortion pipeline: a database dump utility whose output is
+    piped through symmetric encryption / password-protected archiving AND out over an
+    ad-hoc network transport (curl, nc/ncat, socat, telnet, httpie, /dev/tcp, an inline
+    interpreter socket) in one shell invocation. All three stages must appear in the same
+    command line. Operator-run backups that legitimately encrypt and ship off-host use a
+    file sink or a purpose-built transport/backup agent; they do not chain dump -> crypt
+    -> raw socket in a single line.
+
+    Branch B - destructive database extortion: a database client invocation that both
+    destroys data (DROP DATABASE/SCHEMA, TRUNCATE TABLE, db.dropDatabase(), FLUSHALL)
+    AND carries a ransom artefact or ransom-note string in the same command line.
+
+  SCOPE HONESTY (answering triage): this rule makes no claim to detect "autonomy" or
+  "AI agency" - there is no attribution signal for that in the engine, and the proposed
+  RECONNAISSANCE / LATERAL_MOVEMENT / PRIVILEGE_ESCALATION / DATA_EXFILTRATION edges and
+  the exfiltrate_data event type do not exist in the schema. It detects the one stage of
+  the narrated kill chain that IS expressible as a single high-specificity execute_process
+  content signature. The 'connects' event carries only host/port/protocol (no body), so a
+  content-only rule cannot responsibly use it; whether the operator was a human, a script
+  or an agent orchestrator is a correlation question for the behaviour graph, not for this
+  rule. Report-only by design.
+author: Haibo
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1486/
+  - https://attack.mitre.org/techniques/T1485/
+  - https://attack.mitre.org/techniques/T1048/
+  - https://atlas.mitre.org/techniques/AML.T0025
+tags:
+  - attack.impact
+  - attack.t1486
+  - attack.t1485
+  - attack.exfiltration
+  - attack.t1048
+  - atlas.aml.t0025
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_event:
+    event_type: execute_process
+
+  # ---- Branch A stage 1: a real database dump utility ------------------------
+  sel_db_dump:
+    content|re:
+      - '(?i)\b(?:mysqldump|mariadb-dump|pg_dump|pg_dumpall|mongodump|mongoexport|innobackupex|mariabackup|clickhouse-backup)\b'
+      - '(?i)\bsqlite3\b[^|]{0,200}\.dump\b'
+      - '(?i)\b(?:psql|mysql|mariadb)\b[^|]{0,300}\bcopy\b[^|]{0,200}\bto\s+stdout\b'
+
+  # ---- Branch A stage 2: piped straight into an ad-hoc network transport ------
+  # Deliberately EXCLUDES ssh/scp/sftp/rclone/aws/gsutil/az: those are the shapes
+  # legitimate encrypted off-host backups take.
+  sel_pipe_egress:
+    content|re:
+      - '\|\s*(?:[^\s|]*/)?(?i:curl|nc|ncat|netcat|socat|telnet|httpie)\b'
+      - '\|\s*(?:[^\s|]*/)?(?i:wget)\b[^|]{0,200}--post'
+      - '(?i)>\s*/dev/(?:tcp|udp)/'
+      - '\|\s*(?:[^\s|]*/)?(?i:python3?|perl|ruby)\b[^|]{0,300}(?i:socket|urllib|requests\.post|Net::HTTP)'
+
+  # ---- Branch A stage 3: symmetric encryption / password-protected archive ----
+  # Flag letters are case-SENSITIVE on purpose (7z -p, zip -P, gpg -c).
+  sel_pipe_crypto:
+    content|re:
+      - '\|\s*(?:[^\s|]*/)?(?i:openssl)\s+(?:enc|aes-256-cbc|aes-128-cbc|chacha20)\b'
+      - '\|\s*(?:[^\s|]*/)?(?i:gpg2?)\b[^|]{0,200}(?:--symmetric|--passphrase|--batch\s+-c\b|\s-c\s)'
+      - '\|\s*(?:[^\s|]*/)?7z[ar]?\s+a\b[^|]{0,200}\s-p'
+      - '\|\s*(?:[^\s|]*/)?(?i:zip)\b[^|]{0,200}\s-P\s'
+      - '\|\s*(?:[^\s|]*/)?(?i:age|rage)\b[^|]{0,200}(?:\s-p\b|\s-r\s)'
+      - '\|\s*(?:[^\s|]*/)?(?i:ccrypt|mcrypt)\b'
+
+  # ---- Branch B: destructive DB extortion in one invocation ------------------
+  sel_db_client:
+    content|re: '(?i)\b(?:mysql|mariadb|psql|mongosh|mongo|redis-cli|sqlcmd|clickhouse-client)\b'
+
+  sel_db_destroy:
+    content|re:
+      - '(?i)\b(?:drop\s+(?:database|schema)|truncate\s+table|flushall|flushdb)\b'
+      - '(?i)\bdb\.dropdatabase\s*\('
+
+  sel_ransom_marker:
+    content|re:
+      - '(?i)\byour\s+(?:data|databases?|files|backups?)\s+(?:have|has)\s+been\s+(?:encrypted|stolen|downloaded|exfiltrated|locked|deleted)'
+      - '(?i)\b(?:recover|restore)[_-](?:your[_-])?(?:data|db|database|files)\b'
+      - '(?i)\bread[_-]?me[_-]?(?:to[_-]?)?(?:restore|recover|decrypt)\b'
+      - '(?i)\bhow[_ -]?to[_ -]?(?:decrypt|restore|recover)\b'
+      - '(?i)\b(?:btc|bitcoin|monero|xmr)\s+(?:address|wallet|payment)\b'
+      - '(?i)\bpay\s+(?:the\s+)?ransom\b'
+
+  # ---- Filters: inspection / documentation / script-authoring contexts -------
+  # None of these reference a host, domain or path. Each suppressed case still
+  # produces its own execute_process event when the command is actually run.
+  filter_help:
+    content|re: '(?:^|\s)--(?i:help|version)(?:\s|$)'
+
+  filter_docgen:
+    content|re:
+      - '(?i)\b(?:echo|printf)\s+["''][^"'']{0,400}(?:mysqldump|pg_dump|mongodump|drop\s+database)'
+      - '<<\s*[-]?[''"]?(?i:eof|eot|sql|script)\b'
+
+  filter_search:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ack|ag|man|less|awk|sed)\b[^|]{0,200}(?:mysqldump|pg_dump|mongodump|dropdatabase|drop\s+database)'
+
+  condition: >
+    sel_event and (
+      (sel_db_dump and sel_pipe_egress and sel_pipe_crypto) or
+      (sel_db_client and sel_db_destroy and sel_ransom_marker)
+    ) and not (filter_help or filter_docgen or filter_search)
+
+falsepositives:
+  - A DBA or SRE one-liner that dumps a database, encrypts it with openssl/gpg/7z and
+    pushes it to an internal collector with curl or nc in a single pipeline. Rare (the
+    common shapes - file sink, ssh/scp, rclone, cloud CLI - are excluded from the egress
+    set), and report-only, but this is the main legitimate collision.
+  - Purple-team or detection-engineering exercises intentionally replaying JADEPUFFER-style
+    dump-encrypt-exfil or drop-and-ransom-note commands.
+  - A migration or teardown script that drops a schema in an environment where a database,
+    table or output file is genuinely named something like restore_data or recover_db -
+    branch B additionally requires a ransom-note or payment string, so this only collides
+    when both appear in the same command line.
+  - Incident-response tooling that runs a database dump through encryption before shipping
+    evidence off a compromised host.
+  - Documentation generation, heredoc script authoring, and grep/man over backup scripts -
+    suppressed by filter_docgen / filter_search; the eventual execution of the generated
+    script still produces its own matching execute_process event.
+action: report
