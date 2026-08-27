@@ -1,0 +1,119 @@
+title: Financial MCP Server Launched With Inline Secrets Or Unattended Write Flags
+id: 7b3d1c2e-9a54-4f61-b8de-0c2a5f4e17d9
+status: experimental
+level: medium
+description: |
+  Fires on a single execute_process event where an agent (or a shell under an agent)
+  spawns the @dfm-fi/agent MCP server -- an npm package that exposes live DFM v2
+  financial write operations (launch, deposit, redemption, management) as agent-callable
+  tools -- AND the same command line either:
+    (a) carries literal signing/API credential material in argv, or
+    (b) combines a state-changing financial verb with an unattended/force/auto-approve
+        flag that removes the human confirmation step.
+
+  This rule deliberately does NOT claim to detect prompt injection against the server.
+  The triage objection is correct: the reported narrative is conditional, has no PoC,
+  no CVE and no demonstrated injection vector, and "a write-capable MCP server is
+  dangerous if the agent is compromised" is true of most tool-calling integrations.
+  So the rule detects the two *concrete, observable preconditions* that turn that generic
+  risk into a real finding, both verifiable from one command line:
+    1. Credential exposure: a private key / mnemonic / API token passed in argv is
+       world-readable via ps, /proc/<pid>/cmdline and shell history. That is a fact,
+       not a hypothesis, and it is the material that would let a hijacked agent move funds.
+    2. Removed human-in-the-loop: a financial verb plus --force / --auto-approve /
+       --non-interactive / --yolo means an unvalidated agent input reaches the live API
+       with no confirmation gate.
+  Neither branch fires on a plain `npx -y @dfm-fi/agent` launch that reads its secrets
+  from the environment and keeps confirmation on -- that is the safe configuration and
+  it stays silent.
+
+  Scope note: ACQUIRED_SKILL is graph-only and never a triggering edge, and there is no
+  `api_call` event type in the engine, so the report's framing cannot be expressed as a
+  triggering detection. execute_process is the one live surface where this package's
+  invocation is observable in a single event. HTTP_REQUEST correlation to the live DFM
+  API is left to graph-traversal rules; this is the content-only, spawn-time precondition.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://www.npmjs.com/package/@dfm-fi/agent
+  - https://attack.mitre.org/techniques/T1552/
+  - https://attack.mitre.org/techniques/T1657/
+  - https://genai.owasp.org/llmrisk/llm062025-excessive-agency/
+tags:
+  - attack.credential-access
+  - attack.t1552
+  - attack.impact
+  - attack.t1657
+  - atlas.aml.t0055
+  - atlas.aml.t0053
+  - owasp.llm02
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Anchor: the exact scoped package must appear in the spawned command line ──
+  # Matches `npx @dfm-fi/agent`, `npx -y @dfm-fi/agent@2.1.0` and the resolved
+  # `node .../node_modules/@dfm-fi/agent/dist/index.js` form. Bounded on the right so
+  # a different package such as @dfm-fi/agent-docs does not satisfy the anchor.
+  sel_dfm_mcp:
+    event_type: execute_process
+    content|re: '(?i)@dfm-fi/agent(?:@[0-9a-z.+-]+)?(?:["''\s/]|$)'
+
+  # ── Branch A: literal signing / API credential material in argv ──────────────
+  sel_secret_argv:
+    content|re:
+      - '(?i)--?(?:private|signer|wallet|secret|admin|owner)[-_]?key[=:\s]+["'']?[^\s"'']{16,}'
+      - '(?i)--?(?:mnemonic|seed[-_]?phrase|recovery[-_]?phrase)[=:\s]+["'']?[^\s"'']{12,}'
+      - '(?i)\b[a-z0-9_]{0,24}(?:private_key|secret_key|signer_key|mnemonic|seed_phrase)=[^\s"'']{16,}'
+      - '(?i)(?:priv(?:ate)?[-_]?key|signer|wallet|secret|mnemonic)[^\s"'']{0,12}[=:\s]+["'']?0x[0-9a-f]{64}\b'
+      - '(?i)--?(?:api[-_]?key|api[-_]?secret|auth[-_]?token|access[-_]?token)[=:\s]+["'']?[a-z0-9_.-]{24,}'
+
+  # ── Branch B part 1: a state-changing financial operation on the command line ──
+  sel_write_op:
+    content|re: '(?i)(?:^|[\s"''=:/])(?:launch|deposit|redeem|redemption|withdraw|mint|rebalance|transfer)(?:[-_][a-z]{3,12})?(?:$|[\s"''])'
+
+  # ── Branch B part 2: the human confirmation gate is explicitly removed ────────
+  # `-y` / `--yes` are intentionally absent: `npx -y @dfm-fi/agent` is the normal,
+  # benign install-prompt bypass and including them would fire on every launch.
+  sel_unattended:
+    content|re: '(?i)(?:^|\s)--?(?:force|auto[-_]?approve|auto[-_]?confirm|no[-_]?confirm|skip[-_]?confirm(?:ation)?|non[-_]?interactive|unattended|yolo|dangerously[-_]?skip[-_]?permissions)(?:$|[\s=])'
+
+  # ── FP suppression: the value is a reference or an obvious non-secret ─────────
+  filter_placeholder:
+    content|re:
+      - '(?i)(?:key|secret|token|mnemonic|phrase)["'']?[=:\s]+["'']?(?:\$\{?[a-z_][a-z0-9_]*\}?|%[a-z_][a-z0-9_]*%)'
+      - '(?i)\b(?:placeholder|changeme|change[-_]?me|dummy|redacted|example|sample|fixture|your[-_]?(?:private[-_]?|api[-_]?|secret[-_]?)?key|insert[-_]?your|test[-_]?key|fake[-_]?key|not[-_]?a[-_]?real)\b'
+      - '(?i)0x(?:0{32,}|f{32,}|(?:deadbeef){4,})'
+      - '(?i)x{8,}'
+
+  # ── FP suppression: package metadata inspection and help/version output ───────
+  filter_inspect:
+    content|re:
+      - '(?i)(?:^|[\s/])npm\s+(?:view|info|show|search|pack|audit|ls|list|outdated|docs|repo|why)\b'
+      - '(?i)(?:^|[\s/])(?:yarn|pnpm)\s+(?:info|why|list|outdated|view)\b'
+      - '(?i)(?:^|\s)--(?:help|version|usage)(?:$|[\s=])'
+
+  condition: >
+    sel_dfm_mcp
+    and (sel_secret_argv or (sel_write_op and sel_unattended))
+    and not (filter_placeholder or filter_inspect)
+
+falsepositives:
+  - An operator or deployment script legitimately starting the DFM MCP server in production
+    and passing a real API key or signer key on the command line. This is a true positive of
+    credential-in-argv exposure even when the launch itself is authorised, and should be
+    remediated by moving the value to an environment variable (env-var references such as
+    $DFM_PRIVATE_KEY are already suppressed by filter_placeholder).
+  - Integration or QA harness invoking the server with a funded testnet key literal that does
+    not contain any placeholder token; indistinguishable from a mainnet key on the command
+    line, so it is reported rather than blocked.
+  - CI pipelines that inline a short-lived access token instead of using a secret mount.
+  - A file path or unrelated argument that coincidentally contains a financial verb
+    (e.g. a directory named transfer/) together with a --force flag. Requires the exact
+    scoped package name in the same command line, which makes the coincidence unlikely.
+  - '--dry-run and --simulate invocations are deliberately NOT filtered: a literal key in argv
+    is readable via ps and /proc/<pid>/cmdline regardless of whether the transaction executes,
+    and filtering on a self-declared flag would be trivially spoofable.'
+action: report
