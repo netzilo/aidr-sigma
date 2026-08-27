@@ -1,0 +1,112 @@
+title: Unauthenticated Third-Party Airbnb MCP Server Launch
+id: 3f7c9a1e-2b64-4d0f-9e51-8c6a4b2d7f13
+status: experimental
+level: medium
+description: |
+  Detects an agent host spawning the community/third-party Airbnb MCP server family
+  (hasdata-airbnb-mcp and equivalents) with no credential material anywhere on the
+  command line.
+
+  This package brokers Airbnb data through a hosted API and ships no authentication
+  or authorization wrapper of its own, so any local process that can reach the MCP
+  stdio/SSE endpoint inherits full query capability against that hosted backend
+  without an Airbnb developer account or a per-caller key.
+
+  The engine has no first-class telemetry for "this API call carried no credential"
+  (there is no api_call event, no ACQUIRED_CREDENTIAL edge, no API_ACCESS edge), and
+  the resulting HTTP_REQUEST / connects traffic is indistinguishable from any other
+  outbound call an MCP server makes. The one moment where credential absence IS
+  directly observable in a single event is process launch: execute_process carries
+  the full argv. This rule therefore fires only on that launch, and only when the
+  argv contains no key, token, bearer or authorization material -- i.e. the exact
+  deployment shape described in the advisory. Launches that do carry key material,
+  and all package-management, inspection, help and test invocations, are suppressed.
+
+  This is a deployment-posture finding, not an intrusion alert: it is reported, never
+  blocked, because the same argv is produced by a legitimate operator evaluating the
+  package.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ---- Stage 1: the process being spawned is the third-party Airbnb MCP server ----
+  sel_exec_pkg:
+    event_type: execute_process
+    content|re: '(?i)\b(?:hasdata[-_]?airbnb[-_]?mcp|airbnb[-_]?mcp(?:[-_]?server)?|mcp[-_]?server[-_]?airbnb)\b'
+
+  # ---- Stage 2: it is being RUN (runner, module entrypoint, console script, server flag),
+  #      not merely named in a string ----
+  sel_exec_launch:
+    content|re:
+      - '(?i)\b(?:uvx|pipx|npx|bunx)\b'
+      - '(?i)\buv\s+run\b'
+      - '(?i)\b(?:fastmcp|mcp)\s+run\b'
+      - '(?i)\bpython[0-9.]*\s+(?:-[A-Za-z]+\s+)*-m\s+[A-Za-z0-9_.]*(?:airbnb|hasdata)'
+      - '(?i)\bnode\b[^\n]{0,120}(?:airbnb[-_]?mcp|mcp[-_]?server[-_]?airbnb)'
+      - '(?i)(?:^|[\s"=])(?:[^\s"]*/)?(?:hasdata[-_]?airbnb[-_]?mcp|mcp[-_]?server[-_]?airbnb)(?:\s|"|$)'
+      - '(?i)--(?:transport|stdio|sse|port)\b'
+
+  # ---- Suppression 1: credential material IS present on the launch line.
+  #      This is the "credential absent" discriminator the threat model needs, expressed
+  #      as a negative content condition on the same single event. ----
+  filter_credentialed:
+    content|re:
+      - '(?i)\b[A-Z0-9_]*(?:API[_-]?KEY|APIKEY|ACCESS[_-]?TOKEN|AUTH[_-]?TOKEN|SECRET|CLIENT[_-]?SECRET)\s*=\s*[^\s"]'
+      - '(?i)--(?:api[-_]?key|apikey|key|token|auth|bearer|credentials?|secret)(?:[= ]\s*)[^\s"-]'
+      - '(?i)\bauthorization\s*[:=]\s*(?:bearer|basic|token)\s+\S'
+      - '(?i)\bx-api-key\s*[:=]\s*\S'
+      - '(?i)--(?:env-file|secrets?-file|auth-config)\b'
+
+  # ---- Suppression 2: package management, not deployment ----
+  filter_pkg_mgmt:
+    content|re:
+      - '(?i)\b(?:pip[0-9.]*|uv|pipx|poetry|pdm|conda|npm|pnpm|yarn|bun)\b[^\n]{0,60}?\b(?:install|download|uninstall|remove|show|list|index|search|info|view|add|upgrade|update|cache|wheel|publish)\b'
+      - '(?i)\b(?:docker|podman|nerdctl)\b[^\n]{0,40}?\b(?:build|pull|push)\b'
+
+  # ---- Suppression 3: help / version / dry-run probes ----
+  filter_probe_flags:
+    content|re:
+      - '(?i)(?:^|\s)(?:--help|--version|--dry-run|--check)(?:\s|"|$)'
+      - '(?i)(?:^|\s)-(?:h|V)(?:\s|"|$)'
+
+  # ---- Suppression 4: reading or grepping the package, not running it ----
+  filter_inspect:
+    content|re:
+      - '(?i)\b(?:cat|bat|less|more|head|tail|grep|rg|ag|man|vim|nvim|nano|emacs|code|echo|printf|diff|wc|git|curl|wget)\s'
+      - '(?i)\.(?:md|rst|txt|log)\b'
+
+  # ---- Suppression 5: test / lint harnesses ----
+  filter_test_harness:
+    content|re: '(?i)\b(?:pytest|tox|nox|unittest|coverage|mypy|ruff|flake8|pre-commit)\b'
+
+  condition: >
+    sel_exec_pkg and sel_exec_launch and not (
+      filter_credentialed or filter_pkg_mgmt or filter_probe_flags or
+      filter_inspect or filter_test_harness
+    )
+falsepositives:
+  - Authenticated deployment where the API key is supplied via an already-exported
+    environment variable, a .env file, or a secrets mount rather than on the command
+    line. The argv is then indistinguishable from an unauthenticated launch, so the
+    rule reports it. This is the dominant expected FP and the reason the action is
+    report rather than block.
+  - A developer or platform engineer legitimately evaluating the package in a sandbox
+    or on a workstation before deciding whether to adopt it.
+  - A vendored or forked build that keeps the upstream package/module name while
+    adding its own authentication proxy in front of the hosted API.
+  - Process supervisors (systemd, supervisord, container entrypoints) re-launching an
+    already-approved deployment, producing one report per restart.
+  - A different, unrelated MCP server whose name happens to contain both "airbnb" and
+    "mcp" (the package-name regex is deliberately widened to the whole family).
+action: report
