@@ -1,0 +1,288 @@
+title: Roo Code Workspace Config File Write (instance-resolved)
+id: 6f4c1d92-8a3b-4e57-9c21-b0d7e5a34f18
+status: experimental
+level: high
+description: |
+  Detects an AI coding agent session writing a VS Code multi-root workspace
+  configuration file (*.code-workspace). Roo Code <= 3.25.23 does not apply the
+  same write protections to .code-workspace files as it does to the .vscode
+  folder, so a prompt-injected agent with auto-approved file writes can plant
+  "tasks" / "settings" entries that execute automatically the next time the user
+  reopens the workspace — arbitrary code execution with no further interaction.
+
+  The engine exposes no live file_write event type, so this rule is triggered by
+  execute_process (the agent spawning a write-capable interpreter/utility) and
+  the actual evidence is read back from the instance-resolved event log:
+  WRITE_FILE rows whose path contains ".code-workspace", performed by a process
+  instance belonging to the SAME session as the triggering process.
+
+  Attribution is instance-exact: the rule anchors on meta["caller_pid"],
+  resolves it with proc_instance(), walks proc_lineage() to the owning session
+  root, expands the session with EXECUTE_PROCESS rows whose parent is a session
+  instance, and only then queries WRITE_FILE rows scoped to those
+  (actor_pid, actor_start) pairs. No path-keyed graph walk, no cross-session
+  attribution.
+author: Selhan
+date: "2026-03-05"
+modified: "2026-03-05"
+references:
+  - https://attack.mitre.org/techniques/T1546/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://code.visualstudio.com/docs/editor/workspace-trust
+tags:
+  - attack.persistence
+  - attack.t1546
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Developer explicitly asking the agent to create or edit a multi-root
+    .code-workspace file (adding folders, changing editor settings). This is a
+    legitimate refactor task and will match the anchor stage; the rule is
+    report-only and records the writing instance and lineage so the request can
+    be confirmed against the transcript.
+  - VS Code / Cursor "Save Workspace As..." performed by the user while the
+    editor process happens to be an ancestor of the triggering agent subprocess.
+  - Formatters or linters (prettier, eslint --fix, jq) rewriting the workspace
+    JSON in place during a normal agent-assisted cleanup.
+  - git checkout / stash / merge run by the agent restoring a tracked
+    .code-workspace file, and editor atomic-save temp files
+    (*.code-workspace.tmp / ~ suffixes) which are matched deliberately.
+  - Project scaffolding tools (yeoman, cookiecutter, nx, turborepo generators)
+    that emit a .code-workspace file as part of repo initialisation.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Constants ─────────────────────────────────────────────────────────────
+  WINDOW_NS  = 300000000000          # 5 min — stage clustering window
+  WS_MARKER  = ".code-workspace"     # anchor: workspace config (tasks auto-run)
+  MAX_SPAWNS = 3000
+  MAX_WRITES = 300
+  MAX_PIDS   = 60
+
+  # Write-capable binaries an agent uses to mutate files on disk.
+  # Word-anchored: a bare substring would match "Applications", "widget", etc.
+  WRITER_CMDS = [
+      r"\bbash\b", r"\bsh\b", r"\bzsh\b", r"\bdash\b", r"\bfish\b",
+      r"\bpython[23]?\b", r"\bnode\b", r"\bdeno\b", r"\bbun\b",
+      r"\bperl\b", r"\bruby\b", r"\btee\b", r"\bcat\b", r"\becho\b",
+      r"\bprintf\b", r"\bsed\b", r"\bawk\b", r"\bjq\b", r"\bdd\b",
+      r"\bcp\b", r"\bmv\b", r"\bln\b", r"\btouch\b", r"\binstall\b",
+      r"\bgit\b", r"\bpowershell\b", r"\bpwsh\b", r"\bcmd\.exe\b",
+  ]
+
+  # Corroborating (optional) stages — raise confidence, never required.
+  VSCODE_CONFIG = ["/.vscode/tasks.json", "/.vscode/settings.json",
+                   "/.vscode/launch.json", "/.vscode/extensions.json"]
+  SCRIPT_EXT    = [".sh", ".bash", ".zsh", ".py", ".js", ".mjs", ".cjs",
+                   ".ps1", ".bat", ".cmd", ".command"]
+  INLINE_EXEC   = [r"\bbash\s+-c\b", r"\bsh\s+-c\b", r"\bzsh\s+-c\b",
+                   r"\bpython[23]?\s+-c\b", r"\bnode\s+-e\b",
+                   r"\bperl\s+-e\b", r"\bruby\s+-e\b",
+                   r"\beval\b", r"\bbase64\s+--?d\b",
+                   r"\b-enc(odedcommand)?\b"]
+
+  # ── Pure helpers (no graph / log / fs calls) ──────────────────────────────
+  def cmd_is_writer(low):
+      if WS_MARKER in low:
+          return True
+      for pat in WRITER_CMDS:
+          if re.find(pat, low) != None:
+              return True
+      return False
+
+  def is_relevant_event():
+      # Only execute_process is a live producer for this threat; everything
+      # else is rejected before any traversal happens.
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      return cmd_is_writer(meta.get("content", "").lower())
+
+  def short(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def ev_edge(e, target):
+      t = target
+      if t == "":
+          t = e.get("target_id", "")
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       t,
+          "kind":     e.get("kind", ""),
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  # ── Detection ─────────────────────────────────────────────────────────────
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if cp == 0 or trig_ts == 0:
+          return "allow"
+
+      # Anchor on the exact triggering instance — never a path-keyed node walk.
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"      # degraded attribution; re-fires when the row lands
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since = 0
+      if trig_ts > WINDOW_NS:
+          since = trig_ts - WINDOW_NS
+
+      # ── Session scope: lineage instances + their descendants only ─────────
+      session = {}
+      order   = []
+      for x in lineage:
+          if x["actor_pid"] not in session:
+              session[x["actor_pid"]] = x["actor_start"]
+              order.append(x["actor_pid"])
+
+      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=MAX_SPAWNS)
+      for i in range(2):
+          for e in spawns:
+              if e["parent_pid"] in session and e["actor_pid"] not in session:
+                  session[e["actor_pid"]] = e["actor_start"]
+                  order.append(e["actor_pid"])
+      if len(order) > MAX_PIDS:
+          order = order[:MAX_PIDS]
+
+      # ── Required anchor: *.code-workspace write by a session instance ─────
+      anchor      = None
+      anchor_path = ""
+      extras      = []
+      for pid in order:
+          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
+                              actor_start=int(session[pid]),
+                              since_ns=since, limit=MAX_WRITES)
+          for r in rows:
+              p  = r.get("path", "")
+              if p == "":
+                  continue
+              lp = p.lower()
+              if WS_MARKER in lp:
+                  if anchor == None or int(r.get("ts", "0")) < int(anchor.get("ts", "0")):
+                      anchor      = r
+                      anchor_path = p
+                  continue
+              if len(extras) >= 3:
+                  continue
+              for m in VSCODE_CONFIG:
+                  if m in lp and len(extras) < 3:
+                      extras.append(["Config Co-Write",
+                                     "same session also wrote editor config: " + p,
+                                     r, p])
+              for ext in SCRIPT_EXT:
+                  if lp.endswith(ext) and len(extras) < 3:
+                      extras.append(["Payload Staged",
+                                     "same session wrote executable script: " + p,
+                                     r, p])
+
+      if anchor == None:
+          return "allow"          # no anchor stage → no detection
+
+      w_ts = int(anchor.get("ts", "0"))
+      if w_ts < since or w_ts > trig_ts + WINDOW_NS:
+          return "allow"          # outside this session's clustering window
+
+      # Optional corroboration: inline interpreter execution in this session.
+      inline = None
+      for e in spawns:
+          if e["actor_pid"] not in session:
+              continue
+          c = e.get("cmdline", "").lower()
+          if c == "":
+              continue
+          for pat in INLINE_EXEC:
+              if re.find(pat, c) != None:
+                  inline = e
+                  break
+          if inline != None:
+              break
+
+      # ── Per-instance dedupe so one write reports once, not once per spawn ─
+      key  = anchor.get("actor_pid", "") + ":" + anchor.get("actor_start", "") + ":" + anchor_path
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if key in seen:
+          return "allow"
+      if store_usage()["free"] > 8192:
+          if len(seen) > 400:
+              seen = {}
+          seen[key] = str(trig_ts)
+          store_set("reported", seen)
+
+      # ── Kill chain, rooted at the session owner ──────────────────────────
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      lin_s = " -> ".join(names)
+
+      chain.append(step(ev_edge(anchor, anchor_path),
+                        stage_id="Workspace Config Write",
+                        stage_desc="wrote workspace configuration " + anchor_path +
+                                   " (tasks/settings auto-run on reopen) via " +
+                                   short(anchor.get("actor_path", ""))))
+
+      for x in extras:
+          chain.append(step(ev_edge(x[2], x[3]), stage_id=x[0], stage_desc=x[1]))
+
+      if inline != None:
+          chain.append(step(ev_edge(inline, ""),
+                            stage_id="Inline Interpreter Exec",
+                            stage_desc="session executed inline code: " +
+                                       inline.get("cmdline", "")[:160]))
+
+      # Triggering spawn is taken from meta (never re-queried — it races ingest).
+      trig_edge = {
+          "from":     "process://" + inst.get("parent_path", root.get("actor_path", "")),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trig_ts),
+          "first_ts": str(trig_ts),
+          "last_ts":  str(trig_ts),
+          "cmdline":  meta.get("content", "")[:240],
+      }
+      chain.append(step(trig_edge, stage_id="Session Activity",
+                        stage_desc="triggering spawn in the same session: " + lin_s))
+
+      conf = "single-stage"
+      if len(extras) > 0 or inline != None:
+          conf = "corroborated"
+
+      print("workspace-config write [" + conf + "] path=" + anchor_path +
+            " writer=" + short(anchor.get("actor_path", "")) +
+            " session=" + lin_s)
+
+      return {
+          "action": "report",
+          "reason": "Agent session wrote VS Code workspace configuration " +
+                    anchor_path + " (" + conf + ") — .code-workspace tasks/" +
+                    "settings execute automatically on workspace reopen; " +
+                    "lineage " + lin_s,
+          "chain":  chain,
+      }
+
+  result = run()
