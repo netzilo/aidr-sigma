@@ -1,0 +1,306 @@
+title: PALChain Arbitrary Code Execution (LangChain)
+id: b7e4c1f2-9a3d-4e58-8c61-3f0a2d5b7e94
+status: experimental
+level: high
+description: |
+  Detects the execution stage of the LangChain PALChain arbitrary-code-execution
+  vulnerability (CVE-2023-36258, LangChain <= 0.0.199), where LLM-generated text is
+  handed to Python `exec()` inside PALChain and becomes attacker-controlled code.
+
+  The only observable the engine emits for this threat is `execute_process`, so the
+  rule is instance-resolved: it anchors on `meta["caller_pid"]` of the spawn event,
+  resolves the exact process instance with `proc_instance()`, walks the true spawn
+  chain with `proc_lineage()`, and reads *prior* stages from the event log with
+  `query_events(kind="EXECUTE_PROCESS")` scoped strictly to that one session
+  (lineage PIDs plus processes spawned by those PIDs). Nothing is ever attributed
+  across sessions, and the triggering event itself is taken from `meta` (never
+  re-looked-up in the asynchronously-populated log).
+
+  Two mutually exclusive anchors, both high specificity:
+    A. Inline interpreter code execution — the spawned command line names a Python
+       interpreter AND contains a dynamic-execution primitive (exec/eval/compile/
+       __import__) AND a dangerous capability marker (os.system, os.popen,
+       subprocess.*, pty.spawn, socket.socket, base64.b64decode, urllib/requests,
+       shutil.rmtree, /bin/sh, curl/wget/nc). This is the PAL payload shape.
+    B. Python-hosted shell escape — a Python interpreter is present in *this*
+       session's lineage AND the spawned command is a reverse shell or
+       download-and-run payload (/dev/tcp/, curl|wget piped to a shell,
+       base64 -d piped to a shell, nc -e, interactive shell).
+
+  Supporting session stages (inline interpreter exec, shell spawn, network tool)
+  are added to the kill chain only when they occurred in the same session within
+  the clustering window and before the trigger.
+
+  No ATLAS technique was verified for this behaviour, so no `atlas.` tag is claimed
+  rather than inventing an identifier. The upstream advisory maps to OWASP Web Top 10
+  A03:2021 (Injection) / A04:2021; the closest verified OWASP-LLM identifiers for an
+  agent executing model-derived code are LLM05 and LLM06, tagged below.
+author: Tanya
+date: "2026-06-01"
+modified: "2026-06-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36258
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm05
+  - owasp.llm06
+falsepositives:
+  - "pip / setuptools legacy build shim: `python -c 'import sys, setuptools, tokenize; ... exec(compile(...))'`. It carries a dynamic-exec primitive but no dangerous capability marker (no os.system / subprocess / socket / network tool), so anchor A does not fire."
+  - "Developer or notebook one-liners such as `python -c 'import subprocess; subprocess.run([\"ls\"])'` — capability marker present but no dynamic-exec primitive, so anchor A does not fire."
+  - "Security research, CVE-2023-36258 reproduction harnesses and red-team test suites deliberately running PAL payloads. These are genuine true positives of the pattern; the rule is report-only so the exercise is not interrupted, and the kill chain names the operator's own lineage."
+  - "Provisioning tooling (Ansible/Fabric-style bootstraps) that base64-decodes and execs a Python payload on the local host. Reported, not blocked; the emitted lineage makes the automation parent obvious to the analyst."
+  - "Container/CI entrypoints that legitimately pipe a fetched installer into a shell. Anchor B additionally requires a Python interpreter in the same session lineage, which excludes plain shell CI steps; when a Python build driver is present the event is reported for review only."
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_code_markers:
+    content|re:
+      - '(?i)\bexec\s*\('
+      - '(?i)\beval\s*\('
+      - '(?i)\bcompile\s*\('
+      - '__import__\s*\('
+      - '(?i)\bos\.(?:system|popen)\s*\('
+      - '(?i)\bsubprocess\.(?:Popen|run|call|check_output|check_call)\s*\('
+      - '(?i)\bpty\.spawn\s*\('
+      - '(?i)\bsocket\.socket\s*\('
+      - '(?i)/dev/tcp/'
+      - '(?i)\bbase64\b[^\n]{0,64}--?d(?:ecode)?\b'
+      - '(?i)\b(?:curl|wget)\b'
+      - '(?i)\bnc(?:at)?\b'
+      - '(?i)\b(?:ba|z|k)?sh\b\s+-i\b'
+  condition: sel_exec and sel_code_markers
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # LangChain PALChain (CVE-2023-36258) arbitrary code execution.
+  # Instance-resolved: caller_pid -> proc_instance -> proc_lineage -> query_events.
+  # Session-scoped only. Trigger data comes from meta, prior stages from the log.
+
+  WINDOW_NS = 300000000000   # 5 minutes - stage clustering window
+  EXEC_ROWS = 600            # single EXECUTE_PROCESS log pass (newest-first)
+  MAX_PRIOR = 40             # candidate prior rows examined
+
+  INTERP_RE = r"(?i)\b(?:python[0-9.]*|pypy[0-9.]*)\b"
+
+  DYNAMIC_RE = [
+      r"(?i)\bexec\s*\(",
+      r"(?i)\beval\s*\(",
+      r"(?i)\bcompile\s*\(",
+      r"__import__\s*\(",
+  ]
+
+  CAPABILITY_RE = [
+      r"(?i)\bos\.system\s*\(",
+      r"(?i)\bos\.popen\s*\(",
+      r"(?i)\bsubprocess\.(?:Popen|run|call|check_output|check_call)\s*\(",
+      r"(?i)\bpty\.spawn\s*\(",
+      r"(?i)\bsocket\.socket\s*\(",
+      r"(?i)\bbase64\.b64decode\s*\(",
+      r"(?i)\burllib\.request\b",
+      r"(?i)\brequests\.(?:get|post|put)\s*\(",
+      r"(?i)\bshutil\.rmtree\s*\(",
+      r"(?i)\bos\.(?:remove|unlink)\s*\(",
+      r"(?i)/bin/(?:sh|bash|zsh)\b",
+      r"(?i)\b(?:curl|wget|nc|ncat)\b",
+  ]
+
+  PAYLOAD_RE = [
+      r"(?i)/dev/tcp/",
+      r"(?i)\b(?:curl|wget)\b[^\n]{0,200}\|\s*(?:ba|z|k)?sh\b",
+      r"(?i)\bbase64\b[^\n]{0,64}--?d(?:ecode)?\b[^\n]{0,200}\|\s*(?:ba|z|k)?sh\b",
+      r"(?i)\bnc(?:at)?\b[^\n]{0,80}\s-[a-z]{0,6}e\b",
+      r"(?i)\b(?:ba|z|k)?sh\b\s+-i\b",
+  ]
+
+  PRIOR_LABELS = [
+      ["Inline Interpreter Exec", r"(?i)\b(?:python[0-9.]*|pypy[0-9.]*)\b[^\n]{0,400}\s-c\s"],
+      ["Shell Spawn",            r"(?i)\b(?:ba|z|k)?sh\b\s+-c\s"],
+      ["Network Tool",           r"(?i)\b(?:curl|wget|nc|ncat)\b"],
+  ]
+
+  def first_match(pats, s):
+      for p in pats:
+          m = re.find(p, s)
+          if m != None:
+              return m
+      return None
+
+  def is_python_path(p):
+      if p == "":
+          return False
+      if re.find(r"(?i)(?:^|/)python[0-9.]*$", p) != None:
+          return True
+      if re.find(r"(?i)(?:^|/)pypy[0-9.]*$", p) != None:
+          return True
+      return False
+
+  def short(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm != "":
+          frm = "process://" + frm
+      else:
+          frm = "process://pid:" + e.get("parent_pid", "0")
+      to = e.get("target_id", "")
+      if to == "":
+          to = "process://" + e.get("actor_path", "")
+      return {
+          "from":     frm,
+          "to":       to,
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def run():
+      # 1. relevance gate - pure string work on meta, no graph/log access
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+
+      interp  = re.find(INTERP_RE, cmd) != None
+      dynamic = first_match(DYNAMIC_RE, cmd)
+      capab   = first_match(CAPABILITY_RE, cmd)
+      payload = first_match(PAYLOAD_RE, cmd)
+
+      anchor_a = interp and dynamic != None and capab != None
+      if not anchor_a and payload == None:
+          return "allow"
+
+      # 2. instance attribution - never a path-keyed graph walk
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      ets = int(meta.get("event_ts", "0"))
+      if ets == 0:
+          return "allow"
+      inst = proc_instance(cp, ets)
+      if inst == None:
+          return "allow"                      # degraded - re-fires when create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if len(lineage) == 0:
+          return "allow"
+
+      # 3. session scope: lineage instances + processes they spawned in-window
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+
+      since = ets - WINDOW_NS
+      if since < 0:
+          since = 0
+      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                               until_ns=ets, limit=EXEC_ROWS)
+      for i in range(2):                      # two passes: rows are newest-first
+          for e in exec_rows:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "")
+
+      py_host = None
+      for x in lineage:
+          if is_python_path(x.get("actor_path", "")):
+              py_host = x
+              break
+      if py_host == None:
+          for e in exec_rows:
+              if e.get("actor_pid", "") in session:
+                  if is_python_path(e.get("actor_path", "")):
+                      py_host = e
+                      break
+
+      # anchor B requires a Python interpreter host in THIS session
+      if not anchor_a and py_host == None:
+          return "allow"
+
+      # 4. kill chain, rooted at the session owner
+      root  = lineage[-1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      stages = []
+
+      if py_host != None:
+          chain.append(step(ev_edge(py_host), stage_id="Interpreter Host",
+                            stage_desc="python interpreter in session: " +
+                                       py_host.get("actor_path", "?") +
+                                       " (pid " + py_host.get("actor_pid", "?") + ")"))
+          stages.append("python host")
+
+      seen  = {}
+      count = 0
+      total = len(exec_rows)
+      for i in range(total):
+          if count >= MAX_PRIOR:
+              break
+          e = exec_rows[total - 1 - i]        # oldest-first, chronological chain
+          if e.get("actor_pid", "") not in session:
+              continue
+          c = e.get("cmdline", "")
+          if c == "" or c == cmd:
+              continue
+          ts = int(e.get("ts", "0"))
+          if ts < since or ts > ets:
+              continue
+          count = count + 1
+          for pair in PRIOR_LABELS:
+              if pair[0] in seen:
+                  continue
+              if re.find(pair[1], c) != None:
+                  seen[pair[0]] = True
+                  chain.append(step(ev_edge(e), stage_id=pair[0],
+                                    stage_desc=e.get("actor_path", "?") +
+                                               " ran: " + short(c, 200)))
+                  stages.append(pair[0])
+
+      # 5. trigger stage - taken from meta, never re-queried from the log
+      tgt = re.find(r"/[A-Za-z0-9._+/-]{2,160}", cmd)
+      if tgt == None:
+          tgt = "spawned-process"
+      trig = {
+          "from":     "process://" + inst.get("actor_path", ""),
+          "to":       "process://" + tgt,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ets),
+          "first_ts": str(ets),
+          "last_ts":  str(ets),
+          "cmdline":  short(cmd, 400),
+      }
+      if anchor_a:
+          desc = ("inline interpreter code execution - dynamic=" + short(dynamic, 40) +
+                  " capability=" + short(capab, 60))
+          stages.append("inline code exec")
+      else:
+          desc = "python-hosted shell escape payload - " + short(payload, 80)
+          stages.append("shell escape payload")
+      chain.append(step(trig, stage_id="PAL Code Execution",
+                        stage_desc=desc + " | cmd: " + short(cmd, 200)))
+
+      names = []
+      for x in lineage:
+          p = x.get("actor_path", "")
+          names.append(p.split("/")[-1])
+      attribution = "resolved"
+      if len(lineage) < 2:
+          attribution = "degraded"
+
+      reason = ("PALChain-style arbitrary code execution (CVE-2023-36258 pattern): " +
+                ", ".join(stages) +
+                " | lineage: " + " -> ".join(names) +
+                " | attribution: " + attribution +
+                " | cmd: " + short(cmd, 200))
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
