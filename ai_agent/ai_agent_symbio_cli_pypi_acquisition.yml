@@ -1,0 +1,105 @@
+title: Supply Chain symbio-cli PyPI Package Acquisition
+id: 6f2b9c41-8d3e-4a17-9b0c-5e7d2a84f1c3
+status: experimental
+level: medium
+description: |
+  Reports the acquisition or first-run of the PyPI package 'symbio-cli' (a
+  self-described autonomous, self-finetuning local MLX agent) on a monitored
+  endpoint.
+
+  Scope statement — this rule deliberately does NOT claim malicious behaviour.
+  No payload, C2 channel or exploit has been disclosed for this package. The
+  detection is artifact-provenance telemetry only: it fires exclusively when a
+  package-manager invocation or an installed console entrypoint names the
+  literal distribution 'symbio-cli' (including the PyPI-normalised spellings
+  symbio_cli / symbio.cli). It is action: report so an operator learns that an
+  unreviewed autonomous-agent package entered the estate, and can then decide
+  whether to review it.
+
+  Answering the triage dissent directly:
+    * The narrative's package_install event and the EXECUTE_CODE /
+      PACKAGE_DEPENDENCY edges are not modelled by the engine, so no rule can
+      use them. This rule uses only execute_process, which IS emitted.
+    * A bare execute_process signal would indeed be meaningless. This rule is
+      therefore not a generic process-exec detection: every branch requires the
+      literal package identifier on the command line, so the causal link to the
+      specific PyPI artifact is carried by the command line itself rather than
+      inferred from provenance telemetry the engine cannot see.
+    * Because no malicious action is confirmed, the verdict is report and the
+      level is medium. This rule must never be escalated to block on the basis
+      of the current intelligence.
+
+  Known coverage gap (accepted): an install driven from a requirements.txt,
+  poetry.lock, pyproject.toml or a private mirror manifest does not place the
+  package name on the command line and will not be seen by this rule.
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://pypi.org/project/symbio-cli/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Only child-process exec events carry a command line we can attribute.
+  sel_exec:
+    event_type: execute_process
+
+  # Required on EVERY branch: the literal distribution name, with word
+  # boundaries so symbio-client / mysymbio-cli / symbio-clipboard do not match.
+  # PyPI treats - _ . as equivalent separators, hence the character class.
+  sel_pkg_name:
+    content|re: '(?i)\bsymbio[-_.]cli\b'
+
+  # Branch A - a package manager is being asked to acquire or run it.
+  sel_install_verb:
+    content|re:
+      - '(?i)\b(?:pip[23]?|uv|pipx|poetry|pdm|conda|micromamba)\b[^\n]{0,200}\b(?:install|add|sync)\b'
+      - '(?i)\b(?:uvx|pipx\s+run|uv\s+tool\s+run|uv\s+tool\s+install|pipx\s+install)\b'
+
+  # Branch B - the installed console entrypoint is being launched from a
+  # bin/Scripts directory, or the module is being run directly.
+  sel_entrypoint_exec:
+    content|re:
+      - '(?i)[/\\](?:bin|Scripts)[/\\]symbio[-_.]cli(?:\.exe)?\b'
+      - '(?i)\bpython[0-9.]*\b[^\n]{0,80}\s-m\s+symbio[-_.]cli\b'
+
+  # Read-only, remedial and rehearsal invocations are not acquisitions.
+  filter_readonly:
+    content|re:
+      - '(?i)\b(?:uninstall|--dry-run|--help|--version|--no-install|--report\b)'
+      - '(?i)\b(?:pip[23]?|conda|poetry|pdm|micromamba)\b[^\n]{0,120}\b(?:remove|show|download|index|list|freeze|search)\b'
+
+  # The package name merely appearing inside a text/search/security-tooling
+  # command line is a mention, not an acquisition.
+  filter_analysis_tools:
+    content|re:
+      - '(?i)\b(?:grep|rg|ag|ack|echo|printf|cat|less|more|head|tail|man|awk|sed|jq|diff)\b'
+      - '(?i)\b(?:pip-audit|safety|bandit|semgrep|trivy|grype|syft|osv-scanner|snyk|dependency-check)\b'
+
+  condition: sel_exec and sel_pkg_name and (sel_install_verb or sel_entrypoint_exec) and not (filter_readonly or filter_analysis_tools)
+
+action: report
+
+falsepositives:
+  - An ML engineer or researcher deliberately evaluating symbio-cli in a
+    sandbox or scratch virtualenv. This is the single most common expected
+    match, and is exactly why the rule reports rather than blocks.
+  - A security analyst detonating or reverse-engineering the package as part of
+    the review this intelligence entry is asking for. Wrapper invocations via
+    pip-audit / safety / trivy / syft are filtered, but a plain
+    'pip install symbio-cli' inside an analysis VM will still be reported.
+  - A CI or provisioning job that installs the package after an internal
+    approval decision has already been taken; the report becomes redundant
+    noise until an allow rule is placed ahead of this one by the operator.
+  - A sibling distribution sharing the namespace prefix, e.g.
+    'pip install symbio-cli-plugin', matches because the word boundary after
+    'cli' is satisfied by the hyphen. Treated as in-scope for review rather
+    than tightened away.
+  - Copy-pasted tutorial or README command lines executed for a demo. These are
+    genuine executions and are intentionally not suppressed.
