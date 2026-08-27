@@ -1,0 +1,103 @@
+title: Supply Chain PyPI gitsage-local Install or Execution
+id: 3f9c1d7a-5b42-4e8e-9c31-7a2d6b8f4e15
+status: experimental
+level: medium
+description: |
+  Flags a process-exec event whose command line installs, upgrades, or runs the PyPI
+  package `gitsage-local` (an LLM-backed Git commit-message generator that executes with
+  developer privileges inside repositories).
+
+  Scope is deliberately narrow. The engine only exposes `execute_process` live; the
+  narrative's package_install / read_file / write_file events and the
+  INSTALLED_PACKAGE / READ_REPOSITORY / WRITE_COMMIT edges do not exist in the schema, so
+  the install -> repo-read -> commit-write chain CANNOT be correlated. This rule therefore
+  makes no claim of malicious behaviour and does not attempt to model a kill chain. It is
+  an inventory/visibility control: it answers only "did this endpoint pull in or run this
+  specific package, and with what invocation", which is the one thing the available signal
+  can support. Because there is no CVE, no confirmed malicious release and no IOC for this
+  package, the action is `report` only and the level is `medium` -- an operator, not the
+  engine, decides whether a hit matters.
+
+  It is intentionally distinct from generic unpinned-dependency rules: it does not fire on
+  `pip install -r requirements.txt`, on any other package, or on resolution/audit tooling.
+  It fires only when this exact distribution name appears as the target of an install verb,
+  or when its console script / module entry point is executed.
+author: Haibo
+date: "2026-03-01"
+references:
+  - https://pypi.org/project/gitsage-local/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # An install verb from a Python/Conda package manager appears on the command line.
+  sel_installer:
+    command|re:
+      - '(?i)\bpip[23]?\b[^\n]*\binstall\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\b[^\n]*\binstall\b'
+      - '(?i)\bpipx\s+(?:install|upgrade|run)\b'
+      - '(?i)\buv\s+(?:pip\s+install|add|tool\s+(?:install|run))\b'
+      - '(?i)\b(?:poetry|pdm|rye)\s+add\b'
+      - '(?i)\bconda\s+install\b'
+
+  # The exact distribution name, normalised for the PEP 503 '-'/'_' equivalence.
+  # \b on both sides tolerates version pins (==, >=, ~=), extras ([...]) and quoting
+  # without matching longer names such as gitsage-localizer.
+  sel_package:
+    command|re: '(?i)\bgitsage[-_]local\b'
+
+  # Post-install execution of the package's own entry point (console script or -m module).
+  # Anchored to a path separator or line start so that a bare mention of the name as an
+  # argument to another program (e.g. "cat gitsage-local") does not match.
+  sel_entrypoint:
+    command|re:
+      - '(?i)\bpython[0-9.]*\s+-m\s+gitsage_local\b'
+      - '(?i)(?:^|/)gitsage[-_]local(?:\.exe)?(?:\s|$)'
+
+  # Package-manager subcommands and flags that do not install or execute anything.
+  filter_noninstall:
+    command|re:
+      - '(?i)\bpip[23]?\b[^\n]*\b(?:uninstall|download|show|list|index|search|cache|freeze|check|config|debug|wheel)\b'
+      - '(?i)\bpipx\s+(?:list|uninstall|runpip)\b'
+      - '(?i)\b(?:poetry|pdm)\s+(?:remove|show|lock|search)\b'
+      - '(?i)\bpip-(?:compile|audit|licenses)\b'
+      - '(?i)\s--(?:dry-run|help|version|report)\b'
+      - '(?i)(?:^|\s)-h(?:\s|$)'
+
+  # Text-inspection utilities invoked as the leading program: grepping a README,
+  # requirements file or lockfile that literally contains "pip install gitsage-local"
+  # is documentation, not an install. Anchored to the start of the command line so a
+  # pipeline that actually reaches an installer is not suppressed.
+  filter_inspection:
+    command|re: '(?i)^(?:[^\s]*/)?(?:grep|egrep|fgrep|rg|ag|ack|cat|bat|less|more|head|tail|man|which|type|whereis|echo|printf|awk|sed|diff|git)\b'
+
+  condition: >
+    sel_event
+    and ((sel_installer and sel_package) or sel_entrypoint)
+    and not (filter_noninstall or filter_inspection)
+falsepositives:
+  - A developer or team that has deliberately adopted gitsage-local and installs or runs it
+    as part of normal workflow. This rule reports every such invocation by design; suppress
+    per-endpoint once the package is approved rather than widening the pattern.
+  - CI/CD or container build steps that install the package from a pinned requirements or
+    lock file where the distribution name is expanded onto the command line by the build
+    tool (e.g. a generated "pip install gitsage-local==x.y.z" step).
+  - Editable or local development installs of a fork of the same project
+    ("pip install -e ." run from a checkout named gitsage-local).
+  - Reinstall/upgrade churn on developer machines, which produces repeated identical
+    reports for the same benign package.
+  - Shell history replay, dotfile bootstrap scripts, or setup documentation executed
+    verbatim, where the install command is intentional and human-initiated.
+action: report
