@@ -1,0 +1,105 @@
+title: Supply Chain Lark Apaas Miaoda Sandbox Skills Package Deployment
+id: 4b7c9e21-3a5f-4d18-9c6e-2f8a1d4b7e30
+status: experimental
+level: medium
+description: |
+  Detects a process being spawned that installs, updates, links, unpacks or
+  synchronises the @lark-apaas/coding-miaoda-sandbox-skills npm package (or an
+  unscoped fork / tarball of the same skill bundle) into an agent sandbox.
+
+  Threat: an attacker publishes a malicious version of this package to npm. The
+  sandbox "update-skills" synchronisation step pulls the tampered tarball and
+  drops it under .agent/skills/, where the skill documents and any lifecycle
+  scripts execute inside the agent's own context. The corroborating graph signal
+  (ACQUIRED_SKILL / WRITE_FILE edges into .agent/skills) is only reachable from
+  a script and never fires as a triggering event, and file_write has no live
+  producer on the client, so the single-event surface that is actually observable
+  is the execute_process command line of the package manager / sync helper.
+
+  This rule is deliberately narrow: it requires BOTH the distinctive package
+  identifier AND an acquisition/deployment verb in the same command line, and it
+  suppresses the read-only inspection commands (npm view/ls/audit, grep, cat,
+  --dry-run) that mention the package without deploying it.
+author: Haibo
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.t1059
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # --- the package identifier (scoped name, unscoped fork, or tarball) --------
+  sel_pkg_content:
+    content|re:
+      - '(?i)@lark-apaas/coding-miaoda-sandbox-skills'
+      - '(?i)\bcoding[-_]miaoda[-_]sandbox[-_]skills\b'
+      - '(?i)\blark-apaas-coding-miaoda-sandbox-skills-[0-9][0-9A-Za-z.+-]*\.tgz\b'
+  sel_pkg_command:
+    command|re:
+      - '(?i)@lark-apaas/coding-miaoda-sandbox-skills'
+      - '(?i)\bcoding[-_]miaoda[-_]sandbox[-_]skills\b'
+      - '(?i)\blark-apaas-coding-miaoda-sandbox-skills-[0-9][0-9A-Za-z.+-]*\.tgz\b'
+
+  # --- an actual acquisition / deployment action, not a mention ---------------
+  sel_acquire_content:
+    content|re:
+      - '(?i)\b(npm|pnpm|yarn|bun)\b[^\n]{0,200}?\b(install|add|update|upgrade|ci|exec|dlx|link|unlink|rebuild)\b'
+      - '(?i)\b(npx|bunx|pnpx)\b'
+      - '(?i)\bupdate[-_]skills\b'
+      - '(?i)\.agent/skills'
+      - '(?i)\btar\b[^\n]{0,120}?\b-[A-Za-z]*x[A-Za-z]*\b'
+  sel_acquire_command:
+    command|re:
+      - '(?i)\b(npm|pnpm|yarn|bun)\b[^\n]{0,200}?\b(install|add|update|upgrade|ci|exec|dlx|link|unlink|rebuild)\b'
+      - '(?i)\b(npx|bunx|pnpx)\b'
+      - '(?i)\bupdate[-_]skills\b'
+      - '(?i)\.agent/skills'
+      - '(?i)\btar\b[^\n]{0,120}?\b-[A-Za-z]*x[A-Za-z]*\b'
+
+  # --- read-only inspection of the package: mentions it, deploys nothing ------
+  filter_readonly_content:
+    content|re:
+      - '(?i)\b(npm|pnpm|yarn|bun)\s+(view|info|show|search|ls|list|why|outdated|audit|explain|docs|repo|home|ping|config|help)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)--package-lock-only\b'
+      - '(?i)--help\b'
+      - '(?i)^\s*(sudo\s+)?(/[^\s]*/)?(grep|egrep|fgrep|rg|ag|cat|bat|less|more|head|tail|jq|yq|diff|wc|awk|sed|find|ls|stat|file|md5sum|sha256sum|shasum)\b'
+  filter_readonly_command:
+    command|re:
+      - '(?i)\b(npm|pnpm|yarn|bun)\s+(view|info|show|search|ls|list|why|outdated|audit|explain|docs|repo|home|ping|config|help)\b'
+      - '(?i)--dry-run\b'
+      - '(?i)--package-lock-only\b'
+      - '(?i)--help\b'
+      - '(?i)^\s*(sudo\s+)?(/[^\s]*/)?(grep|egrep|fgrep|rg|ag|cat|bat|less|more|head|tail|jq|yq|diff|wc|awk|sed|find|ls|stat|file|md5sum|sha256sum|shasum)\b'
+
+  condition: >
+    sel_event
+    and (sel_pkg_content or sel_pkg_command)
+    and (sel_acquire_content or sel_acquire_command)
+    and not (filter_readonly_content or filter_readonly_command)
+
+falsepositives:
+  - Legitimate scheduled skill synchronisation — the Miaoda sandbox running its
+    own update-skills step to pull the current published version of the package.
+    This rule cannot distinguish a clean release from a tampered one; every hit
+    should be triaged against the resolved version/integrity in the lockfile.
+  - A developer or CI job running npm/pnpm/yarn install in the monorepo that
+    declares @lark-apaas/coding-miaoda-sandbox-skills as a dependency, including
+    lockfile regeneration and container image builds.
+  - Release engineering for the package itself (npm pack, npm link during local
+    development, tarball extraction while testing a release candidate).
+  - Security or dependency-review tooling that installs the package into a
+    throwaway directory to analyse it (the read-only filters cover view/ls/audit
+    and --dry-run, but an analysis workflow that genuinely installs will match).
+
+action: report
