@@ -1,0 +1,125 @@
+title: Supply Chain Copilot API Proxy Shim Exposure
+id: 7b1e4c9a-3f2d-4a6e-9c58-0d41f6b27e83
+status: experimental
+level: high
+description: |
+  Detects the @ascdong/copilot-proxy npm package (and equivalent Copilot-backed
+  OpenAI/Anthropic-compatible shims) being installed, executed, pinned as a
+  dependency, or observed brokering GitHub Copilot credentials through a
+  compatibility endpoint used by Claude Code / Codex / Gemini CLIs.
+
+  Why this is a content rule and not a behavioural script: the engine exposes no
+  package_installation, process_execution (as an event_type), api_request or
+  network_connection event, and no ACQUIRED_CREDENTIAL / API_CALL /
+  PROXIED_CONNECTION edge. The only live graph artefact for this threat is a bare
+  HTTP_REQUEST edge, which carries no signal that distinguishes a Copilot shim
+  from any other outbound API call. There is therefore nothing to correlate in the
+  graph, and a scripted rule would either fire on all egress or on nothing. What
+  IS observable in a single event is the package identifier itself and the
+  shim-specific marker pairs, so this rule matches only those, on the raw command
+  line and request/response bodies.
+
+  Three disjoint high-specificity branches, all report-only:
+    1. The exact package identifier plus an install/exec verb, or the identifier
+       pinned in a dependency manifest.
+    2. A Copilot-proxy runtime marker co-occurring with a base-URL / auth-token
+       override that repoints an agent CLI at an OpenAI/Anthropic-shaped endpoint.
+       Legitimate Copilot use goes through the official extension and never sets
+       ANTHROPIC_BASE_URL or ANTHROPIC_AUTH_TOKEN.
+    3. A Copilot-proxy runtime marker co-occurring with a live-shaped Copilot
+       session token (tid=...;exp=<unix>) or GitHub user-to-server token.
+
+  No branch fires on the package name alone, on a base-URL override alone, or on a
+  Copilot host alone.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://attack.mitre.org/techniques/T1528/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.credential-access
+  - attack.t1528
+  - atlas.aml.t0010
+  - owasp.llm02
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_scope:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+      - http_request
+      - llm_tool_call
+      - llm_tool_result
+
+  # ── Branch 1: the package itself ────────────────────────────────────────────
+  sel_pkg_name:
+    content|re: '(?i)@?ascdong/copilot[-_]?proxy\b'
+
+  sel_install_exec:
+    content|re: '(?i)\b(?:npx|bunx|git\s+clone|npm\s+(?:i|install|exec|x)|pnpm\s+(?:add|i|install|dlx)|yarn\s+(?:add|dlx)|bun\s+(?:add|x))\b'
+
+  sel_manifest_pin:
+    content|re: '(?i)"@ascdong/copilot[-_]?proxy"\s*:\s*"'
+
+  # ── Branch 2 and 3 shared anchor: Copilot proxy runtime markers ─────────────
+  sel_proxy_marker:
+    content|re:
+      - '(?i)\bcopilot[-_]proxy\b'
+      - '(?i)\bapi\.(?:business\.|enterprise\.)?githubcopilot\.com\b'
+      - '(?i)copilot[-_]internal/v2/token'
+      - '(?i)\bCopilot-Integration-Id\b'
+
+  # ── Branch 2: agent CLI repointed at an OpenAI/Anthropic-shaped endpoint ────
+  sel_compat_surface:
+    content|re:
+      - '(?i)\b(?:ANTHROPIC|OPENAI|GEMINI|GOOGLE)_(?:BASE_URL|API_BASE|API_BASE_URL|BASE_URL_OVERRIDE)\s*[=:]'
+      - '(?i)\bANTHROPIC_AUTH_TOKEN\s*[=:]'
+      - '(?i)https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\])(?::\d{2,5})?/v1/(?:chat/completions|messages|responses|models)\b'
+      - '(?i)\b(?:claude|codex|gemini)\s+(?:--)?(?:base[-_]url|api[-_]base)\b'
+
+  # ── Branch 3: live-shaped Copilot / GitHub credential material ──────────────
+  sel_copilot_credential:
+    content|re:
+      - '\btid=[0-9a-f]{16,}\S{0,200}\bexp=\d{10}\b'
+      - '\b(?:ghu|gho)_[A-Za-z0-9]{36}\b'
+      - '(?i)\bAuthorization:\s*(?:Bearer|token)\s+tid=[0-9a-f]{16,}'
+
+  # ── Suppressions ────────────────────────────────────────────────────────────
+  filter_docs:
+    content|re:
+      - '(?i)\b(?:CVE-\d{4}-\d{4,}|GHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4})\b'
+      - '(?i)\b(?:security advisory|threat (?:report|advisory|intelligence)|indicators? of compromise|detection rule|sigma rule|malware analysis|incident report|proof[- ]of[- ]concept write[- ]?up)\b'
+
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(?:ghu|gho)_(?:x{16,}|0{16,}|1234)'
+      - '(?i)tid=(?:0{16,}|x{16,}|f{16,}|<)'
+      - '(?i)<(?:YOUR|MY|INSERT|REPLACE)[ _][A-Z_ ]{2,}>'
+      - '(?i)\b(?:REDACTED|PLACEHOLDER|EXAMPLE_TOKEN|DUMMY_TOKEN|FAKE_TOKEN)\b'
+
+  filter_remediation:
+    content|re: '(?i)\b(?:npm|pnpm|yarn|bun)\s+(?:uninstall|un|remove|rm|audit|view|info|why|ls|list|outdated)\b'
+
+  condition: >
+    sel_scope and ((sel_pkg_name and (sel_install_exec or sel_manifest_pin))
+    or (sel_proxy_marker and sel_compat_surface)
+    or (sel_proxy_marker and sel_copilot_credential))
+    and not (filter_docs or filter_placeholder or filter_remediation)
+
+action: report
+
+falsepositives:
+  - Security or platform engineers deliberately installing @ascdong/copilot-proxy in a sandbox to reproduce or triage the supply-chain issue. filter_remediation suppresses uninstall/audit/view flows but not a deliberate reinstall.
+  - An agent fetching the npm registry page, GitHub README or a dependency-review report for the package, where the quickstart text contains "npx @ascdong/copilot-proxy". filter_docs suppresses advisory-worded pages but not a plain README.
+  - An organisation that intentionally brokers Copilot through an approved internal gateway and sets ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN for Claude Code. This matches branch 2 only when a Copilot-proxy marker is also present in the same event, which is the exact configuration the rule is meant to surface for review.
+  - Local OpenAI-compatible gateways (LiteLLM, Ollama, vLLM) exposing /v1/chat/completions on loopback during development. These match only if a Copilot marker appears in the same payload.
+  - Verbose HTTP debug traces from the official Copilot extension that echo a tid=...;exp=... session token, if that trace is also read by an agent tool and happens to contain the string "copilot-proxy" (e.g. copilot-proxy.githubusercontent.com). Report-only, so this costs an analyst a look, not a blocked request.
+  - CI dependency-scanning output listing the package as a transitive dependency; suppressed by filter_remediation when emitted by npm ls/audit, not suppressed for third-party scanners.
