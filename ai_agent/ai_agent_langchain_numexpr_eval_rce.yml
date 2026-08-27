@@ -1,0 +1,110 @@
+title: LangChain numexpr Evaluate Code Execution
+id: 9c4b71e2-5a3d-4f28-b6e1-7d0a2c8f4531
+status: experimental
+level: high
+description: |
+  Detects the observable subprocess slice of CVE-2023-39631 (LangChain < 0.0.308
+  arbitrary code execution through the optional numexpr dependency's evaluate()
+  function).
+
+  Coverage limit, stated explicitly: the core exploit primitive runs IN-PROCESS.
+  numexpr.evaluate() can reach Python builtins and execute attacker code without
+  ever calling fork/exec, and the engine exposes no 'function_call' event type and
+  no 'EXECUTE_CODE' / 'DEPENDENCY_LOAD' edge kinds. The ONLY live signal for this
+  threat is 'execute_process'. This rule therefore does not attempt to detect the
+  in-process eval; it detects the two cases where the exploit is actually visible
+  on a spawned command line:
+
+    Branch A - a child process is spawned whose command line reaches the numexpr /
+               LLMMathChain evaluation surface AND carries a Python code-execution
+               primitive (__import__, __builtins__, __subclasses__, os.system,
+               subprocess.*, exec(). Benign numexpr use evaluates numeric
+               expressions and never contains these tokens.
+
+    Branch B - a Python interpreter is spawned with a fully-formed sandbox-escape
+               expression of exactly the shape numexpr expression injection
+               produces (e.g. __import__('os').system(...),
+               __builtins__['__import__'], __class__.__base__.__subclasses__()[...]).
+
+  A payload that stays entirely inside the Python process (in-memory reverse shell,
+  file read, credential theft via os.environ) will NOT be seen by this rule. That
+  residual gap must be closed by a behavioural rule over the graph
+  (EXECUTE_PROCESS / CONNECTS / READ_FILE from the LangChain host process), not by
+  content matching. Shipped as report so the true-positive rate can be measured
+  before any enforcement decision.
+author: Evgen
+date: "2026-03-14"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-39631
+  - https://owasp.org/Top10/A03_2021-Injection/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm05
+falsepositives:
+  - Security engineer or AI coding agent reproducing CVE-2023-39631 in a sandbox,
+    e.g. python -c "import numexpr; numexpr.evaluate(\"__import__('os').system('id')\")".
+    This is a genuine detection of the exploit string and is reported, not blocked.
+  - Exploit fixtures or regression tests in a LangChain fork executed through a
+    runner that places the payload in argv rather than in a test file.
+  - Semgrep / Bandit / CodeQL rule authoring where the --pattern argument contains
+    __import__( next to numexpr (suppressed by filter_security_tooling).
+  - Source-code search for the vulnerable call site, e.g. rg "numexpr.evaluate"
+    or grep -rn "__import__" (suppressed by filter_source_search).
+  - Dependency remediation such as pip install "langchain>=0.0.308" numexpr
+    (suppressed by filter_pkg_mgmt).
+  - Advisory or changelog text quoted on a command line, identified by an embedded
+    CVE-/GHSA- identifier (suppressed by filter_advisory_text).
+  - Legitimate pandas.eval / DataFrame.query workloads that use the numexpr engine.
+    Not matched - the surface list requires an explicit numexpr import or
+    numexpr.evaluate call token (engine="numexpr" alone does not match) and the
+    primitive list deliberately excludes a bare eval( token.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_numexpr_surface:
+    event_type: execute_process
+    content|contains:
+      - 'numexpr.evaluate'
+      - 'numexpr.re_evaluate'
+      - 'import numexpr'
+      - 'from numexpr'
+      - 'LLMMathChain'
+      - 'chains.llm_math'
+      - 'llm-math'
+  sel_exec_primitive:
+    content|re:
+      - '__import__\s*\('
+      - '__builtins__'
+      - '__subclasses__\s*\('
+      - '__globals__'
+      - '\bos\s*\.\s*(?:system|popen|execl|execv|execve|spawnl|spawnv)\s*\('
+      - '\bsubprocess\s*\.\s*(?:Popen|run|call|check_output|check_call|getoutput)\s*\('
+      - '\bexec\s*\('
+      - '\bcompile\s*\(\s*\\?[\x22\x27]'
+  sel_python_interp:
+    event_type: execute_process
+    content|re: '(?i)\b(?:python[23]?[0-9.]*|uv\s+run|uvx|poetry\s+run|pipenv\s+run)\b'
+  sel_injection_signature:
+    content|re:
+      - '__import__\s*\(\s*\\?[\x22\x27](?:os|subprocess|pty|commands|importlib)\\?[\x22\x27]\s*\)\s*\.\s*(?:system|popen|call|run|Popen|check_output|spawn)'
+      - '__builtins__\s*(?:\[|\.\s*get\s*\(|\.)\s*\\?[\x22\x27]?(?:__import__|eval|exec|compile)'
+      - '\.\s*__class__\s*\.\s*__(?:base|bases|mro)[a-z_]*[^\n]{0,80}__subclasses__\s*\(\s*\)'
+      - '__subclasses__\s*\(\s*\)\s*\['
+  filter_pkg_mgmt:
+    content|re: '(?i)\b(?:pip[0-9.]*|pipx|uv|poetry|conda|mamba|micromamba|pdm|hatch)\b[^|;&\n]{0,60}\b(?:install|uninstall|download|show|freeze|list|add|sync|lock|update|upgrade)\b[^|;&\n]{0,80}\b(?:numexpr|langchain)\b'
+  filter_security_tooling:
+    content|re: '(?i)\b(?:semgrep|bandit|codeql|pip-audit|safety|trivy|grype|osv-scanner|snyk)\b(?:\s+-{0,2}[A-Za-z][\w-]*)+'
+  filter_source_search:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ag|ack)\b(?:\s+-{1,2}[A-Za-z][\w-]*)*\s+\\?[\x22\x27]?(?:numexpr|LLMMathChain|__import__)'
+  filter_advisory_text:
+    content|re:
+      - '(?i)\bcve-\d{4}-\d{4,7}\b'
+      - '(?i)\bghsa-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b'
+  condition: >
+    ((sel_numexpr_surface and sel_exec_primitive) or
+    (sel_python_interp and sel_injection_signature))
+    and not (filter_pkg_mgmt or filter_security_tooling or
+    filter_source_search or filter_advisory_text)
+action: report
