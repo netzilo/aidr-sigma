@@ -1,0 +1,252 @@
+title: Supply Chain ai-sessions Bridge Activation Chain
+id: 3f8c1d47-9b26-4a5e-8d31-7c0a6be24f19
+status: experimental
+level: medium
+description: |
+  Behavioural rule for the ai-sessions PyPI package (terminal browser / cross-harness
+  bridge for Codex, Claude Code and OpenCode). A compromised or malicious version would
+  execute inside the agent's own process tree with the agent's privileges.
+
+  The engine cannot observe the claimed mechanism directly: there is no load_module or
+  create_connection event, and ACQUIRED_SKILL is graph-only. So this rule deliberately
+  does NOT fire on the installation or execution of the package, which is what a generic
+  "unpinned dependency install" rule already covers and which is indistinguishable from
+  any benign dependency. It fires only when the package's code is activated INSIDE a
+  monitored agent's process tree AND at least two independent follow-on behaviours occur
+  in the same 15-minute window, ordered after that activation:
+
+    * external instruction content (ACQUIRED_SKILL) ingested from a public-origin host
+      after activation - the cross-harness bridge pulling off-network directives;
+    * HTTP_REQUEST egress to a public host by a descendant process that is NOT a package
+      manager (this is what separates real bridge egress from pip/uv fetching the wheel,
+      without allowlisting any host);
+    * egress fan-out across three or more distinct public hosts after activation;
+    * an interpreter or shell spawned after activation whose command line names the
+      package or an AI coding harness - the bridge being driven.
+
+  Verdict is report only. No host, domain or path is trusted anywhere in this rule; the
+  discriminators are ordering, process class and session scope, not reputation.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Legitimate first run of ai-sessions where the tool performs its own version/update
+    check and then fetches harness documentation from a public docs host - two stages,
+    benign intent. Investigate the destination rather than assuming compromise.
+  - CI or devcontainer bootstrap that installs ai-sessions and then runs a test suite
+    which downloads fixtures from several public hosts inside the same window.
+  - Process nodes are keyed by executable path, so HTTP requests made by an unrelated
+    invocation of the same interpreter (python, node) can be attributed to the same node
+    and inflate the egress host count.
+  - A developer running the bridge interactively under an agent-launched shell, where the
+    harness name appears in the command line as normal usage.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_exec:
+    event_type: execute_process
+    content|re: '(?i)ai[-_]sessions'
+  condition: sel_pkg_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── tunables (this rule's own window; never persisted) ────────────────────────
+  WINDOW_NS   = 900000000000     # 15 min: activation -> follow-on behaviour
+  SUPPRESS_NS = 1800000000000    # 30 min per-agent de-duplication
+  MIN_CORROB  = 2                # activation alone is NOT a finding
+
+  PKG       = r"(?i)ai[-_]sessions"
+  A_INSTALL = r"(?i)\b(pip3?|uv|uvx|pipx|poetry|pdm|hatch|conda)\b[\s\S]{0,160}?\b(install|add|sync|run|tool)\b[\s\S]{0,160}?ai[-_]sessions"
+  A_RUN     = r"(?i)(-m[\s\x22\x27]+ai[-_]sessions\b|[/\s\x22\x27]ai[-_]sessions\b)"
+  INSPECT   = r"(?i)\b(grep|rg|ripgrep|ag|cat|less|more|head|tail|man|jq|awk|sed|find|git|echo|printf)\b"
+  PKGMGR    = r"(?i)\b(pip3?|uv|uvx|pipx|poetry|pdm|hatch|conda|npm|pnpm|yarn|bun)\b"
+  HARNESS   = r"(?i)\b(codex|claude|claude-code|opencode|open-code)\b"
+  SHELLISH  = r"(?i)\b(sh|bash|zsh|dash|fish|python[0-9.]*|node|deno|bun|osascript|powershell|pwsh)\b"
+
+  # ── pure helpers (no graph / no event-log calls) ──────────────────────────────
+  def anchor_matches(cmd):
+      if re.find(PKG, cmd) == None:
+          return False
+      if re.find(A_INSTALL, cmd) != None:
+          return True
+      if re.find(A_RUN, cmd) != None and re.find(INSPECT, cmd) == None:
+          return True
+      return False
+
+  def is_relevant_event():
+      # relevance gate: pure string checks on meta only, no traversal
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      return anchor_matches(meta.get("content", ""))
+
+  def is_public(n):
+      # default "1" = treat unknown as internal (narrower, fewer FPs)
+      return n != None and n.get("is_ztna_host", "1") == "0"
+
+  def ident_of(pe):
+      p = node(pe["to"])
+      if p == None:
+          return ""
+      return p.get("name", "") + " " + p.get("path", "")
+
+  def short(pe):
+      cl = pe.get("cmdline", "")
+      if cl == "":
+          p = node(pe["to"])
+          if p != None:
+              cl = p.get("path", p.get("name", "?"))
+      if len(cl) > 160:
+          cl = cl[:160]
+      return cl
+
+  def pkg_ref(pe):
+      if re.find(PKG, pe.get("cmdline", "")) != None:
+          return True
+      return re.find(PKG, ident_of(pe)) != None
+
+  def same_edge(a, b):
+      return a.get("ts", "") == b.get("ts", "") and a.get("to", "") == b.get("to", "")
+
+  # ── bounded, windowed process tree (depth 2) ──────────────────────────────────
+  def collect_tree(aid, lo, hi):
+      kids = []
+      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          ts = int(pe.get("ts", "0"))
+          if ts >= lo and ts <= hi:
+              kids.append(pe)
+      tree = []
+      for pe in kids:
+          tree.append(pe)
+      for pe in kids:
+          for ge in edges(pe["to"], dir="out", kind="EXECUTE_PROCESS"):
+              ts = int(ge.get("ts", "0"))
+              if ts >= lo and ts <= hi:
+                  tree.append(ge)
+      return tree
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      anchor_ts = int(meta.get("event_ts", "0"))
+      if anchor_ts <= 0:
+          return "allow"
+      lo = anchor_ts - WINDOW_NS
+      hi = anchor_ts + WINDOW_NS
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid  = agent["id"]
+          tree = collect_tree(aid, lo, hi)
+          if len(tree) == 0:
+              continue
+
+          # REQUIRED anchor: the package actually ran inside THIS agent's tree.
+          tie = None
+          for pe in tree:
+              if pkg_ref(pe):
+                  tie = pe
+                  break
+          if tie == None:
+              continue
+          tie_ts = int(tie.get("ts", "0"))
+
+          chain  = new_chain(aid)
+          chain.append(step(tie, stage_id="Package Activation",
+                            stage_desc="ai-sessions package code ran inside agent process tree: " + short(tie)))
+          corrob = []
+
+          # C1 — external instruction content ingested after activation
+          for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              s = node(se["to"])
+              if not is_public(s):
+                  continue
+              ts = int(se.get("ts", "0"))
+              if ts < tie_ts or ts > hi:
+                  continue
+              chain.append(step(se, stage_id="Bridge Ingest",
+                                stage_desc="external instruction content loaded from " + s.get("host", "?")))
+              corrob.append("external instruction content from " + s.get("host", "?"))
+              break
+
+          # C2 — public egress by a NON-package-manager descendant after activation
+          # (process-class discriminator, not a host allowlist: this is what separates
+          #  bridge egress from pip/uv fetching the distribution itself)
+          hosts = {}
+          for pe in tree:
+              p = node(pe["to"])
+              if p == None:
+                  continue
+              if re.find(PKGMGR, ident_of(pe)) != None:
+                  continue
+              for he in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
+                  u = node(he["to"])
+                  if not is_public(u):
+                      continue
+                  if int(he.get("last_ts", "0")) < tie_ts:
+                      continue
+                  hosts[u.get("host", "?")] = he
+          if len(hosts) > 0:
+              shown = 0
+              for h in hosts:
+                  chain.append(step(hosts[h], stage_id="Post-Activation Egress",
+                                    stage_desc="non-installer process in agent tree reached public host " + h))
+                  shown = shown + 1
+                  if shown >= 3:
+                      break
+              corrob.append("post-activation egress to " + str(len(hosts)) + " public host(s)")
+              if len(hosts) >= 3:
+                  corrob.append("egress fan-out across " + str(len(hosts)) + " distinct public hosts")
+
+          # C3 — interpreter/shell driven for the package or an AI harness after activation
+          for pe in tree:
+              if same_edge(pe, tie):
+                  continue
+              if int(pe.get("ts", "0")) < tie_ts:
+                  continue
+              nm = ident_of(pe)
+              if re.find(SHELLISH, nm) == None:
+                  continue
+              cl = pe.get("cmdline", "")
+              if re.find(PKG, cl) == None and re.find(HARNESS, cl) == None and re.find(HARNESS, nm) == None:
+                  continue
+              chain.append(step(pe, stage_id="Bridge Driven",
+                                stage_desc="interpreter spawned for harness bridge: " + short(pe)))
+              corrob.append("interpreter/harness bridge process spawned after activation")
+              break
+
+          if len(corrob) < MIN_CORROB:
+              continue
+
+          # per-agent de-duplication so repeated ai-sessions execs do not re-report
+          seen = store_get("reported") or {}
+          prev = 0
+          if aid in seen:
+              prev = int(seen[aid])
+          if prev > 0 and (anchor_ts - prev) < SUPPRESS_NS:
+              return "allow"
+          if len(seen) > 64:
+              seen = {}
+          seen[aid] = anchor_ts
+          if store_usage()["free"] > 8192:
+              store_set("reported", seen)
+
+          reason = "ai-sessions activated in agent process tree with follow-on behaviour: " + "; ".join(corrob)
+          print(reason)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
