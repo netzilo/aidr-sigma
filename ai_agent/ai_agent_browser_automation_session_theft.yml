@@ -1,0 +1,357 @@
+title: Browser Automation Toolkit Session Credential Harvest
+id: 7b3c1e9a-4d52-4f18-9c60-2a8e5d31b7f4
+status: experimental
+level: high
+description: |
+  Instance-resolved detection for abuse of agent browser-control tooling such as the
+  PyPI package ai-browser-toolkit (CLI / MCP / HTTP interfaces driving Chrome, Edge,
+  Chromium, Brave or Firefox).
+
+  The rule does NOT try to detect the package itself (there is no INSTALLED_PACKAGE
+  edge and no package_install event type in the engine, and no CVE or confirmed
+  malicious build exists for this package). It detects the only thing that actually
+  matters operationally: a single agent session that (a) drives a browser
+  automation control plane over HTTP, and (b) has a NON-BROWSER process in that same
+  session reading the browser's credential / session store, optionally followed by
+  (c) external egress or staging of the harvested material.
+
+  Attribution is instance-exact: the rule anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks the true spawn chain with
+  proc_lineage(), expands the session to sibling/child instances via
+  query_events(kind="EXECUTE_PROCESS"), and only then queries per-instance READ_FILE /
+  HTTP_REQUEST / WRITE_FILE rows. Nothing is attributed across sessions and nothing is
+  read from a path-keyed graph node.
+
+  Verdict is report only. Browser automation is a legitimate agent capability; the
+  rule surfaces the credential-store access that turns it into session theft.
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1555/003/
+  - https://attack.mitre.org/techniques/T1539/
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://chromedevtools.github.io/devtools-protocol/
+  - https://www.w3.org/TR/webdriver2/
+tags:
+  - attack.credential-access
+  - attack.t1555.003
+  - attack.t1539
+  - attack.collection
+  - attack.t1195.001
+  - owasp.llm03
+  - owasp.llm06
+falsepositives:
+  - Browser-automation toolkits that intentionally clone the user's real Chrome/Edge
+    profile (User Data/Default, Cookies, Login Data) into a temporary profile so the
+    agent can reuse an authenticated session. This is the primary benign case for this
+    exact package. It is reported, not blocked, and the reason string states whether an
+    egress stage was observed (profile-clone alone produces only the staging stage).
+  - A developer inspecting their own browser cookie database with sqlite3, python or
+    a notebook inside an agent-driven terminal while a headless browser is running.
+  - Backup, migration or profile-sync utilities launched from the same shell session as
+    the agent within the 10 minute correlation window.
+  - Session-recovery or crash-reporting helpers that are not matched by the browser
+    process exclusion list (renamed or vendored browser binaries).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── ai-browser-toolkit / browser automation → session credential harvest ─────
+  # Anchored on caller_pid. Session-scoped. Report only.
+
+  WINDOW_NS = 600000000000     # 10 min  — every stage must cluster in this window
+  DEDUPE_NS = 300000000000     # 5 min   — do not re-report the same session
+  PRUNE_NS  = 3600000000000    # 1 hour  — store housekeeping
+  MAX_PIDS  = 16               # bound the per-instance query fan-out
+  MAX_ROWS  = 300              # bound rows per scoped query
+
+  # Browser automation control planes (CDP / W3C WebDriver / local toolkit HTTP API)
+  CDP_PATHS = ["/json/version", "/json/list", "/json/new", "/json/activate",
+               "/json/close", "/json/protocol", "/devtools/page/",
+               "/devtools/browser/", "/devtools/inspector"]
+  WD_VERBS  = ["/cookie", "/execute/sync", "/execute/async", "/url", "/screenshot",
+               "/element", "/source", "/window", "/actions", "/frame"]
+  AUTOMATION_PORTS = [":9222", ":9223", ":9515", ":4444", ":4723"]
+  LOCAL_API_PATHS  = ["/navigate", "/screenshot", "/click", "/type_text",
+                      "/evaluate", "/browser/", "/page/", "/tabs", "/dom/"]
+
+  # Browser profile + secret-store markers (both must hit, or a standalone filename)
+  PROFILE_MARKERS = ["/google/chrome/", "/google chrome/", "/chromium/",
+                     "/microsoft edge/", "/microsoft/edge/", "/bravesoftware/",
+                     "/mozilla/firefox/", "/firefox/profiles/", "/library/safari/",
+                     "/user data/default/", "/user data/profile",
+                     "/appdata/local/google/", "/appdata/local/microsoft/edge/"]
+  SECRET_MARKERS  = ["login data", "cookies", "web data", "local state",
+                     "leveldb", "logins.json", "key4.db", "key3.db",
+                     "signons.sqlite", "cookies.sqlite", "binarycookies"]
+  STANDALONE      = ["logins.json", "key4.db", "key3.db", "cookies.sqlite",
+                     "signons.sqlite", "binarycookies", "/login data"]
+
+  # The browser itself constantly reads its own credential store — exclude it.
+  BROWSER_PROCS = ["/google chrome", "chrome helper", "chrome.exe", "/chromium",
+                   "/msedge", "msedge.exe", "/microsoft edge", "/brave browser",
+                   "/firefox", "firefox.exe", "/safari", "com.apple.webkit",
+                   "crashpad", "/opera", "/vivaldi", "plugin_host"]
+
+  STAGING = ["/tmp/", "/var/tmp/", "/private/tmp/", "/appdata/local/temp/",
+             "/.cache/", "/downloads/", "/dev/shm/"]
+
+  def has_any(s, pats):
+      for p in pats:
+          if p in s:
+              return True
+      return False
+
+  def is_local_host(h):
+      h = h.lower().replace("[", "").replace("]", "")
+      if h == "localhost" or h == "::1":
+          return True
+      if h.startswith("127.") or h.startswith("10.") or h.startswith("192.168."):
+          return True
+      if h.startswith("169.254."):
+          return True
+      if h.startswith("172."):
+          parts = h.split(".")
+          if len(parts) > 1 and parts[1].isdigit():
+              o = int(parts[1])
+              if o >= 16 and o <= 31:
+                  return True
+      return False
+
+  def is_browser_proc(p):
+      return has_any(p.lower(), BROWSER_PROCS)
+
+  def is_browser_secret(path):
+      p = path.lower()
+      if has_any(p, STANDALONE):
+          return True
+      if has_any(p, PROFILE_MARKERS) and has_any(p, SECRET_MARKERS):
+          return True
+      return False
+
+  def is_staging(path):
+      return has_any(path.lower(), STAGING)
+
+  def is_browser_control(path, url, host, method):
+      p = path.lower()
+      u = url.lower()
+      if has_any(p, CDP_PATHS):
+          return True
+      if "/wd/hub" in p:
+          return True
+      if "/session/" in p and has_any(p, WD_VERBS):
+          return True
+      if method == "POST" and (p == "/session" or p.endswith("/session")):
+          return True
+      if has_any(u, AUTOMATION_PORTS):
+          return True
+      if is_local_host(host) and has_any(p, LOCAL_API_PATHS):
+          return True
+      return False
+
+  def ev_edge(e, target):
+      t = target
+      if t == "":
+          t = e.get("target_id", "")
+      return {"from": "process://" + e.get("actor_path", ""),
+              "to": t,
+              "kind": e.get("kind", ""),
+              "ts": e.get("ts", "0"),
+              "first_ts": e.get("ts", "0"),
+              "last_ts": e.get("ts", "0")}
+
+  def short(p):
+      parts = p.split("/")
+      return parts[-1]
+
+  def prune(seen, now):
+      out = {}
+      for k in seen:
+          v = seen[k]
+          if type(v) == "string":
+              v = int(v)
+          if now - v < PRUNE_NS:
+              out[k] = v
+      return out
+
+  def run():
+      # ── 1. relevance gate — pure string checks on meta, no graph/log calls ────
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      path   = meta.get("path", "")
+      url    = meta.get("url", "")
+      host   = meta.get("host", "")
+      method = meta.get("method", "").upper()
+      if not is_browser_control(path, url, host, method):
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+      since = now - WINDOW_NS
+
+      # ── 2. anchor on the exact triggering instance ───────────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"            # degraded — re-fires when the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+      root = lineage[-1]
+
+      # ── 3. session scope — lineage + descendants spawned inside the window ───
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now,
+                           limit=4000)
+      for i in range(3):
+          add = {}
+          for e in execs:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap not in session:
+                  add[ap] = e.get("actor_start", "0")
+          if not add:
+              break
+          for k in add:
+              session[k] = add[k]
+
+      pids = sorted([p for p in session])
+      if len(pids) > MAX_PIDS:
+          pids = pids[:MAX_PIDS]
+
+      # ── 4. REQUIRED discriminator: non-browser session process read the
+      #        browser credential / session store inside the window ────────────
+      read_ev = None
+      for p in pids:
+          rows = query_events(kind="READ_FILE", actor_pid=int(p),
+                              actor_start=int(session[p]), since_ns=since,
+                              until_ns=now, limit=MAX_ROWS)
+          for r in rows:
+              if is_browser_proc(r.get("actor_path", "")):
+                  continue
+              fp = r.get("path", "")
+              if fp == "" or not is_browser_secret(fp):
+                  continue
+              if read_ev == None or int(r.get("ts", "0")) < int(read_ev.get("ts", "0")):
+                  read_ev = r
+      if read_ev == None:
+          return "allow"            # automation without credential access — benign
+
+      read_ts   = int(read_ev.get("ts", "0"))
+      read_path = read_ev.get("path", "")
+      if read_ts < since or read_ts > now:
+          return "allow"
+
+      # ── 5. ordered corroboration: egress or staging AT OR AFTER the read ─────
+      egress = None
+      for p in pids:
+          for r in query_events(kind="HTTP_REQUEST", actor_pid=int(p),
+                                actor_start=int(session[p]), since_ns=read_ts,
+                                until_ns=now, limit=200):
+              if is_browser_proc(r.get("actor_path", "")):
+                  continue
+              h = r.get("host", "")
+              if h != "" and not is_local_host(h):
+                  egress = r
+                  break
+          if egress != None:
+              break
+
+      staged = None
+      if egress == None:
+          for p in pids:
+              for r in query_events(kind="WRITE_FILE", actor_pid=int(p),
+                                    actor_start=int(session[p]), since_ns=read_ts,
+                                    until_ns=now, limit=200):
+                  if is_browser_proc(r.get("actor_path", "")):
+                      continue
+                  wp = r.get("path", "")
+                  if wp != "" and is_staging(wp):
+                      staged = r
+                      break
+              if staged != None:
+                  break
+
+      # ── 6. per-session dedupe so one incident is not reported repeatedly ─────
+      key  = "s:" + str(root.get("actor_pid", "0")) + ":" + str(root.get("actor_start", "0"))
+      seen = store_get("reported") or {}
+      prev = seen.get(key, 0)
+      if type(prev) == "string":
+          prev = int(prev)
+      if prev > 0 and (now - prev) < DEDUPE_NS:
+          return "allow"
+      seen = prune(seen, now)
+      seen[key] = now
+      if store_usage()["free"] > 8192:
+          store_set("reported", seen)
+
+      # ── 7. kill chain, built from instance-resolved event rows ───────────────
+      chain  = new_chain("process://" + root.get("actor_path", ""))
+      stages = 2
+
+      trig = {"from": "process://" + inst.get("actor_path", ""),
+              "to": "url://" + host + path,
+              "kind": "HTTP_REQUEST",
+              "ts": str(now), "first_ts": str(now), "last_ts": str(now)}
+      chain.append(step(trig, stage_id="Browser Control Plane",
+                        stage_desc="session drove a browser automation endpoint: " +
+                                   method + " " + host + path + " (by " +
+                                   short(inst.get("actor_path", "?")) + ")"))
+
+      reader = short(read_ev.get("actor_path", "?"))
+      chain.append(step(ev_edge(read_ev, read_path),
+                        stage_id="Browser Credential Access",
+                        stage_desc="non-browser process " + reader +
+                                   " read browser credential/session store: " + read_path))
+
+      detail = "no egress or staging observed yet"
+      if egress != None:
+          stages = 3
+          eh = egress.get("host", "")
+          chain.append(step(ev_edge(egress, "url://" + eh + egress.get("path", "")),
+                            stage_id="Exfil Egress",
+                            stage_desc="external HTTP by " +
+                                       short(egress.get("actor_path", "?")) +
+                                       " after credential access: " +
+                                       egress.get("method", "") + " " + eh))
+          detail = "external egress to " + eh
+      elif staged != None:
+          stages = 3
+          sp = staged.get("path", "")
+          chain.append(step(ev_edge(staged, sp),
+                            stage_id="Exfil Staging",
+                            stage_desc="harvested material written to staging path by " +
+                                       short(staged.get("actor_path", "?")) + ": " + sp))
+          detail = "staged to " + sp
+
+      names = " -> ".join([short(x.get("actor_path", "?")) for x in lineage])
+      attrib = "instance-resolved"
+      if len(lineage) < 2:
+          attrib = "degraded (lineage truncated)"
+
+      print("browser-automation session harvest | " + names + " | read=" + read_path +
+            " | " + detail + " | stages=" + str(stages) + " | " + attrib)
+
+      return {
+          "action": "report",
+          "reason": "Browser automation control plane (" + host + path +
+                    ") plus browser credential-store read by non-browser process " +
+                    reader + " (" + read_path + ") in the same session [" + names +
+                    "]; " + detail + "; stages=" + str(stages) + "; " + attrib,
+          "chain": chain,
+      }
+
+  result = run()
