@@ -1,0 +1,375 @@
+title: LLama-Index CLI --files OS Command Injection
+id: 7c3f9d21-4b6a-4a58-9e2d-8f61c05a7bd3
+status: experimental
+level: high
+description: |
+  Detects exploitation of the OS command injection flaw in the LLama-Index CLI
+  (v0.12.20) --files argument, where the caller-supplied value is passed straight
+  to os.system(). The rule is instance-resolved: it anchors on meta["caller_pid"],
+  resolves the exact process instance with proc_instance(), walks the real spawn
+  chain with proc_lineage(), and expands that lineage into a single session using
+  EXECUTE_PROCESS rows from the event log. Only that one session is ever
+  attributed - no cross-session stitching.
+
+  Required anchor stage: an EXECUTE_PROCESS command line that names the
+  llama-index CLI AND carries a shell metacharacter inside the --files value
+  itself (the value is truncated at the next " --" so metacharacters belonging to
+  other flags do not count). A shell metacharacter surviving into argv of the CLI
+  - or appearing in the os.system() "sh -c" wrapper the CLI is invoked through -
+  is the discriminating signal; neither the CLI nor the --files flag alone fires
+  the rule.
+
+  Optional confirmation stage: the anchor process is itself a shell invoked with
+  -c (the os.system() pattern), or a descendant of the session spawned after the
+  anchor is a shell -c / recon-egress binary. Both stages must fall inside a
+  5 minute window ending at the triggering event, and every stage must be
+  performed by an instance belonging to the caller's session.
+
+  Reporting only - the rule never blocks, and repeat verdicts for the same anchor
+  instance are suppressed through the rule's private store.
+
+  Taxonomy note: the source advisory maps this to OWASP Top 10 A03:2021 -
+  Injection, which is not an identifier the owasp. tag namespace accepts
+  (LLM01-LLM10 / ASI01-ASI10 only), so it is recorded here and in references
+  rather than invented as a tag. No ATLAS technique applies.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://attack.mitre.org/techniques/T1059/004/
+  - https://docs.python.org/3/library/os.html#os.system
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.004
+  - attack.initial-access
+  - attack.t1190
+  - owasp.llm05
+falsepositives:
+  - A real filename passed to --files that legitimately contains a shell
+    metacharacter (for example "Q3 P&L; final.pdf" on macOS, or a path containing
+    a pipe or angle bracket). Reported as SUSPECTED, never CONFIRMED, unless a
+    shell or recon binary is also spawned in the same session.
+  - A CI/Make one-liner that chains the CLI with another command inside the same
+    sh -c string, e.g. 'llamaindex rag --files docs/a.md docs/b.md && echo ok'.
+    The value is truncated at the next " --", but a trailing "&& ..." after the
+    file list still matches.
+  - Documentation, exploit write-ups or regression tests that echo a PoC string
+    containing 'llamaindex --files "x; id"' - the metacharacter is inside a
+    quoted echo argument, not a real invocation.
+  - Deliberate CVE reproduction in a sandbox or a red-team exercise.
+  - Repository paths that merely contain the token llama_index (site-packages,
+    vendored source) combined with an unrelated --files flag on the same command
+    line - the metacharacter check inside the --files value is what suppresses
+    these.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_cli:
+    content|contains:
+      - 'llamaindex'
+      - 'llama-index'
+      - 'llama_index'
+  sel_files:
+    content|contains: '--files'
+  sel_shell:
+    content|re: '(?i)(?:/bin/(?:sh|bash|zsh|dash|ksh|ash)|/usr/bin/(?:sh|bash|zsh)|\bcmd\.exe|\bpowershell(?:\.exe)?|\bpwsh)[^\n]{0,240}[\s",\x27\[][-/]c[\s",\x27\]]'
+  condition: sel_exec and (sel_cli or sel_files or sel_shell)
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── llama-index CLI --files OS command injection — instance-resolved ────────
+  WINDOW_NS = 300000000000        # 5 minutes: one session slice, no stitching
+  MAX_ROWS  = 2000
+
+  CLI_RE     = r'(?i)(llamaindex-cli|llamaindex|llama[-_ ]index)'
+  SHELL_C_RE = r'(?:^|[\s",\x27\[])-c(?:[\s",\x27\]]|$)'
+  WIN_C_RE   = r'(?i)(?:^|[\s",\x27\[])/c(?:ommand)?(?:[\s",\x27\]]|$)'
+
+  # Metacharacters that cannot reach argv as part of a path value unless they
+  # were injected. Bare "&" is deliberately excluded ("R&D.pdf"); only the
+  # backgrounding form " & " is matched.
+  META_CHARS = [";", "&&", "||", "|", "`", "$(", "${", ">", "<", " & ",
+                "\n", "\r", "%0a", "%0A"]
+
+  SHELL_NAMES = ["sh", "bash", "zsh", "dash", "ksh", "ash", "busybox",
+                 "cmd.exe", "powershell.exe", "pwsh"]
+
+  PAYLOAD_TOOLS = ["curl", "wget", "nc", "ncat", "netcat", "socat", "whoami",
+                   "id", "uname", "chmod", "base64", "openssl", "ssh", "scp",
+                   "perl", "ruby", "php", "osascript", "dd"]
+
+  # Hosts that can plausibly reach os.system() with the CLI. Used ONLY to avoid
+  # an expensive log scan on unrelated shell spawns — it never widens trust.
+  HOST_HINTS = ["python", "llamaindex", "llama_index", "llama-index", "uv",
+                "pipx", "poetry", "uvicorn", "gunicorn", "hypercorn", "node"]
+
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      return int(s)
+
+  def base(p):
+      b = p
+      for sep in ["/", "\\"]:
+          parts = b.split(sep)
+          b = parts[len(parts) - 1]
+      return b.lower()
+
+  def trunc(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def files_value(cmd):
+      idx = cmd.find("--files")
+      if idx < 0:
+          return ""
+      tail = cmd[idx + 7:]
+      nxt = tail.find(" --")
+      if nxt >= 0:
+          tail = tail[:nxt]
+      return tail
+
+  def find_injection(cmd):
+      # High-specificity anchor: llama-index CLI token AND a metacharacter that
+      # lives inside the --files value itself.
+      if re.find(CLI_RE, cmd) == None:
+          return ""
+      v = files_value(cmd)
+      if v == "":
+          return ""
+      for m in META_CHARS:
+          if m in v:
+              return m
+      return ""
+
+  def has_dash_c(cmd):
+      if re.find(SHELL_C_RE, cmd) != None:
+          return True
+      if re.find(WIN_C_RE, cmd) != None:
+          return True
+      return False
+
+  def is_shell_c(path, cmd):
+      b = base(path)
+      hit = False
+      for s in SHELL_NAMES:
+          if b == s:
+              hit = True
+      if not hit:
+          return False
+      return has_dash_c(cmd)
+
+  def is_payload_tool(path):
+      b = base(path)
+      for t in PAYLOAD_TOOLS:
+          if b == t:
+              return True
+      return False
+
+  def lineage_hint(lineage):
+      for x in lineage:
+          p = x.get("actor_path", "").lower()
+          for h in HOST_HINTS:
+              if h in p:
+                  return True
+      return False
+
+  def ikey(pid, start):
+      return str(pid) + "/" + str(start)
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = e.get("actor_path", "")
+      return {
+          "kind":     "EXECUTE_PROCESS",
+          "from":     "process://" + frm,
+          "to":       "process://" + e.get("actor_path", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  trunc(e.get("cmdline", ""), 400),
+      }
+
+  def trig_event(inst, lineage, cmd, ts):
+      ppath = ""
+      if len(lineage) > 1:
+          ppath = lineage[1].get("actor_path", "")
+      return {
+          "kind":         "EXECUTE_PROCESS",
+          "ts":           str(ts),
+          "actor_pid":    str(inst.get("actor_pid", "")),
+          "actor_start":  str(inst.get("actor_start", "")),
+          "actor_path":   inst.get("actor_path", ""),
+          "parent_pid":   str(inst.get("parent_pid", "")),
+          "parent_start": str(inst.get("parent_start", "")),
+          "parent_path":  ppath,
+          "cmdline":      cmd,
+      }
+
+  def run():
+      # ── 1. relevance gate: pure string checks on meta, no log/graph calls ──
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      if cmd.find("--files") < 0 and re.find(CLI_RE, cmd) == None:
+          if not has_dash_c(cmd):
+              return "allow"
+
+      # ── 2. anchor on the exact triggering instance ─────────────────────────
+      cp     = to_int(meta.get("caller_pid", "0"))
+      ts_now = to_int(meta.get("event_ts", "0"))
+      if cp == 0 or ts_now == 0:
+          return "allow"
+      inst = proc_instance(cp, ts_now)
+      if inst == None:
+          return "allow"          # degraded: create row not landed — re-fires later
+      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
+                            to_int(inst.get("actor_start", "0")))
+      if not lineage:
+          lineage = [inst]
+
+      caller_path = inst.get("actor_path", "")
+      trig_hit    = find_injection(cmd)
+      trig_shell  = is_shell_c(caller_path, cmd)
+      trig_tool   = is_payload_tool(caller_path)
+
+      # secondary gate — keeps the log scan off unrelated shell spawns
+      if trig_hit == "" and not (trig_shell or trig_tool):
+          return "allow"
+      if trig_hit == "" and not lineage_hint(lineage):
+          return "allow"
+
+      since = ts_now - WINDOW_NS
+      if since < 0:
+          since = 0
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                          until_ns=ts_now + 1, limit=MAX_ROWS)
+
+      # ── 3. scope: this lineage + its descendants inside the window only ────
+      session = {}
+      for x in lineage:
+          session[ikey(x.get("actor_pid", ""), x.get("actor_start", ""))] = True
+      for i in range(4):
+          added = False
+          for e in rows:
+              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
+              pk = ikey(e.get("parent_pid", ""), e.get("parent_start", ""))
+              if pk in session and ak not in session:
+                  session[ak] = True
+                  added = True
+          if not added:
+              break
+      caller_key = ikey(inst.get("actor_pid", ""), inst.get("actor_start", ""))
+      session[caller_key] = True
+
+      # ── 4. REQUIRED anchor stage ───────────────────────────────────────────
+      anchor      = None
+      anchor_ts   = 0
+      anchor_char = ""
+      anchor_key  = ""
+      if trig_hit != "":
+          # trigger itself carries the injection — taken from meta, never re-queried
+          anchor      = trig_event(inst, lineage, cmd, ts_now)
+          anchor_ts   = ts_now
+          anchor_char = trig_hit
+          anchor_key  = caller_key
+      else:
+          for e in rows:
+              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
+              if ak not in session:
+                  continue
+              m = find_injection(e.get("cmdline", ""))
+              if m != "":
+                  anchor      = e
+                  anchor_ts   = to_int(e.get("ts", "0"))
+                  anchor_char = m
+                  anchor_key  = ak
+                  break
+
+      if anchor == None:
+          return "allow"          # no discriminating anchor — not this CVE
+
+      anchor_shell = is_shell_c(anchor.get("actor_path", ""),
+                                anchor.get("cmdline", ""))
+
+      # ── 5. optional confirmation stage, ordered after the anchor ───────────
+      stage2 = None
+      if anchor_key != caller_key and (trig_shell or trig_tool):
+          if ts_now >= anchor_ts and (ts_now - anchor_ts) <= WINDOW_NS:
+              stage2 = trig_event(inst, lineage, cmd, ts_now)
+      if stage2 == None:
+          for e in reversed(rows):
+              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
+              if ak not in session or ak == anchor_key:
+                  continue
+              t = to_int(e.get("ts", "0"))
+              if t < anchor_ts or (t - anchor_ts) > WINDOW_NS:
+                  continue
+              p = e.get("actor_path", "")
+              if is_shell_c(p, e.get("cmdline", "")) or is_payload_tool(p):
+                  stage2 = e
+                  break
+
+      confirmed = stage2 != None or anchor_shell
+
+      # ── 6. suppress duplicate verdicts for the same anchor instance ────────
+      dedupe = anchor_key + "|" + anchor_char
+      if confirmed:
+          dedupe = dedupe + "|confirmed"
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if dedupe in seen:
+          return "allow"
+
+      # ── 7. kill chain built from instance-resolved event rows ──────────────
+      lin = []
+      for x in lineage:
+          lin.append(base(x.get("actor_path", "")))
+      lineage_str = " -> ".join(lin)
+
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      desc = ("llama-index CLI '--files' value carries shell metacharacter '" +
+              anchor_char + "': " + trunc(anchor.get("cmdline", ""), 260))
+      if anchor_shell:
+          desc = desc + " [value reached a shell interpreter — os.system pattern]"
+      chain.append(step(ev_edge(anchor), stage_id="Argument Injection",
+                        stage_desc=desc))
+      if stage2 != None:
+          chain.append(step(ev_edge(stage2), stage_id="Command Execution",
+                            stage_desc="process spawned in the same session after the injected argument: " +
+                                       base(stage2.get("actor_path", "")) + " — " +
+                                       trunc(stage2.get("cmdline", ""), 200)))
+
+      verdict = "SUSPECTED"
+      if confirmed:
+          verdict = "CONFIRMED"
+      attrib = "instance-resolved"
+      if len(lineage) < 2:
+          attrib = "degraded"
+      reason = ("LLama-Index CLI --files OS command injection " + verdict +
+                " — metacharacter '" + anchor_char + "' inside the --files value; session " +
+                lineage_str + " (" + attrib + ")")
+      print(reason)
+
+      seen[dedupe] = str(ts_now)
+      if len(seen) > 300:
+          seen = {dedupe: str(ts_now)}
+      u = store_usage()
+      if u["free"] > 8192:
+          store_set("reported", seen)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
