@@ -1,0 +1,103 @@
+title: Supply Chain PyPI hasdata-zillow-mcp Install or Execution
+id: 7c3f9a12-5d84-4e6b-9f21-a0c8b3e75d64
+status: experimental
+level: medium
+description: |
+  Detects a single process-execution event in which an AI agent (or its runtime)
+  installs, fetches-and-runs, or directly executes the PyPI distribution
+  'hasdata-zillow-mcp' — an MCP server package that proxies Zillow real-estate
+  data through the third-party HasData API.
+
+  Scope note (answering triage dissent): there is no confirmed malicious release
+  and no CVE for this artifact. This rule therefore does NOT claim compromise and
+  is deliberately report-only. Its value is artifact-level visibility: the generic
+  'Unpinned or Latest Dependency Installation' rule (d7f1c645) sees the *shape* of
+  a risky install, this rule names the *specific* distribution so that, if a
+  backdoored version is ever published, responders can retro-hunt exactly which
+  agent hosts pulled or ran it and when. It fires on the two moments that matter
+  for a PyPI supply-chain vector that the engine can actually observe:
+  (1) the package-manager invocation that fetches and runs setup/build code, and
+  (2) later execution of the installed console script or module, which is when the
+  MCP server would make its outbound HasData API calls.
+
+  For execute_process events the 'content' field carries the full command line,
+  so all matching is done against 'content'. Package-name matching accepts PyPI
+  name normalisation ('-', '_', '.' are interchangeable separators).
+author: Tanya
+date: "2026-06-11"
+references:
+  - https://pypi.org/project/hasdata-zillow-mcp/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: a package-manager invocation that installs from an index ──────
+  # Both sel_installer AND sel_package must match the SAME command line.
+  sel_installer:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bpip[0-9.]*\s+(?:[-\w=./]+\s+)*install\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\s+(?:[-\w=./]+\s+)*install\b'
+      - '(?i)\buv\s+(?:pip\s+install|add|tool\s+install)\b'
+      - '(?i)\buvx\b'
+      - '(?i)\bpipx\s+(?:install|run)\b'
+      - '(?i)\bpoetry\s+add\b'
+      - '(?i)\bpdm\s+add\b'
+      - '(?i)\brye\s+add\b'
+
+  sel_package:
+    event_type: execute_process
+    content|re: '(?i)\bhasdata[-_.]+zillow[-_.]+mcp\b'
+
+  # ── Branch 2: direct execution of the installed console script / module ─────
+  # This is the runtime moment the MCP server would spawn and call out.
+  sel_runtime:
+    event_type: execute_process
+    content|re:
+      - '(?i)\bpython[0-9.]*\s+-m\s+hasdata[-_.]+zillow[-_.]+mcp\b'
+      - '(?i)(?:^|[\s"''=])(?:[^\s"'']*/)?hasdata[-_.]+zillow[-_.]+mcp(?:\.exe)?(?:\s|$|"|'')'
+
+  # ── Filters: benign, non-installing package-manager verbs ───────────────────
+  filter_readonly_verbs:
+    content|re:
+      - '(?i)\bpip[0-9.]*\s+(?:uninstall|show|list|freeze|check|cache|index|config)\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\s+(?:uninstall|show|list|freeze|check|cache|index|config)\b'
+      - '(?i)\b(?:uv|pipx|poetry|pdm|rye)\s+(?:uninstall|remove|show|list|tree|search)\b'
+
+  # Planning / no-op invocations that never execute package code
+  filter_dry_run:
+    content|re: '(?i)(?:^|\s)--(?:dry-run|help|version)\b'
+
+  # The package name merely appearing as text inside a search/print/VCS command
+  # (README greps, lockfile diffs, log tailing, SBOM queries).
+  filter_text_tools:
+    content|re: '(?i)^(?:[^\s]*/)?(?:grep|egrep|fgrep|rg|ag|ack|sed|awk|echo|printf|cat|head|tail|less|more|man|jq|yq|diff|git|wc|sort|uniq|column)\b'
+
+  condition: >
+    ((sel_installer and sel_package) or sel_runtime)
+    and not (filter_readonly_verbs or filter_dry_run or filter_text_tools)
+
+falsepositives:
+  - Intentional, authorised installation of hasdata-zillow-mcp by a developer or
+    platform team wiring up a Zillow/HasData MCP integration. This is the dominant
+    benign case and the reason the rule is report-only rather than blocking.
+  - CI/CD or container build steps that reinstall the pinned dependency on every
+    run, producing one repeated event per build.
+  - Legitimate startup of the MCP server process by an agent supervisor after a
+    sanctioned install (branch 2 fires once per server launch).
+  - Security researchers, SOC analysts or SBOM tooling deliberately fetching the
+    distribution into a sandbox for inspection.
+  - Shell one-liners that merely mention the package name in documentation,
+    lockfile or log text (mitigated by filter_text_tools) or that remove/inspect
+    it (mitigated by filter_readonly_verbs).
+
+action: report
