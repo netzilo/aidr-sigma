@@ -1,0 +1,307 @@
+title: ObsidianReader Symlink Traversal Arbitrary File Read
+id: 6f3b1c92-8a4d-4f57-9b21-7d0c5e4a18ab
+status: experimental
+level: high
+description: |
+  Detects the observable footprint of CWE-59 / CWE-22 abuse in markdown-vault
+  loaders such as llama_index's ObsidianReader, which does not resolve symbolic
+  links to their real path nor confirm that the resolved path stays inside the
+  vault root.
+
+  There is no SYMLINK_RESOLVED edge and no live file_read event producer in this
+  engine, so the rule reconstructs the behaviour from the instance-resolved event
+  log instead: the exact process instance that is ingesting a markdown vault
+  (identified either by a read under a ".obsidian" marker directory or by bulk
+  ".md" reads sharing one parent directory) subsequently reads a credential or
+  secret file that lies OUTSIDE that vault root, within the same ingestion run.
+
+  Attribution is anchored on meta["caller_pid"] -> proc_instance() ->
+  proc_lineage(), and every file query is scoped to one (pid, start) instance of
+  that one session. Nothing is ever attributed across sessions or across PID
+  reuse. Report only.
+author: Evgen
+date: "2026-03-04"
+references:
+  - https://cwe.mitre.org/data/definitions/59.html
+  - https://cwe.mitre.org/data/definitions/22.html
+  - https://github.com/run-llama/llama_index
+tags:
+  - attack.collection
+  - attack.t1005
+  - attack.credential-access
+  - attack.t1552.001
+  - cwe.cwe-59
+  - cwe.cwe-22
+  - owasp.llm02
+falsepositives:
+  - A knowledge-base indexing job that legitimately ingests an Obsidian vault and,
+    in the same process, loads its own ".env" / ".npmrc" for API keys. Mitigated by
+    requiring the out-of-vault secret read to occur AFTER the first vault file read
+    (dotenv-style config loading happens at start-up, before ingestion) and by
+    reporting rather than blocking.
+  - A user who deliberately symlinks notes stored outside the vault into it (a
+    documented Obsidian workflow). This is a genuine true-positive behaviour with a
+    benign intent; the report names the exact out-of-vault path so an analyst can
+    confirm it in seconds.
+  - Developer agents that index a vault and separately read "~/.gitconfig" or shell
+    history in the same window. Those paths are secondary evidence only and can
+    never satisfy the required anchor on their own.
+  - Backup / sync helpers spawned under the agent process tree that walk both the
+    vault and the home directory. Bounded by the 5-minute window, the ordering
+    requirement and the per-instance scoping, but still possible - hence report.
+  - Short lineage (an unmonitored shell above the loader) yields "attribution
+    degraded" in the reason string; the detection is still instance-exact for the
+    reading process itself.
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  sel_events:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_tool_call
+      - llm_tool_result
+      - execute_process
+  sel_vault_hint:
+    content|contains:
+      - obsidian
+      - vault
+      - markdown
+      - load_data
+      - llama_index
+      - llamaindex
+      - SimpleDirectoryReader
+      - '.md'
+  condition: sel_events and sel_vault_hint
+
+action: execute
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants ───────────────────────────────────────────────────────────────
+  WINDOW_NS     = 300000000000   # 5 minutes — one vault ingestion run
+  MAX_READS     = 600            # per-instance cap: READ_FILE is high volume
+  MIN_MD_IN_DIR = 3              # bulk-markdown heuristic for the vault root
+  MAX_SEC_STEPS = 3
+
+  HINTS = ["obsidian", "vault", "markdown", "load_data", "llama_index",
+           "llamaindex", "simpledirectoryreader", ".md"]
+
+  # Required anchor: secret material read from OUTSIDE the vault root.
+  CRED_ANCHORS = [
+      "/.ssh/id_", "/.ssh/authorized_keys", "/.aws/credentials", "/.aws/config",
+      "/.kube/config", "/.gnupg/", "/.docker/config.json", "/.git-credentials",
+      "/.netrc", "/.pgpass", "/.npmrc", "/.pypirc", "/.env",
+      "/etc/shadow", "/etc/master.passwd", "/etc/sudoers",
+      "/.config/gcloud/", "/.azure/", "/library/keychains/",
+      "id_rsa", "id_ed25519", "id_ecdsa",
+  ]
+
+  # Supporting evidence only — never sufficient on its own.
+  SECONDARY_ANCHORS = [
+      "/etc/passwd", "/.bash_history", "/.zsh_history", "/.mysql_history",
+      "/.gitconfig", "/.config/git/credentials", "/.mozilla/", "/.thunderbird/",
+      "/cookies.sqlite", "/login data", "/.viminfo", "/proc/self/environ",
+  ]
+
+  # ── Pure helpers (no graph / log / fts calls) ───────────────────────────────
+  def dirname(p):
+      i = p.rfind("/")
+      if i <= 0:
+          return p
+      return p[:i]
+
+  def has_any(s, pats):
+      for p in pats:
+          if p in s:
+              return True
+      return False
+
+  def inside(p, root):
+      if root == "":
+          return False
+      return p == root or p.startswith(root + "/")
+
+  def ev_edge(e, target):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       target,
+          "kind":     e.get("kind", "READ_FILE"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── Relevance gate: cheap string checks on meta only ───────────────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct in ("tool_input", "tool_output", "llm_tool_call", "llm_tool_result"):
+          low = meta.get("content", "").lower() + " " + meta.get("tool_name", "").lower()
+          return has_any(low, HINTS)
+      if ct == "execute_process":
+          cmd = meta.get("content", "").lower()
+          if re.find(r"\bpython[0-9.]*\b", cmd) == None:
+              if re.find(r"\bobsidian\b", cmd) == None:
+                  return False
+          return has_any(cmd, HINTS)
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if trig_ts <= 0 or cp == 0:
+          return "allow"
+
+      # ── Anchor on the exact triggering instance ─────────────────────────────
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"                    # create row not landed — degraded, re-fires
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since = trig_ts - WINDOW_NS
+
+      # ── Session scope: caller lineage + children spawned in this window ─────
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "0")
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                            until_ns=trig_ts, limit=2000):
+          pp = e.get("parent_pid", "")
+          ap = e.get("actor_pid", "")
+          if pp != "" and pp in session and ap not in session:
+              session[ap] = e.get("actor_start", "0")
+
+      # ── Instance-scoped file reads (never a broad READ_FILE scan) ───────────
+      reads = []
+      for pid in session:
+          for e in query_events(kind="READ_FILE", actor_pid=int(pid),
+                                actor_start=int(session[pid]),
+                                since_ns=since, until_ns=trig_ts,
+                                limit=MAX_READS):
+              p = e.get("path", "")
+              if p != "":
+                  reads.append([int(e.get("ts", "0")), p, e])
+      if not reads:
+          return "allow"
+
+      # ── Stage 1 (REQUIRED anchor): markdown vault ingestion, and its root ───
+      vault_root = ""
+      vault_ts   = 0
+      vault_ev   = None
+      md_dirs    = {}
+
+      for r in reads:
+          ts  = r[0]
+          p   = r[1]
+          low = p.lower()
+          idx = low.find("/.obsidian")
+          if idx > 0:
+              if vault_root == "" or ts < vault_ts:
+                  vault_root = p[:idx]
+                  vault_ts   = ts
+                  vault_ev   = r[2]
+          if low.endswith(".md") or low.endswith(".markdown"):
+              d   = dirname(p)
+              cur = md_dirs.get(d, None)
+              if cur == None:
+                  md_dirs[d] = [1, ts, r[2]]
+              else:
+                  cur[0] = cur[0] + 1
+                  if ts < cur[1]:
+                      cur[1] = ts
+                      cur[2] = r[2]
+
+      if vault_root == "":
+          best = 0
+          for d in md_dirs:
+              v = md_dirs[d]
+              if v[0] >= MIN_MD_IN_DIR and v[0] > best:
+                  best       = v[0]
+                  vault_root = d
+                  vault_ts   = v[1]
+                  vault_ev   = v[2]
+
+      if vault_root == "" or vault_ev == None:
+          return "allow"                    # no vault ingestion — anchor absent
+      if trig_ts - vault_ts > WINDOW_NS:
+          return "allow"                    # stale ingestion, not this run
+
+      # ── Stage 2 (REQUIRED): out-of-vault secret read, AFTER ingestion began ─
+      cred_ev   = None
+      cred_path = ""
+      cred_ts   = 0
+      sec       = []
+
+      for r in reads:
+          ts = r[0]
+          p  = r[1]
+          if ts < vault_ts:
+              continue                      # ordering: must follow the anchor
+          if inside(p, vault_root):
+              continue                      # in-vault reads are expected behaviour
+          low = p.lower()
+          if has_any(low, CRED_ANCHORS):
+              if cred_ev == None or ts < cred_ts:
+                  cred_ev   = r[2]
+                  cred_path = p
+                  cred_ts   = ts
+          elif has_any(low, SECONDARY_ANCHORS):
+              sec.append([p, r[2]])
+
+      if cred_ev == None:
+          return "allow"
+
+      # ── Idempotence: one report per (instance, out-of-vault target) ─────────
+      key  = (cred_ev.get("actor_pid", "?") + ":" +
+              cred_ev.get("actor_start", "?") + ":" + cred_path)
+      seen = store_get("reported") or {}
+      if key in seen:
+          return "allow"
+      if store_usage()["free"] > 8192:
+          if len(seen) > 200:
+              seen = {}
+          seen[key] = str(trig_ts)
+          store_set("reported", seen)
+
+      # ── Kill chain, rooted at the session owner ─────────────────────────────
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      who = " -> ".join(names)
+      if len(lineage) < 2:
+          who = who + " (attribution degraded)"
+
+      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain.append(step(ev_edge(vault_ev, vault_root),
+                        stage_id="Vault Ingestion",
+                        stage_desc="markdown vault ingested by " +
+                                   vault_ev.get("actor_path", "?") +
+                                   " — vault root: " + vault_root))
+      chain.append(step(ev_edge(cred_ev, cred_path),
+                        stage_id="Symlink Traversal / Arbitrary Read",
+                        stage_desc="secret read OUTSIDE the vault root during " +
+                                   "ingestion: " + cred_path))
+      added = 0
+      for s in sec:
+          if added >= MAX_SEC_STEPS:
+              break
+          chain.append(step(ev_edge(s[1], s[0]),
+                            stage_id="Collection",
+                            stage_desc="additional out-of-vault read: " + s[0]))
+          added = added + 1
+
+      reason = ("ObsidianReader-style path/symlink traversal — vault ingestion at " +
+                vault_root + " followed by out-of-vault secret read " + cred_path +
+                " by " + who)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
