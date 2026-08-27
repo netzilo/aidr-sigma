@@ -1,0 +1,125 @@
+title: Supply Chain TokenSaver CLI Agent Token Interception
+id: 7c1f9a2e-4b83-4d61-9f0a-2e8c5d3b71a4
+status: experimental
+level: high
+description: |
+  Detects a single outbound HTTP request that simultaneously carries a TokenSaver
+  CLI control-plane marker (URL segment, header-style key, JSON key, or agent
+  version string) AND either (a) live authentication material belonging to an AI
+  development tool (Claude Code, Cursor, Codex, Anthropic/OpenAI keys, on-disk
+  credential file names) or (b) an explicit base-URL / proxy override that re-points
+  one of those tools at a third-party endpoint.
+
+  TokenSaver CLI is distributed as a PyPI dependency that advertises "routing AI
+  agents through a control plane". Once installed it rewrites agent egress so that
+  Claude Code / Cursor / Codex authentication tokens traverse an operator-controlled
+  gateway, where they can be harvested and replayed to hijack agent sessions and the
+  services behind them.
+
+  This is deliberately a two-signal content rule: neither the TokenSaver marker nor
+  the credential material alone is conclusive, so both must be present in the same
+  request body or URL before the rule reports.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.credential-access
+  - attack.t1552.001
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: single outbound HTTP request only ───────────────────────────────
+  sel_http:
+    event_type: http_request
+
+  # ── Signal 1a: TokenSaver control-plane marker in the request URL ──────────
+  sel_marker_url:
+    url.full|re:
+      - '(?i)://[^/]*\btoken[-_]?saver\b'
+      - '(?i)/token[-_]?saver/(v\d{1,2}/)?(route|routes|proxy|token|tokens|session|sessions|enroll|register|ingest|capture)\b'
+      - '(?i)[?&](tokensaver|token_saver|ts_control_plane)[a-z_]{0,24}='
+
+  # ── Signal 1b: TokenSaver control-plane marker in the request body ─────────
+  sel_marker_body:
+    content|re:
+      - '(?i)"?x-token-?saver-[a-z-]{2,24}"?\s*[:=]'
+      - '(?i)"(tokensaver|token_saver)[a-z_]{0,24}"\s*:'
+      - '(?i)\btoken-?saver[-_ ](cli|proxy|router|gateway|agent|daemon|control[- _]?plane)\b'
+      - '(?i)\btoken-?saver/\d{1,3}\.\d{1,3}'
+
+  # ── Signal 2a: live AI-agent credential material in the same request ───────
+  sel_cred_material:
+    content|re:
+      - '\bsk-ant-(?:api|oat|sid)[0-9]{2}-[A-Za-z0-9_\-]{24,}'
+      - '\bsk-proj-[A-Za-z0-9_\-]{32,}'
+      - '(?i)"(claude[_-]?code|cursor|codex|anthropic|openai)[_-]?(oauth|access|refresh|session|api)[_-]?(token|key)"\s*:\s*"[^"]{20,}"'
+      - '(?i)\b(CLAUDE_CODE_OAUTH_TOKEN|ANTHROPIC_AUTH_TOKEN|ANTHROPIC_API_KEY|OPENAI_API_KEY|CURSOR_API_KEY|CODEX_API_KEY)\b["'']?\s*[:=]\s*["'']?[A-Za-z0-9_\-]{20,}'
+      - '(?i)(\.claude/\.credentials\.json|\.codex/auth\.json|\.cursor/[a-z0-9_.-]{0,32}(auth|token|session|cred)[a-z0-9_.-]{0,32}\.json)'
+
+  # ── Signal 2b: agent egress re-pointed at a third-party endpoint ───────────
+  sel_routing_override:
+    content|re:
+      - '(?i)\b(ANTHROPIC_BASE_URL|ANTHROPIC_API_URL|OPENAI_BASE_URL|OPENAI_API_BASE|OPENAI_API_BASE_URL|CLAUDE_CODE_[A-Z_]{2,20}(BASE_URL|PROXY|GATEWAY)|CURSOR_[A-Z_]{0,20}(BASE_URL|PROXY)|CODEX_[A-Z_]{0,20}(BASE_URL|PROXY))\b["'']?\s*[:=]\s*["'']?https?://'
+      - '(?i)"(base_?url|api_?base|upstream_?url|proxy_?url|gateway_?url|control_?plane_?url)"\s*:\s*"https?://[^"]{4,200}"[\s\S]{0,300}?"(claude[_-]?code|cursor|codex)"'
+
+  # ── FP suppression: placeholder / masked / templated secrets ───────────────
+  filter_placeholder:
+    content|re:
+      - '(?i)\b(your|insert|replace|placeholder|example|sample|dummy|fake|mock|test)[-_ ]?(api[-_ ]?)?(key|token|secret|credential)s?\b'
+      - '(?i)\b(api[-_ ]?key|token|secret)[-_ ]?(here|goes[-_ ]?here|placeholder)\b'
+      - '<[A-Z][A-Z0-9_ -]{2,30}>'
+      - '\$\{[A-Za-z_][A-Za-z0-9_]{0,40}\}'
+      - '(?i)\bx{8,}\b'
+      - '\*{6,}'
+      - '(?i)\[?\bREDACTED\b\]?'
+      - '(?i)\bsk-ant-(api|oat)\d{2}-(EXAMPLE|XXXX|TEST|1234)'
+
+  # ── FP suppression: package-index metadata about the package itself ────────
+  filter_pkg_metadata:
+    content|re:
+      - '(?i)"requires_dist"\s*:\s*\['
+      - '(?i)"upload_time_iso_8601"\s*:'
+      - '(?i)"classifiers"\s*:\s*\[\s*"'
+      - '(?im)^(Metadata-Version|Requires-Dist|Home-page|Author-email)\s*:\s'
+
+  # ── FP suppression: security research / detection content discussing it ────
+  filter_security_research:
+    content|re:
+      - '(?i)\b(sigma|yara|snort|suricata)\s+rule\b'
+      - '(?i)\b(indicators? of compromise|threat (intel|intelligence|advisory|report)|malware analysis|security advisory)\b'
+      - '(?i)\bCVE-\d{4}-\d{4,7}\b'
+      - '(?i)"?falsepositives"?\s*:'
+      - '(?i)\bproof[- ]of[- ]concept\b'
+
+  condition: >
+    sel_http
+    and (sel_marker_url or sel_marker_body)
+    and (sel_cred_material or sel_routing_override)
+    and not (filter_placeholder or filter_pkg_metadata or filter_security_research)
+
+falsepositives:
+  - Security researcher or SOC analyst pulling the TokenSaver package page, release
+    artefacts or a vendor advisory while triaging the dependency — normally caught by
+    filter_pkg_metadata / filter_security_research, but a rendered page that quotes a
+    realistic-looking token can still slip through.
+  - An internal AI egress gateway that legitimately proxies Claude Code / Cursor /
+    Codex traffic and happens to ship a similarly-named product, header or JSON key.
+    Confirm the destination host is the approved corporate gateway before escalating.
+  - CI/CD or dotfile-sync jobs POSTing an environment template that sets
+    ANTHROPIC_BASE_URL / OPENAI_BASE_URL to a real internal URL alongside a real key.
+  - Developer telemetry or crash reporters that upload a redacted config blob which
+    still contains the literal credential file paths (.claude/.credentials.json,
+    .codex/auth.json).
+
+action: report
