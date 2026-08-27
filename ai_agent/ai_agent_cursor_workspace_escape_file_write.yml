@@ -1,0 +1,117 @@
+title: Cursor Agent Workspace Escape - File Write Outside Project Root
+id: 7f3c1e64-9b2a-4d58-8a41-6c0f2d9e5b73
+status: experimental
+level: medium
+description: |
+  Single-event detection for an AI coding agent (Cursor / VS Code fork) that
+  spawns a process whose command line performs a WRITE whose target is
+  demonstrably outside the opened workspace.
+
+  Cursor 0.45.0 - 0.48.6 shipped a regression in the Agent's write permission
+  check that allowed edits to paths outside the opened workspace when the model
+  was fed crafted context. The only observable at the endpoint is the write
+  itself, so this rule binds a write OPERATOR to an out-of-workspace TARGET
+  inside a single regex:
+
+    * shell redirect (>, >>, 1>>), tee, dd of=
+    * PowerShell Out-File / Set-Content / Add-Content
+    * inline open(...,"w") / fs.writeFile / pathlib .write_text
+
+  and a target that either escapes the project root through two or more ../
+  (three or more for cp/mv/rsync/install, where a traversal may legitimately be
+  a source argument), or is a HOME-anchored / absolute path that no build step
+  inside a workspace should ever write: shell init files, SSH and cloud
+  credential files, agent MCP and editor settings files, autostart and scheduler
+  locations, system binary directories and /etc.
+
+  Because the operator and the target must be adjacent in the same command line,
+  a command that merely mentions one of these paths (cat, grep, ls, --help text,
+  a README being printed) does not match.
+author: Tanya
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1546/004/
+  - https://genai.owasp.org/llmrisk/llm06-excessive-agency/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.persistence
+  - attack.t1546.004
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_ctx:
+    event_type: execute_process
+
+  # ── Write operator whose target escapes the project root via ../ ───────────
+  sel_traversal_write:
+    content|re:
+      - '(?:^|[\s;&|(`])\d?>{1,2}\s*[\\\x22\x27]{0,3}(?:\.\./){2,}'
+      - '\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s+[\\\x22\x27]{0,3}(?:\.\./){2,}'
+      - '\bof=[\\\x22\x27]{0,3}(?:\.\./){2,}'
+      - '\b(?:cp|mv|install|rsync|ln)\b[^\n]{0,200}(?:\.\./){3,}'
+      - '\bopen\(\s*[\\\x22\x27]{1,2}(?:\.\./){2,}[^\x22\x27\n]{0,200}[\\\x22\x27]{1,2}\s*,\s*[\\\x22\x27]{1,2}[wax]'
+      - '\bfs\.(?:promises\.)?(?:writeFile|appendFile|writeFileSync|appendFileSync)\(\s*[\\\x22\x27]{1,2}(?:\.\./){2,}'
+      - '\bPath\(\s*[\\\x22\x27]{1,2}(?:\.\./){2,}[^\x22\x27\n]{0,200}[\\\x22\x27]{1,2}\s*\)\s*\.write_(?:text|bytes)\('
+
+  # ── Write operator targeting shell init or credential files in $HOME ───────
+  sel_write_shell_init_or_creds:
+    content|re:
+      - '(?:\d?>{1,2}|\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s|\bof=)\s*[\\\x22\x27]{0,3}(?:~|\$HOME|/Users/[^/\s\x22\x27]{1,64}|/home/[^/\s\x22\x27]{1,64}|/root|/var/root)/\.(?:bashrc|bash_profile|bash_login|bash_logout|profile|zshrc|zshenv|zprofile|zlogin|kshrc|inputrc|config/fish/config\.fish)\b'
+      - '(?:\d?>{1,2}|\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s|\bof=)\s*[\\\x22\x27]{0,3}(?:~|\$HOME|/Users/[^/\s\x22\x27]{1,64}|/home/[^/\s\x22\x27]{1,64}|/root|/var/root)/\.(?:ssh/(?:authorized_keys|config|id_[A-Za-z0-9_]+)|aws/(?:credentials|config)|netrc|npmrc|pypirc|gitconfig|docker/config\.json|kube/config)\b'
+
+  # ── Write operator targeting agent / editor configuration outside workspace ─
+  sel_write_agent_config:
+    content|re:
+      - '(?:\d?>{1,2}|\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s|\bof=)\s*[\\\x22\x27]{0,3}(?:~|\$HOME|/Users/[^/\s\x22\x27]{1,64}|/home/[^/\s\x22\x27]{1,64}|/root)/(?:\.cursor|\.cursor-server|\.vscode|\.vscode-server|\.claude|\.codeium|\.continue|\.aider\.conf\.yml|\.config/(?:Cursor|Code)|Library/Application\x20Support/(?:Cursor|Code|Claude))'
+
+  # ── Write operator targeting autostart / scheduler locations ───────────────
+  sel_write_autostart:
+    content|re:
+      - '(?:\d?>{1,2}|\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s|\bof=)\s*[\\\x22\x27]{0,3}(?:(?:~|\$HOME|/Users/[^/\s\x22\x27]{1,64}|/home/[^/\s\x22\x27]{1,64}|/root)/(?:Library/Launch(?:Agents|Daemons)|\.config/systemd/user|\.config/autostart)/|/(?:Library/Launch(?:Agents|Daemons)|etc/cron\.[a-z]{1,10}|etc/crontab|etc/systemd/system|var/spool/cron)/)'
+
+  # ── Write operator targeting system directories ────────────────────────────
+  sel_write_system_path:
+    content|re:
+      - '(?:\d?>{1,2}|\btee\b(?:\s+-{1,2}[A-Za-z-]+)*\s|\bof=)\s*[\\\x22\x27]{0,3}/(?:etc|private/etc|bin|sbin|usr/bin|usr/sbin|usr/lib|usr/local/bin|usr/local/sbin|usr/local/lib|opt/homebrew/(?:bin|sbin|etc)|System|Library/(?:Preferences|LaunchAgents|LaunchDaemons)|var/root)/'
+
+  # ── Windows / PowerShell equivalents ──────────────────────────────────────
+  sel_write_windows:
+    content|re:
+      - '(?:\d?>{1,2}|\bOut-File\b[^\n]{0,120}|\bSet-Content\b[^\n]{0,120}|\bAdd-Content\b[^\n]{0,120})\s*[\\\x22\x27]{0,3}(?:[A-Za-z]:\\{1,2}(?:Windows|Program\x20Files|ProgramData)|%(?:APPDATA|USERPROFILE|ProgramData|SystemRoot)%|\$env:(?:APPDATA|USERPROFILE|ProgramData))'
+      - '(?:\d?>{1,2}|\bOut-File\b[^\n]{0,120}|\bSet-Content\b[^\n]{0,120}|\bAdd-Content\b[^\n]{0,120})\s*[\\\x22\x27]{0,3}(?:\.\.\\{1,2}){2,}'
+      - '(?:\d?>{1,2}|\bOut-File\b[^\n]{0,60}|\bSet-Content\b[^\n]{0,60}|\bAdd-Content\b[^\n]{0,60})[^\n]{0,40}[A-Za-z]:\\{1,2}Users\\{1,2}[^\\\s\x22\x27]{1,64}\\{1,2}(?:\.cursor|\.vscode|AppData\\{1,2}Roaming)'
+
+  # ── Documentation / template / placeholder command lines ───────────────────
+  filter_placeholder_path:
+    content|re:
+      - '/path/to/'
+      - '<(?:path|file|filename|dir|directory|your[-_A-Za-z]{2,20})>'
+      - '\bPATH_TO_[A-Z_]{2,30}\b'
+      - '\bREPLACE_ME\b'
+
+  # ── Explicitly non-mutating invocations ───────────────────────────────────
+  filter_dry_run:
+    content|re:
+      - '--dry[-_]?run\b'
+      - '--just-print\b'
+      - '\bgit\s+apply\b[^\n]{0,80}--check\b'
+      - '\bWhatIf\b'
+
+  condition: >
+    sel_ctx and (
+      sel_traversal_write or sel_write_shell_init_or_creds or
+      sel_write_agent_config or sel_write_autostart or
+      sel_write_system_path or sel_write_windows
+    ) and not (filter_placeholder_path or filter_dry_run)
+falsepositives:
+  - Toolchain installers the agent legitimately runs on request (nvm, rustup, pyenv, sdkman, `brew shellenv`) append their init lines to ~/.zshrc or ~/.bashrc via a redirect.
+  - Dev-environment bootstrap the user asked for that writes ~/.gitconfig, ~/.npmrc or ~/.docker/config.json by redirect instead of the tool's own config subcommand.
+  - The user explicitly asking the agent to add an MCP server or change editor settings, producing a write to ~/.cursor/mcp.json or Library/Application Support/Cursor.
+  - Container or CI entrypoint scripts run by the agent that write to /etc or /usr/local/bin inside an ephemeral image.
+  - Monorepo build scripts that emit artifacts through deep relative paths (mitigated: two or more ../ with a redirect/tee, three or more for cp/mv/rsync/install).
+  - Heredocs or shell snippets that echo tutorial commands, when the placeholder filters do not catch the wording.
+action: report
