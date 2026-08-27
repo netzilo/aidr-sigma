@@ -1,0 +1,71 @@
+title: Supply Chain - HasData Indeed Scraping Broker Egress
+id: 7f3c9d2e-4b81-4a6f-9c05-2e8d1b7a4c63
+status: experimental
+level: low
+description: |
+  Reports outbound agent HTTP traffic to the HasData hosted scraping API that is
+  specifically targeting Indeed, the runtime behaviour of the PyPI package
+  `hasdata-indeed-mcp`.
+
+  Scope statement (answering triage dissent): the engine has no `package_installed`
+  event and no `INSTALLED_PACKAGE` edge, so this rule makes NO claim to detect that
+  the package was installed, nor to observe any credential flow. It detects one
+  thing only and states it plainly: an AI agent, at runtime, routed an Indeed data
+  request through a third-party scraping intermediary instead of Indeed itself.
+  That is a factual, verifiable egress observation and a legitimate inventory signal
+  for a vulnerable/unvetted-component review (OWASP A06:2021 / LLM03 Supply Chain).
+  Because the submitter's exploit theory is unconfirmed and vendor use may be fully
+  sanctioned, the action is `report` and the level is `low` - this is an audit
+  breadcrumb for asset inventory, not an incident.
+
+  Detection requires BOTH halves of the signature in a single http_request event:
+    1. the destination host is hasdata.com or a subdomain of it, AND
+    2. the request targets Indeed - either an `indeed` token in the URL path/query,
+       or an Indeed target supplied through a JSON body parameter.
+  Either half alone is common and is deliberately not enough to fire.
+author: Evgen
+date: "2026-03-14"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.reconnaissance
+  - attack.t1593
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: http_request
+  sel_hasdata_host:
+    host|re: '(?i)(^|\.)hasdata\.com$'
+  sel_indeed_in_url:
+    url.full|re: '(?i)[/?&=%._-]indeed\b'
+  sel_indeed_in_body:
+    content|re: '(?i)"[a-z_]{0,24}(url|link|query|keyword|domain|source|engine|site|board)"\s*:\s*"[^"]{0,256}indeed'
+  filter_placeholder_key:
+    content|re: '(?i)(your[_-]?api[_-]?key|<api[_-]?key>|api[_-]?key[^a-z0-9]{1,6}(x{3,}|test|demo|dummy|sample|placeholder|changeme))'
+  filter_api_spec:
+    content|re: '(?i)"(openapi|swagger|jsonschema|\$schema)"\s*:'
+  condition: >
+    sel_event and sel_hasdata_host
+    and (sel_indeed_in_url or sel_indeed_in_body)
+    and not (filter_placeholder_key or filter_api_spec)
+falsepositives:
+  - Sanctioned vendor use - an HR, recruiting or labour-market-research agent that is
+    licensed to use HasData as an approved data supplier. This is the single most
+    common legitimate case and is exactly why the rule reports instead of blocking.
+  - A developer evaluating the hasdata-indeed-mcp server against the vendor's live
+    endpoint during a proof of concept.
+  - Vendor OpenAPI/JSON-Schema documents fetched from the same host that enumerate the
+    Indeed endpoints - suppressed by filter_api_spec.
+  - Copy-pasted vendor quickstart requests that still carry a placeholder API key -
+    suppressed by filter_placeholder_key.
+  - An unrelated HasData product call (Google/Amazon SERP) whose body happens to contain
+    the English word "indeed" in free text - not matched, because the body branch
+    requires the token to be the value of a target-bearing JSON key and the URL branch
+    requires a delimiter-anchored token.
+action: report
