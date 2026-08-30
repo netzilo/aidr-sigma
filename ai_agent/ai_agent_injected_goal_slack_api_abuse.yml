@@ -1,0 +1,105 @@
+title: Prompt Injection Injected-Goal Drives Messaging or Exfil Action
+id: 7f3c1e94-2a6b-4d58-9c07-b1e4a5d38f62
+status: experimental
+level: medium
+description: |
+  Detects a single spawned-process command line that simultaneously carries
+  (a) an injected-goal / instruction-override cue (--goal="ignore previous
+  instructions...", "NEW TASK:", "disregard the system prompt") and
+  (b) an unauthorized messaging or exfiltration action (Slack Web API methods
+  such as chat.postMessage / conversations.invite / conversations.history,
+  or an imperative to send credentials, invite an account to a workspace,
+  or post collected data to an arbitrary URL).
+
+  The engine exposes no Slack- or function-call-aware telemetry for this threat
+  (SEND_MESSAGE / EXECUTE_FUNCTION / EXFILTRATE_DATA edges and function_call /
+  api_call / message_send event types are all rejected by the schema). The only
+  live single-event surface is execute_process, where the full command line of
+  the agent's child process is available. Rather than degrade to "agent made an
+  outbound call" -- which the triage dissent correctly calls indistinguishable
+  from any generic egress -- this rule keeps the narrative specificity in the
+  content itself: it fires only when the injected goal AND the unauthorized
+  action verb/API method co-occur in the same command line. That co-occurrence
+  is the observable residue of step 2-3 of the attack narrative (agent receives
+  an injected GOAL and materialises it as a concrete Slack/web API invocation),
+  and it does not fire on ordinary agent subprocess execution.
+
+  Report-only: the telemetry is a proxy, not a function-call trace. Measure the
+  false-positive rate on real agent fleets before considering escalation.
+author: Haibo
+date: "2026-06-11"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.exfiltration
+  - attack.t1567
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Security engineers running the ADR-Bench prompt-injection benchmark locally;
+    the harness invokes agents with the literal attack goal on the command line.
+    Mitigated by filter_test_runner (pytest/jest/go test/tox/cargo test wrappers)
+    but a bare invocation of the benchmark binary will still report.
+  - Red-team and purple-team replay tooling that re-plays stored injection
+    payloads as CI fixtures.
+  - A detection engineer grepping, catting or diffing rule files, corpora or
+    incident notes that contain injection strings - mitigated by filter_reader.
+  - Legitimate Slack administration scripts driven by an agent framework that
+    passes a natural-language --goal describing an invite or a channel export.
+    These normally lack an override cue ("ignore previous instructions",
+    "NEW TASK:") so both selections should not co-fire.
+  - Documentation generators and --help output that echo example goal syntax -
+    mitigated by filter_help_usage and filter_placeholder.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_ctx:
+    event_type: execute_process
+
+  # (a) evidence that the task/goal handed to the agent is an override, not a task
+  sel_injected_goal:
+    command|re:
+      - '(?i)\b(?:goal|objective|task|instruction|prompt)s?\s*[:=]\s*["\x27]?\s*(?:ignore|disregard|forget|override|instead of|urgent|immediately|do not tell)'
+      - '(?i)(?:^|[\s;&|(])--?(?:goal|objective|task|prompt|instruction)[= ]["\x27][^"\x27\n]{0,400}\b(?:ignore (?:all |any |the )?(?:previous|prior|earlier|above)|disregard (?:all |any |the )?(?:previous|prior|earlier)|system prompt|you are now)'
+      - '(?i)\b(?:ignore|disregard|forget)\s+(?:all\s+|any\s+|the\s+|your\s+)*(?:previous|prior|earlier|above|preceding|original|system)\s+(?:instruction|prompt|rule|directive|task|goal)s?\b'
+      - '(?i)\b(?:new|updated|revised|real|actual|true|override)\s+(?:goal|task|objective|instruction|mission)s?\s*[:=]'
+      - '(?i)\b(?:system|admin(?:istrator)?|developer)\s+(?:mode\s+)?override\b'
+
+  # (b) the unauthorized messaging / invite / exfil action the injected goal demands
+  sel_unauthorized_action:
+    command|re:
+      - '(?i)\b(?:chat\.postmessage|chat\.postephemeral|chat\.schedulemessage|conversations\.invite|conversations\.history|conversations\.replies|admin\.users\.invite|admin\.conversations\.invite|files\.upload)\b'
+      - '(?i)\b(?:send|post|share|forward|dm|message|deliver)\b[^\n]{0,120}\b(?:phishing|credential|password|passwd|api[_\- ]?key|secret|access[_\- ]?token|bearer token|session cookie)s?\b'
+      - '(?i)\b(?:exfiltrat\w+|leak|siphon|dump)\b[^\n]{0,120}\b(?:message|channel|conversation|dm|inbox|thread|transcript|credential|token)s?\b'
+      - '(?i)\binvite\b[^\n]{0,120}\b(?:to\s+(?:the\s+|this\s+|our\s+)?(?:channel|workspace|organi[sz]ation|org|team)|as\s+(?:an?\s+)?(?:admin|owner|member))\b'
+      - '(?i)\b(?:post|send|upload|forward|copy|relay)\b[^\n]{0,120}\bto\s+https?://'
+
+  # ── suppressions: lexical only, no host/domain/path trust ───────────────────
+  filter_reader:
+    command|re: '(?i)^\s*(?:/\S+/)?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|sed|awk|less|more|cat|bat|head|tail|diff|wc|sort|uniq|jq|yq|git(?:\s+\S+)?\s+(?:grep|log|show|diff|blame))\b'
+
+  filter_test_runner:
+    command|re: '(?i)(?:^|[\s;&|(])(?:/\S+/)?(?:pytest|py\.test|unittest|nose2|tox|nox|jest|mocha|vitest|karma|cargo\s+test|go\s+test|gotestsum|npm\s+(?:run\s+)?test|yarn\s+test|pnpm\s+test|bundle\s+exec\s+rspec|rspec|phpunit|ctest)\b'
+
+  filter_help_usage:
+    command|re:
+      - '(?i)(?:^|\s)--?(?:help|usage|version)(?:\s|$)'
+      - '(?i)\busage:\s'
+      - '(?i)^\s*(?:man|tldr|help)\s'
+
+  filter_placeholder:
+    command|re:
+      - '(?i)<(?:your|insert|redacted|placeholder|todo|fill[_\- ]?me)[^>\n]{0,40}>'
+      - '\b(?:REDACTED|PLACEHOLDER|CHANGEME|CHANGE_ME|FIXME)\b'
+      - '\bYOUR_[A-Z0-9_]{3,}\b'
+      - '(?i)\bxxxx+\b'
+      - '(?i)\blorem ipsum\b'
+
+  condition: >
+    sel_ctx and sel_injected_goal and sel_unauthorized_action
+    and not (filter_reader or filter_test_runner or filter_help_usage or filter_placeholder)
+action: report
