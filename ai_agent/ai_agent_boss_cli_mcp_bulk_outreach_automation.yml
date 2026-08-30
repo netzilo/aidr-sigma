@@ -1,0 +1,120 @@
+title: Recruitment Platform Bulk Outreach Automation (boss-cli-mcp)
+id: 7b3f2c1e-9d4a-4f86-b0c5-2e8a19d7c634
+status: experimental
+level: medium
+description: |
+  Detects a single event in which the boss-cli-mcp automation tool is invoked in an
+  unattended, list-driven or mass-outreach mode, or in which a batch-list payload is
+  posted to a Boss (zhipin) chat/greeting endpoint.
+
+  Scope note (answering triage dissent): running boss-cli-mcp is NOT treated as an
+  attack, and neither is a single greeting message. Merely spawning the binary,
+  reading its help, installing it, or a recruiter sending one message through the
+  platform will not match. The rule requires a second, discriminating token in the
+  SAME event:
+    * exec branch  - the tool name AND an explicit bulk/unattended verb or flag
+      (batch/bulk/mass greet|message|send, greet-all, --all-candidates, --no-confirm,
+      --limit >=100, a candidate list/CSV input, or xargs/parallel fan-out), or the
+      tool started in MCP-server transport mode (the agent-integration step named in
+      the threat narrative).
+    * http branch  - a request to a zhipin host, on a chat/greeting/add-friend path,
+      whose body carries a plural recipient-id array or an explicit batch/bulk field.
+      A single-recipient send from the web UI has no id-array and will not match.
+
+  Verdict is report only: this is a policy/abuse signal (unauthorised mass outreach,
+  excessive agency delegated to an agent), not a memory-safety or injection exploit,
+  so it is routed to audit rather than enforcement.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1119/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://genai.owasp.org/llmrisk/llm06-excessive-agency/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.collection
+  - attack.t1119
+  - atlas.aml.t0050
+  - owasp.llm06
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1: process execution of the automation tool ─────────────────────
+  sel_exec_evt:
+    event_type: execute_process
+
+  sel_tool_boss_cli:
+    content|re: '(?i)\bboss[-_]cli(?:[-_]mcp)?\b'
+
+  # Discriminating bulk / unattended automation markers. Without one of these the
+  # rule does not fire, so an interactive single-candidate use is not reported.
+  sel_bulk_action:
+    content|re:
+      - '(?i)\b(?:batch|bulk|mass)[-_ ]?(?:greet|greeting|message|messages|msg|send|chat|invite|apply|outreach)\b'
+      - '(?i)\b(?:greet|message|msg|send|chat|invite)[-_](?:all|batch|bulk|many|loop)\b'
+      - '(?i)--(?:all|all[-_]candidates|all[-_]geeks|every|unattended|no[-_]confirm|no[-_]prompt|auto[-_]greet|auto[-_]reply|yes[-_]to[-_]all)\b'
+      - '(?i)--(?:count|limit|max|num|batch[-_]size|concurrency)[= ]+[1-9][0-9]{2,}\b'
+      - '(?i)--(?:candidates?|geeks?|users?|targets?|recipients?)[-_]?(?:file|list|csv|json|ids)\b'
+      - '(?i)\b(?:xargs|parallel)\b[^\n]{0,80}boss[-_]cli'
+
+  # MCP transport mode - the tool being wired into an agent runtime.
+  # \bmcp\b is deliberately NOT used: it would match the binary name itself.
+  sel_mcp_serve_mode:
+    content|re:
+      - '(?i)(?:^|[\s"])(?:serve|mcp[-_]server|start[-_]server)(?:$|[\s"])'
+      - '(?i)--(?:stdio|transport|sse|mcp[-_]server)\b'
+
+  # ── Branch 2: batch payload to a Boss messaging endpoint ───────────────────
+  sel_http_evt:
+    event_type: http_request
+
+  sel_boss_host:
+    host|re: '(?i)(^|\.)(?:zhipin|bosszhipin)\.com$'
+
+  sel_greeting_path:
+    path|re: '(?i)/[^ ]{0,200}(?:chat|message|msg|greet|say[-_]?hello|add[-_]?friend|invite)'
+
+  # Plural recipient array / explicit batch field - absent from a normal one-to-one
+  # send performed through the platform UI.
+  sel_batch_payload:
+    content|re:
+      - '(?i)"[a-z_]{0,20}(?:id|ids)_?list"\s*:\s*\['
+      - '(?i)"(?:geek|candidate|user|security|encrypt[a-z]*)_?ids"\s*:\s*\['
+      - '(?i)"(?:batch|bulk|mass)[a-z_]{0,16}"\s*:\s*(?:true|\[)'
+
+  # ── Filters: benign contexts that legitimately contain the same tokens ─────
+  filter_help_version:
+    content|re: '(?i)(?:^|[\s"])(?:--help|--usage|--version|help)(?:$|[\s"])'
+
+  filter_dry_run:
+    content|re: '(?i)--(?:dry[-_]?run|simulate|preview|check[-_]only|no[-_]send)\b'
+
+  filter_pkg_mgmt:
+    content|re: '(?i)\b(?:npm|npx|pnpm|yarn|pip3?|pipx|uv|uvx|brew|cargo|go)\s+(?:install|add|i|get|remove|uninstall|update|upgrade|link|publish|pack|audit|list)\b'
+
+  filter_text_tooling:
+    content|re: '(?i)\b(?:grep|rg|ripgrep|ack|cat|bat|less|more|head|tail|man|echo|printf|sed|awk)\b[^\n]{0,120}boss[-_]cli'
+
+  filter_test_ctx:
+    content|re: '(?i)(?:\btest_|_test\b|/tests?/|/fixtures?/|\bpytest\b|\bjest\b|\bmocha\b|\bgo\s+test\b|\bnpm\s+test\b|--sandbox)'
+
+  condition: >
+    (
+    (sel_exec_evt and sel_tool_boss_cli and (sel_bulk_action or sel_mcp_serve_mode))
+    or
+    (sel_http_evt and sel_boss_host and sel_greeting_path and sel_batch_payload)
+    )
+    and not (filter_help_version or filter_dry_run or filter_pkg_mgmt or
+    filter_text_tooling or filter_test_ctx)
+
+falsepositives:
+  - Recruiters or sourcing teams who have organisational approval to run boss-cli-mcp for bulk outreach campaigns; this rule records the campaign, it does not judge authorisation.
+  - An approved agent deployment that legitimately starts boss-cli-mcp in MCP-server mode at session start - expect one report per server start, not per message.
+  - CI or smoke tests exercising the CLI with batch flags (mitigated by the test-context and --dry-run filters, but a custom harness path may still match).
+  - Shell history, README snippets, or a developer grepping for the batch subcommand (mitigated by filter_text_tooling and filter_help_version).
+  - Unrelated zhipin API traffic that happens to carry an id array on a path containing 'msg' or 'chat' (mitigated by requiring both a greeting-style path and a batch/id-list payload field).
+
+action: report
