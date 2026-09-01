@@ -1,0 +1,121 @@
+title: Agent System Prompt Extraction Written To File
+id: 7b3d9f42-5c81-4e6a-9b0d-2f8a41c7de35
+status: experimental
+level: medium
+description: |
+  Detects the observable half of the Google Jules system-prompt exfiltration chain:
+  the agent, having been asked to disclose its own system prompt, spawns a shell /
+  interpreter command that writes that instruction text to a file on disk.
+
+  Only the execute_process command line is inspected. The "return it directly in the
+  API response" variant of this attack is NOT observable in this engine (no api_call
+  event type, no EXFILTRATED_DATA / PROMPTED_ACTION edge kinds), so this rule
+  deliberately scopes itself to the file-write vector, which surfaces both as the
+  spawning command line (here) and as a WRITE_FILE edge (covered behaviourally by
+  a4c8f312 File System Enumeration for Credentials and Secrets). This rule is the
+  cheap, single-event, content-only complement to that graph rule: it names the
+  motive ("my/your full system prompt", $SYSTEM_PROMPT, "you are Jules") which a
+  WRITE_FILE edge alone cannot express.
+
+  Two independent high-confidence branches, both requiring a real write primitive:
+    A) write primitive + self-referential prompt-extraction language
+       (echo "$SYSTEM_PROMPT" > /tmp/x, cat <<EOF ... my full system prompt ... > out)
+    B) redirect/tee into a prompt-named dump target + instruction-shaped body text
+       (printf 'You are Jules, an asynchronous...' > system_prompt.txt)
+  A generic redirect, or a generic mention of the words "system prompt", is never
+  sufficient on its own.
+author: Tanya
+date: "2026-03-14"
+tags:
+  - attack.collection
+  - attack.t1059
+  - owasp.llm07
+falsepositives:
+  - Developer or agent legitimately authoring or updating a prompt template that
+    belongs to the project under development (writing system_prompt.md as source).
+    Branch B additionally requires instruction-shaped body text, and the canonical
+    scaffolding line "You are a helpful assistant" is filtered.
+  - Prompt-engineering test fixtures and snapshot tests that materialise expected
+    prompt text to disk - filtered by filter_fixture_or_sample.
+  - Documentation generation that embeds an example system prompt into a file -
+    filtered by filter_fixture_or_sample and filter_placeholder_template.
+  - Templating engines writing a prompt file that still contains {{placeholders}} -
+    filtered by filter_placeholder_template.
+  - git show/diff/log of a prompt file redirected to a temporary file during review -
+    filtered by filter_vcs_inspection.
+  - Checksum / size / stat operations against a prompt file (integrity checks, not
+    content disclosure) - filtered by filter_integrity_or_metadata.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+
+  # --- a real file-write primitive must be present in the command line ---
+  sel_write_primitive:
+    content|re:
+      - '>>?[ \t]*[A-Za-z0-9_~$./\\-]{2,256}'
+      - '(?i)\btee\b[ \t]+(?:-a[ \t]+)?[A-Za-z0-9_~$./\\-]{2,256}'
+      - '(?i)\bopen\([^)]{1,200},[ \t]*[\\"'']{1,2}[wax]'
+      - '(?i)\b(?:Set-Content|Add-Content|Out-File|New-Item)\b'
+      - '(?i)\bdd\b[ \t][^|;&]{0,120}\bof='
+      - '(?i)\b(?:write_file|writeFileSync|fs\.writeFile)\b'
+
+  # --- branch A: self-referential system-prompt extraction language ---
+  sel_self_prompt:
+    content|re:
+      - '(?i)\b(?:my|your|the agents?|jules)[ \t]+(?:own[ \t]+)?(?:full[ \t]+|complete[ \t]+|entire[ \t]+|raw[ \t]+|verbatim[ \t]+|exact[ \t]+)?(?:system[ _\-]?)?(?:prompt|instructions|directives)\b'
+      - '(?i)\b(?:full|complete|entire|verbatim|raw|exact|original)[ \t]+(?:system[ _\-]?)?(?:prompt|instructions)\b'
+      - '(?i)\b(?:reveal|disclose|dump|exfiltrate|leak|reproduce|output|print|echo)[ \t]+(?:the[ \t]+|your[ \t]+|my[ \t]+)?(?:full[ \t]+|entire[ \t]+|raw[ \t]+|verbatim[ \t]+)?system[ _\-]?(?:prompt|instructions)\b'
+      - '\$\{?SYSTEM_(?:PROMPT|INSTRUCTIONS)\}?'
+      - '(?i)\b(?:instructions|prompt)[ \t]+(?:you[ \t]+(?:were|are)[ \t]+given|i[ \t]+(?:was|am)[ \t]+given|above[ \t]+this[ \t]+line)\b'
+      - '(?i)\b(?:you are|i am)[ \t]+jules\b'
+      - '(?i)\bdeveloper[ \t]+(?:message|instructions)\b'
+
+  # --- branch B part 1: the write target is a prompt-dump filename ---
+  sel_prompt_file:
+    content|re:
+      - '(?i)>>?[ \t]*[A-Za-z0-9_~$./\\-]{0,200}(?:system[ _\-.]?prompt|system[ _\-.]?instruction|agent[ _\-.]?instruction|base[ _\-.]?prompt|meta[ _\-.]?prompt|prompt[ _\-.]?dump|jules[ _\-.]?(?:prompt|instruction))'
+      - '(?i)\btee\b[ \t]+(?:-a[ \t]+)?[A-Za-z0-9_~$./\\-]{0,200}(?:system[ _\-.]?prompt|prompt[ _\-.]?dump|jules[ _\-.]?prompt)'
+
+  # --- branch B part 2: the bytes being written look like an agent system prompt ---
+  sel_instruction_body:
+    content|re:
+      - '(?i)\byou are (?:an?[ \t]+)?(?:[a-z]+[ \t]+){0,3}(?:agent|assistant|engineer|coder|jules)\b'
+      - '(?i)\b(?:do not|never|you must not|you should never)[ \t]+(?:ever[ \t]+)?(?:reveal|disclose|share|repeat|output|print)[ \t]+(?:your|the|these|this)[ \t]+(?:system[ _\-]?)?(?:prompt|instructions)\b'
+      - '(?im)^[ \t]*#{1,6}[ \t]*(?:system prompt|role|core (?:instructions|directives)|instructions)\b'
+      - '(?i)\b(?:your (?:task|role|goal|purpose) is|core (?:directives|guidelines)|operating (?:instructions|guidelines))\b'
+
+  # --- benign-shape suppressions (no host / domain / path trust added) ---
+  filter_placeholder_template:
+    content|re:
+      - '\{\{[ \t]*[A-Za-z0-9_.]{1,64}[ \t]*\}\}'
+      - '(?i)<(?:your|insert|todo)[ _\-]?(?:prompt|instructions|text)[ _\-]?here>'
+      - '(?i)\blorem ipsum\b'
+
+  filter_generic_assistant_boilerplate:
+    content|re:
+      - '(?i)\byou are a (?:helpful|friendly|concise|polite)[ \t]+(?:and[ \t]+[a-z]+[ \t]+)?(?:ai[ \t]+)?assistant\b'
+
+  filter_vcs_inspection:
+    content|re:
+      - '(?i)\bgit[ \t]+(?:show|diff|log|cat-file|blame|stash)\b'
+
+  filter_integrity_or_metadata:
+    content|re:
+      - '(?i)\b(?:wc[ \t]+-[lcw]|md5sum|sha1sum|sha256sum|shasum|stat[ \t]+-)'
+
+  filter_fixture_or_sample:
+    content|re:
+      - '(?i)\b(?:sample|example|dummy|mock|fixture)[ _\-](?:prompt|instructions|template|system[ _\-]?prompt)\b'
+      - '(?i)\b(?:test[ _\-]fixture|snapshot[ _\-]test|fixtures?[ \t]+for)\b'
+
+  condition: >
+    sel_exec
+    and ((sel_write_primitive and sel_self_prompt)
+    or (sel_prompt_file and sel_instruction_body))
+    and not (filter_placeholder_template or filter_generic_assistant_boilerplate
+    or filter_vcs_inspection or filter_integrity_or_metadata
+    or filter_fixture_or_sample)
+action: report
