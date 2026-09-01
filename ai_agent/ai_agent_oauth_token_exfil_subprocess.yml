@@ -1,0 +1,93 @@
+title: OAuth Token Abuse - Literal OAuth Token in Agent Subprocess Egress
+id: 6f1c9b74-3a5e-4d2c-9b41-8e0d7a2c5f13
+status: experimental
+level: high
+description: |
+  Detects a single high-specificity event: an AI agent spawning a network egress
+  utility (curl / wget / httpie / Invoke-WebRequest / Invoke-RestMethod) whose
+  command line carries BOTH a remote http(s) target AND a literal, provider-shaped
+  OAuth token (Google ya29./1//, GitHub gho_/ghu_/ghs_, Slack xox*, an
+  Authorization: Bearer JWT, an opaque Authorization: Bearer value, or an
+  access_token/refresh_token/id_token parameter with 40+ token characters).
+
+  This is the terminal step of the OAuth token abuse narrative: the token has
+  already been lifted out of agent context, logs or storage, and is now being
+  replayed inline against an external API to impersonate the agent or user.
+  Tokens sourced correctly are referenced indirectly ($TOKEN, ${GH_TOKEN},
+  $(gcloud auth print-access-token)) and therefore never match - only a
+  hard-inlined secret does.
+
+  Scope note: the other observable event type for this threat (connects) carries
+  no content field - only host/port/protocol in script meta - so it cannot be
+  matched by a content rule. This rule deliberately scopes to execute_process,
+  the one event type where the token bytes are actually visible in content.
+author: Tanya
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1528/
+  - https://attack.mitre.org/techniques/T1567/
+  - https://atlas.mitre.org/techniques/AML.T0057
+  - https://genai.owasp.org/
+tags:
+  - attack.credential-access
+  - attack.t1528
+  - attack.exfiltration
+  - attack.t1567
+  - atlas.aml.t0057
+  - owasp.asi03
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_egress_tool:
+    content|re:
+      - '(?i:\bcurl\b)'
+      - '(?i:\bwget\b)'
+      - '(?i:\bhttpie\b)'
+      - '(?i:\bInvoke-WebRequest\b)'
+      - '(?i:\bInvoke-RestMethod\b)'
+  sel_remote_target:
+    content|re: '(?i:https?://)'
+  sel_oauth_token_literal:
+    content|re:
+      - '\bya29\.[A-Za-z0-9_\-]{40,}'
+      - '\b1//[A-Za-z0-9_\-]{30,}'
+      - '\bgh[ous]_[A-Za-z0-9]{36}\b'
+      - '\bxox[baprse]-[0-9]{9,}-[0-9A-Za-z\-]{15,}'
+      - '(?i:bearer)\s+eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{20,}\.[A-Za-z0-9_\-]{20,}'
+      - '(?i:authorization:\s*bearer)\s+[A-Za-z0-9_\-\.]{30,}'
+      - '(?i:access_token|refresh_token|id_token)["\s:=&]{1,4}[A-Za-z0-9_\-\.]{40,}'
+  filter_placeholder:
+    content|re:
+      - '(?i:your[_\- ]?(?:oauth[_\- ]?)?(?:access[_\- ]?)?token)'
+      - '(?i:<(?:token|access[_\-]?token|oauth[_\-]?token|refresh[_\-]?token|jwt)>)'
+      - '(?i:for example|example[_\- ]?token|example[_\- ]?value)'
+      - '(?i:placeholder|redacted|dummy[_\- ]?token|changeme|insert[_\- ]?token|sample[_\- ]?token|fake[_\- ]?token)'
+      - 'x{8,}'
+      - '(?i:X{8,})'
+  filter_test_fixture:
+    content|re:
+      - '(?i:/(?:tests?|fixtures?|spec|__tests__|node_modules|vendor|site-packages)/)'
+      - '(?i:\.(?:test|spec)\.[a-z]{2,4}\b)'
+  condition: >
+    sel_event and sel_egress_tool and sel_remote_target and sel_oauth_token_literal
+    and not (filter_placeholder or filter_test_fixture)
+falsepositives:
+  - An engineer debugging a live API through the agent's shell tool who pastes a
+    real short-lived access token directly into a curl command instead of using an
+    environment variable.
+  - Helper or bootstrap scripts that resolve a secret from a vault into a shell
+    variable and then echo/expand it inline before invoking curl, so the expanded
+    literal appears on the child process command line.
+  - Legitimate OAuth refresh or token-exchange flows executed with curl against a
+    provider token endpoint, where refresh_token=<value> is genuinely present in
+    the POST body.
+  - Slack / GitHub App installation or troubleshooting runbooks that include a real
+    bot or installation token in the documented command.
+  - Authorised red-team, secret-scanning validation, or credential-rotation drills
+    that intentionally transmit a live token.
+action: report
