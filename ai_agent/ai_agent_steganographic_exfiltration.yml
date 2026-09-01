@@ -1,0 +1,119 @@
+title: Steganographic Exfiltration Tooling
+id: b7f3c1d4-9a6e-4f2b-8c15-3d7e0a4b92f6
+status: experimental
+level: medium
+description: |
+  Detects a single agent-originated command that performs steganographic data
+  concealment or carrier-file carving: dedicated stego binaries invoked with an
+  embed/extract operation, exiftool writing an opaque long payload (or the
+  contents of a data file) into an image metadata tag, file-carving tools aimed
+  at media carriers, and shell-level payload appends onto image/audio files
+  (the "benign file that suddenly grew" pattern).
+
+  This is a single-event content rule. It fires on the command line of a spawned
+  process (execute_process) or on the arguments of a tool call (tool_call). It
+  deliberately requires a concrete embedding/extraction *operation* — a bare
+  mention of a tool name in prose is not enough for the operation-based
+  selections, and documentation-authoring / help / package-install invocations
+  are filtered out explicitly.
+author: Selhan
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1027/003/
+  - https://attack.mitre.org/techniques/T1001/002/
+  - https://attack.mitre.org/techniques/T1074/001/
+tags:
+  - attack.defense-evasion
+  - attack.exfiltration
+  - attack.t1027.003
+  - attack.t1001.002
+  - atlas.aml.t0025
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type:
+      - execute_process
+      - tool_call
+
+  # Dedicated steganography tooling with an actual embed/extract operation,
+  # plus tool names that exist for no purpose other than steganography.
+  sel_stego_binary:
+    content|re:
+      - '(?i)\bsteghide\s+(?:-{1,2}\S+\s+)*(?:embed|extract)\b'
+      - '(?i)\b(?:stegpy|zsteg|stegolsb|stegano-lsb|stegosuite|openstego|stegseek|stegcracker|stegbreak|stegdetect|steg86|jsteg|deepsteg|deepsound|cloakify(?:_factory)?)\b'
+      - '(?i)\boutguess\b[^\n]{0,120}\s-[dr]\s'
+      - '(?i)\bpython[0-9.]{0,4}\s+-m\s+(?:stegano|stego?lsb|stepic)\b'
+      - '(?i)(?:import\s+stepic|from\s+stegano(?:\.\w+)?\s+import|from\s+stego_lsb\s+import)'
+
+  # exiftool used to WRITE a payload into a metadata tag: either a long opaque
+  # base64-ish blob, or the contents of a data/secret file via the <= operator.
+  sel_metadata_embed:
+    content|re:
+      - '(?i)\bexiftool\b[^\n]{0,200}-(?:usercomment|comment|description|imagedescription|artist|copyright|xpcomment)\s*<?=\s*.{0,3}[A-Za-z0-9+/]{60,}={0,2}'
+      - '(?i)\bexiftool\b[^\n]{0,200}-(?:usercomment|comment|description|imagedescription)\s*<=\s*\S{0,120}\.(?:txt|json|csv|env|pem|key|zip|gz|tar|b64)\b'
+
+  # File carving aimed specifically at a media carrier (not firmware images).
+  sel_carve_carrier:
+    content|re:
+      - '(?i)\bbinwalk\b[^\n]{0,200}(?:\s-e\b|--extract\b|--dd=)[^\n]{0,200}\.(?:png|jpe?g|gif|bmp|tiff?|wav|mp3|flac|mp4|pdf)\b'
+      - '(?i)\bforemost\b[^\n]{0,200}\s-i\s+\S{0,120}\.(?:png|jpe?g|gif|bmp|tiff?|wav|mp3|flac|mp4)\b'
+      - '(?i)\bscalpel\b[^\n]{0,200}\s\S{0,120}\.(?:png|jpe?g|gif|bmp|tiff?|wav|mp3|flac|mp4)\b'
+
+  # Shell-level concealment: appending/overlaying data onto a carrier file,
+  # producing the abnormal size increase described in the threat narrative.
+  sel_carrier_append:
+    content|re:
+      - '(?i)(?:\bcat\b|\bxxd\b|\bbase64\b|\bgzip\b|\btar\b|\bprintf\b|\bopenssl\s+enc\b)[^\n;|]{0,200}>>\s*.{0,3}\S{0,160}\.(?:jpe?g|png|gif|bmp|tiff?|ico|webp|wav|mp3|flac|mp4)\b'
+      - '(?i)\bdd\b[^\n]{0,200}\bconv=notrunc\b[^\n]{0,200}\bof=\S{0,160}\.(?:jpe?g|png|gif|bmp|wav|mp3|mp4)\b'
+      - '(?i)\bzip\b\s+-{1,2}A\b[^\n]{0,160}\.(?:jpe?g|png|gif|bmp|webp)\b'
+      - '(?i)\bcopy\s+/b\b[^\n]{0,200}\.(?:jpe?g|png|gif|bmp)\b'
+
+  # ── Aggressive benign-case suppression ─────────────────────────────────────
+
+  # Help text, version probes, availability checks, package installs and
+  # package queries — the tool is named but nothing is embedded or extracted.
+  filter_help_or_install:
+    content|re:
+      - '(?i)(?:--help|--usage|--version|\s-V\b|\bhelp\s*$)'
+      - '(?i)\b(?:apt|apt-get|yum|dnf|zypper|brew|pacman|apk|pip3?|pipx|gem|npm|yarn|cargo|go\s+install)\s+(?:install|add|-S\b|-Sy\b)'
+      - '(?i)\b(?:man|whereis|which|type|command\s+-v)\s+(?:steghide|outguess|zsteg|stegpy|binwalk|foremost|scalpel|exiftool|stegolsb|stegseek)\b'
+      - '(?i)\b(?:dpkg\s+-[lLs]|rpm\s+-q|pip3?\s+show|brew\s+info)\b'
+
+  # The agent is authoring documentation/notes/tutorials that discuss these
+  # tools, not running them.
+  filter_doc_authoring:
+    event_type: tool_call
+    tool|re: '(?i)^(?:write|edit|multiedit|notebook_?edit|create_file|apply_patch|str_replace(?:_based)?_?editor?)$'
+    file_path|re: '(?i)\.(?:md|mdx|markdown|rst|adoc|txt|html?|ipynb|tex)$'
+
+  # Markdown/code-fenced prose inside tool arguments — a written example, not
+  # an executed command line.
+  filter_fenced_prose:
+    event_type: tool_call
+    content|re: '(?i)```(?:[a-z]{0,12})\s'
+
+  condition: >
+    sel_scope
+    and (sel_stego_binary or sel_metadata_embed or sel_carve_carrier or sel_carrier_append)
+    and not (filter_help_or_install or filter_doc_authoring or filter_fenced_prose)
+
+falsepositives:
+  - Security research, CTF solving or DFIR work performed intentionally by the
+    operator — binwalk/foremost/scalpel/zsteg against a media sample is normal
+    forensic triage and will match sel_carve_carrier.
+  - Malware-analysis workflows that carve embedded objects out of a malicious
+    PDF or image sample.
+  - Photography or asset pipelines that legitimately write long generated tokens
+    (license IDs, signed provenance/C2PA-style strings) into EXIF UserComment or
+    ImageDescription via exiftool.
+  - Build scripts that append a trailing blob to a media file for legitimate
+    reasons, e.g. self-extracting archives or appended sprite/atlas data.
+  - Developers writing unit tests or demos for a steganography library
+    (stegano, stego_lsb, stepic) inside source files rather than markdown — the
+    documentation filter only covers doc-extension writes.
+  - Rare naming collisions with the bare tool-name list (for example an
+    unrelated internal script named deepsound or jsteg).
+action: report
