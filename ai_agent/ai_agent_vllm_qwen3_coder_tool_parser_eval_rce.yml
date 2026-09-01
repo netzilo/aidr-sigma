@@ -1,0 +1,110 @@
+title: vLLM Qwen3-Coder Tool Parser eval() RCE Payload Execution
+id: 7f3c1e42-9b5a-4d18-8c0f-2a6e5b41d9c7
+status: experimental
+level: high
+description: |
+  vLLM's qwen3_coder tool-call parser converts tool-call parameters whose declared
+  type is not recognised by passing the raw parameter string to Python's eval().
+  An authenticated caller can therefore reach an arbitrary-code-execution sink on
+  the inference server simply by emitting a tool call with an unknown parameter type.
+
+  The eval() call itself leaves no distinct AI-layer event - the only observable
+  artefact on the host is the child process the payload spawns. This rule is a
+  single-event content detection on execute_process command lines and fires on the
+  two shapes that payload takes:
+
+    1. an unambiguous Python code-injection / reverse-shell signature
+       (__import__('os').system(...), eval(base64.b64decode(...)), pty.spawn('/bin/sh'),
+       socket+dup2/pty reverse shell, bash -i >& /dev/tcp/, nc -e /bin/sh,
+       downloader piped to a shell over plaintext HTTP or from a bare IP literal); or
+    2. an inline Python interpreter invocation (python -c / __import__ / eval(compile(...)))
+       combined with a process-execution primitive (os.system, os.popen, os.execv,
+       subprocess with shell=True, pty.spawn, a quoted /bin/sh argument, or base64 -d).
+
+  Scoping to execute_process means the rule cannot fire on prose - a model or
+  document merely discussing this CVE never produces an exec event.
+author: Evgen
+date: "2026-03-18"
+modified: "2026-03-18"
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+  - https://cwe.mitre.org/data/definitions/95.html
+  - https://genai.owasp.org/llmrisk/llm052025-improper-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.initial-access
+  - attack.t1190
+  - atlas.aml.t0050
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  sel_exec_ctx:
+    event_type: execute_process
+
+  # Unambiguous code-injection / reverse-shell signatures - these stand alone.
+  sel_unambiguous:
+    content|re:
+      - '\b__import__\s*\(\s*["\x27]os["\x27]\s*\)\s*\.\s*(?:system|popen)\s*\('
+      - '\b(?:eval|exec)\s*\(\s*(?:__import__|base64\.b64decode|codecs\.decode|bytes\.fromhex|compile)\s*\('
+      - '\bpty\.spawn\s*\(\s*[\["\x27]{1,2}/(?:usr/)?bin/(?:ba|z|da)?sh'
+      - '\bsocket\.socket\s*\([\s\S]{0,200}?\bos\.dup2\s*\('
+      - '\bsocket\.socket\s*\([\s\S]{0,300}?\bpty\.spawn\s*\('
+      - '\bos\.dup2\s*\([\s\S]{0,200}?\bsubprocess\.(?:Popen|call|run)\s*\('
+      - '(?i:bash|sh)\s+-[a-z]{0,3}i[a-z]{0,3}\s+>&\s*/dev/tcp/'
+      - '/dev/tcp/(?:[0-9]{1,3}\.){3}[0-9]{1,3}/[0-9]{1,5}'
+      - '\bnc(?:at)?\b[^\n]{0,80}-e\s+/(?:usr/)?bin/(?:ba|z|da)?sh'
+      - '(?i:curl|wget)[^|\n]{0,300}http://[^|\n]{0,200}\|\s*(?:ba|z|da)?sh\b'
+      - '(?i:curl|wget)[^|\n]{0,300}https?://(?:[0-9]{1,3}\.){3}[0-9]{1,3}[^|\n]{0,200}\|\s*(?:ba|z|da)?sh\b'
+
+  # Inline interpreter / dynamic-eval surface (half of the AND branch).
+  sel_py_inline:
+    content|re:
+      - '(?i:python)[0-9.]{0,4}(?:\.exe)?\s+(?:-[A-Za-z]{1,4}\s+)*-c\s'
+      - '\b(?:eval|exec)\s*\(\s*(?:__import__|compile|base64\.|codecs\.|bytes\.fromhex|bytearray\()'
+      - '\b__import__\s*\(\s*["\x27](?:os|subprocess|pty|builtins|importlib)["\x27]'
+
+  # Process-execution primitive (other half of the AND branch).
+  sel_rce_primitive:
+    content|re:
+      - '\bos\.(?:system|popen|execv[pe]?|spawn[lv]p?e?)\s*\('
+      - '\bsubprocess\.(?:Popen|run|call|check_output)\s*\([^)]{0,300}shell\s*=\s*True'
+      - '\bpty\.spawn\s*\('
+      - '\bos\.dup2\s*\('
+      - '["\x27]/(?:usr/)?bin/(?:ba|z|da)?sh["\x27]'
+      - '\bbase64\s+(?:-d|-D|--decode)\b'
+
+  # Build/packaging interpreter probes: the single most common benign shape of
+  # "python -c" seen in agent and CI process trees.
+  filter_interpreter_probe:
+    content|re:
+      - '(?i:python)[0-9.]{0,4}\s+(?:-[A-Za-z]{1,4}\s+)*-c\s+[\\"\x27]{0,2}\s*import\s+(?:sysconfig|platform|struct|site|ensurepip|sys[;,])'
+      - '(?i:python)[0-9.]{0,4}\s+(?:-[A-Za-z]{1,4}\s+)*-c\s+[\\"\x27]{0,2}\s*from\s+(?:sysconfig|distutils|setuptools|importlib)'
+
+  # Interpreter/environment bootstrap tooling.
+  filter_pkg_bootstrap:
+    content|re: '\b(?:ensurepip|node-gyp|conda-build)\b'
+
+  condition: >
+    sel_exec_ctx and
+    (sel_unambiguous or (sel_py_inline and sel_rce_primitive))
+    and not (filter_interpreter_probe or filter_pkg_bootstrap)
+
+falsepositives:
+  - Developer or agent shell sessions running an inline Python one-liner that shells
+    out, e.g. python -c "import os; os.system('make test')".
+  - CI/container wait-for-service and health-check helpers written as inline Python
+    that open a socket and then spawn a subprocess (only matches when both a socket
+    and dup2/pty appear, so plain connect-and-exit probes are already excluded).
+  - Security tooling, CTF material, or deliberate CVE reproduction executed on a lab
+    host - the payload is genuinely executed, so this is a true positive on the host
+    even when the intent is benign.
+  - Package build backends invoking the interpreter with -c and a shell=True
+    subprocess call; the common sysconfig/distutils/setuptools probe shapes are
+    suppressed by filter_interpreter_probe.
+  - Internal mirrors serving installer scripts over plaintext HTTP that are piped to
+    a shell.
+action: report
