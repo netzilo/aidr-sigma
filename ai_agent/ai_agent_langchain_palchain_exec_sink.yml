@@ -1,0 +1,337 @@
+title: LangChain PALChain exec() Sink Reached OS
+id: 6f3b1d0e-2a47-4c9e-9d1b-8e5f7a4c2b91
+status: experimental
+level: high
+description: |
+  Detects the behavioural signature of LangChain / langchain_experimental PALChain
+  arbitrary code execution (CVE-2023-36258, CVE-2023-44467 and the python_executor
+  bypass variants), where attacker-influenced text is turned into a program by an LLM
+  and then handed to Python's exec().
+
+  The rule does not look for a payload string. It correlates two graph facts on the
+  SAME interpreter process, in order, inside a 5 minute window:
+
+    Stage 1 (required anchor) - the interpreter made an LLM_REQUEST (the PAL
+             "write me a program" reasoning step). A build script or a test runner
+             that shells out never does this; a PAL chain always does.
+    Stage 2 (required)        - the same interpreter then spawned an OS command whose
+             command line carries an exec()-sink signature: an inline shell/interpreter
+             (-c / -e), a download tool, a reverse-shell binary, base64 -d, chmod +x,
+             or literal os.system / subprocess / __import__ text.
+
+  Optional escalation stages are added to the kill chain when present: outbound
+  CONNECTS/HTTP_REQUEST to a non-ZTNA host from the exec'd code, credential-file
+  READ_FILE resolved through fs_activity(), and further process spawns by the child.
+  They enrich the report; they are not required to fire.
+
+  Report-only by design: shell-capable agent frameworks are legitimate, so this rule
+  surfaces the ordered chain and the exact command line for a human decision rather
+  than interrupting the interpreter.
+author: Haibo
+date: "2026-03-05"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-36258
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-44467
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - owasp.llm02
+falsepositives:
+  - Agentic frameworks that legitimately expose a shell tool (LangChain ShellTool,
+    BashTool, terminal plugins). The interpreter makes an LLM call and then spawns
+    'sh -c <command>' as designed - the ordered chain looks identical. The report
+    carries the full command line so an analyst can confirm intent.
+  - Notebook sessions (jupyter/ipython) where a developer runs an LLM cell and then a
+    '!curl' / '!pip' shell-bang cell within the same 5 minute window.
+  - LangServe / uvicorn / gunicorn workers that call an LLM and also invoke ffmpeg,
+    git, pandoc or similar via subprocess with an inline shell wrapper.
+  - Python LLM apps that use boto3 or kubectl helpers, which read ~/.aws/credentials or
+    ~/.kube/config - this only adds an optional escalation stage, it cannot fire the
+    rule on its own.
+  - Legitimate agent egress (package installs, model downloads) attributed to the
+    spawned child, again only as an optional escalation stage.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (no underscore digit separators - Starlark would mis-parse them) ──
+  CHAIN_WINDOW_NS = 300000000000   # 5 min: LLM program generation -> exec() sink
+  LOOK_BACK_NS    = 120000000000   # 2 min: only report a *fresh* sink, never replay
+
+  # exec() sink signature: LLM-generated program text reaching the operating system.
+  # Case folding is applied only to binary names, never to flag letters.
+  SINK = [
+      r"(?i:\b(sh|bash|zsh|dash|ksh|ash)\b)\s+-c\b",
+      r"(?i:\b/bin/(sh|bash|zsh|dash)\b)",
+      r"(?i:\bpython[0-9.]*\b)\s+-c\b",
+      r"(?i:\bperl\b)\s+-e\b",
+      r"(?i:\bruby\b)\s+-e\b",
+      r"(?i:\bnode\b)\s+-e\b",
+      r"(?i:\bos\.system\b)",
+      r"(?i:\bsubprocess\.(popen|run|call|check_output)\b)",
+      r"(?i:\b__import__\b)",
+      r"(?i:\b(curl|wget)\b)",
+      r"(?i:\b(nc|ncat|netcat|socat)\b)\s",
+      r"(?i:\bbase64\b)\s+--?[dD]\b",
+      r"(?i:\bchmod\b)\s+\+x\b",
+      r"(?i:\bpowershell\b).{0,80}\s-(?i:enc|encodedcommand)\b",
+      r"(?i:\bosascript\b)",
+  ]
+
+  # fs_activity() path filter: every whitespace token must appear in the path.
+  CRED = ['"aws credentials"', '"ssh id rsa"', '"etc shadow"', '"kube config"']
+
+  def as_ns(v):
+      if v == None or v == "":
+          return 0
+      return int(v)
+
+  def sink_match(s):
+      if s == "":
+          return None
+      for pat in SINK:
+          if re.find(pat, s) != None:
+              return pat
+      return None
+
+  # Pure, cheap relevance gate - no graph, no event log, no fs_activity.
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      return sink_match(meta.get("content", "")) != None
+
+  # A process that can host a PAL chain: a Python-family interpreter or an ASGI/
+  # notebook host, or anything whose command line names langchain/PALChain.
+  def is_llm_host(p):
+      n = p.get("name", "")
+      if re.find(r"(?i:^python[0-9._]*$)", n) != None:
+          return True
+      if re.find(r"(?i:^(pypy|uv|uvicorn|gunicorn|hypercorn|streamlit|chainlit|jupyter|ipython)[0-9._-]*$)", n) != None:
+          return True
+      if re.find(r"(?i:/(python[0-9._]*|pypy[0-9._]*)$)", p.get("path", "")) != None:
+          return True
+      if re.find(r"(?i:\b(langchain|langserve|pal_chain|palchain)\b)", p.get("cmdline", "")) != None:
+          return True
+      return False
+
+  # Stage 1: newest LLM_REQUEST at or before the sink, inside the chain window.
+  def llm_anchor(hid, upper_ts):
+      best = None
+      best_ts = 0
+      for e in edges(hid, dir="out", kind="LLM_REQUEST"):
+          ts = as_ns(e.get("ts", ""))
+          if ts <= 0 or ts > upper_ts:
+              continue
+          if upper_ts - ts > CHAIN_WINDOW_NS:
+              continue
+          if ts > best_ts:
+              best = e
+              best_ts = ts
+      return best
+
+  # Optional escalation: exec'd code talking to a public (non-ZTNA) endpoint.
+  def egress_step(pid, since_ts):
+      for e in edges(pid, dir="out", kind="CONNECTS"):
+          h = node(e["to"])
+          if h == None or h.get("is_ztna_host", "0") == "1":
+              continue
+          ts = as_ns(e.get("last_ts", ""))
+          if ts == 0:
+              ts = as_ns(e.get("first_ts", ""))
+          if ts < since_ts:
+              continue
+          return step(e, stage_id="Egress",
+                      stage_desc="exec'd code connected out to " + h.get("host", "?") + ":" + h.get("port", "?"))
+      for e in edges(pid, dir="out", kind="HTTP_REQUEST"):
+          u = node(e["to"])
+          if u == None or u.get("is_ztna_host", "0") == "1":
+              continue
+          ts = as_ns(e.get("last_ts", ""))
+          if ts == 0:
+              ts = as_ns(e.get("first_ts", ""))
+          if ts < since_ts:
+              continue
+          return step(e, stage_id="Egress",
+                      stage_desc="exec'd code sent HTTP to " + u.get("host", "?"))
+      return None
+
+  # Optional escalation: credential material touched. Path-targeted, process-scoped -
+  # never a broad READ_FILE scan.
+  def cred_step(pid, since_ts):
+      for e in edges(pid, dir="out", kind="READ_FILE"):
+          fs = node(e["to"])
+          if fs == None:
+              continue
+          for pat in CRED:
+              for a in fs_activity(fs["id"], "READ", pat):
+                  if as_ns(a.get("ts", "")) >= since_ts:
+                      return step(e, stage_id="Credential Access",
+                                  stage_desc="exec'd code read " + a.get("path", "?"),
+                                  activity=a)
+      return None
+
+  # Optional escalation: the spawned command spawned more processes.
+  def spawn_step(pid, since_ts):
+      for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+          ts = as_ns(e.get("ts", ""))
+          if ts < since_ts:
+              continue
+          c = node(e["to"])
+          nm = "?"
+          if c != None:
+              nm = c.get("name", "?")
+          return step(e, stage_id="Nested Execution",
+                      stage_desc="exec'd code spawned " + nm + ": " + e.get("cmdline", "")[:160])
+      return None
+
+  # Fallback attribution only: the triggering pid must be this interpreter or its
+  # direct child, otherwise we do not claim the spawn belongs to it.
+  def caller_belongs(hostproc, cpid):
+      if cpid == "" or cpid == "0":
+          return False
+      hpid = hostproc.get("pid", "")
+      if hpid != "" and hpid == cpid:
+          return True
+      for p in graph(type="Process"):
+          if p.get("pid", "") == cpid and p.get("parent_pid", "") == hpid and hpid != "":
+              return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      event_ts = as_ns(meta.get("event_ts", ""))
+      cpid     = meta.get("caller_pid", "0")
+
+      candidates = []
+      for p in graph(type="Process"):
+          if is_llm_host(p):
+              candidates.append(p["id"])
+      if not candidates:
+          return "allow"
+
+      for hid in sorted(candidates):
+          h = node(hid)
+          if h == None:
+              continue
+          chain = new_chain(hid)
+
+          # ── Stage 2: a FRESH exec()-style spawn by this interpreter ───────────
+          sink_edge = None
+          sink_ts   = 0
+          sink_cmd  = ""
+          for e in edges(hid, dir="out", kind="EXECUTE_PROCESS"):
+              cmd = e.get("cmdline", "")
+              if cmd == "":
+                  c = node(e["to"])
+                  if c != None:
+                      cmd = c.get("cmdline", "")
+                      if cmd == "":
+                          cmd = c.get("path", "")
+              if sink_match(cmd) == None:
+                  continue
+              ts = as_ns(e.get("ts", ""))
+              if ts <= 0:
+                  continue
+              if event_ts > 0 and event_ts - ts > LOOK_BACK_NS:
+                  continue      # stale chain - already reported on an earlier event
+              if ts > sink_ts:
+                  sink_edge = e
+                  sink_ts   = ts
+                  sink_cmd  = cmd
+
+          synthetic = False
+          child_id  = ""
+          if sink_edge == None:
+              # Graph ingest is asynchronous: the spawn that triggered this run may
+              # not be an edge yet. Take the trigger from meta, but only if the pid
+              # actually belongs to this interpreter.
+              if not caller_belongs(h, cpid):
+                  continue
+              sink_ts   = event_ts
+              sink_cmd  = meta.get("content", "")
+              sink_edge = {"kind": "EXECUTE_PROCESS", "from": hid,
+                           "to": "process://pid:" + cpid, "ts": str(event_ts),
+                           "first_ts": str(event_ts), "last_ts": str(event_ts),
+                           "cmdline": sink_cmd}
+              synthetic = True
+          else:
+              child_id = sink_edge.get("to", "")
+
+          # ── Stage 1: required anchor - the LLM that produced the program ──────
+          upper = sink_ts
+          if upper <= 0:
+              upper = event_ts
+          anchor = llm_anchor(hid, upper)
+          if anchor == None:
+              continue      # no LLM in the loop -> not a PAL chain, no verdict
+
+          l = node(anchor["to"])
+          who = "an LLM"
+          if l != None:
+              who = l.get("provider", "?") + "/" + l.get("model", "?")
+          chain.append(step(anchor, stage_id="LLM Program Generation",
+                            stage_desc="interpreter requested program text from " + who))
+          chain.append(step(sink_edge, stage_id="exec() Sink",
+                            stage_desc=h.get("name", "?") + " spawned OS command from generated code: " + sink_cmd[:200]))
+
+          stages = ["llm_program_generation", "exec_sink"]
+          since  = sink_ts - CHAIN_WINDOW_NS
+          if since < 0:
+              since = 0
+
+          scopes = []
+          if child_id != "" and not child_id.startswith("process://pid:"):
+              scopes.append(child_id)
+          scopes.append(hid)
+
+          st = None
+          for sc in scopes:
+              st = egress_step(sc, since)
+              if st != None:
+                  break
+          if st != None:
+              chain.append(st)
+              stages.append("egress")
+
+          st = None
+          for sc in scopes:
+              st = cred_step(sc, since)
+              if st != None:
+                  break
+          if st != None:
+              chain.append(st)
+              stages.append("credential_access")
+
+          if child_id != "" and not child_id.startswith("process://pid:"):
+              st = spawn_step(child_id, since)
+              if st != None:
+                  chain.append(st)
+                  stages.append("nested_execution")
+
+          reason = ("LangChain PAL-style exec() sink: LLM-generated code reached the OS from " +
+                    h.get("path", h.get("name", "?")) + " -- " + sink_cmd[:160])
+          if len(stages) > 2:
+              reason = reason + " | follow-on: " + ", ".join(stages[2:])
+          if synthetic:
+              reason = reason + " | attribution: degraded (pending graph ingest, pid " + cpid + ")"
+
+          print("PALChain exec sink | interpreter=" + h.get("path", "?") +
+                " | llm=" + who + " | cmd=" + sink_cmd[:200] +
+                " | stages=" + ",".join(stages))
+
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
