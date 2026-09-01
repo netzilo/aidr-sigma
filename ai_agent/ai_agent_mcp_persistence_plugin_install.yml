@@ -1,0 +1,90 @@
+title: MCP Plugin Persistence Registration
+id: 7f3d9c21-6b4e-4a58-9c2f-1e0d5b8a3f47
+status: experimental
+level: high
+description: |
+  Detects a spawned process whose command line installs or rewrites Model Context
+  Protocol (MCP) server configuration — the persistence primitive for AI agent
+  systems. An MCP server registered in claude_desktop_config.json, .mcp.json,
+  cline_mcp_settings.json, .claude.json, ~/.codex/config.toml or
+  ~/.gemini/settings.json is re-launched on every agent restart, so a single
+  successful write survives session teardown and grants the attacker persistent,
+  in-band tool capability.
+
+  Three independent command shapes are matched, all on a single execute_process
+  event:
+    A. Native registration subcommands (`* mcp add`, `mcp add-json`,
+       `mcp add-from-claude-desktop`, `mcp install`, `--add-mcp`).
+    B. A shell write primitive (redirect, tee, sed -i, perl -i, curl -o, dd of=)
+       whose *target* — within the same command segment, no `;`/`|`/`&` between
+       them — is a known MCP config file.
+    C. An interpreter one-liner (python/node/deno/bun/ruby/perl -c/-e) that opens
+       or serialises into a known MCP config file.
+
+  Shapes B and C require both a write verb and a specific MCP config filename in
+  writer-then-target order, so reads, greps and diffs of the same files
+  (`cat ~/.cursor/mcp.json > /tmp/x`) do not match.
+author: Haibo
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1176/
+  - https://atlas.mitre.org/techniques/AML.T0053
+  - https://modelcontextprotocol.io/docs/concepts/architecture
+tags:
+  - attack.persistence
+  - attack.t1176
+  - atlas.aml.t0053
+  - owasp.llm03
+  - owasp.llm06
+falsepositives:
+  - Developer or IT onboarding script registering an approved MCP server via `claude mcp add` / `codex mcp add` / `code --add-mcp`
+  - Dotfile and configuration managers (chezmoi, GNU stow, Ansible, Nix home-manager, Puppet) templating claude_desktop_config.json or .mcp.json onto a workstation
+  - Devcontainer, Codespaces or CI postCreate scripts generating a repo-local .mcp.json for the project
+  - jq / sed based config migration during a legitimate MCP server version upgrade or import from Claude Desktop
+  - An editor extension rewriting its own MCP settings file when the user changes preferences in the UI
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # A — native MCP registration subcommands across agent CLIs
+  sel_mcp_cli_register:
+    content|re:
+      - '(?i)\bmcp\s+(add|add-json|add-from-claude-desktop|install|enable)\b'
+      - '(?i)--add-mcp[=\s]'
+      - '(?i)\bmcp-(add|install)\b'
+
+  # B — shell write primitive whose target is an MCP server config file
+  sel_mcp_config_shell_write:
+    content|re:
+      - '(?i)(>>?|\btee\b|\bsed\s+-i\b|\bperl\s+-[a-z]{0,3}i[a-z]{0,3}\b|\bcurl\b[^\n;|&]{0,120}\s-o\b|\bdd\b[^\n;|&]{0,60}of=)[^\n;|&]{0,140}(claude_desktop_config\.json|cline_mcp_settings\.json|mcp_settings\.json|mcp_config\.json|mcp\.json|\.claude\.json|\.codex/config\.toml|\.gemini/settings\.json|\.claude/settings(\.local)?\.json)'
+
+  # C — interpreter one-liner serialising into an MCP server config file
+  sel_mcp_config_inline_write:
+    content|re:
+      - '(?i)\b(python[0-9.]*|node|deno|bun|ruby|perl)\b[^\n]{0,300}(writefilesync|writefile|json\.dump|open\s*\(|fs\.write|configparser|toml\.dump)[^\n]{0,200}(claude_desktop_config\.json|cline_mcp_settings\.json|mcp_settings\.json|mcp_config\.json|mcp\.json|\.claude\.json|\.codex/config\.toml|\.gemini/settings\.json)'
+
+  # Usage / documentation invocations that never mutate a config
+  filter_help_or_dryrun:
+    content|contains:
+      - '--help'
+      - '--dry-run'
+
+  # Target lives inside a test fixture, example, template or vendored tree
+  filter_fixture_target:
+    content|re:
+      - '(?i)(/node_modules/|/site-packages/|/\.git/|/(tests?|testdata|__tests__|fixtures?|examples?|samples?|templates?)/)[^\n]{0,140}(mcp\.json|mcp_settings\.json|mcp_config\.json|claude_desktop_config\.json)'
+
+  # Redirect target is documentation or a log, not a live config
+  filter_doc_write_target:
+    content|re:
+      - '(?i)>>?\s*[^\n;|&]{0,100}\.(md|mdx|rst|txt|adoc|log|tmpl|example|sample)\b'
+
+  condition: >
+    sel_event
+    and (sel_mcp_cli_register or sel_mcp_config_shell_write or sel_mcp_config_inline_write)
+    and not (filter_help_or_dryrun or filter_fixture_target or filter_doc_write_target)
+action: report
