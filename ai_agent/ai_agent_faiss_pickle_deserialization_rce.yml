@@ -1,0 +1,281 @@
+title: FAISS Pickle Deserialization RCE - Python Host Spawns Payload Process
+id: b7c41f9e-2a83-4d16-9f0c-5e8a13d47c62
+status: experimental
+level: high
+description: |
+  Detects the post-exploitation footprint of insecure pickle deserialization in
+  LangChain vector-store loading (FAISS.deserialize_from_bytes / load_local).
+  A malicious pickle payload executes inside the Python interpreter that hosts the
+  application, and the only observable artifact is the child process that
+  __reduce__ / os.system spawns.
+
+  The rule is instance-resolved: it anchors on meta["caller_pid"] of the
+  execute_process event, resolves the exact process instance with proc_instance(),
+  walks the real spawn chain with proc_lineage(), and requires a Python interpreter
+  (or python-hosted app server) within 3 hops of the caller. Corroborating siblings
+  are pulled from query_events(kind="EXECUTE_PROCESS") filtered on the SAME
+  (parent_pid, parent_start) instance pair and a 5-minute window, so nothing is ever
+  attributed across sessions or across PID reuse.
+
+  High-severity payload shapes (reverse shell, download-and-pipe, encoded exec,
+  literal pickle idioms) fire on their own once a Python host is confirmed.
+  Medium-severity shapes require corroboration: a LangChain/FAISS/pickle marker in
+  the Python host's own command line, or two or more payload-shaped children from
+  the same interpreter instance inside the window.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://docs.python.org/3/library/pickle.html
+  - https://python.langchain.com/docs/integrations/vectorstores/faiss/
+  - https://atlas.mitre.org/techniques/AML.T0011
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0011
+  - atlas.aml.t0050
+  - owasp.llm05
+falsepositives:
+  - MLOps and data-pipeline code that legitimately shells out from Python (dvc, aws,
+    gcloud, ffmpeg wrappers). Mitigated by requiring a payload-shaped command line -
+    a plain "sh -c aws s3 cp ..." matches none of the HIGH or MED classes.
+  - LangChain agents deliberately equipped with ShellTool / BashProcess. These are a
+    genuine policy decision and will be reported (never blocked) for review.
+  - Jupyter or IDE kernels running "!curl ... | sh" style shell magics from a notebook
+    cell. The interpreter is the same, so the rule reports; triage on the lineage root.
+  - Build and install steps executed from Python (pip / setup.py) that run
+    "chmod +x && ./configure". Medium class only - suppressed unless the interpreter
+    command line also carries a langchain/faiss/pickle marker or a second payload-shaped
+    child appears in the same 5-minute window.
+  - Deliberate CVE reproduction or red-team validation of the pickle PoC.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_payload_shape:
+    content|re:
+      - '/dev/tcp/'
+      - '(?i)(curl|wget)[^|;&]{0,200}\|\s*(bash|sh|zsh|dash|python[0-9.]*|perl|ruby)\b'
+      - '(?i)base64[^|]{0,80}\|\s*(bash|sh|zsh|dash|python[0-9.]*)\b'
+      - '(?i)\bn(c|cat)\b[^\n]{0,80}\s-[a-z]{0,4}e\b'
+      - '(?i)\bpython[0-9.]*\s+-c\b'
+      - '(?i)\bperl\b\s+-e\b'
+      - '(?i)(powershell|pwsh)[^\n]{0,120}\s-e'
+      - '(?i)(__reduce__|pickle\.loads|cpickle|deserialize_from_bytes)'
+      - '(?i)\b(bash|sh|zsh|dash)\b\s+-[a-z]{0,3}i\b'
+      - '(?i)\bchmod\s+\+x\b'
+      - '(?i)\bos\.system\s*\('
+      - '(?i)\b(curl|wget)\b[^\n]{0,160}\s-[oO]\s*/tmp/'
+      - '(?i)\b(nohup|setsid)\b'
+  condition: sel_exec and sel_payload_shape
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (this rule owns its window; nothing is persisted) ──────────────
+  WINDOW_NS = 300000000000   # 5 minutes of same-instance sibling context
+  MAX_HOP   = 3              # python host must be within 3 hops of the caller
+  MAX_SIBS  = 5
+  SIB_LIMIT = 2000
+
+  PY_HOST = [
+      r"(?i)/python[0-9.]*$",
+      r"(?i)^python[0-9.]*$",
+      r"(?i)/pypy[0-9.]*$",
+      r"(?i)\\python[0-9.]*\.exe$",
+      r"(?i)/(uvicorn|gunicorn|hypercorn|celery|streamlit|chainlit)$",
+  ]
+
+  # Payload shapes that are self-sufficient once a Python host is confirmed.
+  PAYLOAD_HIGH = [
+      r"/dev/tcp/",
+      r"(?i)(curl|wget)[^|;&]{0,200}\|\s*(bash|sh|zsh|dash|python[0-9.]*|perl|ruby)\b",
+      r"(?i)base64[^|]{0,80}\|\s*(bash|sh|zsh|dash|python[0-9.]*)\b",
+      r"(?i)\bn(c|cat)\b[^\n]{0,80}\s-[a-z]{0,4}e\b",
+      r"(?i)\bpython[0-9.]*\s+-c\b[^\n]{0,300}(socket\.|subprocess\.|os\.system|__import__|exec\(|pty\.)",
+      r"(?i)\bperl\b\s+-e\b[^\n]{0,200}(socket|exec)",
+      r"(?i)(powershell|pwsh)[^\n]{0,120}\s-e(nc|ncodedcommand)?\s+[A-Za-z0-9+/]{24,}",
+      r"(?i)(__reduce__|pickle\.loads|cpickle|deserialize_from_bytes)",
+  ]
+
+  # Payload shapes that need corroboration before they are worth an analyst's time.
+  PAYLOAD_MED = [
+      r"(?i)\b(bash|sh|zsh|dash)\b\s+-[a-z]{0,3}i\b",
+      r"(?i)\bchmod\s+\+x\b[^\n]{0,160}(&&|;|\|)",
+      r"(?i)\bos\.system\s*\(",
+      r"(?i)\b(curl|wget)\b[^\n]{0,160}\s-[oO]\s*/tmp/",
+      r"(?i)\b(nohup|setsid)\b[^\n]{0,160}&",
+  ]
+
+  CONTEXT_MARK = r"(?i)(langchain|faiss|vectorstore|vector_store|index\.pkl|docstore|embedding|\brag\b|pickle|joblib|deserialize|serialize_to_bytes)"
+
+  def to_int(s):
+      if s == None:
+          return 0
+      if s == "":
+          return 0
+      return int(s)
+
+  def clip(s, n):
+      if len(s) > n:
+          return s[:n] + "..."
+      return s
+
+  def match_any(pats, s):
+      if s == "":
+          return None
+      for p in pats:
+          if re.find(p, s) != None:
+              return p
+      return None
+
+  def is_py_host(path):
+      if path == "":
+          return False
+      for p in PY_HOST:
+          if re.find(p, path) != None:
+              return True
+      return False
+
+  def base(path):
+      if path == "":
+          return "?"
+      return path.split("/")[-1]
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = "pid:" + e.get("parent_pid", "?")
+      return {
+          "from":     "process://" + frm,
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", ""),
+          "first_ts": e.get("ts", ""),
+          "last_ts":  e.get("ts", ""),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def run():
+      # ── 1. Relevance gate: pure string work on meta, no graph, no log ────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      hi  = match_any(PAYLOAD_HIGH, cmd)
+      med = match_any(PAYLOAD_MED, cmd)
+      if hi == None and med == None:
+          return "allow"
+
+      # ── 2. Anchor on the exact triggering instance ───────────────────────────
+      cp = to_int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      ev_ts = to_int(meta.get("event_ts", "0"))
+      inst  = proc_instance(cp, ev_ts)
+      if inst == None:
+          return "allow"          # degraded attribution - never guess an owner
+      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
+                             to_int(inst.get("actor_start", "0")))
+      if not lineage:
+          return "allow"
+
+      # ── 3. Required anchor: a Python host within MAX_HOP of the caller ───────
+      py     = None
+      py_idx = -1
+      for i in range(len(lineage)):
+          if i > MAX_HOP:
+              break
+          if is_py_host(lineage[i].get("actor_path", "")):
+              py     = lineage[i]
+              py_idx = i
+              break
+      if py == None:
+          return "allow"          # not a python-hosted deserialization surface
+
+      py_pid   = to_int(py.get("actor_pid", "0"))
+      py_start = to_int(py.get("actor_start", "0"))
+      py_cmd   = py.get("cmdline", "")
+      ctx_hit  = re.find(CONTEXT_MARK, py_cmd) != None
+
+      # ── 4. Same-instance, same-window siblings (strict session scoping) ──────
+      sibs = []
+      if ev_ts > 0 and py_pid > 0:
+          since = ev_ts - WINDOW_NS
+          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                                until_ns=ev_ts, limit=SIB_LIMIT):
+              if to_int(e.get("parent_pid", "0")) != py_pid:
+                  continue
+              if to_int(e.get("parent_start", "0")) != py_start:
+                  continue
+              c = e.get("cmdline", "")
+              if c == "":
+                  c = e.get("actor_path", "")
+              if match_any(PAYLOAD_HIGH, c) != None or match_any(PAYLOAD_MED, c) != None:
+                  sibs.append(e)
+              if len(sibs) >= MAX_SIBS:
+                  break
+
+      # ── 5. Verdict gate ─────────────────────────────────────────────────────
+      if hi == None and not ctx_hit and len(sibs) < 2:
+          return "allow"          # medium shape, no corroboration - stay quiet
+
+      # ── 6. Kill chain, rooted at the session owner ──────────────────────────
+      chain = new_chain("process://" + lineage[-1].get("actor_path", py.get("actor_path", "")))
+
+      host_desc = "python host " + base(py.get("actor_path", "")) + \
+                  " (pid " + str(py_pid) + ") cmdline: " + clip(py_cmd, 200)
+      if ctx_hit:
+          host_desc = host_desc + " [langchain/faiss/pickle marker present]"
+      chain.append(step(ev_edge(py),
+                        stage_id="Vulnerable Host",
+                        stage_desc=host_desc))
+
+      for e in sibs:
+          chain.append(step(ev_edge(e),
+                            stage_id="Repeated Payload Exec",
+                            stage_desc="same interpreter instance spawned: " +
+                                       clip(e.get("cmdline", e.get("actor_path", "?")), 160)))
+
+      child_path = inst.get("actor_path", "")
+      if py_idx == 0:
+          toks = cmd.split(" ")
+          child_path = toks[0] if len(toks) > 0 else child_path
+      trig = {
+          "from":     "process://" + py.get("actor_path", ""),
+          "to":       "process://" + child_path,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(ev_ts),
+          "first_ts": str(ev_ts),
+          "last_ts":  str(ev_ts),
+          "cmdline":  clip(cmd, 400),
+      }
+      sev = "high-confidence" if hi != None else "corroborated"
+      chain.append(step(trig,
+                        stage_id="Deserialization RCE",
+                        stage_desc=sev + " payload process spawned by python host: " +
+                                   clip(cmd, 200)))
+
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "")))
+      lin = " <- ".join(names)
+
+      reason = "Possible FAISS/pickle deserialization RCE: python host " + \
+               base(py.get("actor_path", "")) + " spawned a " + sev + \
+               " payload process; lineage " + lin
+      if ctx_hit:
+          reason = reason + "; interpreter cmdline references langchain/faiss/pickle"
+      if len(sibs) > 0:
+          reason = reason + "; " + str(len(sibs)) + " corroborating sibling exec(s) in window"
+
+      print(reason + " | trigger: " + clip(cmd, 300))
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
