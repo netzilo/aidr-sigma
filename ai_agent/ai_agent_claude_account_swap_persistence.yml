@@ -1,0 +1,117 @@
+title: Claude Code Account Swap Persistence
+id: 9f4c1e2a-6b70-4d38-8c51-2f6a83b7de14
+status: experimental
+level: medium
+description: |
+  Detects a single shell invocation that mutates Claude Code's *account identity*
+  material - the credential store (~/.claude/.credentials.json, the macOS keychain item
+  "Claude Code-credentials", or a Linux keyring entry of the same name), the account
+  block inside ~/.claude.json (oauthAccount / organizationUuid / accountUuid), or a
+  persisted ANTHROPIC_AUTH_TOKEN / ANTHROPIC_BASE_URL / CLAUDE_CODE_OAUTH_TOKEN written
+  into a shell profile, launchctl/setx environment, or a .claude settings/MCP file.
+
+  This is the endpoint-observable half of the "account swap" technique: a package that
+  keeps its remote-control artifacts bound to one Claude account while re-pointing the
+  inference credentials/base URL used by the local Claude Code install, so the requests
+  bill and log against a different (victim) account.
+
+  Scope limits, stated deliberately:
+    * Only execute_process is a live triggering event type for this behaviour. ACQUIRED_SKILL
+      is graph-only and can never trigger a rule; PERSISTENCE / LATERAL_MOVEMENT are not
+      edge kinds; network_connection is unknown to the engine; file_write has no live
+      producer. So this rule watches the one live surface and refuses to fire on the
+      generic signal ("a package installer ran a command") that carries no discriminating
+      information.
+    * Every alternative below requires BOTH a Claude-Code-specific identity artifact AND a
+      mutating operator in the same command line. A plain `npm install`, `pip install`,
+      postinstall script, or `claude --version` cannot match.
+    * There is no account-identity telemetry that proves which credential ends up
+      authenticating inference, so the verdict is report, never block. This rule is the
+      trigger for investigation, not the adjudication.
+author: Tanya
+date: "2026-03-06"
+references:
+  - https://attack.mitre.org/techniques/T1078/
+  - https://attack.mitre.org/techniques/T1552/001/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://atlas.mitre.org/techniques/AML.T0012
+tags:
+  - attack.persistence
+  - attack.credential-access
+  - attack.t1078
+  - attack.t1552.001
+  - atlas.aml.t0010
+  - atlas.aml.t0012
+  - atlas.aml.t0050
+  - owasp.llm03
+falsepositives:
+  - A developer migrating or backing up their own Claude Code profile between machines or
+    accounts, e.g. `mv ~/.claude ~/.claude.bak` or copying ~/.claude/.credentials.json to a
+    new host.
+  - Dotfile managers (chezmoi, stow, yadm) and provisioning tools (Ansible, Chef, Nix
+    activation scripts) that copy or symlink ~/.claude/.credentials.json and ~/.claude.json.
+  - Enterprise onboarding or CI bootstrap scripts that persist ANTHROPIC_BASE_URL for an
+    internal LLM gateway, or a service CLAUDE_CODE_OAUTH_TOKEN, into a shell profile or
+    container image for headless runs.
+  - Clean re-authentication flows that run `security delete-generic-password -s "Claude
+    Code-credentials"` (or the keyring equivalent) before a fresh login.
+  - Support/debug snippets that rewrite ~/.claude.json to clear a stale oauthAccount or
+    organizationUuid after an organisation change or seat move.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── A. self-contained swap signatures: artifact + mutation in ONE command line ──
+  sel_cred_store_swap:
+    content|re:
+      # copy / move / link / stage the Claude Code credential file
+      - '(?i)\b(cp|mv|ln|rsync|scp|install|tee|dd)\b[^\n]{0,160}\.claude/\.credentials\.json'
+      # redirect something INTO the credential file
+      - '(?i)>>?[^\n;&|]{0,80}\.claude/\.credentials\.json'
+      # macOS keychain item for Claude Code created or removed non-interactively
+      - '(?i)\bsecurity\b[^\n]{0,80}\b(add|delete)-generic-password\b[^\n]{0,200}claude[ _-]?code-credentials'
+      # Linux keyring equivalent
+      - '(?i)\b(keyring|secret-tool)\b[^\n]{0,60}\b(set|store|delete|clear)\b[^\n]{0,160}claude[ _-]?code-credentials'
+      # inference routing token / base URL persisted into a startup or Claude config file
+      - '(?i)(ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN)[^\n]{0,200}(\.zshrc|\.zshenv|\.bashrc|\.bash_profile|\.profile|\.claude/settings(\.local)?\.json|\.claude/\.mcp|\.mcp\.json)'
+      # same token/base URL persisted through the OS environment store
+      - '(?i)\b(launchctl\s+setenv|setx)\b[^\n]{0,120}(ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|CLAUDE_CODE_OAUTH_TOKEN)'
+      # profile-swap staging: ~/.claude moved or duplicated to a suffixed sibling
+      - '(?i)\b(mv|cp|rsync)\b[^\n]{0,100}[~/]\.claude\b[^\n]{0,100}[~/]\.claude[._-][A-Za-z0-9]'
+
+  # ── B. identity block inside ~/.claude.json rewritten (needs all three) ──
+  sel_claude_config_path:
+    content|re: '(?i)[~/]\.claude\.json\b'
+  sel_account_identity_key:
+    content|re: '(?i)\b(oauthAccount|organizationUuid|accountUuid)\b'
+  sel_mutating_write:
+    content|re:
+      - '(?i)>>?[^\n;&|]{0,120}\.claude'
+      - '(?i)\|\s*(tee|sponge)\b'
+      - '\b(?i:sed)\s+(-[A-Za-z]+\s+)*-i'
+      - '\b(?i:perl)\s+-[A-Za-z]*i[A-Za-z]*\s+-e'
+      - '(?i)\b(cp|mv|install|dd|tee)\b'
+      - '(?i)\b(json\.dump|writeFileSync|write_text)\b'
+
+  # ── filters: documentation, placeholders, no-op invocations, test harnesses ──
+  filter_placeholder_docs:
+    content|re:
+      - '(?i)YOUR[_-]?(API[_-]?KEY|TOKEN|CREDENTIALS)'
+      - '(?i)<your[^\n>]{0,40}>'
+      - '(?i)\b(REDACTED|PLACEHOLDER|CHANGEME|FAKE_TOKEN)\b'
+      - '(?i)x{8,}'
+  filter_help_or_dryrun:
+    content|re: '(?i)(\s--help|\s--version|\s--dry-run)(\s|$|")'
+  filter_test_runner:
+    content|re: '(?i)\b(pytest|jest|vitest|mocha|bats|shellcheck|go\s+test|cargo\s+test|npm\s+(run\s+)?test)\b'
+
+  condition: >
+    sel_event and (
+      sel_cred_store_swap or
+      (sel_claude_config_path and sel_account_identity_key and sel_mutating_write)
+    ) and not (filter_placeholder_docs or filter_help_or_dryrun or filter_test_runner)
+action: report
