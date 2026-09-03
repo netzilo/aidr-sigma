@@ -1,6 +1,6 @@
 title: DNS Exfiltration — Agent Resolver Spawn With Encoded Query Name After Secret Staging
 id: 9f3c1d7a-4b62-4e58-9a1c-0d6f2b8e5714
-status: experimental
+status: stable
 level: high
 author: Selhan
 date: "2026-06-11"
