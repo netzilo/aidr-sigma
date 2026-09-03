@@ -187,6 +187,27 @@ script: |
           "first_ts": t,
           "last_ts":  t,
           "cmdline":  row.get("cmdline", ""),
+          # The engine's own trigger-injection (appendTriggerReason,
+          # scanner_filter.go) merges into whichever chain step's edge has
+          # this SAME callid, instead of appending a second, generic node --
+          # but only if the edge actually carries it. Dropping this field
+          # here (as this helper originally did) is exactly why the
+          # DNS Exfil Channel step and the auto-injected "Trigger Reason"
+          # step always rendered as two separate nodes even when they
+          # described the identical real event.
+          "callid":   row.get("callid", ""),
+      }
+
+  def file_edge(row, kind):
+      t = row.get("ts", "0")
+      ap = row.get("actor_path", "")
+      return {
+          "kind":     kind,
+          "from":     "process://" + (ap if ap != "" else "unknown"),
+          "to":       row.get("path", ""),
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def synth_edge(frm, to, ts, cmdline):
@@ -254,7 +275,8 @@ script: |
               c = e.get("actor_path", "")
           if c == "":
               continue
-          cmds.append({"ts": int(e.get("ts", "0")), "cmd": c, "edge": ev_edge(e)})
+          cmds.append({"ts": int(e.get("ts", "0")), "cmd": c, "edge": ev_edge(e),
+                       "pid": e.get("actor_pid", ""), "start": e.get("actor_start", "")})
 
       # 4 ── graph traversal: EXECUTE_PROCESS edges out of the lineage's process
       #      nodes (covers spawns the event log has not yet materialised) and the
@@ -286,16 +308,66 @@ script: |
                       if c == "":
                           c = ch.get("path", "")
               if c != "":
-                  cmds.append({"ts": ts, "cmd": c, "edge": e})
+                  # Graph edges don't carry actor_pid/actor_start the way
+                  # query_events rows do, so file-evidence enrichment below
+                  # is skipped for entries sourced this way -- the base
+                  # EXECUTE_PROCESS step still renders correctly either way.
+                  cmds.append({"ts": ts, "cmd": c, "edge": e, "pid": "", "start": ""})
       if agent_node != None:
           root_id = agent_node["id"]
 
+      # cmds is populated from two independent sources -- the instance-
+      # resolved event log (query_events) and a separate graph edge walk --
+      # which commonly both surface the SAME physical exec (including the
+      # triggering call itself). Without deduping by (ts, cmd), one real
+      # invocation gets counted twice here alone, on top of the seed below;
+      # collapse exact (ts, cmd) duplicates before any counting happens.
+      seen_cmd = {}
+      deduped = []
+      for c in cmds:
+          key = str(c["ts"]) + "|" + c["cmd"]
+          if key in seen_cmd:
+              continue
+          seen_cmd[key] = True
+          deduped.append(c)
+      cmds = deduped
+
       # 5 ── ordered stage evaluation, session- and window-scoped
+      #
+      # data_lookup_n and lookup_n are counted as the SIZE OF A SET of
+      # distinct identities, not as running increments over cmds entries.
+      # An increment-per-match approach is fragile against ANY duplicate
+      # surfacing of the same physical exec (this rule's cmds is populated
+      # from two independent sources -- query_events and a separate graph
+      # edge walk -- which routinely both surface the same instance,
+      # including the triggering call itself, whose own ts does not
+      # equal meta.event_ts and so was never recognized as a re-surfacing
+      # of the seed). Two entries describing the same real lookup
+      # necessarily carry the same extracted query-name label, so
+      # deduping by that label is correct regardless of how many times,
+      # or through which path, the underlying event was surfaced -- it
+      # measures "how many distinct data-bearing names were resolved",
+      # which is what this amplifier is actually meant to represent.
       secret_ev = None
       encode_ev = None
-      lookup_n = 0
-      data_lookup_n = 1 if name_hit != "" else 0
-      sib_name = ""
+      lookup_keys = {}
+      data_labels = {}
+      if name_hit != "":
+          data_labels[name_hit] = True
+      # The triggering call's own instance-log/graph edge almost always
+      # appears in cmds too (query_events' until_ns includes it), just at
+      # its own real ts, not meta.event_ts -- those are two different
+      # clocks (one stamped by the probe at execve time, the other by the
+      # engine at rule-dispatch time), so they never compare equal. Reusing
+      # this REAL edge for the "DNS Exfil Channel" step (instead of
+      # fabricating one from meta) lets the engine's own trigger-matching
+      # recognize it and merge, instead of always injecting a second,
+      # generic "Trigger Reason" node alongside a richer one that isn't
+      # recognized as the trigger. It's identified as the RESOLVER-matching
+      # entry with the latest ts in-window -- the most recent resolver
+      # invocation is the one that just fired the rule.
+      trigger_edge = None
+      trigger_edge_ts = -1
       for c in cmds:
           if c["ts"] < since or c["ts"] > trigger_ts + 1:
               continue
@@ -309,12 +381,20 @@ script: |
               if m != "":
                   encode_ev = {"ev": c, "m": m}
           if hit(RESOLVER, s) != "":
-              lookup_n += 1
+              lookup_keys[str(c["ts"])] = True
+              if c["ts"] > trigger_edge_ts:
+                  trigger_edge_ts = c["ts"]
+                  trigger_edge = c
               m = hit(DATA_NAME, s)
               if m != "":
-                  data_lookup_n += 1
-                  if sib_name == "":
-                      sib_name = m
+                  data_labels[m] = True
+      lookup_n = len(lookup_keys)
+      data_lookup_n = len(data_labels)
+      sib_name = ""
+      for k in data_labels:
+          if k != name_hit:
+              sib_name = k
+              break
 
       # Discriminator: a resolver invocation whose query name carries data.
       if name_hit == "" and sib_name == "":
@@ -336,6 +416,49 @@ script: |
       if strength < need:
           return "allow"
 
+      # Both narrative stages below describe a file touching disk (a
+      # credential file read; an encoded payload written for DNS-label
+      # transport) -- attach the REAL filesystem edge as evidence, scoped
+      # to the exact same process instance, not just the process spawn
+      # that's presumed to have caused it.
+      #
+      # This is a best-effort addition, not a guarantee: some binaries copy
+      # regular-file-to-regular-file via a zero-copy syscall path (sendfile,
+      # copy_file_range) that a read()/write()-hooking probe never observes,
+      # so no matching row will ever exist to find -- the base EXECUTE_PROCESS
+      # step for the stage (built from the command line itself, always
+      # present) is what carries the stage regardless of whether this
+      # secondary evidence is available. A found target that isn't a real
+      # filesystem path (a pipe or socket, e.g. a command-substitution
+      # capture) is excluded -- it was never "written to disk".
+      def is_file_target(p):
+          if p == "":
+              return False
+          if p.startswith("pipe:") or p.startswith("socket:") or p.startswith("anon_inode:"):
+              return False
+          return True
+
+      secret_read = None
+      if secret_ev != None:
+          epid = secret_ev["ev"].get("pid", "")
+          estart = secret_ev["ev"].get("start", "")
+          if epid != "" and estart != "":
+              for r in query_events(kind="READ_FILE", actor_pid=int(epid),
+                                    actor_start=int(estart), limit=20):
+                  if is_file_target(r.get("path", "")):
+                      secret_read = r
+                      break
+      encode_write = None
+      if encode_ev != None:
+          epid = encode_ev["ev"].get("pid", "")
+          estart = encode_ev["ev"].get("start", "")
+          if epid != "" and estart != "":
+              for w in query_events(kind="WRITE_FILE", actor_pid=int(epid),
+                                    actor_start=int(estart), limit=20):
+                  if is_file_target(w.get("path", "")):
+                      encode_write = w
+                      break
+
       # 6 ── kill chain built from event rows / graph edges + the meta trigger
       chain = new_chain(root_id)
       if secret_ev != None:
@@ -343,26 +466,47 @@ script: |
                             stage_desc="session process touched credential material (" +
                                        clip(secret_ev["m"], 60) + "): " +
                                        clip(secret_ev["ev"]["cmd"], 160)))
+          if secret_read != None:
+              chain.append(step(file_edge(secret_read, "READ_FILE"), stage_id="Secret Staging",
+                                stage_desc="credential material read from disk: " +
+                                           clip(secret_read.get("path", ""), 160)))
       if encode_ev != None:
           chain.append(step(encode_ev["ev"]["edge"], stage_id="Payload Encoding",
                             stage_desc="data shaped for DNS label transport (" +
                                        clip(encode_ev["m"], 40) + "): " +
                                        clip(encode_ev["ev"]["cmd"], 160)))
+          if encode_write != None:
+              chain.append(step(file_edge(encode_write, "WRITE_FILE"), stage_id="Payload Encoding",
+                                stage_desc="encoded payload written to disk: " +
+                                           clip(encode_write.get("path", ""), 160)))
 
-      trig_actor = inst.get("actor_path", "") if inst != None else ""
-      if trig_actor == "":
-          trig_actor = "pid:" + str(cp)
-      trig_parent = inst.get("parent_path", "") if inst != None else ""
-      if trig_parent == "":
-          trig_parent = root_id
-      else:
-          trig_parent = "process://" + trig_parent
+      # The triggering call's own real edge (see trigger_edge above) is
+      # preferred over a fabricated one -- its "callid" (propagated by
+      # ev_edge(), now) is what the engine's own trigger-injection
+      # (appendTriggerReason, scanner_filter.go) matches on to MERGE into
+      # this exact step instead of appending a second, generic, path-less
+      # "Trigger Reason" node alongside it. synth_edge() (no callid) is only
+      # a fallback for the rare case where the triggering instance genuinely
+      # isn't in cmds yet -- that case still gets the separate node, same as
+      # before this fix.
       shown = name_hit if name_hit != "" else sib_name
-      chain.append(step(synth_edge(trig_parent, "process://" + trig_actor,
-                                   trigger_ts, clip(cmd, 400)),
-                        stage_id="DNS Exfil Channel",
+      if trigger_edge != None:
+          dns_edge = trigger_edge["edge"]
+          dns_cmd_display = trigger_edge["cmd"]
+      else:
+          trig_actor = inst.get("actor_path", "") if inst != None else ""
+          if trig_actor == "":
+              trig_actor = "pid:" + str(cp)
+          trig_parent = inst.get("parent_path", "") if inst != None else ""
+          if trig_parent == "":
+              trig_parent = root_id
+          else:
+              trig_parent = "process://" + trig_parent
+          dns_edge = synth_edge(trig_parent, "process://" + trig_actor, trigger_ts, clip(cmd, 400))
+          dns_cmd_display = cmd
+      chain.append(step(dns_edge, stage_id="DNS Exfil Channel",
                         stage_desc="resolver spawned with data-bearing query name (" +
-                                   clip(shown, 80) + "): " + clip(cmd, 200)))
+                                   clip(shown, 80) + "): " + clip(dns_cmd_display, 200)))
 
       names = "pid " + str(cp)
       if lineage:
@@ -372,6 +516,16 @@ script: |
           names = " -> ".join(parts)
       attribution = "agent=" + agent_node.get("name", "?") if agent_node != None else "attribution=degraded"
 
+      # A single data-bearing lookup corroborated by staging is reported;
+      # sustained resolution (the `repetition` amplifier: >=3 data-bearing
+      # lookups, or >=8 resolver invocations, in the window) is no longer
+      # ambiguous — it is an active exfiltration channel moving data in
+      # multiple chunks, and is blocked. In both cases credential material
+      # has already been shaped for and pushed through a channel that
+      # bypasses HTTP proxy and egress inspection, so the peer's integrity
+      # is degraded, gating it out of integrity-enforced destinations.
+      verdict = "block" if repetition else "report"
+
       reason = ("Possible DNS-channel exfiltration: " + clip(res_hit.strip(), 24) +
                 " lookup with encoded query name" +
                 (", credential material staged in session" if secret_ev != None else "") +
@@ -379,6 +533,7 @@ script: |
                 (", " + str(data_lookup_n) + " data-bearing lookups" if repetition else "") +
                 " | lineage: " + names + " | " + attribution)
       print(reason)
-      return {"action": "report", "reason": reason, "chain": chain}
+      set_integrity_level(0)
+      return {"action": verdict, "reason": reason, "chain": chain}
 
   result = run()
