@@ -1379,6 +1379,8 @@ s = step(e, stage_id="Credential Access", stage_desc="read " + files[0]["path"],
 
 Steps with no `stage_id` are structural context (ancestry prefix). Steps with `stage_id` are evidence steps — the script author decided these edges matter.
 
+**`step()` does not validate or construct `from`/`to` — it only annotates whatever dict you hand it.** It is documented as taking a dict "returned by `edges()`", but nothing enforces that. If you pass it a hand-built dict (from `query_events()`, from `meta`, or assembled inline for a trigger stage) that uses different key names — `actor_path`/`target_id` instead of `from`/`to`, for instance — `step()` will happily attach `stage_id`/`stage_desc` to that dict and return it with no `from`/`to` at all. This does not error at rule-load or at runtime; the malformed edge is silently serialized into the chain, and only breaks downstream — typically as a crash in whatever renders the chain (a dashboard graph view, an export). **Rule: every dict passed to `step()` must already have real `from`/`to` string fields before the call, with no exceptions for "this one's just the trigger" or "I built this one myself, not from `query_events()`."** If a stage's evidence dict does not come from `edges()`, synthesize it into edge shape first (see the `ev_edge`-style helper below) — for every stage, not only the ones sourced from `query_events()`.
+
 ##### `fs_activity(node_id, op, pattern="")`
 
 Returns file activity entries for a FileSystem node from the event log, optionally filtered by a path pattern (every whitespace-separated token must appear in the path, case-insensitive). Each entry carries the exact timestamp of that specific file access — not the aggregate edge `first_ts`/`last_ts`.
@@ -1835,6 +1837,8 @@ def run():
 3. **`READ_FILE` is extremely high-volume.** A single `curl` reads hundreds of system files. A broad `query_events(kind="READ_FILE")` hits the `limit` and truncates. **Always scope file-read queries by `actor_pid`**, or use `fs_activity(fs["id"], "READ", "aws credentials")` (path-targeted, scoped to one process) rather than a broad scan.
 4. **Lineage can stop early (degraded, not broken).** `proc_lineage` only climbs as far as the log has `EXECUTE_PROCESS` rows. If an ancestor was never ingested (e.g. an unmonitored shell above the agent), the chain ends there. On the live graph, the attack curl resolves to `curl → zsh` and stops, because `zsh`'s parent was not captured. Treat a short lineage as best-effort, not failure — stamp `attribution: "degraded"` rather than discarding the detection.
 5. **`event_ts` is the script-invocation time**, not the original event time (they are within milliseconds). Fine for `proc_instance(pid, at_ns)`'s "latest at" semantics and as the trigger-stage timestamp; do not treat it as a precise sub-second event time.
+6. **On an `EXECUTE_PROCESS` event row, `actor_path` is the CHILD — the process that was spawned — not the parent.** The parent's path is `parent_path` (in `attrs`, alongside `cmdline`). This is easy to get backwards because for every OTHER kind (`CONNECTS`, `HTTP_REQUEST`, `READ_FILE`, …) `actor_path` genuinely is "the process that did this, use it as the edge's `from`." For `EXECUTE_PROCESS` specifically, using `actor_path` for `from` when synthesizing a kill-chain edge sets `from` to the same node as `to` (`target_id` is also the child) — a self-referencing edge, not a parent→child one. When building an edge from an `EXECUTE_PROCESS` row, branch on `kind` and use `parent_path` for `from`.
+7. **`Process` nodes are keyed by executable path, not PID** (see "the path-keyed node problem" above) — so a parent spawning a child that happens to run the **same binary** (e.g. one shell invoking another shell, a process re-executing itself) collapses parent and child onto one graph node. A correctly-built edge between them will still read `from == to`. This is the graph's identity model working as designed, not a bug in your edge-construction code — gotcha 6 above is a distinct problem (wrong field) that produces the same *symptom* (`from == to`) for a different reason. If you're constructing a test/attack sequence and need a chain that renders as two distinct, readable nodes, avoid a same-binary parent→child spawn as the stage you want to visualize; if you're just detecting, a same-binary self-edge is still evidence and should not be suppressed.
 
 ### What changed vs. older rules (migration notes)
 
@@ -2168,14 +2172,15 @@ script: |
 
 ### Determinism & the kill chain
 
-16. **Build the kill chain from event rows, instance-accurately.** Synthesise edge dicts from `query_events` results so the chain shows the exact actor instance and target:
+16. **Build the kill chain from event rows, instance-accurately.** Synthesise edge dicts from `query_events` results so the chain shows the exact actor instance and target. **Branch on `kind` for the `from` field — see gotcha 6**: an `EXECUTE_PROCESS` row's `actor_path` is the child, so `from` must come from `parent_path` for that kind specifically, or the edge self-loops.
     ```python
     def ev_edge(e):
-        return {"from": "process://" + e["actor_path"], "to": e.get("target_id", ""),
+        from_path = e["parent_path"] if e["kind"] == "EXECUTE_PROCESS" else e["actor_path"]
+        return {"from": "process://" + from_path, "to": e.get("target_id", ""),
                 "kind": e["kind"], "ts": e["ts"], "first_ts": e["ts"], "last_ts": e["ts"]}
     chain.append(step(ev_edge(e), stage_id="Initial", stage_desc="untrusted fetch: " + e["host"]))
     ```
-    Root the chain at the session owner: `new_chain("process://" + lineage[-1]["actor_path"])`. The serializer auto-prepends ancestry context; your evidence steps (with `stage_id`) carry the proof.
+    Root the chain at the session owner: `new_chain("process://" + lineage[-1]["actor_path"])`. The serializer auto-prepends ancestry context; your evidence steps (with `stage_id`) carry the proof. **This same `ev_edge` transform applies to every stage you append, not only ones read from `query_events`** — including a trigger stage you assemble by hand from `meta` (e.g. a `CONNECTS` trigger's host/port/caller_pid). A hand-built dict using `actor_path`/`target_id` as field names is not edge-shaped; pass it through `ev_edge` (or equivalent) before `step()`, exactly as you would a `query_events` row — see the `step()` warning above for what happens if you skip this.
 
 17. **Idempotence over look-back hacks.** With instance scoping, re-firing on the same connect yields the same correct verdict — there's no cross-session bleed to suppress, so you generally don't need an `event_ts`-vs-now look-back guard. Add window clustering (item 8) for defense, not a stale-attack guard.
 
@@ -2193,6 +2198,8 @@ script: |
 - [ ] Degraded (`proc_instance == None`) returns `allow`/`report`, never a guessed block.
 - [ ] `on_timeout`/`on_error` fail open on high-volume triggers.
 - [ ] Returns a kill chain built from event rows.
+- [ ] Every dict passed to `step()` — for every stage, including hand-built trigger dicts — already has real `from`/`to` string fields (ran through an `ev_edge`-style transform first, not just the ones sourced from `query_events`).
+- [ ] Any `EXECUTE_PROCESS` edge in the chain uses `parent_path` for `from`, not `actor_path` (gotcha 6) — check by eye that `from != to` on every appended stage before shipping.
 - [ ] Tested against the live graph at `http://127.0.0.1:41336/debug` — confirmed the true positive blocks **and** at least one near-miss (missing anchor, wrong session) allows.
 
 ---

@@ -1,6 +1,6 @@
 title: Package Lifecycle Script Writes Agent Memory/Instruction Store
 id: 7c3f1d2a-9b64-4e18-a5d7-2f0c6b81e4a3
-status: experimental
+status: stable
 level: high
 description: |
   Detects the DSH/"memory plugin" supply-chain pattern: a package-manager
@@ -93,6 +93,13 @@ script: |
   PKG_MGR_RE = r"\b(npm|npx|pnpm|yarn|bun|corepack)\b"
   INSTALL_RE = r"\b(install|add|ci|postinstall|preinstall|prepare|rebuild|link|exec|dlx)\b"
 
+  # Optional stage 0 -- what made the agent run the install in the first
+  # place. FTS5 phrase queries (multi-word terms quoted) against whichever
+  # content the poisoning surface indexed.
+  INJECTION_MARKERS = ['"ignore previous"', '"ignore all previous"',
+                       '"new instructions"', '"you must always"',
+                       "disregard", '"override system"']
+
   # ── Pure helpers (no graph / log calls) ───────────────────────────────────
   def to_int(v):
       if v == None:
@@ -139,14 +146,82 @@ script: |
       return False
 
   def ev_edge(e, kind, target):
+      # For an EXECUTE_PROCESS row, e's own actor_path is the CHILD — same as
+      # what the Supply-Chain Delivery caller passes as `target` (the process
+      # itself). Using actor_path for "from" there makes from == to, a
+      # self-loop with no distinct path for the dashboard to highlight. Use
+      # parent_path (who spawned it) for "from" on EXECUTE_PROCESS edges.
+      from_path = e.get("parent_path", "") if kind == "EXECUTE_PROCESS" else e.get("actor_path", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     "process://" + from_path,
           "to":       target,
           "kind":     kind,
           "ts":       e.get("ts", "0"),
           "first_ts": e.get("ts", "0"),
           "last_ts":  e.get("ts", "0"),
       }
+
+  def has_marker(source_label):
+      for m in INJECTION_MARKERS:
+          if search_in(source_label, m):
+              return True
+      return False
+
+  # Optional stage 0: what made the agent run the install. Any one of these
+  # signals -- an untrusted skill acquisition, a poisoned LLM prompt/response,
+  # or a tool result carrying injected instructions -- upgrades the verdict
+  # from report to block (see run()). ACQUIRED_SKILL/LLM/TOOL_RESULT edges are
+  # attributed to the SPECIFIC process that made the call (e.g. the curl
+  # child, not the top-level agent node) -- IngestSkillAcquired etc. take the
+  # calling pid, not the session root -- so every node in the session must be
+  # checked, not just the agent root. ACQUIRED_SKILL and MCP-tool-description
+  # poisoning only exist when the MITM/semantic-classifier path is active; in
+  # a pure evaluate()+probe reproduction those loops are a harmless no-op.
+  def find_poisoning(node_ids, since, now):
+      for nid in node_ids:
+          for e in edges(nid, dir="out", kind="ACQUIRED_SKILL"):
+              ts = to_int(e.get("ts", "0"))
+              if ts < since or ts > now:
+                  continue
+              s = node(e.get("to", ""))
+              untrusted = s != None and s.get("is_ztna_host", "0") == "0"
+              if untrusted or has_marker(e.get("to", "")):
+                  host = s.get("host", "?") if s != None else "?"
+                  return {"edge": e, "stage_desc": "skill acquired from untrusted host: " + host}
+
+      for nid in node_ids:
+          for e in edges(nid, dir="out", kind="LLM_REQUEST"):
+              ts = to_int(e.get("ts", "0"))
+              if ts < since or ts > now:
+                  continue
+              llm = node(e.get("to", ""))
+              rid = e.get("request_id", e.get("callid", ""))
+              label = "llmreq://" + (llm.get("provider", "") + "/" + llm.get("model", "") if llm != None else "") + "#" + rid
+              if has_marker(label):
+                  return {"edge": e, "stage_desc": "LLM prompt carried instruction-injection markers"}
+
+      for nid in node_ids:
+          for e in edges(nid, dir="in", kind="LLM_RESPONSE"):
+              ts = to_int(e.get("ts", "0"))
+              if ts < since or ts > now:
+                  continue
+              llm = node(e.get("from", ""))
+              rid = e.get("request_id", e.get("callid", ""))
+              label = "llmres://" + (llm.get("provider", "") + "/" + llm.get("model", "") if llm != None else "") + "#" + rid
+              if has_marker(label):
+                  return {"edge": e, "stage_desc": "LLM response carried instruction-injection markers"}
+
+      for nid in node_ids:
+          for e in edges(nid, dir="in", kind="TOOL_RESULT"):
+              ts = to_int(e.get("ts", "0"))
+              if ts < since or ts > now:
+                  continue
+              cid = e.get("call_id", e.get("callid", ""))
+              label = e.get("from", "") + "#result:" + cid
+              if has_marker(label):
+                  return {"edge": e, "stage_desc": "tool result carried instruction-injection markers"}
+
+      return None
 
   # ── Relevance gate: pure string checks on meta, no traversal ──────────────
   def is_relevant_event():
@@ -183,8 +258,10 @@ script: |
 
       # ── Session scope: lineage + descendants spawned inside the window ────
       session = {}
+      session_paths = {}          # pid -> actor_path, for poisoning lookups
       for x in lineage:
           session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+          session_paths[x.get("actor_pid", "")] = x.get("actor_path", "")
 
       execs = query_events(kind="EXECUTE_PROCESS", since_ns=now - WINDOW_NS,
                            until_ns=now, limit=4000)
@@ -195,6 +272,7 @@ script: |
               ap = e.get("actor_pid", "")
               if pp in session and ap not in session and len(session) < MAX_SESSION:
                   session[ap] = e.get("actor_start", "0")
+                  session_paths[ap] = e.get("actor_path", "")
                   added += 1
           if added == 0:
               break
@@ -205,14 +283,18 @@ script: |
           if is_pkg_install(x.get("cmdline", ""), x.get("actor_path", "")):
               install_ev = x
               break
+      # execs is newest-first; break on the first match so a stale, older
+      # install from an earlier unrelated burst in the same session can
+      # never get stitched onto a newer, separate incident's writes.
       if install_ev == None:
-          for e in execs:        # newest-first -> loop ends on the earliest in-window
+          for e in execs:
               ap = e.get("actor_pid", "")
               pp = e.get("parent_pid", "")
               if ap not in session and pp not in session:
                   continue
               if is_pkg_install(e.get("cmdline", ""), e.get("actor_path", "")):
                   install_ev = e
+                  break
       if install_ev == None:
           return "allow"          # no supply-chain provenance -> not this rule's threat
 
@@ -261,43 +343,65 @@ script: |
       if score < 2:
           return "allow"
 
+      # ── Optional stage 0: what poisoned the agent into running this ───────
+      # Poisoning necessarily precedes the install, so it falls BEFORE `since`
+      # (which is anchored at-or-after the install's own s0_ts) -- look back
+      # the full WINDOW_NS from `now`, not from the install's own start.
+      aid = "process://" + lineage[-1].get("actor_path", "")
+      node_ids = {}
+      for pid in session_paths:
+          node_ids["process://" + session_paths[pid]] = True
+      poison = find_poisoning(list(node_ids.keys()), now - WINDOW_NS, now)
+
       # ── Kill chain, built from instance-resolved event rows ───────────────
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain = new_chain(aid)
       names = []
       for x in lineage:
           names.append(x.get("actor_path", "?").split("/")[-1])
       lname = " -> ".join(names)
 
+      if poison != None:
+          chain.append(step(poison["edge"], stage_id="0- Agent Poisoning",
+                            stage_desc=poison["stage_desc"]))
+
       chain.append(step(ev_edge(install_ev, "EXECUTE_PROCESS",
                                 "process://" + install_ev.get("actor_path", "")),
-                        stage_id="Supply-Chain Delivery",
+                        stage_id="1- Supply-Chain Delivery",
                         stage_desc="package-manager lifecycle process: " +
                                    install_ev.get("cmdline", install_ev.get("actor_path", "?"))))
 
       first = marker_w[0] if marker_w else store_w[0]
       chain.append(step(ev_edge(first, "WRITE_FILE", first.get("path", "")),
-                        stage_id="Memory Store Write",
+                        stage_id="2- Memory Store Write",
                         stage_desc="agent memory/instruction store written by install subtree: " +
                                    first.get("path", "")))
 
       if fanout >= 3:
           for e in (marker_w + store_w)[1:4]:
               chain.append(step(ev_edge(e, "WRITE_FILE", e.get("path", "")),
-                                stage_id="Instruction Store Fan-Out",
+                                stage_id="3- Instruction Store Fan-Out",
                                 stage_desc="bulk sync into agent store: " + e.get("path", "")))
 
       if cap_w:
           c0 = cap_w[0]
           chain.append(step(ev_edge(c0, "WRITE_FILE", c0.get("path", "")),
-                            stage_id="Capability Registration",
+                            stage_id="4- Capability Registration",
                             stage_desc="skill/capability manifest written: " + c0.get("path", "")))
 
+      verdict = "block" if poison != None else "report"
       reason = ("Package lifecycle subtree wrote " + str(fanout) +
                 " file(s) into the agent memory/instruction store via " + lname +
                 " (marker_writes=" + str(len(marker_w)) +
                 ", capability_writes=" + str(len(cap_w)) +
                 ", score=" + str(score) + ")")
+      if poison != None:
+          reason = "Full chain confirmed -- " + poison["stage_desc"] + " -> " + reason
       print(reason)
-      return {"action": "report", "reason": reason, "chain": chain}
+      # Mark the agent/host integrity as BREACHED (level 0), report or block --
+      # the write into the agent's own memory/instruction store already
+      # happened either way, and the level persists in posture metadata until
+      # something resets it (see Claw Chain's identical use of this call).
+      set_integrity_level(0)
+      return {"action": verdict, "reason": reason, "chain": chain}
 
   result = run()
