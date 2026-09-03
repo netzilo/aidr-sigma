@@ -1,0 +1,131 @@
+title: Supply Chain - Malicious CrewAI Package (crewai-true402)
+id: 7b3f1c2a-9d84-4e6f-8a15-c0b7e2d34f91
+status: experimental
+level: high
+description: |
+  Detects an AI agent (or a tool it drives) installing, importing, version-pinning,
+  or fetching the trojanized PyPI distribution "crewai-true402" - a package that
+  impersonates a CrewAI tool extension and advertises on-chain honeypot detection
+  and SEO data services while shipping unauthorized code that runs inside the
+  agent process.
+
+  The engine has no package-install, process-execute or dependency-resolution
+  telemetry (package_installed / process_execute / INSTALLED_PACKAGE are all
+  unknown to the schema), so build-time supply-chain compromise cannot be modelled
+  behaviourally. What IS observable is the moment the agent *utters* the artifact:
+  a Bash/tool argument (`pip install crewai-true402`), a requirements/pyproject
+  edit, a Python import, a wheel/sdist filename, or an outbound HTTP request whose
+  URL carries the PyPI project or artifact path. This rule is therefore a strict
+  single-event IOC content detection over those surfaces, plus one modestly
+  widened branch for same-campaign typosquat variants in the crewai namespace
+  (`crewai-<legitimacy-adjective><digits>`) when they appear inside an installer
+  command line.
+
+  Shipped as report-only: this is a newly authored IOC rule with no measured
+  false-positive baseline, and the blast radius of a bad block on a package
+  installer is a broken developer workflow. Escalate to block only after the
+  report volume is confirmed clean.
+author: Haibo
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Surfaces where the artifact can actually be observed ────────────────────
+  sel_scope:
+    event_type:
+      - tool_call
+      - tool_response
+      - llm_request
+      - llm_response
+      - llm_tool_call
+      - llm_tool_result
+      - execute_process
+      - skill_acquired
+      - http_request
+
+  # ── The IOC itself, in every PyPI-normalised spelling ───────────────────────
+  sel_pkg_ioc:
+    content|re: '(?i)\bcrewai[-_.]?true402\b'
+
+  # ── The IOC must appear in an ACTIONABLE context, not as bare prose ─────────
+  sel_actionable:
+    content|re:
+      # installer / resolver invocation
+      - '(?i)\b(?:pip3?|uv|pipx|poetry|pdm|conda|micromamba)\b[^\n]{0,120}\b(?:install|add|sync)\b'
+      # python import of the package
+      - '(?i)\b(?:import|from)\s+crewai[-_.]?true402\b'
+      # dependency specifier / extras in requirements.txt, pyproject, setup.py
+      - '(?i)\bcrewai[-_.]?true402\s*(?:==|>=|<=|~=|!=|@|\[)'
+      # built distribution artifact name
+      - '(?i)\bcrewai[-_.]?true402[-_][0-9][^\s]{0,24}\.(?:whl|tar\.gz|zip)'
+      # any URL carrying the project or artifact
+      - '(?i)https?://[^\s"]{0,200}crewai[-_.]?true402'
+
+  # ── Widened branch: same-campaign typosquats in the crewai namespace ────────
+  # Legitimate distributions are `crewai` and `crewai-tools` - neither carries a
+  # numeric suffix, so requiring 2-4 trailing digits keeps this branch tight.
+  sel_installer:
+    content|re: '(?i)\b(?:pip3?|uv|pipx|poetry|pdm|conda|micromamba)\b[^\n]{0,120}\b(?:install|add)\b'
+  sel_typosquat_family:
+    content|re: '(?i)\bcrewai[-_](?:true|real|official|verified|secure|trusted|genuine|pro|plus|tool|tools)[-_]?\d{2,4}\b'
+
+  # ── Outbound fetch of the artifact (URL fields, not body) ───────────────────
+  sel_http_ioc_url:
+    event_type: http_request
+    url.full|re: '(?i)crewai[-_.]?true402'
+  sel_http_ioc_path:
+    event_type: http_request
+    path|re: '(?i)crewai[-_.]?true402'
+
+  # ── Filters: benign discussion of the IOC, remediation, and rule text ───────
+  # Every filter is ADJACENCY-ANCHORED to the package token (<=200 chars) so a
+  # stray word elsewhere in a large body cannot blanket-suppress a real install.
+  filter_advisory:
+    content|re:
+      - '(?i)(?:malicious|malware|typosquat|typo-squat|squatt|compromised|backdoor(?:ed)?|advisory|indicator of compromise|do not install|never install|supply[- ]chain attack|blocklist|denylist|quarantin|yanked|removed from pypi|CVE-\d{4}|GHSA-)[^\n]{0,200}crewai[-_.]?true402'
+      - '(?i)crewai[-_.]?true402[^\n]{0,200}(?:is malicious|malware|typosquat|typo-squat|compromised|backdoor|advisory|indicator of compromise|do not install|blocklist|denylist|quarantin|yanked|removed from pypi|reported to pypi|flagged)'
+  filter_remediation:
+    content|re: '(?i)\b(?:pip3?|uv|pipx|poetry|pdm)\b[^\n]{0,60}\b(?:uninstall|remove)\b[^\n]{0,60}crewai[-_.]?true402'
+  filter_rule_text:
+    content|contains|all:
+      - 'logsource'
+      - 'detection'
+      - 'falsepositives'
+
+  condition: >
+    ((sel_scope and sel_pkg_ioc and sel_actionable)
+     or (sel_scope and sel_installer and sel_typosquat_family)
+     or sel_http_ioc_url
+     or sel_http_ioc_path)
+    and not (filter_advisory or filter_remediation or filter_rule_text)
+
+action: report
+
+falsepositives:
+  - Security research or incident-response work where an engineer pastes the IOC
+    into an agent prompt without any verdict wording within 200 characters of the
+    package name (e.g. a bare column in a CSV of package names) - the adjacency
+    filters will not catch that phrasing.
+  - SBOM, pip-audit, safety, Dependabot or Renovate output enumerating the package
+    as a finding, where the tool prints the specifier form (crewai-true402==0.1.0)
+    with the verdict on a different line.
+  - Reproducing the attack in a sandboxed malware-analysis or detection-engineering
+    environment - the install command is genuinely executed and will be reported.
+  - The widened typosquat branch may match an internal fork or vendored build named
+    like crewai_tools2024 or crewai-pro24 installed from a private index; the branch
+    requires an installer verb on the same line, so prose mentions do not fire.
+  - An agent reading this rule file, its test fixtures, or a threat-intel feed that
+    embeds the rule - mitigated by filter_rule_text requiring logsource + detection
+    + falsepositives to co-occur.
