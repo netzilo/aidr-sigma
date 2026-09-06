@@ -1,0 +1,301 @@
+title: ML Runtime Shared-Temp Artifact Exposure
+id: b7f4c2d1-9a6e-4c58-8f3b-2e7d51a9c064
+status: experimental
+level: medium
+description: |
+  Behavioural surface detection for the insecure-temporary-file class of bug in
+  Hugging Face transformers <= 4.29.2 (CVE-2023-2800 class): the library creates
+  model/tokenizer scratch files in a world-shared temp directory with predictable
+  names, letting a co-resident local attacker read them or win a symlink/TOCTOU
+  race before the library reopens the path.
+
+  The engine cannot observe the exploit primitives themselves. There are no file
+  mode, symlink-target, inode or race-window attributes on FILE edges, and the
+  event types 'access_file' / 'create_file' do not exist. The only manifestation
+  of the vulnerable pattern that IS in the graph is the cross-process touch:
+  a Python runtime CREATEs/WRITEs an artifact under a world-shared temp path
+  (/tmp, /var/tmp, /private/tmp, /dev/shm, Windows Temp) and a DIFFERENT
+  executable READs/WRITEs that exact path inside the same short window.
+
+  That is deliberately a report-only exposure signal, not an exploit claim. In
+  the single-tenant / ephemeral-container deployments the triage review flagged,
+  a second distinct executable touching the interpreter's scratch artifact is
+  rare, so the rule is quiet there and only speaks up on genuinely shared hosts
+  where the local-attacker precondition is actually reachable. Same-runtime
+  pairs (python3 vs python3.11) are collapsed to one actor so multi-process
+  dataloaders and pip/uv build steps do not present as cross-tenant access.
+author: Tanya
+date: "2026-02-19"
+modified: "2026-02-19"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-2800
+  - https://github.com/huggingface/transformers/releases/tag/v4.30.0
+tags:
+  - attack.privilege-escalation
+  - attack.t1574
+  - owasp.llm03
+falsepositives:
+  - pip / uv / poetry building a wheel or extracting an sdist into /tmp, then the
+    interpreter reading the same staged artifact (different executables, same path)
+  - pytest tmp_path / tmpdir fixtures shared between the test runner and a helper
+    binary such as tar, unzip, git or a compiler
+  - tar / unzip / zstd / git-lfs extracting a model archive into /tmp or /dev/shm
+    which the Python process then loads
+  - container build tooling, backup agents, antivirus or desktop-search indexers
+    that read everything under /tmp shortly after it is written
+  - deliberate developer workflow where a shell one-liner inspects a model shard
+    the notebook just materialised under /tmp
+  - multi-process torch dataloaders or accelerate launchers whose worker binaries
+    are not named like the parent interpreter (mitigated but not eliminated by the
+    same-runtime-family collapse)
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_agent_activity:
+    event_type:
+      - tool_call
+      - tool_response
+      - execute_process
+  condition: sel_agent_activity
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables (all rule-local; no host/domain/path is ever granted trust) ────
+  WINDOW_NS = 900000000000        # 15 min - cross-process touch must cluster
+  DEDUP_NS  = 21600000000000      # 6 h    - one report per temp path
+  SWEEP_NS  = 60000000000         # 1 min  - cost throttle on the FS sweep
+
+  OPS      = ["CREATE", "WRITE", "READ"]      # only verified FILE edge kinds
+  PATTERNS = ["tmp", "temp", "shm"]           # fs_activity path tokens
+
+  # World-shared temp roots only. Per-user private temp (macOS /var/folders,
+  # XDG_RUNTIME_DIR) is intentionally NOT here: the vulnerability needs a
+  # directory a second local principal can also write.
+  SHARED_TMP = ["/tmp/", "/dev/shm/", "/windows/temp/", "/appdata/local/temp/"]
+
+  ARTIFACT = ["pytorch_model", "safetensors", "tokenizer", "vocab", "merges",
+              "special_tokens", "config.json", "transformers", "huggingface",
+              "blobs", "snapshots", ".bin", ".h5", ".ckpt", ".onnx", ".msgpack",
+              ".gguf", ".pt", ".pth", ".lock"]
+
+  HF_HINT = ["huggingface", "hf.co", "cdn-lfs", "hf-mirror"]
+
+  def norm(p):
+      return p.replace("\\", "/").lower()
+
+  def base_of(lp):
+      parts = lp.split("/")
+      return parts[len(parts) - 1]
+
+  def proc_name(p):
+      return base_of(norm(p))
+
+  def in_shared_tmp(lp):
+      for d in SHARED_TMP:
+          if d in lp:
+              return True
+      return False
+
+  def artifact_like(lp):
+      for a in ARTIFACT:
+          if a in lp:
+              return True
+      b = base_of(lp)
+      # predictable mkstemp-style scratch name
+      if b.startswith("tmp") and len(b) >= 6:
+          return True
+      if re.find(r"^[a-f0-9]{16,}$", b) != None:
+          return True
+      return False
+
+  def python_like(pth):
+      n = proc_name(pth)
+      n = re.replace(r"\.exe$", n, "")
+      if re.find(r"^python[0-9.]*$", n) != None:
+          return True
+      if re.find(r"^pythonw[0-9.]*$", n) != None:
+          return True
+      if re.find(r"^pypy[0-9.]*$", n) != None:
+          return True
+      return False
+
+  def same_runtime_family(a, b):
+      na = re.replace(r"[0-9.]+$", re.replace(r"\.exe$", proc_name(a), ""), "")
+      nb = re.replace(r"[0-9.]+$", re.replace(r"\.exe$", proc_name(b), ""), "")
+      return na != "" and na == nb
+
+  # ── Relevance gate: pure string checks on meta, no graph calls ─────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct in ("tool_input", "tool_output", "llm_request", "llm_response"):
+          return True
+      if ct in ("tool_description", "gateway_description", "prompt_description"):
+          return False
+      if ct == "execute_process":
+          cmd = meta.get("content", "")
+          for pat in [r"\bpython[0-9.]*\b", r"\bpythonw\b", r"\bpypy\b",
+                      r"\btransformers\b", r"\bhuggingface[-_a-z]*\b",
+                      r"\bsafetensors\b", r"\btorch\b", r"\baccelerate\b",
+                      r"\bfrom_pretrained\b", r"\bhf_hub_download\b",
+                      r"\bpip\b", r"\bunzip\b", r"\btar\b"]:
+              if re.find(pat, cmd) != None:
+                  return True
+          return False
+      return True
+
+  def agent_anchor(fallback):
+      for p in graph(type="Process"):
+          if p.get("agent", "0") == "1":
+              return p["id"]
+      return fallback
+
+  def hf_corroboration():
+      for u in graph(type="URL"):
+          h = u.get("host", "").lower()
+          if h == "":
+              continue
+          for hint in HF_HINT:
+              if hint in h:
+                  ie = edges(u["id"], dir="in", kind="HTTP_REQUEST")
+                  if ie:
+                      return [ie[0], h]
+      return [None, ""]
+
+  # ── Collect shared-temp artifact touches, keyed by resolved path ───────────
+  def collect():
+      touches = {}
+      for fs in graph(type="FileSystem"):
+          pp = fs.get("proc_path", "")
+          if pp == "":
+              continue
+          for op in OPS:
+              in_edges = edges(fs["id"], dir="in", kind=op + "_FILE")
+              ed = None
+              if in_edges:
+                  ed = in_edges[0]
+              for pat in PATTERNS:
+                  for ent in fs_activity(fs["id"], op, pat):
+                      p = ent.get("path", "")
+                      if p == "":
+                          continue
+                      lp = norm(p)
+                      if not in_shared_tmp(lp):
+                          continue
+                      if not artifact_like(lp):
+                          continue
+                      lst = touches.get(lp, [])
+                      dup = False
+                      for t in lst:
+                          if t["proc"] == pp and t["op"] == op and t["ts"] == ent.get("ts", "0"):
+                              dup = True
+                      if dup:
+                          continue
+                      lst.append({"proc": pp, "op": op, "ts": ent.get("ts", "0"),
+                                  "path": p, "edge": ed, "entry": ent})
+                      touches[lp] = lst
+      return touches
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now = int(meta.get("event_ts", "0"))
+
+      # Cost throttle - the FileSystem sweep runs at most once a minute.
+      last = store_get("last_sweep_ns")
+      if last != None and now > 0 and (now - int(last)) < SWEEP_NS:
+          return "allow"
+      if now > 0 and store_usage()["free"] > 4096:
+          store_set("last_sweep_ns", now)
+
+      touches = collect()
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      if len(seen) > 200:
+          seen = {}
+
+      for key in sorted(touches.keys()):
+          lst = touches[key]
+
+          # Stage 1 (required anchor): a Python runtime materialised the artifact.
+          writer = None
+          for t in lst:
+              if t["op"] in ("CREATE", "WRITE") and python_like(t["proc"]):
+                  if writer == None or int(t["ts"]) < int(writer["ts"]):
+                      writer = t
+          if writer == None:
+              continue
+
+          # Stage 2 (required): a genuinely different executable touched the very
+          # same shared-temp path inside the window. Same-runtime variants
+          # (python3 / python3.11) are one actor, not a second principal.
+          other = None
+          for t in lst:
+              if t["proc"] == writer["proc"]:
+                  continue
+              if same_runtime_family(writer["proc"], t["proc"]):
+                  continue
+              d = int(t["ts"]) - int(writer["ts"])
+              if d < 0:
+                  d = -d
+              if d > WINDOW_NS:
+                  continue
+              if other == None or int(t["ts"]) < int(other["ts"]):
+                  other = t
+          if other == None:
+              continue
+
+          if writer["edge"] == None and other["edge"] == None:
+              continue      # no edge to evidence - refuse to report blind
+
+          prev = seen.get(key, None)
+          if prev != None and now > 0 and (now - int(prev)) < DEDUP_NS:
+              continue
+
+          gap = int(other["ts"]) - int(writer["ts"])
+          if gap < 0:
+              gap = -gap
+          gap_s = gap // 1000000000
+
+          chain = new_chain(agent_anchor("process://" + writer["proc"]))
+          if writer["edge"] != None:
+              chain.append(step(writer["edge"],
+                                stage_id="Insecure Temp Artifact",
+                                stage_desc=proc_name(writer["proc"]) + " " +
+                                           writer["op"].lower() +
+                                           " model artifact in world-shared temp: " +
+                                           writer["path"],
+                                activity=writer["entry"]))
+          if other["edge"] != None:
+              chain.append(step(other["edge"],
+                                stage_id="Cross-Process Temp Access",
+                                stage_desc=proc_name(other["proc"]) + " " +
+                                           other["op"].lower() +
+                                           " the same shared-temp path " +
+                                           str(gap_s) + "s later",
+                                activity=other["entry"]))
+
+          hf = hf_corroboration()
+          if hf[0] != None:
+              chain.append(step(hf[0], stage_id="Model Source",
+                                stage_desc="model artifacts fetched from " + hf[1]))
+
+          if now > 0 and store_usage()["free"] > 4096:
+              seen[key] = now
+              store_set("seen", seen)
+
+          reason = ("Shared-temp artifact exposure (CVE-2023-2800 class): " +
+                    proc_name(writer["proc"]) + " " + writer["op"].lower() +
+                    " " + writer["path"] + "; " + proc_name(other["proc"]) +
+                    " " + other["op"].lower() + " the same path " + str(gap_s) +
+                    "s later. File mode/symlink state is not observable - verify " +
+                    "transformers >= 4.30.0 and that the temp dir is not world-writable.")
+          print(reason)
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      return "allow"
+
+  result = run()
