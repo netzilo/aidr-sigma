@@ -1,0 +1,126 @@
+title: Port Exposure - Agent Publishes Local Service via Public Tunnel
+id: 7c1f0a3e-9d24-4f6b-b8a1-2e5c7d09f431
+status: experimental
+level: high
+description: |
+  Detects an AI coding agent (Devin-class) invoking a port-exposure / public-tunnel
+  capability that publishes a local port or service to the public Internet.
+
+  Threat: an attacker plants an indirect prompt injection in content the agent reads
+  (issue text, README, web page, tool output). The injection nudges the agent to run its
+  port-exposure tool, publishing a local dev server, database, admin panel, or file share
+  to the Internet where the attacker can reach it without authentication.
+
+  This is a single-event content detection on the exposure action itself, which is the only
+  high-fidelity observable available for this threat (event types execute_process and
+  http_request). Two surfaces are covered:
+    1. execute_process - the agent spawns a named public-tunnel utility (ngrok, cloudflared
+       tunnel, tailscale funnel, devtunnel host, localtunnel, bore, zrok share public, frpc,
+       pagekite, expose/telebit, `code tunnel`, `gh codespace ports visibility N:public`) or
+       an SSH remote port-forward (`ssh -R`), which is how serveo / localhost.run / pinggy
+       tunnels are established.
+    2. http_request - the agent drives a tunnel control plane directly: the ngrok local agent
+       API (127.0.0.1:4040/api/tunnels), api.ngrok.com endpoint/tunnel creation, Cloudflare
+       cfd_tunnel creation, or the Tailscale funnel/serve API. Scoped to mutating methods.
+
+  Action is `report`, not block: publishing a preview URL is a legitimate, advertised feature
+  of hosted coding agents, so this rule is a triage signal for "what did the agent expose,
+  and who asked for it?" - not an enforcement gate. Escalate only after measuring the local
+  false-positive rate.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1572/
+  - https://attack.mitre.org/techniques/T1133/
+  - https://atlas.mitre.org/techniques/AML.T0015
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.command-and-control
+  - attack.t1572
+  - attack.persistence
+  - attack.t1133
+  - atlas.aml.t0015
+  - owasp.llm01
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Surface 1: the agent spawns a public-tunnel / port-exposure binary ──────────
+  sel_exec_public_tunnel:
+    event_type: execute_process
+    content|re:
+      # ngrok / cloudflared: allow global flags between binary and subcommand
+      - '(?i)\bngrok\b(\s+--?[\w.=/:-]+)*\s+(http|tcp|tls|start|tunnel)\b'
+      - '(?i)\bcloudflared\b(\s+--?[\w.=/:-]+)*\s+tunnel\b'
+      # named public-exposure subcommands
+      - '(?i)\btailscale\b\s+funnel\b'
+      - '(?i)\bdevtunnel\b\s+(host|port\s+create)\b'
+      - '(?i)\b(lt|localtunnel)\b[^\n]{0,40}--port\s*\d{1,5}\b'
+      - '(?i)\bbore\b\s+local\s+\d{1,5}\b'
+      - '(?i)\bzrok\b\s+share\s+public\b'
+      - '(?i)\bfrpc\b\s+(-c\b|http\b|tcp\b)'
+      - '(?i)\bpagekite(\.py)?\b\s+\d{1,5}\b'
+      - '(?i)\b(expose|telebit)\b\s+(share|http)\b'
+      - '(?i)\bcode\b\s+tunnel\b'
+      # GitHub Codespaces: flip a forwarded port to public
+      - '(?i)\bports\s+visibility\s+\d{1,5}:public\b'
+      # SSH remote port-forward (serveo / localhost.run / pinggy / self-hosted jump host).
+      # -R is case-sensitive on purpose: -r is a different flag.
+      - '(?i:ssh)\b[^\n]{0,160}\s-R\s*\d{1,5}:[^\s:]{1,80}:\d{1,5}\b'
+      - '(?i:ssh)\b[^\n]{0,160}\s-R\s*(0\.0\.0\.0|\*):\d{1,5}:'
+
+  # ── Surface 2: the agent drives a tunnel control plane over HTTP ────────────────
+  sel_http_tunnel_api:
+    event_type: http_request
+    method:
+      - POST
+      - PUT
+      - PATCH
+    url.full|re: '(?i)(://(127\.0\.0\.1|localhost|\[::1\]):4040/api/tunnels|//api\.ngrok\.com/(tunnels|endpoints|edges|reserved_addrs)|/client/v4/accounts/[^/\s]{1,64}/cfd_tunnel|//api\.tailscale\.com/api/v2/[^\s]{0,120}(funnel|serve))'
+
+  # ── Filters. Each is adjacency-anchored to the tunnel binary and refuses to cross
+  #    a shell chaining operator ([^\n&;|]) so that
+  #      "apt-get install -y ngrok && ngrok http 8080"
+  #    is NOT suppressed by the install filter. No host, domain or path is trusted here.
+  filter_install:
+    content|re:
+      - '(?i)\b(apt|apt-get|yum|dnf|zypper|pacman|apk|brew|snap|choco|winget|npm|pnpm|yarn|pip|pip3|gem|cargo|go|docker|nix-env)\s+(install|add|get|pull|-S|-U)\b[^\n&;|]{0,80}\b(ngrok|cloudflared|localtunnel|tailscale|bore|zrok|frpc?|pagekite|devtunnel|telebit|expose)\b'
+      - '(?i)\b(curl|wget|tar|unzip)\b[^\n&;|]{0,120}\b(ngrok|cloudflared|frp|zrok|devtunnel)[\w.\-]{0,20}\.(zip|tgz|gz|deb|rpm|exe|msi)\b'
+
+  filter_help_version:
+    content|re:
+      - '(?i)\b(ngrok|cloudflared|tailscale|devtunnel|zrok|frpc|bore|localtunnel|lt|code|pagekite|telebit|expose)\b[^\n&;|]{0,60}\s--(help|version)\b'
+      - '(?i)\bman\s+(ngrok|cloudflared|tailscale|ssh|devtunnel)\b'
+
+  filter_lookup:
+    content|re: '(?i)\b(which|whereis|command\s+-v|type\s+-p)\s+(ngrok|cloudflared|tailscale|localtunnel|lt|bore|zrok|frpc|pagekite|devtunnel|code)\b'
+
+  filter_tunnel_readonly:
+    content|re:
+      - '(?i)\btailscale\s+funnel\s+(status|off|reset)\b'
+      - '(?i)\bcloudflared\b[^\n&;|]{0,80}\btunnel\s+(list|info|token|cleanup|delete|route\s+ip)\b'
+      - '(?i)\bdevtunnel\s+(list|show|delete)\b'
+      - '(?i)\bcode\s+tunnel\s+(status|unregister|kill|prune|rename)\b'
+
+  condition: >
+    (sel_exec_public_tunnel and not (filter_install or filter_help_version or
+    filter_lookup or filter_tunnel_readonly))
+    or sel_http_tunnel_api
+
+falsepositives:
+  - Operator-requested preview sharing - the user explicitly asks the agent to "give me a
+    link to the running app", and the agent starts an ngrok/cloudflared/devtunnel preview.
+    This is the dominant benign case for hosted coding agents and the reason the action is
+    report rather than block.
+  - Webhook development loops - Stripe, Twilio, GitHub, Shopify and Slack integrations are
+    routinely tested by tunnelling a local callback endpoint to the Internet.
+  - Mobile / cross-device QA - exposing a local dev server so a phone or a remote reviewer
+    can load it.
+  - Legitimate reverse SSH forwards to an internal jump host (`ssh -R`) used for private
+    service access rather than public exposure; the rule cannot tell the remote side apart
+    from a public tunnel broker on a single event.
+  - Infrastructure automation that provisions Cloudflare Tunnels or Tailscale Funnel as part
+    of a deliberate, reviewed deployment run.
+  - CI end-to-end suites that spin up a tunnel for the duration of the test job.
+action: report
