@@ -1,0 +1,98 @@
+title: Supply Chain iris-prism MCP Package Install or Launch
+id: 6f3b1c92-8d4a-4e7b-9a15-2c0f7db3e841
+status: experimental
+level: medium
+description: |
+  Reports execute_process events whose command line shows the PyPI distribution
+  `iris-prism` (an MCP server exposing SQL, filesystem, compilation, debugging and
+  ObjectScript execution to an AI agent) being installed by a package manager, or
+  being launched as a module / console script / uvx-pipx-uv runner.
+
+  SCOPE AND TELEMETRY LIMITS (answers the triage dissent):
+  The narrated chain "package installed -> MCP capability granted -> SQL/ObjectScript
+  executed" is NOT reachable with current telemetry. The engine has no
+  package_installed, mcp_server_initialized or database_query event types, and no
+  INSTALLED_PACKAGE, ACQUIRED_CAPABILITY, DATABASE_ACCESS or EXECUTE_CODE edges, so
+  install lineage cannot be correlated to later database or code execution. The one
+  live observable is execute_process, whose content carries the command line.
+  This rule therefore makes no malice claim. It asserts only the single fact that is
+  actually observable: this specific distribution name appeared in an install or
+  launch command line on this host, at this time, under this process. That is a
+  software-bill-of-materials / provenance signal for responders to pivot on manually,
+  which is why the action is report and the level is medium rather than block.
+
+  To avoid the "generic subprocess activity" objection, a bare mention of the token is
+  deliberately NOT sufficient: the command line must additionally contain a package
+  manager install verb, a runner (uvx / pipx run / uv run), a `-m` module invocation,
+  a path-anchored console script (`/...\/iris-prism`), a quoted argv element, or an
+  `mcp` subcommand. Directory paths, source checkouts and read-only inspection do not
+  match.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://pypi.org/project/iris-prism/
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # Package-manager install of the distribution (PEP 503 name normalisation covered
+  # by iris[-_.]?prism, so iris-prism / iris_prism / iris.prism all match, including
+  # wheel and sdist filenames such as iris_prism-0.1.0-py3-none-any.whl).
+  sel_install:
+    content|re:
+      - '(?i)\b(?:pip|pip3|pipx|poetry|pdm|conda|mamba)\b[^\n]{0,160}\b(?:install|add)\b[^\n]{0,160}\biris[-_.]?prism\b'
+      - '(?i)\bpython[0-9.]*\b[^\n]{0,40}\s-m\s+pip\b[^\n]{0,160}\b(?:install|add)\b[^\n]{0,160}\biris[-_.]?prism\b'
+      - '(?i)\buv\b[^\n]{0,60}\b(?:pip\s+install|tool\s+install|add)\b[^\n]{0,160}\biris[-_.]?prism\b'
+
+  # Actual launch of the MCP server: runner, module invocation, path-anchored console
+  # script, quoted argv element, or an mcp subcommand naming the package.
+  sel_launch:
+    content|re:
+      - '(?i)\b(?:uvx|pipx\s+run|uv\s+run)\b[^\n]{0,120}\biris[-_.]?prism\b'
+      - '(?i)\bpython[0-9.]*\b[^\n]{0,80}\s-m\s+iris[-_.]?prism\b'
+      - '(?i)[/\\]iris[-_]prism(?:\.exe|\.cmd|\.bat)?(?:\s|["'']|$)'
+      - '(?i)["'']iris[-_]prism(?:\.exe|\.cmd|\.bat)?["'']'
+      - '(?i)\bmcp\b[^\n]{0,80}\b(?:run|serve|add|install)\b[^\n]{0,120}\biris[-_.]?prism\b'
+
+  # ── Filters. Each requires the package token inside the SAME shell clause as the
+  #    benign verb ([^\n;&|] blocks the separator), so a real install chained after a
+  #    benign clause is not suppressed. None of these widen host/domain/path trust.
+  filter_pkg_metadata:
+    content|re:
+      - '(?i)\b(?:pip|pip3)\s+(?:show|list|freeze|check|cache|config|index|uninstall)\b[^\n;&|]{0,80}\biris[-_.]?prism\b'
+      - '(?i)\b(?:pipx|uv\s+tool|uv\s+pip)\s+(?:list|show|uninstall|tree)\b[^\n;&|]{0,80}\biris[-_.]?prism\b'
+      - '(?i)\b(?:poetry|pdm|conda|mamba)\s+(?:show|list|remove|uninstall|info)\b[^\n;&|]{0,80}\biris[-_.]?prism\b'
+
+  filter_help_version:
+    content|re: '(?i:iris[-_.]?prism)[^\n;&|]{0,40}\s(?:--help|--version|-h)\b'
+
+  filter_text_search:
+    content|re: '(?i)(?:^|[\s;&|(])(?:grep|egrep|fgrep|rg|ag|ack|awk|sed|comm|diff)\b[^\n;&|]{0,120}\biris[-_.]?prism\b'
+
+  condition: sel_event and (sel_install or sel_launch) and not (filter_pkg_metadata or filter_help_version or filter_text_search)
+falsepositives:
+  - A developer or platform team legitimately installing iris-prism as an approved MCP
+    server for InterSystems IRIS work — this is the expected majority case and is the
+    reason the rule reports rather than blocks.
+  - Routine dependency maintenance, e.g. `pip install --upgrade iris-prism` or a
+    lockfile refresh that names the distribution explicitly on the command line.
+  - CI/CD or container build steps that pin the package by name (`pip install
+    iris-prism==x.y.z`) as part of a reproducible image build.
+  - An MCP client (Claude Desktop, Cursor, VS Code) starting the configured server via
+    `uvx iris-prism` or a venv console script every time the editor launches — expect
+    repeated, benign events from the same parent process.
+  - Local development of the package itself, where the console script is run from a
+    checkout's `.venv/bin/iris-prism`.
+action: report
