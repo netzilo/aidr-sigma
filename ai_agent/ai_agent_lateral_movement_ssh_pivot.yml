@@ -1,0 +1,122 @@
+title: Lateral Movement - Agent SSH Pivot, Credential Transfer and Remote Agent Spawn
+id: b7e4c1a9-3f52-4d0e-9c6b-8a1f2d7e5b34
+status: experimental
+level: high
+description: |
+  Detects a single AI-agent tool call whose command performs lateral movement:
+  copying credential material to a remote host over scp/rsync (or piping an
+  archived ~/.ssh, ~/.aws or ~/.kube directory into ssh/nc/curl), distributing
+  SSH keys with ssh-copy-id or by appending to a remote authorized_keys,
+  chaining a network sweep (nmap/masscan/arp-scan) directly into ssh/scp,
+  invoking an agent runtime on a remote host over ssh, establishing remote
+  persistence (crontab, systemd unit, rc.local, launchctl) over ssh, reusing a
+  password with sshpass against a remote host, or opening a dynamic/reverse SSH
+  tunnel for pivoting.
+
+  Every selection requires BOTH the lateral-movement verb AND a fully qualified
+  remote target (a dotted hostname or IPv4 literal after an optional user@), so
+  local-only invocations, single-label internal shortnames and help text do not
+  match. The credential-transfer selection additionally requires a real
+  credential path anchor, not a bare keyword.
+
+  This is a single-event content rule: it inspects only the command / tool
+  arguments of the current tool_call. It does not traverse the behaviour graph.
+author: Tanya
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1021/004/
+  - https://attack.mitre.org/techniques/T1570/
+  - https://attack.mitre.org/techniques/T1046/
+  - https://attack.mitre.org/techniques/T1563/001/
+tags:
+  - attack.lateral-movement
+  - attack.discovery
+  - attack.t1021.004
+  - attack.t1570
+  - attack.t1046
+  - attack.t1563.001
+  - atlas.aml.t0050
+  - atlas.aml.t0025
+  - owasp.llm06
+  - owasp.llm02
+falsepositives:
+  - Platform/SRE agents running an approved provisioning job that uses ssh-copy-id
+    the first time a new build host is enrolled.
+  - Deployment agents that rsync application configuration to a managed host and
+    then run "systemctl enable" over ssh as part of a release.
+  - Authorized internal vulnerability-scanning workflows that pipe an nmap sweep
+    into an ssh reachability check.
+  - Developer agents opening an ssh dynamic/reverse tunnel to reach a bastion-only
+    service during debugging.
+  - An agent authoring a runbook, README or shell tutorial that contains example
+    scp/ssh commands (mitigated by filter_docwrite and filter_placeholder).
+  - Help, version or man-page invocations of ssh/scp/rsync/nmap (mitigated by
+    filter_help) and rsync dry runs (mitigated by filter_dryrun).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scope:
+    event_type: tool_call
+
+  # --- credential material moved to a fully qualified remote host -------------
+  sel_lm_cred_file_transfer:
+    command|re:
+      - '\b(?i:scp|rsync)\b[^\n]{0,300}(\.ssh/id_[A-Za-z0-9]{2,}|\.ssh/authorized_keys|\.aws/credentials|\.kube/config|\.gnupg/|\.docker/config\.json|\.git-credentials|\.npmrc|\.pypirc|\.env(\s|/|:|$)|secrets?\.(env|ya?ml|json))[^\n]{0,300}\s([A-Za-z0-9._%+-]+@)?([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+:'
+      - '\b(?i:tar|zip|gzip|base64)\b[^\n]{0,300}(\.ssh/|\.aws/|\.kube/|\.gnupg/)[^\n]{0,300}\|[^\n]{0,200}\b(?i:ssh|nc|ncat|curl)\b'
+
+  # --- SSH key distribution to a remote host ----------------------------------
+  sel_lm_key_distribution:
+    command|re:
+      - '\b(?i:ssh-copy-id)\b[^\n]{0,200}([A-Za-z0-9._%+-]+@)?([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+'
+      - '\b(?i:ssh)\s[^\n]{0,200}@([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+[^\n]{0,300}(>>|\btee\s+-a)[^\n]{0,80}authorized_keys'
+
+  # --- sub-agent / agent runtime launched on a remote host --------------------
+  sel_lm_remote_agent_spawn:
+    command|re: '\b(?i:ssh)\s[^\n]{0,200}@([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+\s[^\n]{0,300}\b(claude|codex|gemini|aider|openhands|autogpt|crewai|ollama|npx\s+[^\n]{0,40}agent|python3?\s+-m\s+[A-Za-z0-9_.]*agent)\b'
+
+  # --- host discovery chained straight into a pivot ---------------------------
+  sel_lm_recon_pivot:
+    command|re: '\b(?i:nmap|masscan|arp-scan|netdiscover|fping)\b[^\n]{0,300}(&&|\|\||;|\|)[^\n]{0,300}\b(?i:ssh|scp|sshpass|rsync)\b'
+
+  # --- persistence established on the remote host -----------------------------
+  sel_lm_remote_persistence:
+    command|re: '\b(?i:ssh)\s[^\n]{0,200}@([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+[^\n]{0,300}(\bcrontab\s+-|\bsystemctl\s+(--user\s+)?enable|/etc/cron\.[a-z]+/|/etc/rc\.local|/etc/systemd/system/|\blaunchctl\s+load)'
+
+  # --- password reuse against a new target ------------------------------------
+  sel_lm_credential_reuse:
+    command|re: '\b(?i:sshpass)\s+-[pfe][\s=]*\S{2,}[^\n]{0,300}@([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+'
+
+  # --- pivot tunnel (dynamic SOCKS / reverse forward) -------------------------
+  sel_lm_pivot_tunnel:
+    command|re: '\b(?i:ssh)\s[^\n]{0,200}\s-(D\s*\d{1,5}\b|R\s*\d{1,5}:)[^\n]{0,200}@([A-Za-z0-9-]+\.)+[A-Za-z0-9-]+'
+
+  # --- dedicated remote-execution MCP tool carrying credential material -------
+  sel_remote_tool:
+    tool|re: '(?i)^(ssh|ssh_[a-z_]+|scp|sftp|rsync|remote_exec|remote_shell|remote_command|execute_remote)$'
+  sel_sensitive_payload:
+    content|re: '(?i)(\.ssh/id_[a-z0-9]{2,}|\.ssh/authorized_keys|\.aws/credentials|\.kube/config|\.git-credentials|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY)'
+
+  # --- benign-context suppressors ---------------------------------------------
+  filter_help:
+    command|re:
+      - '\b(?i:scp|rsync|ssh|ssh-copy-id|nmap|sshpass)\s+(--help|-h|--version)\b'
+      - '\b(?i:man)\s+(ssh|scp|rsync|nmap|sshpass|ssh-copy-id)\b'
+      - '\b(?i:which|type|command\s+-v)\s+(ssh|scp|rsync|nmap|sshpass)\b'
+  filter_dryrun:
+    command|re: '\b(?i:rsync)\b[^\n]{0,300}(--dry-run|\s-n\s)'
+  filter_docwrite:
+    command|re: '>\s*[^\n]{0,120}\.(?i:md|markdown|rst|txt|adoc)\b'
+  filter_placeholder:
+    content|re:
+      - '<(?i:user|username|host|hostname|server|remote|target|ip|your[-_]?host)>'
+      - '(?i)\b(user|username|youruser|myuser)@(host|hostname|server|remote|target)\b'
+
+  condition: >
+    sel_scope and
+    (sel_lm_cred_file_transfer or sel_lm_key_distribution or
+     sel_lm_remote_agent_spawn or sel_lm_recon_pivot or
+     sel_lm_remote_persistence or sel_lm_credential_reuse or
+     sel_lm_pivot_tunnel or (sel_remote_tool and sel_sensitive_payload))
+    and not (filter_help or filter_dryrun or filter_docwrite or filter_placeholder)
+action: report
