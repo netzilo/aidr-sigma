@@ -1,0 +1,107 @@
+title: Malicious PyPI Package fantasy-football-manager Acquisition
+id: 7f3c1d2a-9b64-4e18-8f5a-2c6d0b41ae93
+status: experimental
+level: high
+description: |
+  Single-event detection for acquisition or execution of the PyPI package
+  "fantasy-football-manager", a package advertising ESPN draft/lineup tooling for
+  Codex and other MCP clients. The name is matched in PEP 503 normalised form
+  (runs of - _ . are interchangeable), so fantasy-football-manager,
+  fantasy_football_manager and fantasy.football.manager are all covered.
+
+  Three independent single-event signals, all verified against the engine schema:
+
+    1. execute_process where the command line contains BOTH a Python package
+       installer/runner verb (pip/pip3/pipx/pdm/poetry/conda/mamba install|add|
+       run|download|sync, python -m pip install, uv, uvx, easy_install) AND the
+       normalised package name. This is the install / uvx-launch vector used when
+       an MCP client config points at the package.
+    2. execute_process where the command line contains a versioned distribution
+       filename for this package (fantasy_football_manager-<ver>.whl / .tar.gz /
+       .zip / .egg). A versioned sdist/wheel name is high-specificity on its own
+       and catches curl/wget/aria2c fetches and direct wheel installs.
+    3. http_request whose URL or path is a package-index lookup
+       (/simple/<name>/ or /pypi/<name>/json) or a distribution download
+       (/<name>-<version>.whl|.tar.gz|.zip|.egg). No host is named, so the same
+       detection fires against PyPI, an internal mirror, a proxy, or an
+       attacker-supplied --index-url.
+
+  Reported, not blocked: acquisition is the earliest observable point and the
+  same command lines occur during removal, inspection and local development,
+  which are filtered explicitly below.
+author: Selhan
+date: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://peps.python.org/pep-0503/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.001
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # ── Branch 1: installer/runner verb + normalised package name, same cmdline ──
+  sel_exec_pkg_name:
+    event_type: execute_process
+    content|re: '(?i)\bfantasy[-_.]football[-_.]manager\b'
+  sel_exec_installer:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:pip|pip3|pipx|pdm|poetry|conda|mamba)\s+(?:\S+\s+)*?(?:install|add|run|download|sync)\b'
+      - '(?i)\bpython(?:3(?:\.\d+)?)?\s+-m\s+(?:pip|uv|pipx)\s+(?:\S+\s+)*?(?:install|download|add|run)\b'
+      - '(?i)\buvx?\b'
+      - '(?i)\beasy_install\b'
+
+  # ── Branch 2: versioned distribution filename for this package ──────────────
+  sel_exec_artifact:
+    event_type: execute_process
+    content|re: '(?i)\bfantasy[-_.]football[-_.]manager-\d[^\s/]*(?:\.whl|\.zip|\.egg|\.tar\.gz|\.tar\.bz2)\b'
+
+  # ── Branch 3: index lookup or distribution download over HTTP ───────────────
+  sel_http_pkg_url:
+    event_type: http_request
+    url.full|re:
+      - '(?i)/(?:simple|pypi)/fantasy[-_.]football[-_.]manager(?:/|$)'
+      - '(?i)/fantasy[-_.]football[-_.]manager-\d[^/]*(?:\.whl|\.zip|\.egg|\.tar\.gz|\.tar\.bz2)(?:$|[?#])'
+  sel_http_pkg_path:
+    event_type: http_request
+    path|re:
+      - '(?i)/(?:simple|pypi)/fantasy[-_.]football[-_.]manager(?:/|$)'
+      - '(?i)/fantasy[-_.]football[-_.]manager-\d[^/]*(?:\.whl|\.zip|\.egg|\.tar\.gz|\.tar\.bz2)$'
+
+  # ── Filters: removal, inspection and local/editable development ─────────────
+  filter_remediation:
+    event_type: execute_process
+    content|re: '(?i)\b(?:pip|pip3|pipx|uv|poetry|pdm|conda|mamba)\s+(?:\S+\s+)*?(?:uninstall|remove|show|list|freeze|cache|index|search|audit)\b'
+  filter_local_editable:
+    event_type: execute_process
+    content|re: '(?i)\binstall\b(?:\S+\s+)*?(?:-e|--editable)\b'
+
+  condition: >
+    ((sel_exec_pkg_name and sel_exec_installer)
+    or sel_exec_artifact
+    or sel_http_pkg_url
+    or sel_http_pkg_path)
+    and not (filter_remediation or filter_local_editable)
+action: report
+falsepositives:
+  - An organisation that legitimately publishes or vendors an internal package of
+    the same name; `pip install -e` / `--editable` local development installs are
+    filtered, but `pip install ./dist/fantasy_football_manager-<ver>.whl` from a
+    local build of that internal package will still report.
+  - Malware analysts, IR responders or dependency-review staff deliberately
+    fetching the distribution for analysis (`pip download`, `curl` of the wheel,
+    index metadata lookup) — this is a true positive on the acquisition itself
+    and is intentionally reported.
+  - A private mirror, pull-through proxy or SCA/SBOM scanner crawling the index
+    will match the http_request branch when it prefetches or enumerates this
+    project name.
+  - Removal and inspection commands (`pip uninstall`, `pip show`, `pip list`,
+    `pip cache`, `pip audit`) are filtered and will not report.
