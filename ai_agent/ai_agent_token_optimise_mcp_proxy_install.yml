@@ -1,0 +1,103 @@
+title: Supply Chain - token-optimise MCP Proxy Installation or Registration
+id: 7f3c1d9e-2a64-4b18-9c05-6ad81e2f4b73
+status: experimental
+level: high
+description: |
+  Detects the named supply-chain package "token-optimise" (and its spelling /
+  separator variants) being installed, executed via a direct package runner, wired
+  into an MCP client configuration, or fetched from a package registry.
+
+  The package advertises itself as a token-optimising MCP proxy for Claude Desktop.
+  A proxy positioned between the client and legitimate MCP servers can read, mutate
+  or exfiltrate every tool call and tool result that passes through it, so its mere
+  presence in an mcpServers block is a reportable integrity finding.
+
+  Detection scope note (answers triage dissent): the engine has no package_install,
+  process_spawn or network_connect event types and no INSTALLED_PACKAGE /
+  ACQUIRED_CAPABILITY / INTERCEPTS_TRAFFIC edge kinds, so the install -> spawn ->
+  intercept causal chain is not observable. This rule therefore anchors only on
+  surfaces that ARE observable as single events: the installer/runner command text
+  carried in tool_call and execute_process, the MCP registration text written or
+  read through a tool, and the registry artefact URL on http_request (the one live
+  edge kind, HTTP_REQUEST). It makes no attempt to attribute later proxied traffic
+  to the package - that attribution is genuinely unreachable with current sensors.
+
+  Every branch requires BOTH the package identifier AND an install/registration/
+  registry-artefact context in the same event, so prose such as "token-optimised
+  prompt" or a local token_optimize() helper function cannot fire it.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://modelcontextprotocol.io/docs/concepts/architecture
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── The package identifier itself. Trailing \b prevents matching the very common
+  #    adjectives "token-optimised" / "token-optimized". Never sufficient alone.
+  sel_pkg_name:
+    content|re: '(?i)\btoken[-_.]?optimi[sz]e\b'
+
+  # ── Context A: an installer verb in an agent-issued command or a spawned process.
+  sel_installer_ctx:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)\b(?:pip3?|pipx|uv|poetry|pdm|conda|mamba|npm|pnpm|yarn|bun)\b[^\n]{0,120}\b(?:install|add|--from)\b'
+
+  # ── Context B: MCP client registration surface (Claude Desktop / other clients).
+  sel_mcp_config_ctx:
+    event_type:
+      - tool_call
+      - tool_response
+    content|re: '(?i)("mcpServers"|\bmcpServers\s*[:=]|claude[_-]desktop[_-]config\.json|[\\/]\.?(?:cursor|claude|codex)[\\/]mcp\.json)'
+
+  # ── Context C: direct package runners that carry no "install" verb at all.
+  #    Self-contained: the runner and the package name must be on the same line.
+  sel_direct_runner:
+    event_type:
+      - tool_call
+      - execute_process
+    content|re: '(?i)\b(?:uvx|npx|bunx|pipx\s+run|uv\s+tool\s+run)\b[^\n]{0,80}\btoken[-_.]?optimi[sz]e\b'
+
+  # ── Context D: registry artefact fetch. HTTP_REQUEST is the only live edge kind,
+  #    so both halves are matched on the URL of the same request.
+  sel_http_pkg_name:
+    event_type: http_request
+    url.full|re: '(?i)token[-_.]?optimi[sz]e'
+  sel_http_registry_path:
+    event_type: http_request
+    url.full|re: '(?i)(/simple/|/pypi/|/project/|/packages/|/npm/|\.whl(?:[?#]|$)|\.tar\.gz(?:[?#]|$))'
+
+  # ── Benign: removal / rollback is remediation, not compromise.
+  filter_remediation:
+    content|re: '(?i)\b(?:pip3?|pipx|uv|poetry|pdm|conda|npm|pnpm|yarn|bun)\b[^\n]{0,80}\b(?:uninstall|remove|purge)\b'
+
+  # ── Benign: analyst/IR prose that quotes the package while discussing the threat.
+  filter_advisory_context:
+    content|re: '(?i)(malicious package|supply[- ]chain (?:attack|advisory|risk)|security advisory|typosquat|do not install|known[- ]bad package|indicator of compromise|\bCVE-\d{4}-\d{4,7}\b|\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b)'
+
+  condition: >
+    (
+      (sel_pkg_name and (sel_installer_ctx or sel_mcp_config_ctx))
+      or sel_direct_runner
+      or (sel_http_pkg_name and sel_http_registry_path)
+    )
+    and not (filter_remediation or filter_advisory_context)
+
+falsepositives:
+  - Security research, incident response or malware triage where an engineer deliberately installs or fetches the package in a sandbox - the advisory-language filter catches the common case where the request is accompanied by advisory text, but a bare install in a lab will still report.
+  - Configuration audit tooling that reads claude_desktop_config.json through an agent tool while the entry is already present - the read is reported once per inspection (tool_response branch) even though nothing new was installed.
+  - A vetted internal fork or mirror published under the same distribution name; the rule matches on package identity only and cannot distinguish a reviewed fork from the upstream package.
+  - Dependency manifests, lockfiles or CI job definitions being written or diffed by the agent that pin the package for analysis purposes.
+  - Prose that happens to place the exact token "token-optimise" on the same line as an installer verb, e.g. a runbook sentence like "pip install the token-optimise replacement instead".
+action: report
