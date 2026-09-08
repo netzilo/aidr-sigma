@@ -1,0 +1,114 @@
+title: ML Supply Chain — HF Transformers Unsafe Model Deserialization
+id: 7b1e4c8a-2f63-4d19-9c05-3ae87f2d6b41
+status: experimental
+level: medium
+description: |
+  Detects a spawned process whose command line loads a Hugging Face / PyTorch model
+  artifact through an unsafe deserialization path, i.e. the observable footprint of
+  CWE-502 exploitation in Hugging Face Transformers.
+
+  Two mutually exclusive command-line signatures are recognised:
+
+    1. Remote-code execution flag — `trust_remote_code=True` (or the `--trust-remote-code`
+       CLI form) together with Hugging Face loading context (`from_pretrained(`,
+       `transformers`, `AutoModel*.`, `hf_hub_download`, …). This flag instructs the
+       library to import and execute Python shipped inside the model repository, which is
+       arbitrary code execution in the user's context if the repository is attacker-supplied.
+
+    2. Pickle deserialization of a model artifact — an inline interpreter invocation
+       (`python -c`, heredoc, `ipython -c`) that calls `torch.load(`, `pickle.load(`,
+       `dill.load(`, `joblib.load(`, `torch.jit.load(` or `numpy.load(..., allow_pickle=True)`
+       AND references a pickle-backed artifact extension (.bin/.pt/.pth/.ckpt/.pkl/.joblib/
+       .npy/.npz/.msgpack) or explicitly disables the safety guard with `weights_only=False`.
+
+  Only `execute_process` carries an observable signal for this threat on this engine —
+  there is no deserialization, file-open or code-execution event type or edge kind, so this
+  is deliberately a single-event, content-only detection over the spawned command line.
+  It cannot see loads that happen inside an already-running script; it sees only what the
+  process was launched with.
+author: Haibo
+date: "2026-06-12"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://attack.mitre.org/techniques/T1204/002/
+  - https://atlas.mitre.org/techniques/AML.T0011
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+falsepositives:
+  - ML engineers deliberately loading a community model that ships custom modelling code and
+    therefore requires trust_remote_code=True (e.g. many vision-language and MoE architectures).
+  - Inline one-liners inspecting a locally trained checkpoint, e.g.
+    python -c "import torch; print(torch.load('ckpt.pt').keys())".
+  - Model conversion, merging, quantisation or export pipelines (GGUF/ONNX/AWQ) that call
+    torch.load with weights_only=False on internally produced checkpoints.
+  - Serving stacks launched with --trust-remote-code against an internally published model.
+  - Framework test suites and example scripts that intentionally round-trip pickled fixtures
+    (partially suppressed by filter_docs).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── Branch 1: remote-code execution flag ────────────────────────────────────
+  sel_remote_code:
+    content|re:
+      - '(?i:trust_remote_code)\s*=\s*(?:True|true|1)\b'
+      - '(?i)--trust[-_]remote[-_]code\b'
+  sel_hf_context:
+    content|re:
+      - '(?i)\bfrom_pretrained\s*\('
+      - '(?i)\btransformers\b'
+      - '\bAuto(?:Model|Tokenizer|Config|Processor|FeatureExtractor|ImageProcessor)[A-Za-z]*\s*\.'
+      - '(?i)\b(?:hf_hub_download|snapshot_download|huggingface[-_]cli|text-generation-launcher)\b'
+      - '\bpipeline\s*\('
+
+  # ── Branch 2: pickle deserialization of a model artifact via inline interpreter ─
+  sel_python_inline:
+    content|re:
+      - '(?i:python)[0-9.]*(?:\.exe)?\b[^\n]{0,120}\s-c\b'
+      - '(?i:python)[0-9.]*(?:\.exe)?\b\s+-\s*<<'
+      - '(?i:ipython)\b[^\n]{0,120}\s-c\b'
+  sel_deser_call:
+    content|re:
+      - '\btorch\s*\.\s*load\s*\('
+      - '\btorch\s*\.\s*jit\s*\.\s*load\s*\('
+      - '\b(?:pickle|cPickle|_pickle|dill|cloudpickle)\s*\.\s*loads?\s*\('
+      - '\b(?:pickle|dill|cloudpickle)\s*\.\s*Unpickler\s*\('
+      - '\bjoblib\s*\.\s*load\s*\('
+      - '\b(?:numpy|np)\s*\.\s*load\s*\([^\n]{0,160}(?i:allow_pickle)\s*=\s*(?:True|1)\b'
+  sel_model_artifact:
+    content|re:
+      - '(?i)[\w./~\\-]+\.(?:bin|pt|pth|ckpt|pkl|pickle|joblib|npy|npz|msgpack)\b'
+      - '(?i:weights_only)\s*=\s*(?:False|0)\b'
+
+  # ── Filters ─────────────────────────────────────────────────────────────────
+  filter_safe_load:
+    content|re:
+      - '(?i:weights_only)\s*=\s*(?:True|1)\b'
+  filter_search_or_echo:
+    content|re:
+      - '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|ack-grep|sed|awk|strings|semgrep|codeql|bandit|ruff|flake8|pylint|mypy)\b[^\n]{0,160}(?:trust_remote_code|torch\.load|pickle\.load|joblib\.load|weights_only|from_pretrained)'
+      - '(?i)\b(?:echo|printf|tee)\b[^\n]{0,160}(?:trust_remote_code|torch\.load|pickle\.load|weights_only)'
+  filter_docs:
+    content|re:
+      - '(?i)--help\b'
+      - '(?i)\b(?:pytest|unittest|tox|nox)\b'
+      - '(?i)\bcoverage\s+run\b'
+      - '(?i)[\w./~\\-]+\.(?:md|rst)\b'
+      - '(?i)\b(?:README|CONTRIBUTING|CHANGELOG)\b'
+
+  condition: >
+    sel_event and
+    ((sel_remote_code and sel_hf_context) or
+     (sel_python_inline and sel_deser_call and sel_model_artifact))
+    and not (filter_safe_load or filter_search_or_echo or filter_docs)
+action: report
