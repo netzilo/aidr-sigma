@@ -1,0 +1,313 @@
+title: LLM Eval Escape - Python Host Spawns OS Command (llama_index safe_eval Bypass)
+id: 9c1f4a7d-2e58-4b6c-a3d1-6f80b5e4c927
+status: experimental
+level: high
+description: |
+  Detects remote code execution reached through an LLM code-evaluation sandbox such as
+  the llama_index safe_eval helper, whose underscore-based filter can be bypassed by a
+  payload that contains no '_' characters while still reaching os.system / os.popen.
+
+  The only observable the engine emits for this threat is execute_process, so the rule is
+  instance-resolved rather than content-only: it anchors on meta["caller_pid"], resolves
+  the exact process instance with proc_instance(), walks proc_lineage() to prove the
+  spawning process really is a near-ancestor Python interpreter (the llama_index host),
+  and then scopes every corroborating query_events() lookup to that one session's PIDs.
+  No cross-session attribution is possible.
+
+  Required anchor: a Python-family interpreter within MAX_LINEAGE_DEPTH ancestors spawns
+  a command line containing an OS primitive or an eval/obfuscation construct. The anchor
+  is scored 2 (self-sufficient) when it is host recon (whoami / id / uname -a /
+  cat /etc/passwd), a reverse-shell or curl|sh construct, a credential-file read, or an
+  eval construct with ZERO underscore characters - the literal signature of the safe_eval
+  filter bypass. Otherwise it scores 1 and needs a corroborator: a burst of further
+  OS-command spawns by the same session, or an outbound CONNECTS by a session PID.
+  Reports at score >= 2.
+author: Haibo
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://github.com/run-llama/llama_index
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1059.006
+  - atlas.aml.t0050
+  - owasp.llm05
+falsepositives:
+  - Jupyter / IPython notebooks - the kernel is a Python process and a '!whoami' or '%%bash'
+    cell produces exactly the anchor pattern. Expect these; they are reported, never blocked.
+  - Python MLOps or data-science jobs that shell out to curl/wget to fetch datasets or models.
+    These score 1 and are only reported if a burst or an outbound connect also lands in the
+    same 5-minute session window.
+  - Python-based infrastructure automation (Fabric, Invoke, Ansible local actions) that runs
+    'uname -a' or 'hostname' for host inventory.
+  - Unit tests for the safe_eval sandbox itself, which deliberately execute bypass payloads.
+  - Vulnerability scanners or red-team tooling written in Python running host recon on purpose.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  sel_trigger:
+    content|re: '.'
+  condition: sel_exec and sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── tunables ────────────────────────────────────────────────────────────────
+  WINDOW_NS        = 300000000000   # 5 minutes - one exploitation burst
+  MAX_LINEAGE_DEPTH = 4             # the python host must be a NEAR ancestor
+  MAX_SESSION_PIDS  = 24
+  BURST_MIN         = 2
+  MAX_EGRESS_PIDS   = 10
+
+  # Processes that host an llama_index / LangChain style eval sandbox.
+  PY_HOST = [
+      r"\bpython[0-9.]*\b", r"\bipython\b", r"\buvicorn\b", r"\bgunicorn\b",
+      r"\bhypercorn\b", r"\bstreamlit\b", r"\bchainlit\b", r"\bcelery\b",
+  ]
+
+  # OS primitives an eval'd payload reaches for. Every keyword is \b-anchored:
+  # a bare substring like "id" or "nc" matches half the filesystem.
+  OS_PRIM = [
+      r"\bwhoami\b", r"\bid\s*(;|\||&|$)", r"\buname\s+-a\b",
+      r"\bhostname\s*(;|\||&|$)", r"\bifconfig\b", r"\bipconfig\b",
+      r"\bcat\s+/etc/passwd\b", r"/etc/shadow\b",
+      r"\.aws/credentials\b", r"\.ssh/id[a-z_]*\b",
+      r"\bcurl\b", r"\bwget\b",
+      r"\bncat\b", r"\bnetcat\b", r"\bnc\s+-[a-z]*[el]",
+      r"/dev/tcp/", r"\bcrontab\b", r"\bchmod\s+\+x\b", r"\bosascript\b",
+      r"\bperl\s+-e\b", r"\bruby\s+-e\b", r"\bphp\s+-r\b",
+  ]
+
+  # Host recon: a production LLM service has no reason to shell out for these.
+  RECON = [
+      r"\bwhoami\b", r"\bid\s*(;|\||&|$)", r"\buname\s+-a\b",
+      r"\bhostname\s*(;|\||&|$)", r"\bifconfig\b", r"\bipconfig\b",
+      r"\bcat\s+/etc/passwd\b", r"\bnet\s+user\b", r"\bls\s+-l[a-z]*\s+/root\b",
+  ]
+
+  # Self-sufficient anchors - unambiguous post-exploitation constructs.
+  STRONG = [
+      r"/dev/tcp/",
+      r"\b(ba|z)?sh\s+-i\b",
+      r"\bnc\s+-[a-z]*e\b",
+      r"(curl|wget)\b[^|]*\|\s*[a-z/]*sh\b",
+      r"\bbase64\s+-{1,2}[dD]\b[^|]*\|\s*[a-z/]*sh\b",
+      r"/etc/shadow\b",
+      r"\.aws/credentials\b",
+      r"\.ssh/id[a-z_]*\b",
+      r"\bcrontab\b",
+      r"\bpowershell\b[^|]*\s-e[a-z]*\s+[A-Za-z0-9+/]{20}",
+  ]
+
+  # Eval / sandbox-escape constructs surviving into the spawned command line.
+  OBF = [
+      r"\bchr\s*\(", r"\beval\s*\(", r"\bexec\s*\(", r"\bcompile\s*\(",
+      r"\bgetattr\s*\(", r"\bvars\s*\(", r"\bglobals\s*\(", r"\bbuiltins\b",
+      r"\bfromhex\b", r"\bb64decode\b", r"\bmarshal\b",
+      r"\bpopen\b", r"\bsystem\s*\(",
+  ]
+
+  def any_re(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def short(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def cmd_of(e):
+      c = e.get("cmdline", "")
+      if c == "":
+          c = e.get("actor_path", "")
+      return c
+
+  def exec_edge(e):
+      src = e.get("parent_path", "")
+      if src == "":
+          src = e.get("actor_path", "")
+      return {
+          "from":     "process://" + src,
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def conn_edge(e):
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", "CONNECTS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── relevance gate: pure string checks on meta, no graph / log calls ────────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return False
+      if any_re(OS_PRIM, cmd):
+          return True
+      if any_re(OBF, cmd):
+          return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd     = meta.get("content", "")
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if trig_ts <= 0 or cp == 0:
+          return "allow"
+
+      # ── anchor on the exact triggering instance (never a path-keyed walk) ──
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"                      # degraded attribution - never guess
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── REQUIRED: a python-family LLM host is a NEAR ancestor ─────────────
+      depth = len(lineage)
+      if depth > MAX_LINEAGE_DEPTH:
+          depth = MAX_LINEAGE_DEPTH
+      py_idx = -1
+      for i in range(depth):
+          if any_re(PY_HOST, lineage[i].get("actor_path", "")):
+              py_idx = i
+              break
+      if py_idx < 0:
+          return "allow"                      # not an eval-sandbox host
+      py = lineage[py_idx]
+
+      prim   = any_re(OS_PRIM, cmd)
+      obf    = any_re(OBF, cmd)
+      recon  = any_re(RECON, cmd)
+      strong = any_re(STRONG, cmd)
+      no_us  = obf and cmd.find("_") < 0     # the safe_eval underscore-filter bypass
+      if not (prim or obf):
+          return "allow"
+
+      score = 1
+      if strong or recon or no_us:
+          score = 2
+
+      names = []
+      for x in lineage:
+          names.append(short(x.get("actor_path", "")))
+      lin_s = " <- ".join(names)
+
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      # Trigger stage comes from meta - the log is async and may not have it yet.
+      trig_edge = {
+          "from":     "process://" + py.get("actor_path", ""),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trig_ts),
+          "first_ts": str(trig_ts),
+          "last_ts":  str(trig_ts),
+          "cmdline":  cmd,
+      }
+      chain.append(step(
+          trig_edge,
+          stage_id="Eval Escape",
+          stage_desc="python host " + short(py.get("actor_path", "")) +
+                     " (pid " + py.get("actor_pid", "?") + ") spawned OS command: " + cmd[:200]))
+
+      if no_us:
+          chain.append(step(
+              trig_edge,
+              stage_id="Filter Bypass",
+              stage_desc="eval construct carries ZERO underscore characters - " +
+                         "matches the llama_index safe_eval underscore-filter bypass"))
+
+      # ── session scope: lineage PIDs plus their descendants in the window ──
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      since = trig_ts - WINDOW_NS
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=trig_ts, limit=2000)
+      for _pass in range(2):
+          for e in execs:
+              if len(session) >= MAX_SESSION_PIDS:
+                  break
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = True
+
+      # ── corroborator 1: burst of further OS commands from the same session ─
+      cid   = meta.get("callid", "")
+      burst = []
+      for e in execs:
+          if cid != "" and e.get("callid", "") == cid:
+              continue
+          if e.get("actor_pid", "") not in session and e.get("parent_pid", "") not in session:
+              continue
+          c = cmd_of(e)
+          if any_re(OS_PRIM, c) or any_re(OBF, c):
+              burst.append(e)
+      if len(burst) >= BURST_MIN:
+          score = score + 1
+          n = 0
+          for e in burst:
+              if n >= 2:
+                  break
+              n = n + 1
+              chain.append(step(
+                  exec_edge(e),
+                  stage_id="Command Burst",
+                  stage_desc="same-session OS command #" + str(n) + ": " + cmd_of(e)[:160]))
+
+      # ── corroborator 2: outbound connect by a session PID (callback/exfil) ─
+      egress = None
+      seen   = 0
+      for pid in session:
+          if seen >= MAX_EGRESS_PIDS or egress != None:
+              break
+          if pid == "":
+              continue
+          seen = seen + 1
+          for r in query_events(kind="CONNECTS", actor_pid=int(pid),
+                                since_ns=since, until_ns=trig_ts, limit=20):
+              if r.get("is_ztna_host", "0") == "1":
+                  continue
+              egress = r
+              break
+      if egress != None:
+          score = score + 1
+          chain.append(step(
+              conn_edge(egress),
+              stage_id="Post-Exploitation Egress",
+              stage_desc="session process " + short(egress.get("actor_path", "?")) +
+                         " connected out to " + egress.get("host", egress.get("target_id", "?"))))
+
+      if score < 2:
+          return "allow"
+
+      reason = ("LLM eval escape - " + short(py.get("actor_path", "?")) +
+                " spawned OS command via lineage [" + lin_s + "]; score=" + str(score) +
+                "; cmd=" + cmd[:200])
+      if no_us:
+          reason = reason + " ; underscore-free eval payload (safe_eval bypass signature)"
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
