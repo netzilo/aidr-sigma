@@ -1,0 +1,105 @@
+title: Unsafe Checkpoint Deserialization (Transformers load_repo_checkpoint / pickle RCE)
+id: 7f3b1c9e-2d64-4a17-9f0b-6c58a1d3e742
+status: experimental
+level: high
+description: |
+  Single-event content detection on process-spawn command lines for the
+  huggingface/transformers unsafe-deserialization RCE path.
+
+  TFPreTrainedModel.load_repo_checkpoint() feeds attacker-controllable checkpoint
+  data to pickle.load(). Any spawned command line that names that API, or that
+  inlines an unpickle of a HuggingFace/remote checkpoint via `python -c`, or that
+  passes a raw URL / world-writable temp path as a checkpoint argument to a
+  training entrypoint, is arbitrary code execution at the privilege of the
+  training process.
+
+  Only the execute_process event carries the command line, so this rule is scoped
+  to it. There is no deserialize_object / load_model event and no LOAD_MODEL or
+  DESERIALIZE_DATA edge in the engine schema, so no graph traversal is possible
+  for this threat; this is deliberately a content-only rule.
+
+  Taxonomy note: the applicable OWASP mapping for this weakness is
+  A08:2021 Software and Data Integrity Failures, which belongs to the Web Top 10
+  and is not representable under the `owasp.` tag prefix (LLM01-LLM10 / ASI01-ASI10
+  only). No ATLAS technique was verified as applicable. Both tags are therefore
+  omitted rather than guessed; CWE-502 is recorded instead.
+author: Egemen
+date: "2026-03-11"
+references:
+  - https://cwe.mitre.org/data/definitions/502.html
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://docs.python.org/3/library/pickle.html
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1204.002
+  - cwe.502
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch A: the vulnerable API is named outright in the command line ──────
+  sel_vuln_api:
+    event_type: execute_process
+    content|re: '\bload_repo_checkpoint\s*\('
+
+  # ── Branch B: inline python that unpickles a HF / remote checkpoint ─────────
+  sel_python_inline:
+    event_type: execute_process
+    content|re: '(?i:python)[0-9.]*[^\n]{0,120}\s-c[\s"]'
+
+  sel_unsafe_deser:
+    content|re:
+      - '\b(?:pickle|cPickle|_pickle|dill|joblib)\.loads?\s*\('
+      - '\bUnpickler\s*\('
+      - '\btorch\.load\s*\('
+      - '\b(?:numpy|np)\.load\s*\([^)]{0,80}allow_pickle\s*=\s*True'
+
+  sel_hf_context:
+    content|re: '(?i)\b(?:transformers|TFPreTrainedModel|from_pretrained|huggingface_hub|hf_hub_download|snapshot_download|load_repo_checkpoint|checkpoint)\b'
+
+  sel_remote_source:
+    content|re: '(?i)(?:https?://|urlopen|urlretrieve|requests\.get|hf_hub_download|snapshot_download|s3://|gs://)'
+
+  # ── Branch C: training entrypoint handed an untrusted checkpoint location ───
+  sel_python_any:
+    event_type: execute_process
+    content|re: '(?i)\b(?:python[0-9.]*|torchrun|accelerate|deepspeed|transformers-cli|huggingface-cli)\b'
+
+  sel_remote_ckpt_arg:
+    content|re: '(?i)--(?:resume_from_checkpoint|checkpoint_path|ckpt_path|model_name_or_path|pretrained_model_name_or_path)[= ]+(?:https?://|/tmp/|/private/tmp/|/var/tmp/|/dev/shm/)'
+
+  # ── Filters: benign shapes that legitimately contain these tokens ───────────
+  filter_search_tools:
+    content|re: '(?i)(?:^|[\s"/\[])(?:grep|egrep|fgrep|rg|ripgrep|ack|pydoc|man|whereis|which)\b'
+
+  filter_test_harness:
+    content|re: '(?i)(?:\bpytest\b|\bunittest\b|\btox\b|\bnox\b|/tests?/|\btest_[A-Za-z0-9_]+\.py\b|\b[A-Za-z0-9_]+_test\.py\b|\bconftest\.py\b)'
+
+  filter_safe_load:
+    content|re: '(?i)(?:weights_only\s*=\s*True|use_safetensors\s*=\s*True|\.safetensors\b|safetensors\.torch|\bpickletools\b|\bpickle\.dumps\b)'
+
+  filter_help:
+    content|re: '(?:\s--help(?:\s|$)|\s-h(?:\s|$)|\s--version(?:\s|$))'
+
+  filter_linters:
+    content|re: '(?i)\b(?:flake8|ruff|mypy|pylint|bandit|black|isort|semgrep)\b'
+
+  condition: >
+    (sel_vuln_api
+     or (sel_python_inline and sel_unsafe_deser and (sel_hf_context or sel_remote_source))
+     or (sel_python_any and sel_remote_ckpt_arg))
+    and not (filter_search_tools or filter_test_harness or filter_safe_load
+             or filter_help or filter_linters)
+
+action: report
+
+falsepositives:
+  - ML engineers legitimately resuming a TensorFlow checkpoint with load_repo_checkpoint() from an internal, trusted model repository during fine-tuning. This is a real and expected call in older transformers training loops; the rule reports rather than blocks for exactly this reason.
+  - A developer reproducing a HuggingFace tutorial inline with python -c that unpickles a checkpoint they produced themselves on the same host.
+  - Legacy training pipelines on ephemeral CI runners that stage a checkpoint under /tmp and pass it via --resume_from_checkpoint.
+  - Security research, CVE reproduction, and detection-engineering test runs that intentionally execute the vulnerable call path.
+  - Repository-wide code search for the vulnerable symbol during remediation (grep/rg/ack/pydoc) - suppressed by filter_search_tools.
+  - The transformers library's own test suite exercising the TF checkpoint code path - suppressed by filter_test_harness.
+  - Modern torch.load usage that is already safe because weights_only=True or safetensors is in use - suppressed by filter_safe_load.
