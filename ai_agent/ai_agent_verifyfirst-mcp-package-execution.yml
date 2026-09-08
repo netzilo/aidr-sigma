@@ -1,0 +1,80 @@
+title: Malicious MCP Package verifyfirst-mcp Install or Launch
+id: 7f3c1d92-4b6a-4e08-9c15-2a8d5f0b7e31
+status: experimental
+level: medium
+description: |
+  Detects an endpoint process-execution event whose command line installs, resolves
+  or launches the PyPI package `verifyfirst-mcp` (and separator variants such as
+  verify_first_mcp / verify-first-mcp), a package that advertises itself as an MCP
+  server while describing itself as a "registry of software failures that report
+  success". If wired into an agent as an MCP server, it would return fraudulent
+  verification results, causing the agent to trust unverified or compromised
+  artifacts downstream.
+
+  SCOPE AND LIMITS (answering triage dissent): the engine models no MCP protocol
+  semantics -- there is no mcp_server_call or load_model event type, and no
+  MCP_CALL / REPORT_SUCCESS / VERIFY_FAILURE / TRUST_DECISION edge kind. The
+  fraudulent-verification step itself is therefore NOT observable, and this rule
+  does not claim to detect it. The only deterministic, engine-visible artifact of
+  this supply-chain vector is the execute_process command line that pulls the named
+  package onto the host or starts it as a server. That artifact is high-specificity
+  (a unique package name, not a behavioural heuristic), so it is detected here as a
+  named-IOC content match and reported for analyst confirmation. Because the
+  downstream harm cannot be corroborated by telemetry, this rule is report-only and
+  never blocks. It deliberately does not overlap MCP Server Command Injection via
+  Shell Metacharacters (ae6e3887), which detects metacharacter injection into MCP
+  command execution rather than acquisition of a deceptive package.
+author: Tanya
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0015
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.execution
+  - atlas.aml.t0015
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_install:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:pip|pip3|pipx|uv|uvx|poetry|pdm|hatch|conda|mamba|micromamba)\b[^\n]{0,240}\bverify[-_.]?first[-_.]?mcp\b'
+      - '(?i)\b(?:npm|pnpm|yarn|npx|bun|bunx)\b[^\n]{0,240}\bverify[-_.]?first[-_.]?mcp\b'
+  sel_server_launch:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(?:python|python3|py)\b[^\n]{0,200}(?:-m\s+)?verify[-_.]?first[-_.]?mcp\b'
+      - '(?i)[\\/]verify[-_.]?first[-_.]?mcp(?:\.exe|\.py|[-_]server)?(?:["\s]|$)'
+      - '(?i)\bmcp\s+add\b[^\n]{0,240}\bverify[-_.]?first[-_.]?mcp\b'
+  filter_search_and_read_tools:
+    content|re: '(?i)\b(?:grep|egrep|fgrep|rg|ripgrep|ack|ag|find|locate|cat|bat|less|more|head|tail|strings|awk|sed|codespell)\s'
+  filter_remediation_or_dryrun:
+    content|re:
+      - '(?i)\b(?:uninstall|purge)\b'
+      - '(?i)\bconda\s+remove\b'
+      - '(?i)(?:^|\s)--dry-run\b'
+      - '(?i)\bpip3?\s+(?:show|index|cache|download|list|freeze)\b'
+  filter_security_research:
+    content|re: '(?i)(?:\bsigma\b|\byara\b|detection[-_ ]?rule|threat[-_ ]?intel|malware[-_ ]?analysis|\bsandbox\b|\bquarantine\b|osv\.dev|\bcve-\d{4}-\d{4,}\b|\bghsa-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b)'
+  condition: >
+    (sel_pkg_install or sel_server_launch)
+    and not (filter_search_and_read_tools or filter_remediation_or_dryrun or filter_security_research)
+action: report
+falsepositives:
+  - Incident responders removing the package (pip uninstall / conda remove) or
+    inspecting it (pip show / pip download) -- suppressed by filter_remediation_or_dryrun.
+  - Detection engineers or IR runbooks that reference the package name from a
+    search or read utility (grep, rg, cat, sed) -- suppressed by filter_search_and_read_tools.
+  - Malware analysts intentionally detonating the package inside a sandbox or
+    quarantine tree, or command lines that carry advisory/CVE/GHSA identifiers --
+    suppressed by filter_security_research.
+  - A future unrelated project legitimately publishing under the same or a
+    similarly separated name (verify_first_mcp); this rule is a named-IOC match and
+    would need retirement if the name is reclaimed by a benign maintainer.
+  - Documentation or blog-post examples pasted into a terminal that never actually
+    resolve the package (e.g. a typo'd package manager) will still match; the
+    report-only action keeps the cost of this to an analyst glance.
