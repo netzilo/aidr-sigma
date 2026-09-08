@@ -1,0 +1,400 @@
+title: Transformers URL Username Injection - Origin Impersonation Fetch
+id: 0f2a6c19-4c8b-4d7e-9a3f-1b5e8c274d63
+status: experimental
+level: high
+description: |
+  Detects the URL-validation-bypass class behind the Hugging Face Transformers
+  <=4.49.0 image_utils.py flaw, where origin checks are performed with
+  startswith() on the raw URL string.
+
+  An attacker crafts a URL whose *userinfo* (URL username) component carries a
+  trusted-looking domain -- e.g. https://www.youtube.com@attacker.tld/x.png --
+  or whose hostname embeds a trusted-looking registrable domain as a non-final
+  label -- e.g. www.youtube.com.attacker.tld. A naive startswith() check passes,
+  but the HTTP client connects to the attacker-controlled host, so the library
+  fetches content (image / model asset) from the wrong origin: phishing content,
+  malware, or an exfiltration sink.
+
+  This rule is instance-resolved. It anchors on meta["caller_pid"], resolves the
+  exact process instance with proc_instance(), walks proc_lineage() for the owning
+  session, expands that session by one bounded EXECUTE_PROCESS pass, and then
+  queries HTTP_REQUEST rows from the event log scoped strictly to that session's
+  instances. No cross-session attribution is possible: every corroborating stage
+  must have been performed by a pid/start pair inside the caller's own lineage.
+
+  The triggering request itself is taken from meta (host / url / path / event_ts),
+  never re-queried from the log, because the just-fired event races async ingest.
+author: Egemen
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://github.com/huggingface/transformers/blob/main/src/transformers/image_utils.py
+  - https://cwe.mitre.org/data/definitions/20.html
+  - https://owasp.org/Top10/A07_2021-Identification_and_Authentication_Failures/
+  - https://url.spec.whatwg.org/#url-parsing
+tags:
+  - attack.defense-evasion
+  - attack.t1036
+  - attack.command-and-control
+  - attack.t1071.001
+  - owasp.llm03
+  - cwe.20
+falsepositives:
+  - HTTP basic-auth URLs whose username is an e-mail address or a dotted service
+    account (alice%40corp.com:token@registry / first.last@host). Mitigated - the
+    rule discards any userinfo whose user component contains '@' or '%40', and
+    requires the embedded domain to differ from the host actually connected to.
+  - Vendor or CDN hostnames that legitimately embed a common TLD label mid-name
+    (customer.com.cdn.provider.net) and split-horizon internal suffixes appended
+    to a public name. Mitigated - this variant is only reported when corroborated
+    by a Python/Jupyter interpreter in the caller's own lineage or by an image /
+    model-asset path, and never on hostnames with fewer than four labels (so
+    example.com.au, foo.co.uk and similar ccTLD forms are never matched).
+  - Security research, dependency-scanning or CI harnesses that deliberately
+    replay the CVE payload against a local sink. Expect these to report; they are
+    genuinely the pattern and should be triaged by lineage.
+  - Internal proxies or crawlers that stuff an origin hint into the userinfo
+    field of a rewritten URL. Reported, not blocked - this rule only reports.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Constants (rule-owned; no host/domain/path is trusted anywhere in this file)
+  # ---------------------------------------------------------------------------
+  WINDOW_NS   = 600000000000    # 10 minutes - stage clustering window
+  MAX_SESSION = 24              # bounded session expansion
+  MAX_PRIOR   = 25              # bounded per-instance history
+
+  # Detection aid only: TLD labels that make an impersonated token unambiguous.
+  COMMON_TLD = ["com","net","org","io","co","ai","app","dev","tv","me","info",
+                "biz","xyz","top","site","online","cloud","edu","gov","ru",
+                "cn","br","uk","de","fr","jp","in","us","nl","it","es","pl",
+                "ca","au","kr","tr","se","ch","ir","za"]
+
+  ASSET_EXT = [".png",".jpg",".jpeg",".webp",".bmp",".gif",".tif",".tiff",
+               ".ppm",".avif",".safetensors",".bin",".pt",".onnx"]
+
+  DOMAIN_RE = r"[A-Za-z0-9][A-Za-z0-9\-]*(?:\.[A-Za-z0-9\-]+)+"
+  PY_RE     = r"(?i)(python[0-9]*|ipython|jupyter|conda|pipenv|poetry)"
+
+  # ---------------------------------------------------------------------------
+  # Pure helpers - string only, no graph / log calls (relevance gate must be cheap)
+  # ---------------------------------------------------------------------------
+  def pct_norm(s):
+      t = re.replace("%40", s, "@")
+      t = re.replace("%2[eE]", t, ".")
+      t = re.replace("%3[aA]", t, ":")
+      return t
+
+  def authority_of(u):
+      s = pct_norm(u)
+      p = s.find("://")
+      if p >= 0:
+          s = s[p+3:]
+      cut = len(s)
+      for d in ["/", "?", "#"]:
+          i = s.find(d)
+          if i >= 0 and i < cut:
+              cut = i
+      return s[:cut]
+
+  def scheme_of(u):
+      p = u.find("://")
+      if p > 0:
+          return u[:p].lower()
+      return "https"
+
+  def last_index(s, ch):
+      idx = -1
+      for i in range(len(s)):
+          if s[i:i+1] == ch:
+              idx = i
+      return idx
+
+  def host_of(hostport):
+      h = hostport
+      if h.startswith("["):
+          e = h.find("]")
+          if e > 0:
+              return h[1:e].lower()
+      c = h.find(":")
+      if c >= 0:
+          h = h[:c]
+      return h.lower()
+
+  def last_label(tok):
+      parts = tok.split(".")
+      return parts[len(parts)-1].lower()
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts)-1]
+
+  def is_domain_like(tok):
+      parts = tok.split(".")
+      if len(parts) < 2:
+          return False
+      tld = last_label(tok)
+      if len(tld) < 2 or len(tld) > 24:
+          return False
+      return re.match(r"^[A-Za-z]+$", tld)
+
+  def same_site(host, tok):
+      h = host.lower()
+      t = tok.lower()
+      if h == "" or t == "":
+          return False
+      if h == t:
+          return True
+      if h.endswith("." + t):
+          return True
+      if t.endswith("." + h):
+          return True
+      return False
+
+  # Registrable-looking prefix embedded as a NON-final label:
+  #   www.youtube.com.attacker.tld -> "www.youtube.com"
+  # Requires >=4 labels and >=2 labels after the TLD marker, so example.com.au,
+  # foo.co.uk and other ccTLD second-level forms are never matched.
+  def embedded_tld_prefix(host):
+      labels = host.split(".")
+      n = len(labels)
+      if n < 4:
+          return ""
+      for i in range(1, n - 2):
+          if labels[i] in COMMON_TLD:
+              return ".".join(labels[:i+1])
+      return ""
+
+  def is_asset_path(p):
+      lp = p.lower()
+      for x in ASSET_EXT:
+          if lp.endswith(x):
+              return True
+      if lp.find("/resolve/") >= 0:
+          return True
+      return False
+
+  def ev_edge(kind, actor_path, target, ts):
+      return {
+          "from":     "process://" + actor_path,
+          "to":       target,
+          "kind":     kind,
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
+      }
+
+  # ---------------------------------------------------------------------------
+  def run():
+      # -- 1. RELEVANCE GATE (pure string checks on meta) ----------------------
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+
+      url = meta.get("url", "")
+      if url == "":
+          return "allow"
+
+      auth     = authority_of(url)
+      at       = last_index(auth, "@")
+      userinfo = ""
+      hostport = auth
+      if at >= 0:
+          userinfo = auth[:at]
+          hostport = auth[at+1:]
+
+      real_host = meta.get("host", "").lower()
+      if real_host == "":
+          real_host = host_of(hostport)
+      if real_host == "":
+          return "allow"
+
+      backslash = (auth.find("\\") >= 0)
+
+      # Class A - domain-shaped userinfo impersonating another origin.
+      impersonated = ""
+      strong       = False
+      if userinfo != "":
+          user = userinfo
+          c = user.find(":")
+          if c >= 0:
+              user = user[:c]
+          # e-mail style login (alice@corp.com:token@host) is credential material,
+          # not origin impersonation - shape filter, not a host allowlist.
+          email_login = (user.find("@") >= 0)
+          if not email_login:
+              for t in re.find_all(DOMAIN_RE, userinfo):
+                  if not is_domain_like(t):
+                      continue
+                  if same_site(real_host, t):
+                      continue
+                  impersonated = t.lower()
+                  if last_label(t) in COMMON_TLD:
+                      strong = True
+                  break
+
+      # Class B - startswith() prefix confusion inside the hostname itself.
+      prefix_conf = embedded_tld_prefix(real_host)
+
+      if impersonated == "" and prefix_conf == "" and not backslash:
+          return "allow"
+
+      path  = meta.get("path", "")
+      asset = is_asset_path(path)
+      ets   = int(meta.get("event_ts", "0"))
+
+      # -- 2. ANCHOR on the exact triggering instance --------------------------
+      cp = int(meta.get("caller_pid", "0"))
+      inst = None
+      if cp > 0:
+          inst = proc_instance(cp, ets)
+
+      if inst == None:
+          # Degraded attribution: never guess a lineage. Only surface the
+          # unambiguous userinfo-impersonation case, flagged as degraded.
+          if not strong:
+              return "allow"
+          ap = meta.get("agent_name", "")
+          if ap == "":
+              ap = "unknown"
+          chain = new_chain("process://" + ap)
+          chain.append(step(
+              ev_edge("HTTP_REQUEST", ap, scheme_of(url) + "://" + real_host, ets),
+              stage_id="URL Validation Bypass",
+              stage_desc="URL userinfo impersonates " + impersonated +
+                         " but request resolved to " + real_host + path))
+          print("userinfo impersonation " + impersonated + " -> " + real_host +
+                " (attribution degraded, pid " + str(cp) + ")")
+          return {
+              "action": "report",
+              "reason": "URL username injection: authority claims " + impersonated +
+                        ", connection went to " + real_host + " (attribution degraded)",
+              "chain":  chain,
+          }
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+
+      caller_path = inst.get("actor_path", meta.get("agent_name", ""))
+      root_path   = lineage[len(lineage)-1].get("actor_path", caller_path)
+
+      # -- 3. SCOPE to this session only ---------------------------------------
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x.get("actor_start", "")
+
+      since = 0
+      if ets > WINDOW_NS:
+          since = ets - WINDOW_NS
+
+      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
+          if len(session) >= MAX_SESSION:
+              break
+          if e.get("parent_pid", "") in session:
+              session[e["actor_pid"]] = e.get("actor_start", "")
+
+      # Python / notebook interpreter anywhere in the caller's own lineage.
+      interp = ""
+      for x in lineage:
+          nm = base(x.get("actor_path", ""))
+          if re.find(PY_RE, nm) != None:
+              interp = x.get("actor_path", "")
+              break
+
+      # -- 4. CORROBORATING PRIOR STAGES (session-scoped, windowed, ordered) ---
+      prior_brand = None   # session also contacted the impersonated origin
+      prior_same  = None   # session already pulled other paths from the real host
+      for pid in session:
+          st = 0
+          if session[pid] != "":
+              st = int(session[pid])
+          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                              actor_start=st, since_ns=since, until_ns=ets,
+                              limit=MAX_PRIOR)
+          for e in rows:
+              h = e.get("host", "").lower()
+              if h == "":
+                  continue
+              if prior_brand == None and impersonated != "" and same_site(h, impersonated):
+                  prior_brand = e
+              if prior_same == None and h == real_host and e.get("path", "") != path:
+                  prior_same = e
+          if prior_brand != None and prior_same != None:
+              break
+
+      corroborated = (interp != "") or asset or (prior_brand != None) or (prior_same != None)
+
+      # -- 5. VERDICT ----------------------------------------------------------
+      variant = ""
+      if impersonated != "" and strong:
+          variant = "userinfo-impersonation"
+      elif impersonated != "" and corroborated:
+          variant = "userinfo-impersonation (weak TLD, corroborated)"
+      elif prefix_conf != "" and corroborated:
+          variant = "hostname prefix-confusion of " + prefix_conf
+      elif backslash and corroborated:
+          variant = "backslash authority obfuscation"
+
+      if variant == "":
+          return "allow"
+
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "?")))
+      lin = " -> ".join(names)
+
+      chain = new_chain("process://" + root_path)
+
+      if prior_brand != None:
+          chain.append(step(
+              ev_edge("HTTP_REQUEST", prior_brand.get("actor_path", caller_path),
+                      "https://" + prior_brand.get("host", ""),
+                      prior_brand.get("ts", str(ets))),
+              stage_id="Impersonated Origin Contacted",
+              stage_desc="same session earlier fetched the genuine origin " +
+                         prior_brand.get("host", "") + prior_brand.get("path", "")))
+
+      chain.append(step(
+          ev_edge("HTTP_REQUEST", caller_path,
+                  scheme_of(url) + "://" + real_host, ets),
+          stage_id="URL Validation Bypass",
+          stage_desc=variant + ": authority claims " +
+                     (impersonated if impersonated != "" else prefix_conf) +
+                     ", request resolved to " + real_host + path))
+
+      if prior_same != None:
+          chain.append(step(
+              ev_edge("HTTP_REQUEST", prior_same.get("actor_path", caller_path),
+                      "https://" + prior_same.get("host", ""),
+                      prior_same.get("ts", str(ets))),
+              stage_id="Attacker Origin Reuse",
+              stage_desc="same session already retrieved " +
+                         prior_same.get("path", "") + " from " + real_host))
+
+      detail = ""
+      if interp != "":
+          detail = detail + " interpreter=" + base(interp)
+      if asset:
+          detail = detail + " asset-path"
+
+      print("transformers url-validation bypass (" + variant + ") host=" +
+            real_host + " path=" + path + " lineage=" + lin + detail)
+
+      return {
+          "action": "report",
+          "reason": "Transformers-class URL validation bypass - " + variant +
+                    "; effective host " + real_host + path +
+                    "; session " + lin + detail,
+          "chain":  chain,
+      }
+
+  result = run()
