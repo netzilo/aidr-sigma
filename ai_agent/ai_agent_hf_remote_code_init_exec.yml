@@ -1,0 +1,251 @@
+title: HF Remote-Code Model Init Spawns Executable Payload
+id: 3f9c1d84-6b2e-4a57-9d31-c8e05a7b42f6
+status: experimental
+level: high
+description: |
+  Detects the runtime signature of a trust_remote_code bypass during model
+  initialization (the LightGlue / AutoConfig nested-load class of bug in
+  huggingface/transformers): an attacker-controlled model repository ships a
+  config.json that re-enables remote code, transformers materialises the
+  attacker's Python into the dynamic module cache
+  (~/.cache/huggingface/modules/transformers_modules/<repo>/*.py), imports it,
+  and that module's import-time side effect executes.
+
+  The engine exposes no LOADED_MODEL / EXECUTED_CODE edge and no load_model
+  event, so the rule reconstructs the sequence from the two signals that DO
+  exist: instance-scoped READ_FILE rows for the remote-code module (and the
+  untrusted hub config that authorised it) and the execute_process event for
+  the payload the imported module spawns.
+
+  Strictly instance-resolved: anchored on meta.caller_pid, resolved through
+  proc_instance -> proc_lineage, expanded only to child instances whose
+  (parent_pid, parent_start) exactly matches a member of this session, and
+  bounded to a 5-minute window ending at the triggering spawn. No attribution
+  is ever made across sessions or across recycled PIDs.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://huggingface.co/docs/transformers/en/custom_models
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+  - owasp.llm04
+falsepositives:
+  - Teams that deliberately load remote-code models (trust_remote_code=True by
+    policy) whose custom modeling code legitimately shells out at import time —
+    building CUDA/Triton kernels, running chmod +x on a bundled binary, or
+    invoking python -c for an extension autobuild (flash-attn style).
+  - Jupyter/Colab kernels where one cell imports a remote-code model and a later
+    cell in the same kernel runs !pip / !curl / !git within the 5-minute window;
+    same process lineage, unrelated intent.
+  - CI/CD runners that download a remote-code model and then execute unrelated
+    shell steps from the same runner shell inside the window.
+  - Vendor SDK wrappers that spawn ssh/scp to stage model weights to a
+    distributed-training node immediately after the first import.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(bash|sh|zsh|dash|ksh)\b\s+-c\s'
+      - '(?i)\b(curl|wget)\b\s'
+      - '(?i)\b(nc|ncat|socat)\b\s'
+      - '(?i)\bbase64\b\s+--?d'
+      - '(?i)\bpython[0-9.]*\b\s+-c\s'
+      - '(?i)\bchmod\b\s+[0-7+]*x'
+      - '(?i)\b(osascript|powershell|pwsh)\b'
+      - '(?i)\b(ssh|scp)\b\s'
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- constants (this rule's own window; never persisted) -------------------
+  WINDOW_NS       = 300000000000   # 5 min: repo download + init + payload spawn
+  MAX_SESSION     = 16             # bound the file-read fan-out
+  READ_LIMIT      = 800            # READ_FILE is high volume - always pid-scoped
+  EXEC_SCAN_LIMIT = 3000
+  SEEN_CAP        = 200
+
+  SPAWN_INDICATORS = [
+      r"(?i)\b(bash|sh|zsh|dash|ksh)\b\s+-c\s",
+      r"(?i)\b(curl|wget)\b\s",
+      r"(?i)\b(nc|ncat|socat)\b\s",
+      r"(?i)\bbase64\b\s+--?d",
+      r"(?i)\bpython[0-9.]*\b\s+-c\s",
+      r"(?i)\bchmod\b\s+[0-7+]*x",
+      r"(?i)\b(osascript|powershell|pwsh)\b",
+      r"(?i)\b(ssh|scp)\b\s",
+  ]
+
+  # ---- pure helpers (no graph / log calls) -----------------------------------
+  def spawn_is_suspicious(cmd):
+      for p in SPAWN_INDICATORS:
+          if re.find(p, cmd) != None:
+              return True
+      return False
+
+  def is_remote_code_module(lp):
+      # the dynamic-module cache is ONLY populated when remote code is trusted
+      return "transformers_modules" in lp and ".py" in lp
+
+  def is_hub_config(lp):
+      if not lp.endswith("config.json"):
+          return False
+      return ("models--" in lp) or ("/huggingface/" in lp) or ("/hub/" in lp)
+
+  def ev_edge(e, target):
+      t = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       target,
+          "kind":     e.get("kind", ""),
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def run():
+      # 1. RELEVANCE GATE - pure string checks on meta, no traversal ------------
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "" or not spawn_is_suspicious(cmd):
+          return "allow"
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+      trigger_ts = int(meta.get("event_ts", "0"))
+      if trigger_ts == 0:
+          return "allow"
+      since = trigger_ts - WINDOW_NS
+
+      # 2. ANCHOR on the exact triggering instance ------------------------------
+      inst = proc_instance(cp, trigger_ts)
+      if inst == None:
+          return "allow"          # degraded - never attribute on missing data
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # 3. SESSION SCOPE - lineage plus instance-exact descendants only ---------
+      session = {}
+      for x in lineage:
+          st = x.get("actor_start", "")
+          if st != "":
+              session[x["actor_pid"]] = st
+      if not session:
+          return "allow"
+
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                          until_ns=trigger_ts, limit=EXEC_SCAN_LIMIT)
+      for depth in range(3):
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              if pp == "" or pp not in session:
+                  continue
+              # (pid, start) equality - a recycled PID from another session
+              # can never be pulled into this session set
+              if e.get("parent_start", "") != session[pp]:
+                  continue
+              ap = e.get("actor_pid", "")
+              ast = e.get("actor_start", "")
+              if ap == "" or ast == "":
+                  continue
+              if ap not in session and len(session) < MAX_SESSION:
+                  session[ap] = ast
+
+      # 4. REQUIRED ANCHOR STAGE - remote-code module imported in-window --------
+      anchor = None
+      cfg    = None
+      for pid in session:
+          reads = query_events(kind="READ_FILE",
+                               actor_pid=int(pid), actor_start=int(session[pid]),
+                               since_ns=since, until_ns=trigger_ts,
+                               limit=READ_LIMIT)
+          for r in reads:
+              p = r.get("path", "")
+              if p == "":
+                  continue
+              lp = p.lower()
+              if anchor == None and is_remote_code_module(lp):
+                  anchor = r
+              if cfg == None and is_hub_config(lp):
+                  cfg = r
+          if anchor != None and cfg != None:
+              break
+
+      if anchor == None:
+          return "allow"          # no trust_remote_code materialisation -> no case
+
+      a_ts = int(anchor.get("ts", "0"))
+      if a_ts <= 0 or a_ts > trigger_ts or a_ts < since:
+          return "allow"          # ordering / window guard
+
+      # 5. one report per (session root, materialisation) -----------------------
+      root = lineage[len(lineage) - 1]
+      sig  = root.get("actor_pid", "") + ":" + root.get("actor_start", "") + ":" + str(a_ts)
+      seen = store_get("seen")
+      if seen == None:
+          seen = {}
+      if sig in seen:
+          return "allow"
+      if len(seen) > SEEN_CAP:
+          seen = {}
+      seen[sig] = str(trigger_ts)
+      if store_usage()["free"] > 8192:
+          store_set("seen", seen)
+
+      # 6. KILL CHAIN from event rows, instance-accurate ------------------------
+      chain = new_chain("process://" + root.get("actor_path", ""))
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "").split("/")[-1])
+      lin = " -> ".join(names)
+
+      apath = anchor.get("path", "")
+      if cfg != None and int(cfg.get("ts", "0")) <= a_ts:
+          chain.append(step(ev_edge(cfg, cfg.get("path", "")),
+                            stage_id="Untrusted Model Config",
+                            stage_desc="repo-supplied config read before remote-code import: " + cfg.get("path", "")))
+      chain.append(step(ev_edge(anchor, apath),
+                        stage_id="Remote Code Materialized",
+                        stage_desc="dynamic module imported from HF remote-code cache by " +
+                                   anchor.get("actor_path", "?") + ": " + apath))
+      if cfg != None and int(cfg.get("ts", "0")) > a_ts:
+          chain.append(step(ev_edge(cfg, cfg.get("path", "")),
+                            stage_id="Untrusted Model Config",
+                            stage_desc="repo-supplied config read during model init: " + cfg.get("path", "")))
+
+      trig = {
+          "from":     "process://" + lineage[0].get("actor_path", ""),
+          "to":       "process://spawned",
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trigger_ts),
+          "first_ts": str(trigger_ts),
+          "last_ts":  str(trigger_ts),
+          "cmdline":  cmd[:400],
+      }
+      chain.append(step(trig,
+                        stage_id="Code Execution",
+                        stage_desc="model-init lineage spawned payload: " + cmd[:200]))
+
+      print("remote-code module " + apath + " imported, then spawn via " + lin)
+      return {
+          "action": "report",
+          "reason": "Possible trust_remote_code bypass: HF dynamic module " + apath +
+                    " was imported and the same process lineage (" + lin +
+                    ") then spawned: " + cmd[:160],
+          "chain":  chain,
+      }
+
+  result = run()
