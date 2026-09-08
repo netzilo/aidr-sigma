@@ -1,0 +1,140 @@
+title: Xinference Llama3 Tool-Call eval() RCE Payload
+id: 7c3f9e14-2b6a-4d58-9f0c-5a1e8b47d3ce
+status: experimental
+level: high
+description: |
+  Detects the payload shape used to exploit Xinference's unsafe eval() in the Llama3
+  tool-call parser (extract_tool_calls -> eval of raw model output). Two single-event
+  surfaces are covered:
+
+    1. http_request  - a POST to a /completions inference endpoint whose body both
+       declares tool-calling (tools / tool_choice / tool_calls / function_call) AND
+       carries a Python eval-escape primitive (__import__, __builtins__, dunder class
+       walk, getattr(__import__(...), eval(compile(...)) TOGETHER WITH an execution or
+       exfiltration sink (os.system / popen / subprocess.* / os.exec* / pty.spawn /
+       socket.socket / urlopen / requests.get|post / open('/etc|/proc|...')).
+       All four selections must fire on the same event - a prompt that merely mentions
+       subprocess, or a tool-calling request with no eval gadget, does not match.
+
+    2. execute_process - post-exploitation, the eval() runs inside the Xinference
+       Python process; this branch fires only when the spawned command line is itself a
+       python -c invocation carrying an eval-escape primitive or a socket+subprocess
+       reverse-shell one-liner.
+
+  Report-only: a true positive is unauthenticated RCE on the inference host, but the
+  same byte patterns legitimately appear in security research, SAST review and malware
+  analysis traffic, so this rule raises an incident rather than breaking the endpoint.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://github.com/xorbitsai/inference
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://attack.mitre.org/techniques/T1190/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm05
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Surface 1: the exploit request itself ────────────────────────────────────
+  sel_http_ctx:
+    event_type: http_request
+    method: POST
+    path|contains:
+      - '/chat/completions'
+      - '/v1/completions'
+
+  # The vulnerable code path is only reached when tool-calling is requested.
+  sel_http_toolcall:
+    content|re:
+      - '"tools"\s*:\s*\['
+      - '"tool_choice"\s*:'
+      - '"tool_calls"\s*:\s*\['
+      - '"function_call"\s*:'
+
+  # An eval()-escape primitive - these dunder gadgets are near-absent from
+  # ordinary application code and are the hallmark of expression injection.
+  sel_eval_escape:
+    content|re:
+      - '__import__\s*\(\s*[''"]'
+      - '__builtins__\s*[\[\.]'
+      - '__class__\s*\.\s*__(?:mro|base|bases|subclasses)__'
+      - '__subclasses__\s*\(\s*\)'
+      - '__globals__\s*\['
+      - '\bgetattr\s*\(\s*__import__\s*\('
+      - '(?:\beval|\bexec)\s*\(\s*compile\s*\('
+
+  # ...paired with something the primitive can actually do: execute or exfiltrate.
+  sel_exec_sink:
+    content|re:
+      - '\b(?:system|popen|posix_spawnp?)\s*\(\s*[''"]'
+      - '\bsubprocess\s*\.\s*(?:Popen|run|call|check_output|check_call|getoutput)\s*\('
+      - '\bos\s*\.\s*exec[lv]p?e?\s*\('
+      - '\bpty\s*\.\s*spawn\s*\('
+      - '\bsocket\s*\.\s*socket\s*\('
+      - '\bos\s*\.\s*dup2\s*\('
+      - '\b(?:urlopen|urlretrieve)\s*\('
+      - '\brequests\s*\.\s*(?:get|post)\s*\('
+      - '\bopen\s*\(\s*[''"]/(?:etc|proc|root|var/run/secrets)/'
+
+  # ── Surface 2: the child process the eval() spawns ───────────────────────────
+  sel_proc_ctx:
+    event_type: execute_process
+
+  sel_proc_eval_payload:
+    command|re:
+      - '\b(?i:python)[0-9.]*\b[^\n]{0,160}-c[^\n]{0,240}__import__\s*\(\s*[''"]'
+      - '\b(?i:python)[0-9.]*\b[^\n]{0,160}-c[^\n]{0,240}__builtins__'
+      - '\b(?i:python)[0-9.]*\b[^\n]{0,160}-c[^\n]{0,240}(?:\beval|\bexec)\s*\(\s*(?:compile|input)\s*\('
+      - '\b(?i:python)[0-9.]*\b[^\n]{0,160}-c[^\n]{0,300}socket\s*\.\s*socket[^\n]{0,300}(?:subprocess|pty\s*\.\s*spawn|os\s*\.\s*dup2)'
+
+  # ── Benign-context suppression ───────────────────────────────────────────────
+  # Advisory / remediation / disclosure prose around the same byte patterns.
+  filter_docs:
+    content|re:
+      - '(?i)\bCVE-20[0-9]{2}-[0-9]{3,7}\b'
+      - '(?i)\bGHSA-[0-9a-z]{4}-[0-9a-z]{4}-[0-9a-z]{4}\b'
+      - '(?i)\bast\s*\.\s*literal_eval\b'
+      - '(?i)(?:security advisory|vulnerability (?:report|advisory|disclosure)|responsible disclosure|penetration test|red team exercise|threat model)'
+      - '(?i)(?:never|avoid|do not|don''t|dangerous to)\s+(?:ever\s+)?us(?:e|ing)\s+eval'
+      - '(?i)unsafe (?:use of )?eval'
+
+  # SAST / linter / test-suite traffic that legitimately ships vulnerable samples.
+  filter_tooling:
+    content|re:
+      - '(?i)\b(?:bandit|semgrep|codeql|sonarqube|snyk|pylint|ruff|mypy|dependabot|trivy)\b'
+      - '(?i)\bdef test_|\bpytest\b|\bunittest\b|assertRaises|\bconftest\.py\b'
+
+  # Templated / redacted payloads - documentation and tickets, not live exploits.
+  filter_placeholder:
+    content|re:
+      - '(?i)(?:your_command_here|<your[ _-]?command>|COMMAND[ _-]?HERE|REPLACE[ _-]?ME|PLACEHOLDER|<redacted>|\bXXXX\b)'
+
+  condition: >
+    ((sel_http_ctx and sel_http_toolcall and sel_eval_escape and sel_exec_sink)
+     or (sel_proc_ctx and sel_proc_eval_payload))
+    and not (filter_docs or filter_tooling or filter_placeholder)
+
+falsepositives:
+  - Authorised security research or patch validation firing the exploit at a lab
+    Xinference instance without any advisory/CVE text in the request body.
+  - A developer asking a tool-enabled coding assistant to explain, refactor or review
+    Python that genuinely uses __import__ plus subprocess or requests (dynamic plugin
+    loaders, build scripts) - suppressed only when linter/test markers are present.
+  - Malware-analysis and de-obfuscation workflows pasting captured Python payloads into
+    a tool-calling chat session.
+  - Notebook or REPL agents that legitimately spawn `python -c` with __import__ for
+    dynamic imports (execute_process branch).
+  - Incident-response runbooks or SOAR playbooks that embed the exploit string as
+    reference material in an inference request.
+
+action: report
