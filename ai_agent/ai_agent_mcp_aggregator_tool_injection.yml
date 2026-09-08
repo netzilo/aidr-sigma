@@ -1,0 +1,346 @@
+title: MCP Aggregator Shared-Server Tool Injection
+id: 7f3c1a92-4d6b-4a0e-9c58-2b1e7d64af03
+status: experimental
+level: medium
+description: |
+  Detects the behavioural footprint of a third-party MCP "combiner"/aggregator package
+  (e.g. an npm aggregator plus a companion pi-mcp-adapter) that runs as a shared server
+  and surfaces aggregated, un-enumerated third-party tools into an agent's tool set.
+
+  HONEST SCHEMA NOTE (answers the triage dissent): the engine has NO first-class
+  representation of tool discovery or tool aggregation. The event types 'load_plugin'
+  and 'tool_discovery' and the edge kinds AGGREGATE_TOOL / DISCOVER_TOOL /
+  LOAD_MCP_SERVER do not exist. This rule therefore does not claim to observe the
+  injection of tool-discovery directives directly. It reconstructs the aggregator's
+  observable side effects from edge kinds that DO exist:
+
+    (anchor, REQUIRED) the agent spawned a process whose command line / image names an
+                       MCP combiner, aggregator, hub, proxy, router or *-mcp-adapter
+                       package  ->  EXECUTE_PROCESS edge, 'cmdline' property
+    (stage A) that process fans out to >= 2 distinct upstream endpoints, which is what a
+              shared aggregation server does and what a single MCP server does not
+              ->  CONNECTS / HTTP_REQUEST edges from the aggregator process node
+    (stage B) the agent's TOOL_CALL surface concentrates behind one server name that is
+              either aggregator-named or exposes >= 5 distinct tool names
+              ->  TOOL_CALL edges + Tool.server / Tool.name
+    (stage C) a second spawn installs or launches the companion adapter / npx-fetches an
+              MCP package  ->  EXECUTE_PROCESS edge
+    (stage D) the agent acquired instruction content over MCP inside the same window
+              ->  ACQUIRED_SKILL edge with Skill.source == "mcp"
+
+  The anchor is mandatory and at least two of A-D must corroborate it inside a 15 minute
+  window of the triggering connection. Reporting only — this is a visibility gap, not a
+  confirmed compromise, and the same shape is produced by a legitimately deployed MCP hub.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://modelcontextprotocol.io/specification
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://genai.owasp.org/llmrisk/llm032025-supply-chain/
+tags:
+  - attack.initial_access
+  - attack.t1195.002
+  - attack.execution
+  - attack.t1059.007
+  - atlas.aml.t0010
+  - atlas.aml.t0053
+  - owasp.llm03
+  - owasp.llm06
+falsepositives:
+  - An intentionally deployed, vetted MCP hub or gateway (mcp-hub, metamcp, mcp-proxy,
+    an internal corporate MCP router) is behaviourally identical to a malicious combiner
+    - it spawns from the agent, fans out to several upstream MCP servers and concentrates
+    many tools behind one server name. The rule reports rather than blocks precisely
+    because this case cannot be separated from the attack by telemetry alone.
+  - Engineers building or testing MCP aggregation tooling locally, running `npx` against
+    their own combiner/adapter package. Mitigated only by the corroboration requirement
+    (anchor plus two stages) and the one-hour per-signature suppression, not eliminated.
+  - A single large legitimate MCP server (github, filesystem, jira) that genuinely exposes
+    five or more tools will satisfy stage B on its own; stage B alone can never fire the
+    rule because the aggregator-process anchor is required.
+  - A subprocess whose name coincidentally contains "proxy", "hub" or "router" (for example
+    a corporate HTTP proxy helper) spawned by the agent, if it also happens to reach two
+    endpoints. Mitigated by requiring the MCP token adjacent to the aggregator keyword in
+    most patterns and by requiring a second corroborating stage.
+  - Re-fires on every outbound connection from a long-lived aggregator are suppressed for
+    one hour per (agent, shared server, fan-out width) signature via the rule store.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_connect:
+    event_type: connects
+  condition: sel_connect
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Tunables ─────────────────────────────────────────────────────────────────
+  WINDOW_NS     = 900000000000      # 15 min: aggregator spawn must be recent
+  DEDUPE_NS     = 3600000000000     # 1 h suppression per aggregator signature
+  MIN_UPSTREAMS = 2                 # a shared server fans out; one MCP server does not
+  MIN_TOOLS     = 5                 # distinct tools concentrated behind one server
+  MIN_STAGES    = 2                 # corroboration required beyond the anchor
+  MAX_CANDS     = 200               # bound on process-tree walk
+
+  # Aggregator / combiner / adapter identifiers (narrowing only - no trust list here).
+  AGG_CMD = [
+      r"(?i)\bmcp[-_]?(combiner|combine|aggregator|aggregate|multiplexer|multiplex|hub|proxy|router|gateway)\b",
+      r"(?i)\b(combiner|aggregator|multiplexer)[-_]?mcp\b",
+      r"(?i)\bpi[-_]?mcp[-_]?adapter\b",
+      r"(?i)\bmcp[-_]?adapter\b",
+      r"(?i)mcp[^\n]{0,40}shared[-_]?server",
+      r"(?i)shared[-_]?server[^\n]{0,40}mcp",
+  ]
+  ADAPTER_CMD = [
+      r"(?i)\bpi[-_]?mcp[-_]?adapter\b",
+      r"(?i)\bmcp[-_]?adapter\b",
+  ]
+  INSTALL_CMD = [
+      r"(?i)\bnpx\b[^\n]{0,120}\bmcp\b",
+      r"(?i)\bnpm\b[^\n]{0,24}\b(install|exec|add)\b[^\n]{0,120}\bmcp\b",
+      r"(?i)\b(pnpm|yarn|bunx|bun)\b[^\n]{0,120}\bmcp\b",
+  ]
+
+  def any_match(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # ── Relevance gate: pure string checks on meta, no graph, no event log ───────
+  def is_relevant_event():
+      if meta.get("context_type", "") != "connects":
+          return False
+      if meta.get("protocol", "") == "udp":
+          return False            # MCP transports are TCP; UDP is DNS/mDNS noise
+      if meta.get("caller_pid", "0") == "0":
+          return False
+      return True
+
+  # Attribution only - annotates the finding, never widens or narrows what is allowed.
+  def lineage_paths():
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return []
+      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      if inst == None:
+          return []
+      out = []
+      for x in proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"])):
+          out.append(x.get("actor_path", ""))
+      return out
+
+  def agg_hit(e):
+      txt = e.get("cmdline", "")
+      p = node(e["to"])
+      if p != None:
+          txt = txt + " " + p.get("cmdline", "") + " " + p.get("path", "") + " " + p.get("name", "")
+      if not any_match(AGG_CMD, txt):
+          return None
+      return {"edge": e, "cmd": txt, "id": e["to"]}
+
+  # Aggregators are frequently one hop below the agent (agent -> node -> package).
+  def find_aggregator(aid):
+      seen = 0
+      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          if seen > MAX_CANDS:
+              return None
+          seen += 1
+          h = agg_hit(pe)
+          if h != None:
+              return h
+          for ge in edges(pe["to"], dir="out", kind="EXECUTE_PROCESS"):
+              if seen > MAX_CANDS:
+                  return None
+              seen += 1
+              h = agg_hit(ge)
+              if h != None:
+                  return h
+      return None
+
+  def collect_upstreams(agg_id):
+      ups = {}
+      ue = {}
+      for ce in edges(agg_id, dir="out", kind="CONNECTS"):
+          h = node(ce["to"])
+          if h == None:
+              continue
+          k = h.get("host", "") + ":" + h.get("port", "")
+          if k not in ups:
+              ups[k] = True
+              ue[k] = ce
+      for he in edges(agg_id, dir="out", kind="HTTP_REQUEST"):
+          u = node(he["to"])
+          if u == None:
+              continue
+          k = u.get("host", "")
+          if k == "" or k in ups:
+              continue
+          ups[k] = True
+          ue[k] = he
+      # The triggering connect races async ingest - take it from meta, not the log.
+      th = meta.get("host", "")
+      if th != "":
+          tk = th + ":" + meta.get("port", "")
+          if tk not in ups:
+              ups[tk] = True
+      return [ups, ue]
+
+  def shared_server(aid):
+      servers = {}
+      sedge = {}
+      for te in edges(aid, dir="out", kind="TOOL_CALL"):
+          t = node(te["to"])
+          if t == None:
+              continue
+          s = t.get("server", "")
+          n = t.get("name", "")
+          if s not in servers:
+              servers[s] = {}
+          servers[s][n] = True
+          if s not in sedge:
+              sedge[s] = te
+      # Prefer a server whose own name identifies it as an aggregator.
+      for s in servers:
+          if s != "" and any_match(AGG_CMD, s):
+              return [s, len(servers[s]), sedge.get(s, None)]
+      for s in servers:
+          if len(servers[s]) >= MIN_TOOLS:
+              return [s, len(servers[s]), sedge.get(s, None)]
+      return ["", 0, None]
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      now  = int(meta.get("event_ts", "0"))
+      lin  = lineage_paths()
+      seen = store_get("reported") or {}
+
+      for agent in graph(type="Process"):
+          if agent.get("agent", "0") != "1":
+              continue
+          aid = agent["id"]
+
+          # ── Anchor (REQUIRED): agent spawned an MCP aggregator/adapter ───────
+          hit = find_aggregator(aid)
+          if hit == None:
+              continue
+          agg_edge = hit["edge"]
+          agg_ts   = int(agg_edge.get("ts", "0"))
+          if now > 0 and agg_ts > 0 and (now - agg_ts) > WINDOW_NS:
+              continue                       # stale spawn, not this session's activity
+
+          agg_node = node(hit["id"])
+          agg_name = "?"
+          if agg_node != None:
+              agg_name = agg_node.get("name", agg_node.get("path", "?"))
+
+          chain  = new_chain(aid)
+          stages = []
+          chain.append(step(agg_edge,
+                            stage_id="Aggregator Spawn",
+                            stage_desc="agent spawned MCP aggregator/adapter process: " + agg_name))
+
+          # ── Stage A: shared-server fan-out to multiple upstreams ────────────
+          pair = collect_upstreams(hit["id"])
+          ups  = pair[0]
+          ue   = pair[1]
+          if len(ups) >= MIN_UPSTREAMS:
+              stages.append("fanout:" + str(len(ups)))
+              added = 0
+              for k in ue:
+                  if added >= 3:
+                      break
+                  chain.append(step(ue[k],
+                                    stage_id="Upstream Fan-out",
+                                    stage_desc="aggregator reached upstream endpoint: " + k))
+                  added += 1
+
+          # ── Stage B: tool surface concentrated behind one server ────────────
+          ss = shared_server(aid)
+          if ss[0] != "" and (ss[1] >= MIN_TOOLS or any_match(AGG_CMD, ss[0])):
+              stages.append("toolsurface:" + ss[0] + "/" + str(ss[1]))
+              if ss[2] != None:
+                  chain.append(step(ss[2],
+                                    stage_id="Aggregated Tool Surface",
+                                    stage_desc=str(ss[1]) + " distinct tools invoked through one server: " + ss[0]))
+
+          # ── Stage C: companion adapter / npx-fetched MCP package ────────────
+          scan = 0
+          for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+              if scan > MAX_CANDS:
+                  break
+              scan += 1
+              if pe["to"] == hit["id"]:
+                  continue
+              cmd = pe.get("cmdline", "")
+              if any_match(ADAPTER_CMD, cmd) or any_match(INSTALL_CMD, cmd):
+                  stages.append("adapter")
+                  chain.append(step(pe,
+                                    stage_id="Adapter / Package Fetch",
+                                    stage_desc="companion MCP adapter or package fetch: " + cmd))
+                  break
+
+          # ── Stage D: instruction content arrived over MCP in-window ─────────
+          for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
+              s = node(se["to"])
+              if s == None or s.get("source", "") != "mcp":
+                  continue
+              sts = int(se.get("ts", "0"))
+              if now > 0 and sts > 0 and (now - sts) > WINDOW_NS:
+                  continue
+              stages.append("mcp-directive")
+              chain.append(step(se,
+                                stage_id="MCP Directive Loaded",
+                                stage_desc="instruction content acquired over MCP from: " + s.get("host", "?")))
+              break
+
+          if len(stages) < MIN_STAGES:
+              continue
+
+          # ── Triggering connection (from meta - never re-queried) ────────────
+          trig = {
+              "from": aid,
+              "to": "host://" + meta.get("protocol", "tcp") + ":" + meta.get("host", "") + ":" + meta.get("port", ""),
+              "kind": "CONNECTS",
+              "ts": str(now),
+              "first_ts": str(now),
+              "last_ts": str(now),
+          }
+          chain.append(step(trig,
+                            stage_id="Shared Server Connect",
+                            stage_desc="connection to " + meta.get("host", "?") + ":" + meta.get("port", "?") +
+                                       " from pid " + meta.get("caller_pid", "?")))
+
+          # ── Suppress repeats for the same aggregator signature ──────────────
+          sig  = aid + "|" + ss[0] + "|" + str(len(ups))
+          prev = seen.get(sig, 0)
+          if prev != 0 and now > 0 and (now - int(prev)) < DEDUPE_NS:
+              return "allow"
+          if store_usage()["free"] > 4096:
+              seen[sig] = now
+              store_set("reported", seen)
+
+          attrib = "attribution: degraded"
+          if len(lin) > 0:
+              names = []
+              for p in lin:
+                  names.append(p.split("/")[-1])
+              attrib = "caller lineage: " + " -> ".join(names)
+
+          print("MCP aggregator tool injection - " + ", ".join(stages) + "; " + attrib)
+          return {
+              "action": "report",
+              "reason": "Unvetted MCP aggregator '" + agg_name + "' spawned by agent is fanning out to " +
+                        str(len(ups)) + " upstream endpoint(s) and surfacing aggregated tools " +
+                        "(" + ", ".join(stages) + "). Tool origins are not individually enumerated or " +
+                        "approved. " + attrib,
+              "chain": chain,
+          }
+      return "allow"
+
+  result = run()
