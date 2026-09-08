@@ -1,0 +1,105 @@
+title: vLLM Derender Endpoint Unbounded Token Decode
+id: 3f6b1c94-2d5a-4e08-9b71-0a4c8d5e2716
+status: experimental
+level: medium
+description: |
+  Detects a single outbound HTTP POST to a vLLM derender endpoint
+  (/v1/completions/derender or /v1/chat/completions/derender) whose body carries a
+  caller-supplied GenerateResponse payload with an abusive token_ids list.
+
+  The derender handlers accept a caller-supplied list of GenerateResponseChoice objects
+  and call tokenizer.decode() on every token_ids array without enforcing model context
+  length, max_tokens, choice count, or response size. An authenticated client can drive
+  CPU and memory consumption in the render frontend and degrade availability for every
+  other client sharing the process.
+
+  Three mutually independent abuse indicators are accepted, all of which must co-occur
+  with a derender endpoint POST that actually contains a token_ids field:
+    1. sel_oversized_token_array  - one contiguous numeric token_ids array of at least
+       20,000 characters (roughly 4,000+ token IDs in a single choice), which exceeds
+       the max_tokens ceiling of any conventional serving configuration.
+    2. sel_out_of_range_token_id  - a token ID of 8 or more digits, larger than any real
+       tokenizer vocabulary, i.e. a fabricated or fuzzed ID list.
+    3. sel_choice_flood           - a choice index of 100 or greater, i.e. 101+ choices
+       submitted in one derender request (choice-count amplification).
+
+  Report-only: the rule observes a resource-abuse attempt against an inference frontend
+  and must not interrupt a legitimate long-form derender.
+author: Tanya
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://genai.owasp.org/llmrisk/llm102025-unbounded-consumption/
+  - https://atlas.mitre.org/techniques/AML.T0029
+  - https://attack.mitre.org/techniques/T1499/
+  - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
+tags:
+  - attack.impact
+  - attack.t1499
+  - attack.t1499.004
+  - atlas.aml.t0029
+  - owasp.llm10
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── endpoint scoping: derender POST only ────────────────────────────────────
+  sel_endpoint_path:
+    event_type: http_request
+    method: POST
+    path|re: '(?i)/completions/derender(?:/|\?|$)'
+  sel_endpoint_url:
+    event_type: http_request
+    method: POST
+    url.full|re: '(?i)/completions/derender(?:[/?#]|$)'
+
+  # ── payload shape: a real derender body carries token_ids ───────────────────
+  sel_derender_payload:
+    content|contains: '"token_ids"'
+
+  # ── abuse indicator 1: one contiguous token_ids array >= 20,000 chars ───────
+  # RE2 caps a single repeat count at 1000, so the span is expressed as sibling
+  # (never nested) {1000} blocks: 1000 + 19 * 1000 = 20,000 characters.
+  sel_oversized_token_array:
+    content|re: '"token_ids"\s*:\s*\[\s*[0-9][0-9,\s]{999}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}[0-9,\s]{1000}'
+
+  # ── abuse indicator 2: token ID wider than any real vocabulary (>= 8 digits) ─
+  sel_out_of_range_token_id:
+    content|re: '"token_ids"\s*:\s*\[[0-9,\s]{0,900}[0-9]{8,}'
+
+  # ── abuse indicator 3: 101+ choices in a single derender request ────────────
+  sel_choice_flood:
+    content|re: '"index"\s*:\s*[0-9]{3,}'
+
+  # ── filters: schema documents and templated payloads, not real decodes ──────
+  filter_non_numeric_token_ids:
+    content|re: '"token_ids"\s*:\s*\[\s*(?:"|\.\.\.|null|\{|\$)'
+  filter_api_schema_document:
+    content|re: '"(?:openapi|swagger|\$schema)"\s*:'
+  filter_schema_examples:
+    content|contains:
+      - 'x-codeSamples'
+      - '"examples":'
+      - '"$ref":'
+
+  condition: >
+    (sel_endpoint_path or sel_endpoint_url)
+    and sel_derender_payload
+    and (sel_oversized_token_array or sel_out_of_range_token_id or sel_choice_flood)
+    and not (filter_non_numeric_token_ids or filter_api_schema_document or filter_schema_examples)
+
+falsepositives:
+  - Offline or batch rendering pipeline legitimately derendering a single very long
+    generation (more than roughly 4,000 token IDs in one choice) produced with a high
+    max_tokens setting.
+  - Platform-team load or latency benchmarking of the render frontend against a staging
+    vLLM deployment, which deliberately submits oversized token_ids arrays.
+  - CI fuzzing or security regression suites that replay the oversized-derender payload
+    to verify a bounds check is in place.
+  - A client with corrupted or truncated local state emitting malformed token ID values
+    (matches the out-of-range indicator without malicious intent).
+  - A legitimate high-n serving configuration that returns more than 100 choices per
+    request, if such a deployment exists locally.
+
+action: report
