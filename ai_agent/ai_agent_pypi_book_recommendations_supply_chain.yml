@@ -1,0 +1,279 @@
+title: Malicious PyPI Distribution Acquisition - book-recommendations
+id: 7f3c1d8e-4b2a-4c96-9e57-2a1f0b6d84c3
+status: experimental
+level: high
+description: |
+  Detects an AI agent session fetching the known-malicious PyPI distribution
+  'book-recommendations' (a social-engineered package name posing as an
+  OpenLibrary book-recommendation helper) from a Python package index, and then
+  correlates that acquisition with the first outbound HTTP contact to a
+  destination the session had never reached before.
+
+  This rule deliberately does NOT claim to observe package installation or
+  post-install code execution. The engine has no INSTALLED_PACKAGE or
+  EXECUTE_CODE edge kind and never emits package_install / execute_code /
+  network_request events, so those primitives are not representable. The only
+  verified telemetry for this campaign is the HTTP_REQUEST edge produced when
+  the resolver pulls the distribution from the index. The rule therefore anchors
+  on that single high-specificity fact - the exact malicious distribution name
+  on a package-index host or path shape - and treats any subsequent
+  first-contact egress inside a 10 minute ordered window as a second,
+  corroborating stage rather than as an independent detection.
+
+  Because the payload is unconfirmed in the source report, the rule is
+  report-only. It produces an audit record and a kill chain for an analyst; it
+  never interferes with dependency resolution.
+author: Tanya
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://attack.mitre.org/techniques/T1195/001/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Threat-intel, malware-analysis or dependency-audit workflows that deliberately
+    fetch the malicious distribution in order to inspect it. The acquisition is
+    real, so the report is accurate, but it is not a compromise. Report-only
+    action means no work is interrupted.
+  - An internal PyPI mirror, proxy or quarantine service pre-fetching the package
+    on the agent's behalf. The index path shape still matches and the report is
+    factually correct, but the agent may never install the artifact.
+  - A legitimately named, unrelated distribution whose artifact filename happens
+    to contain the 'book-recommend' token (a fork, a vendored rename, or a
+    project with a genuinely similar name). Mitigated by requiring a
+    package-index host or a package-index path shape, so prose, blog posts,
+    documentation and search results that merely mention the name can never match.
+  - Stage 2 (post-acquisition first contact) can legitimately be a brand-new
+    destination the agent reached for the first time within ten minutes of the
+    fetch - a newly configured API, a new model endpoint, a CDN it had not used
+    before. Mitigated by requiring the malicious-package anchor first, strict
+    timestamp ordering, a 10 minute window, a requirement that the destination
+    URL node was first seen AFTER the acquisition, and a hard cap of five egress
+    reports per session.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  condition: sel_http
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---------------------------------------------------------------------------
+  # Tunables
+  # ---------------------------------------------------------------------------
+  WINDOW_NS          = 600000000000     # 10 minutes acquisition -> egress window
+  BUCKET_NS          = 3600000000000    # 1 hour dedup bucket
+  MAX_EGRESS_REPORTS = 5                # cap stage-2 reports per agent session
+
+  # Package-index HOSTS and PATH SHAPES.
+  # These are DETECTION anchors: they define where a Python distribution fetch
+  # is recognisable. Nothing here exempts any host from evaluation - this rule
+  # contains no allowlist and never permits traffic.
+  INDEX_HOSTS = ["pypi.org", "pypi.python.org", "test.pypi.org",
+                 "files.pythonhosted.org", "pythonhosted.org"]
+  INDEX_PATH_SHAPES = ["/simple/", "/packages/", "/pypi/", "/pypi-remote/",
+                       "/api/pypi/", "/repository/pypi", "/root/pypi/"]
+
+  # The campaign IOC, matched after separator normalisation so that
+  # book-recommendations / book_recommendations / book.recommendations and the
+  # wheel/sdist filename forms all match.
+  IOC_NAME_RE = "book[-]*recommend"
+  IOC_ALT_RE  = "openlibrary[-]*(book|recommend)"
+
+  # ---------------------------------------------------------------------------
+  # Pure helpers - string only, no graph / store / log calls
+  # ---------------------------------------------------------------------------
+  def host_is_index(h):
+      for d in INDEX_HOSTS:
+          if h == d or h.endswith("." + d):
+              return True
+      return False
+
+  def path_is_index(p):
+      lp = p.lower()
+      for s in INDEX_PATH_SHAPES:
+          if s in lp:
+              return True
+      return False
+
+  def normalize(s):
+      return re.replace("[_.]+", s.lower(), "-")
+
+  def ioc_in(target):
+      n = normalize(target)
+      if re.find(IOC_NAME_RE, n) != None:
+          return True
+      if re.find(IOC_ALT_RE, n) != None:
+          return True
+      return False
+
+  def synth_edge(frm, host, ts):
+      return {
+          "from": frm, "to": "https://" + host, "kind": "HTTP_REQUEST",
+          "method": meta.get("method", ""), "ts": str(ts),
+          "first_ts": str(ts), "last_ts": str(ts), "count": "1",
+      }
+
+  # ---------------------------------------------------------------------------
+  # Graph traversal - HTTP_REQUEST edges from monitored agent processes to URL
+  # nodes. HTTP_REQUEST is the only edge kind this campaign is observable on.
+  # ---------------------------------------------------------------------------
+  def find_agent_edge(h):
+      for a in graph(type="Process"):
+          if a.get("agent", "0") != "1":
+              continue
+          for e in edges(a["id"], dir="out", kind="HTTP_REQUEST"):
+              u = node(e["to"])
+              if u != None and u.get("host", "") == h:
+                  return [a["id"], e]
+      return [None, None]
+
+  def url_node_for(h):
+      for u in graph(type="URL"):
+          if u.get("host", "") == h:
+              return u
+      return None
+
+  # ---------------------------------------------------------------------------
+  # Small persistent state: the acquisition timestamp and report dedup keys.
+  # ---------------------------------------------------------------------------
+  def remember(key, value):
+      u = store_usage()
+      if u["free"] < 8192:
+          store_reset()          # state is short-lived by design (10 min window)
+      store_set(key, value)
+      return True
+
+  def stage1(agent, host, target, now):
+      bucket = str(now // BUCKET_NS)
+      prev = store_get("ioc:" + agent)
+      if prev == None or int(prev.get("ts", "0")) < now:
+          remember("ioc:" + agent, {"ts": str(now), "host": host, "url": target})
+
+      rk = "rep1:" + agent + "|" + bucket
+      if store_get(rk) != None:
+          return "allow"                     # already audited this hour
+      remember(rk, "1")
+
+      pair = find_agent_edge(host)
+      aid  = pair[0]
+      ev   = pair[1]
+      if aid == None:
+          aid = "process://" + agent
+      if ev == None:
+          ev = synth_edge(aid, host, now)
+
+      chain = new_chain(aid)
+      chain.append(step(ev,
+          stage_id="Malicious Package Acquisition",
+          stage_desc="package-index fetch of known-malicious distribution 'book-recommendations': " + target))
+      print("pypi IOC acquisition: " + target + " host=" + host + " agent=" + agent)
+      return {
+          "action": "report",
+          "reason": "Agent session fetched the known-malicious PyPI distribution 'book-recommendations' from " + host + " (" + target + "). Install and post-install execution are not observable in this telemetry - acquisition only.",
+          "chain": chain,
+      }
+
+  def stage2(agent, host, target, now):
+      rec = store_get("ioc:" + agent)
+      if rec == None:
+          return "allow"
+      t0 = int(rec.get("ts", "0"))
+      if t0 == 0 or now < t0:
+          return "allow"
+      if now - t0 > WINDOW_NS:
+          return "allow"                     # acquisition is stale, not a chain
+      if host == rec.get("host", ""):
+          return "allow"                     # still the index it came from
+
+      u = url_node_for(host)
+      if u != None:
+          fs = int(u.get("first_seen", "0"))
+          if fs != 0 and fs < t0:
+              return "allow"                 # pre-existing destination, not new
+          if int(u.get("fetch_count", "0")) > 8:
+              return "allow"                 # routine, high-volume destination
+
+      n = int(store_get("n2:" + agent) or 0)
+      if n >= MAX_EGRESS_REPORTS:
+          return "allow"
+
+      bucket = str(now // BUCKET_NS)
+      rk = "rep2:" + agent + "|" + host + "|" + bucket
+      if store_get(rk) != None:
+          return "allow"
+      remember(rk, "1")
+      remember("n2:" + agent, n + 1)
+
+      p1  = find_agent_edge(rec.get("host", ""))
+      p2  = find_agent_edge(host)
+      aid = p1[0]
+      if aid == None:
+          aid = p2[0]
+      if aid == None:
+          aid = "process://" + agent
+      e1 = p1[1]
+      if e1 == None:
+          e1 = synth_edge(aid, rec.get("host", ""), t0)
+      e2 = p2[1]
+      if e2 == None:
+          e2 = synth_edge(aid, host, now)
+
+      zt = "public"
+      if u != None and u.get("is_ztna_host", "0") == "1":
+          zt = "internal/ztna"
+
+      chain = new_chain(aid)
+      chain.append(step(e1,
+          stage_id="Malicious Package Acquisition",
+          stage_desc="package-index fetch of 'book-recommendations': " + rec.get("url", rec.get("host", "?"))))
+      chain.append(step(e2,
+          stage_id="Post-Acquisition First Contact",
+          stage_desc="first-ever HTTP contact to " + zt + " destination " + host + " (" + target + ") " + str((now - t0) // 1000000000) + "s after acquisition"))
+      print("post-acquisition first contact: " + host + " agent=" + agent)
+      return {
+          "action": "report",
+          "reason": "Session that fetched malicious PyPI distribution 'book-recommendations' made its first-ever HTTP contact with " + host + " within " + str((now - t0) // 1000000000) + "s. Consistent with post-install callout; execution itself is not observable in this telemetry.",
+          "chain": chain,
+      }
+
+  def run():
+      # Relevance gate - pure string checks on meta, no traversal.
+      if meta.get("context_type", "") != "http_request":
+          return "allow"
+      host = meta.get("host", "")
+      if host == "":
+          return "allow"
+
+      path   = meta.get("path", "")
+      target = meta.get("url", "")
+      if target == "":
+          target = path
+      now = int(meta.get("event_ts", "0"))
+      if now == 0:
+          return "allow"
+
+      agent = meta.get("agent_name", "")
+      if agent == "":
+          agent = "unresolved-agent"
+
+      is_index = host_is_index(host) or path_is_index(path)
+
+      # Stage 1 anchor: the exact malicious distribution on a package index.
+      if is_index:
+          if ioc_in(target):
+              return stage1(agent, host, target, now)
+          return "allow"                     # ordinary dependency resolution
+
+      # Stage 2 corroboration: only reachable after a stage-1 anchor.
+      return stage2(agent, host, target, now)
+
+  result = run()
