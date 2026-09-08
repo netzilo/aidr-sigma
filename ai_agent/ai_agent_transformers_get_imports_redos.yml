@@ -1,0 +1,138 @@
+title: Transformers get_imports ReDoS Exposure
+id: 3f9c1d7e-6b24-4a58-9e0d-7c41b8ad52f6
+status: experimental
+level: medium
+description: |
+  Detects the reachable exploitation vector for the ReDoS vulnerability in the
+  Hugging Face Transformers get_imports() helper in dynamic_module_utils.py
+  (catastrophic backtracking on the '\s*try\s*:.*?except.*?:' pattern; affects
+  4.49.x, fixed in 4.51.0).
+
+  LIMITATION - stated explicitly. The engine exposes no CPU-time, wall-duration,
+  regex-evaluation or resource-consumption telemetry, and the edge kinds
+  REGEX_EVALUATION / RESOURCE_EXHAUSTION and event type resource_consumption do
+  not exist in the schema. The backtracking event itself is therefore NOT
+  observable. This rule does not claim to see it. It fires on the only live
+  signal - execute_process command lines - and narrows to the three shapes that
+  put attacker-controlled module source in front of get_imports():
+
+    1. An interpreter or model-serving binary launched with remote code trust
+       enabled (trust_remote_code=True / --trust-remote-code). This is the sole
+       supported path by which get_imports() parses source the operator did not
+       write, and therefore the sole path by which an attacker-crafted string
+       reaches the vulnerable regex.
+    2. A command line that names the vulnerable code path directly
+       (dynamic_module_utils, get_imports(), get_class_from_dynamic_module,
+       get_cached_module_file) - the shape of a proof-of-concept or a harness
+       driving the function with a crafted payload.
+    3. An installer command pinning transformers to a version inside the
+       vulnerable window (==/<=4.49.x, ==/<=4.50.x, <4.51), i.e. re-introducing
+       or holding the exposure.
+
+  Because a slow-but-benign import scan and a pathological parse are
+  indistinguishable in this data model, the verdict is report only. Treat a hit
+  as "this host has the vulnerable function reachable with untrusted input",
+  correlate with host CPU metrics out-of-band, and confirm the installed
+  transformers version before escalating.
+author: Selhan
+date: "2026-06-11"
+references:
+  - https://github.com/huggingface/transformers/blob/main/src/transformers/dynamic_module_utils.py
+  - https://github.com/huggingface/transformers/releases/tag/v4.51.0
+  - https://attack.mitre.org/techniques/T1499/
+tags:
+  - attack.impact
+  - attack.t1499
+  - atlas.aml.t0029
+  - owasp.llm10
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # (1) Remote code trust explicitly enabled - the only route by which
+  #     untrusted module source is handed to get_imports().
+  sel_trust_flag:
+    command|re:
+      - 'trust_remote_code"?\s*[=:]\s*"?(?:[Tt]rue|1)\b'
+      - '--trust-remote-code\b'
+
+  # Require an actual execution vector, not a bare mention of the keyword.
+  sel_runtime:
+    command|re:
+      - '(?i)(?:^|[\s/])(?:python[23]?(?:\.[0-9]+)?|ipython|pytest|uvicorn|gunicorn|torchrun|accelerate|deepspeed|transformers-cli|huggingface-cli|text-generation-launcher|vllm|lmdeploy|sglang|jupyter)\b'
+      - '(?i)(?:^|[\s/])\S+\.py\b'
+
+  # (2) Direct invocation of the vulnerable code path - PoC / exploit harness.
+  sel_vuln_codepath:
+    command|re:
+      - 'dynamic_module_utils'
+      - '\bget_imports\s*\('
+      - '\bget_class_from_dynamic_module\s*\('
+      - '\bget_cached_module_file\s*\('
+
+  # (3) Installer re-introducing a version inside the vulnerable window.
+  sel_install_verb:
+    command|re:
+      - '(?i)(?:^|[\s/])pip[0-9.]*\s+(?:-{1,2}[^\s]+\s+)*install\b'
+      - '(?i)(?:^|[\s/])uv\s+(?:pip\s+install|add)\b'
+      - '(?i)(?:^|[\s/])poetry\s+add\b'
+      - '(?i)(?:^|[\s/])(?:conda|mamba|micromamba)\s+install\b'
+  sel_vuln_pin:
+    command|re:
+      - '(?i)transformers(?:\[[^\]]*\])?\s*(?:==|<=)\s*4\.(?:49|50)(?:\.[0-9]+)?\b'
+      - '(?i)transformers(?:\[[^\]]*\])?\s*<\s*4\.51\b'
+
+  # ── Benign-shape suppression ────────────────────────────────────────────────
+  # Source inspection / editing - engineers grepping for the keyword or opening
+  # the vulnerable file are not executing it.
+  filter_read_only:
+    command|re: '(?i)^\s*(?:[^\s]*/)?(?:grep|egrep|fgrep|rg|ripgrep|ag|ack|cat|bat|less|more|head|tail|wc|awk|sed|echo|printf|man|which|whereis|file|diff|git|jq|code|vim|nvim|nano|emacs)\b'
+
+  # Help / version / dry-run probes never execute the parse.
+  filter_help_probe:
+    command|re: '(?:^|\s)(?:--help|--version|--dry-run)(?:\s|$)'
+
+  # Dependency and SAST scanners legitimately name vulnerable versions.
+  filter_dependency_audit:
+    command|re: '(?i)^\s*(?:[^\s]*/)?(?:pip-audit|safety|snyk|trivy|grype|osv-scanner|syft|bandit|semgrep)\b'
+
+  # A patched pin present on the same line means the operator is remediating,
+  # not re-introducing, the exposure.
+  filter_patched_pin:
+    command|re: '(?i)transformers(?:\[[^\]]*\])?\s*(?:>=|~=|==)\s*4\.(?:5[1-9]|[6-9][0-9]|[1-9][0-9]{2})'
+
+  # Project test suites routinely exercise dynamic-module fixtures with
+  # trust_remote_code enabled against local, non-attacker-controlled data.
+  filter_test_runner:
+    command|re:
+      - '(?i)^\s*(?:[^\s]*/)?(?:pytest|tox|nox|make)\b'
+      - '(?i)(?:^|\s)-m\s+(?:pytest|tox|nox)\b'
+
+  condition: >
+    sel_event and (
+    (sel_trust_flag and sel_runtime) or
+    sel_vuln_codepath or
+    (sel_install_verb and sel_vuln_pin)
+    ) and not (filter_read_only or filter_help_probe or filter_dependency_audit
+    or filter_patched_pin or filter_test_runner)
+falsepositives:
+  - ML engineers loading community Hugging Face models that legitimately require
+    custom code (trust_remote_code=True is the documented, required setting for a
+    large fraction of Hub models) - this is the dominant benign case and is why
+    the action is report, not block.
+  - vLLM, text-generation-inference, lmdeploy or SGLang deployments where
+    --trust-remote-code is baked into the standard launch configuration.
+  - CI or reproducibility pipelines that deliberately pin transformers==4.49.0
+    or 4.50.x for artifact parity, on hosts where get_imports() only ever parses
+    first-party module source.
+  - Security researchers or platform teams reproducing the advisory locally; the
+    command line is indistinguishable from exploitation.
+  - Vendored copies of transformers whose own test files are executed outside a
+    recognised test runner and therefore evade filter_test_runner.
+  - A hit is an exposure signal only - the rule cannot observe catastrophic
+    backtracking, so CPU exhaustion must be confirmed from host metrics.
+action: report
