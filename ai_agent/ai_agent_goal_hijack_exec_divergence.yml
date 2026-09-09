@@ -1,0 +1,370 @@
+title: Goal Hijack Execution Divergence (Instance-Resolved)
+id: 7f3c1d9e-4b2a-4f8e-9a61-2c5d8e0b7431
+status: experimental
+level: high
+description: |
+  Goal hijacking (ATLAS AML.T0051 / OWASP LLM01) has no direct telemetry in this
+  engine: there is no prompt_injection or goal_modification event, and no
+  RECEIVED_PROMPT / GOAL_HIJACKED / EXECUTED_MALICIOUS_ACTION edge. This rule does
+  NOT claim to observe the goal-state change. It observes the only live signal that
+  exists for this threat -- execute_process -- and looks for the downstream
+  execution signature a hijacked objective leaves behind inside ONE agent session:
+
+    anchor  : an externally-fetched directive is executed (remote content piped to
+              an interpreter, eval $(curl ...), base64 -d | sh, download+chmod +x)
+              -- i.e. the agent took its next instruction from the network;
+    OR      : the agent mutates its own directive surface (CLAUDE.md, AGENTS.md,
+              .cursorrules, copilot-instructions, .mcp.json, claude_desktop_config,
+              .claude/settings) -- i.e. the hijacked objective is being persisted;
+    then    : at least one objective-divergent class follows within the window --
+              directive mutation, credential harvesting, persistence, or covert
+              egress of file/command-substitution content.
+
+  Everything is anchored on meta.caller_pid, resolved through proc_instance() to an
+  exact (pid, start) instance, then proc_lineage() to the owning session root. Only
+  EXECUTE_PROCESS rows belonging to that lineage and its descendants are considered,
+  so evidence is never stitched across sessions or across PID reuse. The triggering
+  exec is read from meta (never re-queried) because the just-fired event races async
+  ingest. The verdict is report-only: this is a behavioural proxy for an
+  unobservable cause, and it is not safe to block on it.
+author: Evgen
+date: "2026-06-12"
+modified: "2026-06-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://atlas.mitre.org/techniques/AML.T0043
+  - https://genai.owasp.org/llmrisk/llm01-prompt-injection/
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.credential-access
+  - attack.t1552
+  - atlas.aml.t0051
+  - atlas.aml.t0043
+  - owasp.llm01
+  - owasp.llm06
+  - owasp.asi01
+falsepositives:
+  - Developer bootstrap run through the agent -- a vendor install one-liner
+    (remote script piped to a shell) whose installer then appends to ~/.zshrc or
+    registers a launch agent. Ingestion + persistence in one session, benign.
+  - Agent-driven repository onboarding that legitimately edits CLAUDE.md /
+    AGENTS.md / .cursorrules and, in the same session, reads a .env file or copies
+    a config -- directive mutation plus a divergence class, benign.
+  - Dotfile managers (chezmoi, stow, yadm) invoked by the agent, which fetch remote
+    dotfiles and then rewrite shell profiles and ~/.ssh/config.
+  - Backup or artefact-publish steps that tar/gzip a directory and pipe it to curl
+    or scp toward an internal store -- covert-egress class, benign intent.
+  - Operator-approved secret-rotation runbooks executed by the agent that read
+    ~/.aws/credentials or run `aws ... get-secret-value` and post the result onward.
+  - CI containers where the agent both installs tooling from the network and writes
+    service units in the same short window.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Goal-hijack execution signature — session-scoped, instance-resolved ─────
+  WINDOW_NS    = 600000000000      # 10 min correlation window
+  DEDUPE_NS    = 900000000000      # 15 min per-session report suppression
+  PRUNE_NS     = 86400000000000    # 24 h store retention
+  ROW_LIMIT    = 3000
+  CLASSIFY_CAP = 800
+
+  # Cheap single-regex prefilter (relevance gate + per-row gate).
+  QUICK_RE = r"(?i)(curl|wget|fetch|\bnc\b|ncat|netcat|scp|tee|sed|crontab|launchctl|systemctl|schtasks|base64|eval|chmod|claude\.md|agents\.md|gemini\.md|cursorrules|clinerules|windsurfrules|copilot-instructions|mcp\.json|mcp_settings|claude_desktop_config|/\.claude/|/\.codex/|\.aws/|\.ssh/|\.kube/|\.netrc|\.npmrc|\.pypirc|\.env|authorized_keys|launchagents|bashrc|zshrc|bash_profile|find-generic-password|print-access-token|get-session-token)"
+
+  # Anchor A — the agent took its next directive from the network and executed it.
+  INGEST_RE = [
+      r"(?i:curl|wget|fetch)\b[^|]{0,400}\|\s*(?:sudo\s+)?(?:bash|sh|zsh|dash|python[23]?|perl|ruby|node|osascript)\b",
+      r"(?i)\beval\s+['\x22]?\$\(\s*(?:curl|wget)\b",
+      r"(?i)\b(?:base64|openssl\s+enc)\b[^|]{0,200}(?:-d|--decode)[^|]{0,200}\|\s*(?:bash|sh|zsh|python[23]?|node|perl)\b",
+      r"(?i:curl|wget)\b[\s\S]{0,300}\bchmod\s+\+x\b",
+      r"(?i)\bpython[23]?\b[^\n]{0,300}-c[^\n]{0,300}(?:urllib|requests|urlopen)[^\n]{0,300}\bexec\s*\(",
+      r"(?i)\b(?:invoke-webrequest|iwr)\b[^\n]{0,200}\|\s*(?:iex|invoke-expression)\b",
+  ]
+
+  # Anchor B / divergence — the agent's own directive surface is being rewritten.
+  DIRECTIVE_FILE_RE = [
+      r"(?i)\b(?:CLAUDE|AGENTS|GEMINI)\.md\b",
+      r"(?i)(?:^|[/\s='\x22])\.(?:cursorrules|clinerules|windsurfrules|aiderrules)\b",
+      r"(?i)\.cursor/rules",
+      r"(?i)copilot-instructions",
+      r"(?i)(?:claude_desktop_config|mcp_settings)\.json",
+      r"(?i)(?:^|[/\s='\x22])\.mcp\.json",
+      r"(?i)/\.claude/(?:settings|commands|agents|skills)",
+      r"(?i)/\.codex/(?:config|instructions)",
+      r"(?i)/\.config/(?:goose|continue|aider)/",
+      r"(?i)\bsystem[_-]?prompt\b",
+  ]
+  WRITE_VERB_RE = [
+      r">>",
+      r"(?i)\btee\b",
+      r"(?i)\bsed\s+-i\b",
+      r"(?i)\bpatch\b",
+      r"(?i)\bcp\b",
+      r"(?i)\bmv\b",
+      r"(?i)\bdd\b[^\n]{0,80}\bof=",
+      r"(?i)\btruncate\b",
+      r"(?i)\bcat\s*>",
+      r"(?i)\bprintf\b[^\n]{0,200}>",
+      r"(?i)\becho\b[^\n]{0,300}>",
+      r"(?i)\bpython[23]?\b[^\n]{0,300}\bopen\s*\([^\n]{0,120}['\x22](?:w|a)",
+  ]
+
+  # Divergence — credential harvesting.
+  CRED_RE = [
+      r"(?i)\b(?:cat|bat|less|head|tail|grep|rg|strings|xxd|base64|tar|zip|cp|scp|curl|python[23]?)\b[^\n]{0,300}/\.aws/credentials",
+      r"(?i)\b(?:cat|bat|head|grep|rg|base64|xxd|cp|scp|tar|curl)\b[^\n]{0,300}/\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)",
+      r"(?i)\b(?:cat|grep|rg|base64|cp|scp|curl)\b[^\n]{0,300}/\.(?:netrc|npmrc|pypirc)\b",
+      r"(?i)\b(?:cat|grep|rg|base64|cp|scp|curl|tar)\b[^\n]{0,300}/\.kube/config\b",
+      r"(?i)\b(?:cat|base64|xxd|curl|scp|tar|zip|grep|rg)\b[^\n]{0,200}[/\s]\.env(?:\.[a-z]+)?\b",
+      r"(?i)\bsecurity\b[^\n]{0,120}\bfind-(?:generic|internet)-password\b",
+      r"(?i)\bgcloud\b[^\n]{0,120}\bprint-(?:access|identity)-token\b",
+      r"(?i)\baws\b[^\n]{0,120}\b(?:get-session-token|get-secret-value)\b",
+      r"(?i)\b(?:env|printenv)\b\s*\|\s*(?:curl|nc\b|ncat\b|base64|grep\s+-i\s+(?:key|token|secret))",
+      r"(?i)/\.config/gh/hosts\.yml",
+  ]
+
+  # Divergence — persistence of the hijacked objective.
+  PERSIST_RE = [
+      r"(?i)>>\s*[^\s|&;]{0,120}/?\.(?:bashrc|zshrc|bash_profile|zprofile|zshenv|profile)\b",
+      r"(?i)\b(?:tee|sed\s+-i)\b[^\n]{0,200}/?\.(?:bashrc|zshrc|bash_profile|zprofile|profile)\b",
+      r"(?i)(?:>>|\btee\b)[^\n]{0,200}authorized_keys",
+      r"(?i)\bcrontab\b\s+(?:-e\b|-\s|-$)",
+      r"(?i)\|\s*crontab\b",
+      r"(?i)\b(?:launchctl\s+(?:load|bootstrap)|systemctl\s+(?:--user\s+)?enable|schtasks\s+/create)\b",
+      r"(?i)/LaunchAgents/[^\s]+\.plist",
+      r"(?i)/etc/systemd/system/[^\s]+\.service",
+  ]
+
+  # Divergence — covert egress of file or command-substitution content.
+  EGRESS_RE = [
+      r"(?i:curl)\b[^\n]{0,300}\s-(?:d|F)\s*@",
+      r"(?i:curl)\b[^\n]{0,300}\s--data(?:-binary|-raw|-urlencode)?\s*@",
+      r"(?i:curl)\b[^\n]{0,300}\s-T\s*[^\s]",
+      r"(?i)\b(?:nc|ncat|netcat)\b\s+[^\n]{0,120}\s\d{2,5}\b",
+      r"(?i)\b(?:base64|gzip|tar|zip|xxd)\b[^\n]{0,200}\|\s*(?:curl|wget|nc\b|ncat\b|openssl\s+s_client|ssh\b)",
+      r"(?i)\bscp\b\s+[^\n]{0,200}\s[^\s]+@[^\s:]+:",
+      r"(?i:curl|wget)\b[^\n]{0,300}\?[^\s]{0,120}=\$\(",
+      r"(?i:curl|wget)\b[^\n]{0,300}\$\((?:cat|base64|whoami|env|printenv)\b",
+  ]
+
+  DIVERGENCE = ["Directive Mutation", "Credential Harvest", "Persistence", "Covert Egress"]
+
+  def any_match(pats, s):
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def is_directive_mutation(cmd):
+      if not any_match(DIRECTIVE_FILE_RE, cmd):
+          return False
+      return any_match(WRITE_VERB_RE, cmd)
+
+  def classify(cmd):
+      out = []
+      if any_match(INGEST_RE, cmd):
+          out.append("Directive Ingestion")
+      if is_directive_mutation(cmd):
+          out.append("Directive Mutation")
+      if any_match(CRED_RE, cmd):
+          out.append("Credential Harvest")
+      if any_match(PERSIST_RE, cmd):
+          out.append("Persistence")
+      if any_match(EGRESS_RE, cmd):
+          out.append("Covert Egress")
+      return out
+
+  def short(s):
+      s = s.replace("\n", " ")
+      if len(s) > 180:
+          return s[:180] + "..."
+      return s
+
+  def ev_edge(e):
+      frm = e.get("parent_path", "")
+      if frm == "":
+          frm = e.get("actor_path", "")
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + frm,
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def sort_by_ts(items):
+      out = []
+      for it in items:
+          pos = len(out)
+          for i in range(len(out)):
+              if it["ts"] < out[i]["ts"]:
+                  pos = i
+                  break
+          out = out[:pos] + [it] + out[pos:]
+      return out
+
+  def earliest(stages, cls, min_ts):
+      best = None
+      for s in stages:
+          if s["class"] != cls:
+              continue
+          if s["ts"] < min_ts:
+              continue
+          if best == None or s["ts"] < best["ts"]:
+              best = s
+      return best
+
+  def run():
+      # ── 1. relevance gate: pure string work on meta only ────────────────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      trig_cmd = meta.get("content", "")
+      if trig_cmd == "":
+          return "allow"
+      if re.find(QUICK_RE, trig_cmd) == None:
+          return "allow"
+      trig_classes = classify(trig_cmd)
+      if not trig_classes:
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ──────────────────────────
+      ev_ts = int(meta.get("event_ts", "0"))
+      cp    = int(meta.get("caller_pid", "0"))
+      if cp == 0 or ev_ts == 0:
+          return "allow"
+      inst = proc_instance(cp, ev_ts)
+      if inst == None:
+          return "allow"          # degraded — re-fires once the create row lands
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+      root  = lineage[len(lineage) - 1]
+      since = ev_ts - WINDOW_NS
+
+      # ── 3. per-session report suppression ───────────────────────────────────
+      skey = "s:" + root.get("actor_pid", "?") + ":" + root.get("actor_start", "?")
+      seen = store_get("sessions") or {}
+      last = seen.get(skey, 0)
+      if last != 0 and (ev_ts - int(last)) < DEDUPE_NS:
+          return "allow"
+
+      # ── 4. scope: this lineage plus its descendants inside the window ───────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ev_ts,
+                          limit=ROW_LIMIT)
+      for _round in range(4):
+          added = 0
+          for e in rows:
+              pp = e.get("parent_pid", "")
+              ap = e.get("actor_pid", "")
+              if pp in session and ap != "" and ap not in session:
+                  session[ap] = True
+                  added += 1
+          if added == 0:
+              break
+
+      # ── 5. stages: session-scoped, windowed, ordered ────────────────────────
+      stages    = []
+      inspected = 0
+      for e in rows:
+          if e.get("actor_pid", "") not in session:
+              continue
+          cmd = e.get("cmdline", "")
+          if cmd == "":
+              cmd = e.get("actor_path", "")
+          if re.find(QUICK_RE, cmd) == None:
+              continue
+          inspected += 1
+          if inspected > CLASSIFY_CAP:
+              break
+          for c in classify(cmd):
+              stages.append({"class": c, "ts": int(e.get("ts", "0")), "ev": e, "cmd": cmd})
+
+      # the TRIGGERING exec comes from meta, never from a log re-query
+      trig_ev = {
+          "ts":          str(ev_ts),
+          "actor_pid":   inst.get("actor_pid", ""),
+          "actor_start": inst.get("actor_start", ""),
+          "actor_path":  inst.get("actor_path", ""),
+          "parent_path": inst.get("parent_path", ""),
+          "cmdline":     trig_cmd,
+          "kind":        "EXECUTE_PROCESS",
+      }
+      for c in trig_classes:
+          stages.append({"class": c, "ts": ev_ts, "ev": trig_ev, "cmd": trig_cmd})
+
+      # ── 6. verdict: required anchor + ordered divergence ────────────────────
+      anchor      = None
+      anchor_kind = ""
+      ingest      = earliest(stages, "Directive Ingestion", 0)
+      directive   = earliest(stages, "Directive Mutation", 0)
+      if ingest != None:
+          anchor      = ingest
+          anchor_kind = "network-sourced directive executed"
+      elif directive != None:
+          anchor      = directive
+          anchor_kind = "agent directive surface rewritten"
+      if anchor == None:
+          return "allow"
+
+      evidence = [anchor]
+      classes  = []
+      for c in DIVERGENCE:
+          if ingest == None and c == "Directive Mutation":
+              continue                      # already the anchor on the alt path
+          floor = anchor["ts"]              # ordering: divergence follows anchor
+          if ingest == None:
+              floor = 0                     # alt path: order-agnostic in-window
+          s = earliest(stages, c, floor)
+          if s != None:
+              evidence.append(s)
+              classes.append(c)
+      if len(classes) < 1:
+          return "allow"
+
+      # ── 7. kill chain, rooted at the session owner ──────────────────────────
+      ordered = sort_by_ts(evidence)
+      chain   = new_chain("process://" + root.get("actor_path", ""))
+      for s in ordered:
+          chain.append(step(ev_edge(s["ev"]),
+                            stage_id=s["class"],
+                            stage_desc=short(s["cmd"])))
+
+      names = []
+      for x in lineage:
+          names.append(x.get("actor_path", "?").split("/")[-1])
+      lin = " -> ".join(names)
+      note = ""
+      if len(lineage) < 2:
+          note = " [attribution: degraded — lineage truncated]"
+
+      # ── 8. persist suppression state (quota-guarded) ────────────────────────
+      seen[skey] = ev_ts
+      pruned = {}
+      for k in seen:
+          if (ev_ts - int(seen[k])) < PRUNE_NS:
+              pruned[k] = seen[k]
+      if store_usage()["free"] > 8192:
+          store_set("sessions", pruned)
+
+      reason = ("Goal-hijack execution signature (report-only): anchor=" +
+                anchor_kind + "; divergence=" + ", ".join(classes) +
+                "; session=" + lin + note)
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
