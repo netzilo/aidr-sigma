@@ -1,0 +1,329 @@
+title: HF Transformers Cross-Repo Remote Code Fetch
+id: b7c41f2e-9d38-4a6c-8f15-2e6b9a0d47c3
+status: experimental
+level: critical
+description: |
+  Detects the HuggingFace transformers remote-code-execution chain in which a
+  malicious config.json (e.g. an attacker-controlled repository id planted in
+  _attn_implementation_internal or auto_map) causes from_pretrained() to download
+  and execute Python from a repository that is NOT the repository the model
+  configuration was loaded from.
+
+  Instance-resolved: the rule anchors on meta["caller_pid"], resolves the exact
+  process instance with proc_instance(), establishes ownership with
+  proc_lineage(), expands that lineage into a single session (lineage plus the
+  processes its members spawned) and then reads prior stages from the event log
+  with query_events() scoped to those pids only. Nothing is ever attributed
+  across sessions and no path-keyed graph node walk is performed.
+
+  Ordered stages, all inside one 15-minute window and one session:
+    1. Model Config Fetch          HTTP_REQUEST to <repoA>/resolve/.../config.json
+    2. Cross-Repo Remote Code      HTTP_REQUEST to <repoB>/resolve/.../*.py where
+       Fetch  (REQUIRED anchor)    repoB is not any repo whose config.json this
+                                   session loaded, and t1 >= t0
+    3. Post-Exploitation Execution EXECUTE_PROCESS by a session member running an
+       (raises tier to CONFIRMED)  egress/persistence tool after t1
+
+  Ordinary trust_remote_code usage fetches its *.py from the same repository as
+  its config.json and is therefore never reported. Report-only: this rule
+  surfaces the chain for an analyst, it does not interfere with model loading.
+author: Selhan
+date: "2026-06-11"
+modified: "2026-06-11"
+references:
+  - https://huggingface.co/docs/transformers/en/custom_models
+  - https://genai.owasp.org/llmrisk/llm03-supply-chain/
+  - https://atlas.mitre.org/techniques/AML.T0010
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1195.001
+  - attack.t1105
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Documented cross-repository remote code references ("org/repo--modeling_x.MyClass"
+    in auto_map). Uncommon, and reported only at SUSPECTED tier with no
+    post-exploitation stage attached.
+  - A repository whose config.json was already cached on disk, so only its *.py
+    module is re-fetched. No config repo is observable, so the rule falls to the
+    DEGRADED tier and requires an egress/persistence spawn in the same session
+    before it reports at all.
+  - Self-hosted hub mirrors or HF_ENDPOINT proxies that rewrite the path prefix so
+    the config and the code appear to come from different repository ids.
+  - Build tooling for custom CUDA kernels that shells out during model load; the
+    post-exploitation matcher deliberately excludes compilers/ninja/nvcc and only
+    matches network-egress and persistence utilities.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_hub_artifact:
+    event_type: http_request
+    path|contains: '/resolve/'
+  sel_postex_spawn:
+    event_type: execute_process
+    command|re: '(?i)\b(curl|wget|nc|ncat|socat|certutil|osascript|powershell|base64|chmod)\b'
+  condition: sel_hub_artifact or sel_postex_spawn
+action: report
+on_timeout: allow
+on_error:   allow
+script: |
+  # ── Constants (no trust lists; detection scope only) ──────────────────────
+  WINDOW_NS = 900000000000     # 15 minutes: config load -> code fetch -> exec
+  DEDUP_NS  = 3600000000000    # 1 hour retention for the reported-set
+  SLACK_NS  = 2000000000       # tolerance for the trigger timestamp
+
+  POSTEX = [
+      r"\bcurl\b", r"\bwget\b", r"\bnc\b", r"\bncat\b", r"\bsocat\b",
+      r"\bcertutil\b", r"\bosascript\b", r"\bpowershell(\.exe)?\b",
+      r"\bbase64\s+-{1,2}d\b", r"\bchmod\s+\+x\b",
+      r"\bsh\s+-c\b[^\n]*\|", r"\bbash\s+-c\b[^\n]*\|",
+  ]
+
+  # ── Pure helpers (no graph / log / fs calls) ──────────────────────────────
+  def is_postex(cmd):
+      for p in POSTEX:
+          if re.find(p, cmd) != None:
+              return True
+      return False
+
+  def repo_of(p):
+      i = p.find("/resolve/")
+      if i < 0:
+          return ""
+      r = p[:i]
+      if r.startswith("/"):
+          r = r[1:]
+      if r.startswith("datasets/"):
+          r = r[9:]
+      return r.lower()
+
+  def short_names(lin):
+      out = []
+      for x in lin:
+          out.append(x.get("actor_path", "?").split("/")[-1])
+      return " -> ".join(out)
+
+  def ev_edge(e):
+      ts = e.get("ts", "0")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
+      }
+
+  # ── Relevance gate: pure string checks on meta, no traversal ─────────────
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          p = meta.get("path", "")
+          if "/resolve/" not in p:
+              return False
+          lp = p.lower()
+          if lp.endswith(".py"):
+              return True
+          if "config.json" in lp:
+              return True
+          return False
+      if ct == "execute_process":
+          return is_postex(meta.get("content", ""))
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      ct  = meta.get("context_type", "")
+      now = int(meta.get("event_ts", "0"))
+      cp  = int(meta.get("caller_pid", "0"))
+      if cp == 0 or now == 0:
+          return "allow"
+
+      # ── Anchor on the exact triggering instance ──────────────────────────
+      inst = proc_instance(cp, now)
+      if inst == None:
+          return "allow"                     # create row not landed yet; re-fires
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since = now - WINDOW_NS
+
+      # ── Session scope: lineage pids + processes they spawned ─────────────
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = True
+      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=4000)
+      for i in range(4):
+          for e in spawn_rows:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = True
+
+      # ── Prior stages from the log, scoped per session pid ────────────────
+      cfg  = []
+      code = []
+      for pid in session:
+          if pid == "" or pid == "0":
+              continue
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+                                since_ns=since, limit=200):
+              p = e.get("path", "")
+              if "/resolve/" not in p:
+                  continue
+              lp = p.lower()
+              if lp.endswith(".py"):
+                  code.append(e)
+              elif "config.json" in lp:
+                  cfg.append(e)
+
+      # ── The triggering event comes from meta, never from a log lookup ────
+      if ct == "http_request":
+          tp = meta.get("path", "")
+          te = {
+              "ts":         str(now),
+              "kind":       "HTTP_REQUEST",
+              "actor_pid":  str(cp),
+              "actor_path": inst.get("actor_path", ""),
+              "host":       meta.get("host", ""),
+              "path":       tp,
+              "target_id":  "https://" + meta.get("host", "") + tp,
+          }
+          if tp.lower().endswith(".py"):
+              code.append(te)
+          else:
+              cfg.append(te)
+
+      if not code:
+          return "allow"
+
+      # ── Which repos did this session load a model config from? ───────────
+      cfg_repos = {}
+      cfg_first = None
+      for e in cfg:
+          r = repo_of(e.get("path", ""))
+          if r == "":
+              continue
+          t = int(e.get("ts", "0"))
+          if r not in cfg_repos:
+              cfg_repos[r] = str(t)
+          elif t < int(cfg_repos[r]):
+              cfg_repos[r] = str(t)
+          if cfg_first == None or t < int(cfg_first.get("ts", "0")):
+              cfg_first = e
+
+      # ── REQUIRED anchor: *.py pulled from a repo the config did not name ─
+      anchor      = None
+      anchor_repo = ""
+      degraded    = False
+      for e in code:
+          t = int(e.get("ts", "0"))
+          if t < since or t > now + SLACK_NS:
+              continue
+          r = repo_of(e.get("path", ""))
+          if r == "":
+              continue
+          if len(cfg_repos) == 0:
+              if anchor == None:
+                  anchor      = e
+                  anchor_repo = r
+                  degraded    = True
+              continue
+          if r in cfg_repos:
+              continue                       # normal trust_remote_code: same repo
+          if cfg_first != None and int(cfg_first.get("ts", "0")) <= t:
+              anchor      = e
+              anchor_repo = r
+              degraded    = False
+              break
+
+      if anchor == None:
+          return "allow"
+      anchor_ts = int(anchor.get("ts", "0"))
+
+      # ── Optional stage: egress/persistence spawn after the code fetch ────
+      postex = None
+      for e in spawn_rows:
+          if e.get("actor_pid", "") not in session:
+              if e.get("parent_pid", "") not in session:
+                  continue
+          t = int(e.get("ts", "0"))
+          if t < anchor_ts or t > now + SLACK_NS:
+              continue
+          if is_postex(e.get("cmdline", "")):
+              postex = e
+              break
+      if ct == "execute_process" and postex == None and now >= anchor_ts:
+          cmd  = meta.get("content", "")
+          head = cmd.split(" ")[0]
+          postex = {
+              "ts":         str(now),
+              "kind":       "EXECUTE_PROCESS",
+              "actor_pid":  str(cp),
+              "actor_path": inst.get("actor_path", ""),
+              "cmdline":    cmd,
+              "target_id":  "process://" + head,
+          }
+
+      # ── Tier ─────────────────────────────────────────────────────────────
+      if degraded:
+          if postex == None:
+              return "allow"                 # not enough signal without a config repo
+          tier = "DEGRADED"
+      elif postex != None:
+          tier = "CONFIRMED"
+      else:
+          tier = "SUSPECTED"
+
+      # ── Dedup per (tier, repo, anchor) so one chain reports once ─────────
+      key  = tier + "|" + anchor_repo + "|" + str(anchor_ts)
+      seen = store_get("reported") or {}
+      if key in seen:
+          return "allow"
+      fresh = {}
+      for k in seen:
+          if now - int(seen[k]) < DEDUP_NS:
+              fresh[k] = seen[k]
+      fresh[key] = str(now)
+      if store_usage()["free"] > 8192:
+          store_set("reported", fresh)
+
+      # ── Kill chain, rooted at the session owner ──────────────────────────
+      root  = lineage[len(lineage) - 1].get("actor_path", "")
+      chain = new_chain("process://" + root)
+      if cfg_first != None and not degraded:
+          chain.append(step(ev_edge(cfg_first),
+              stage_id="Model Config Fetch",
+              stage_desc="model config.json loaded from hub repo '" +
+                         repo_of(cfg_first.get("path", "")) + "'"))
+      chain.append(step(ev_edge(anchor),
+          stage_id="Cross-Repo Remote Code Fetch",
+          stage_desc="python module fetched from repo '" + anchor_repo +
+                     "' (" + anchor.get("path", "") +
+                     ") which no config.json in this session referenced — " +
+                     "_attn_implementation_internal / auto_map repo-id redirect"))
+      if postex != None:
+          chain.append(step(ev_edge(postex),
+              stage_id="Post-Exploitation Execution",
+              stage_desc="session spawned egress/persistence tool: " +
+                         postex.get("cmdline", "")[:200]))
+
+      lin    = short_names(lineage)
+      reason = ("HF transformers remote-code RCE (" + tier + ") — session " + lin +
+                " fetched python module from hub repo '" + anchor_repo + "'")
+      if degraded:
+          reason = reason + " with no matching config.json fetch observed in this session"
+      else:
+          reason = reason + " that does not match any config.json repo loaded by this session"
+      if postex != None:
+          reason = reason + "; post-exploitation spawn: " + postex.get("cmdline", "")[:160]
+      if len(lineage) < 2:
+          reason = reason + " [attribution: degraded lineage]"
+      print(reason)
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
