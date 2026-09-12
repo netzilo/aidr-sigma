@@ -1,0 +1,307 @@
+title: Supply Chain — PyPI 'creativetasks' Acquisition and Execution (instance-resolved)
+id: 7c3f9a41-5b2e-4d68-9f0a-1e6b8c4d2a35
+status: experimental
+level: medium
+description: |
+  Observes the only part of the reported threat that this engine can actually see:
+  a process launch whose command line references the PyPI package 'creativetasks'
+  (an unverified, newly published package advertising a full-screen terminal chat /
+  coding-agent interface).
+
+  Triage dissent is answered explicitly, not ignored:
+    * The schema has no DOWNLOADED_FROM edge, no EXECUTED_CODE edge and no
+      package_installed event type, so package provenance cannot be modelled.
+      This rule therefore does NOT claim provenance. It infers acquisition only
+      from an in-session package-manager command line (pip/uv/pipx/poetry/... plus
+      an install/add/download/run verb plus the package token) observed on the
+      live execute_process stream.
+    * There is no confirmed malicious payload or IOC for this package. The rule is
+      report-only and can never block a build, an install or an editor. It exists to
+      give an analyst a session-scoped, instance-resolved record when the package is
+      first pulled in or first run, plus whatever corroborating behaviour the same
+      session actually produced (installer spawning a shell/network helper,
+      the package entrypoint reading credential-path files, non-installer egress).
+    * A bare mention of the string (grep, editor, README, log line) is discarded by
+      the relevance gate — a positive package-manager or entrypoint signature is
+      required before any traversal happens.
+
+  Attribution is instance-resolved: the verdict is anchored on meta.caller_pid,
+  resolved with proc_instance() and proc_lineage(), and every corroborating stage is
+  restricted to PIDs inside that one lineage (plus descendants spawned inside the
+  15-minute window). No cross-session attribution is possible.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://attack.mitre.org/techniques/T1195/002/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195.002
+  - attack.t1059.006
+  - atlas.aml.t0010
+  - owasp.llm03
+falsepositives:
+  - Engineer evaluating the tool on purpose (pipx run / uvx / pip install) — reported for triage, never blocked.
+  - Namespace collision with an internal or personally authored package of the same name installed from a private index.
+  - Malware analyst or supply-chain researcher deliberately installing the package in a sandbox or CI scanning job.
+  - CI/build agent resolving a lockfile that happens to pin a package matching the name pattern.
+  - The 'Credential Access' and 'Egress' stages are context only — a legitimate agent CLI may genuinely read ~/.netrc or ~/.config/gh and may legitimately call an LLM API; neither stage is required for the finding and neither suppresses it.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec_pkg:
+    event_type: execute_process
+    content|contains: 'creativetasks'
+  sel_exec_pkg_sep:
+    event_type: execute_process
+    content|re: '(?i)creative[-_]tasks'
+  condition: sel_exec_pkg or sel_exec_pkg_sep
+action: execute
+on_timeout: report
+on_error:   report
+script: |
+  # ── Threat parameters — positive signatures only, no host/domain trust list ──
+  PKG_RE    = r"(?i)\bcreative[-_]?tasks\b"
+  MGR_RE    = r"(?i)\b(pip|pip3|pipx|uvx?|poetry|pdm|hatch|rye|conda|mamba|micromamba|easy_install)\b"
+  VERB_RE   = r"(?i)\b(install|reinstall|upgrade|add|download|sync|run|tool|exec)\b"
+  RUN_RE    = r"(?i)(-m\s+creative[-_]?tasks\b|/creative[-_]?tasks\b)"
+  DIRECT_RE = r"(?i)\b(uvx|pipx\s+run)\s+creative[-_]?tasks\b"
+  HOOK_RE   = r"(?i)\b(sh|bash|zsh|dash|curl|wget|nc|ncat|osascript|powershell|base64|chmod)\b"
+
+  CRED_ANCHORS = ["/.aws/", "/.ssh/", "/.netrc", "/.env", "/.kube/",
+                  "/.config/gh/", "/.docker/config.json", "/.npmrc",
+                  "/.pypirc", "/etc/shadow"]
+
+  WINDOW_NS    = 900000000000     # 15 minutes — install-then-run clustering
+  DEDUP_TTL_NS = 3600000000000    # 1 hour
+  MAX_EXECS    = 2000
+  MAX_EGRESS   = 800
+
+  def short(s):
+      if len(s) > 160:
+          return s[:160] + "..."
+      return s
+
+  def base(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1]
+
+  def is_pkg(s):
+      return re.find(PKG_RE, s) != None
+
+  def is_acquire(cmd):
+      if not is_pkg(cmd):
+          return False
+      if re.find(DIRECT_RE, cmd) != None:
+          return True
+      if re.find(MGR_RE, cmd) == None:
+          return False
+      return re.find(VERB_RE, cmd) != None
+
+  def is_run(cmd, path):
+      if path != "" and is_pkg(path):
+          return True
+      if not is_pkg(cmd):
+          return False
+      return re.find(RUN_RE, cmd) != None
+
+  def ev_edge(e):
+      tgt = e.get("target_id", "")
+      if tgt == "":
+          tgt = "process://" + e.get("actor_path", "")
+      src = e.get("parent_path", "")
+      if src == "":
+          src = e.get("actor_path", "")
+      ts = e.get("ts", "0")
+      return {"from": "process://" + src, "to": tgt,
+              "kind": e.get("kind", "EXECUTE_PROCESS"),
+              "ts": ts, "first_ts": ts, "last_ts": ts,
+              "cmdline": e.get("cmdline", ""), "risk_context": ""}
+
+  def run():
+      # 1 ── relevance gate: pure string checks on meta, zero traversal
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if not is_pkg(cmd):
+          return "allow"
+      trig_ts = int(meta.get("event_ts", "0"))
+      cp      = int(meta.get("caller_pid", "0"))
+      if trig_ts <= 0 or cp == 0:
+          return "allow"
+
+      # 2 ── anchor on the exact triggering instance (never a graph node walk)
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return {"action": "report",
+                  "reason": "creativetasks referenced in a process launch; instance attribution degraded (create row not yet logged): " + short(cmd)}
+      apath = inst.get("actor_path", "")
+
+      phase = ""
+      if is_acquire(cmd):
+          phase = "acquire"
+      elif is_run(cmd, apath):
+          phase = "run"
+      else:
+          # bare mention (grep / editor / README / log line) — not an acquisition
+          # and not an invocation. No finding, no noise.
+          return "allow"
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          lineage = [inst]
+      root  = lineage[len(lineage) - 1]
+      names = []
+      for x in lineage:
+          names.append(base(x.get("actor_path", "?")))
+      lineage_str = " -> ".join(names)
+
+      t0 = trig_ts - WINDOW_NS
+
+      # 3 ── session scope: this lineage plus descendants spawned in-window
+      session = {}
+      for x in lineage:
+          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=t0,
+                           until_ns=trig_ts + 1, limit=MAX_EXECS)
+      for i in range(3):
+          for e in execs:
+              if e.get("parent_pid", "") in session:
+                  session[e.get("actor_pid", "")] = e.get("actor_start", "")
+
+      # The triggering stage is taken from meta, never re-queried (async ingest race).
+      parent_path = apath
+      if len(lineage) > 1:
+          parent_path = lineage[1].get("actor_path", apath)
+      trig_row = {"kind": "EXECUTE_PROCESS", "ts": str(trig_ts),
+                  "actor_pid": inst.get("actor_pid", ""),
+                  "actor_start": inst.get("actor_start", ""),
+                  "actor_path": apath, "parent_path": parent_path, "cmdline": cmd}
+
+      acq_ev = None
+      run_ev = None
+      if phase == "acquire":
+          acq_ev = trig_row
+      else:
+          run_ev = trig_row
+
+      # 4 ── counterpart stage, session-scoped and windowed (prior stages only)
+      for e in execs:
+          if e.get("actor_pid", "") not in session:
+              continue
+          if int(e.get("ts", "0")) < t0:
+              continue
+          c = e.get("cmdline", "")
+          p = e.get("actor_path", "")
+          if acq_ev == None and is_acquire(c):
+              acq_ev = e
+          if run_ev == None and is_run(c, p):
+              run_ev = e
+
+      # 5 ── optional corroboration (never required, never suppressing)
+      hooks = []
+      if acq_ev != None:
+          apid = acq_ev.get("actor_pid", "")
+          for e in execs:
+              if e.get("parent_pid", "") != apid:
+                  continue
+              blob = e.get("cmdline", "") + " " + e.get("actor_path", "")
+              if re.find(HOOK_RE, blob) != None and len(hooks) < 3:
+                  hooks.append(e)
+
+      creds = []
+      if run_ev != None:
+          rp = int(run_ev.get("actor_pid", "0"))
+          rs = int(run_ev.get("actor_start", "0"))
+          if rp > 0:
+              # READ_FILE is high volume — scoped to this one instance, small limit.
+              for e in query_events(kind="READ_FILE", actor_pid=rp, actor_start=rs,
+                                    since_ns=t0, limit=400):
+                  fp  = e.get("path", "")
+                  hit = False
+                  for anchor in CRED_ANCHORS:
+                      if anchor in fp:
+                          hit = True
+                  if hit and len(creds) < 3:
+                      creds.append(e)
+
+      egress  = []
+      acq_pid = ""
+      if acq_ev != None:
+          acq_pid = acq_ev.get("actor_pid", "")
+      for kind in ["CONNECTS", "HTTP_REQUEST"]:
+          for e in query_events(kind=kind, since_ns=t0, until_ns=trig_ts + 1,
+                                limit=MAX_EGRESS):
+              pid = e.get("actor_pid", "")
+              if pid not in session:
+                  continue
+              if pid == acq_pid:
+                  # the installer's own registry fetch is expected behaviour for an
+                  # install command; excluded by INSTANCE, not by host allowlist.
+                  continue
+              if len(egress) < 3:
+                  egress.append(e)
+
+      # 6 ── kill chain built from instance-resolved event rows
+      chain     = new_chain("process://" + root.get("actor_path", apath))
+      stage_ids = []
+
+      if acq_ev != None:
+          chain.append(step(ev_edge(acq_ev), stage_id="Package Acquisition",
+                            stage_desc="PyPI package 'creativetasks' fetched/installed: " + short(acq_ev.get("cmdline", cmd))))
+          stage_ids.append("acquire")
+      for e in hooks:
+          chain.append(step(ev_edge(e), stage_id="Install-Time Execution",
+                            stage_desc="installer spawned shell/network helper: " + short(e.get("cmdline", ""))))
+          stage_ids.append("hook")
+      if run_ev != None:
+          chain.append(step(ev_edge(run_ev), stage_id="Package Execution",
+                            stage_desc="creativetasks entrypoint executed: " + short(run_ev.get("cmdline", cmd))))
+          stage_ids.append("run")
+      for e in creds:
+          chain.append(step(ev_edge(e), stage_id="Credential Access",
+                            stage_desc="creativetasks process read: " + e.get("path", "?")))
+          stage_ids.append("cred")
+      for e in egress:
+          h = e.get("host", e.get("target_id", "?"))
+          chain.append(step(ev_edge(e), stage_id="Egress (context)",
+                            stage_desc="session process " + base(e.get("actor_path", "?")) + " contacted " + h))
+          stage_ids.append("egress")
+
+      # 7 ── suppress identical repeats of the same finding in the same session
+      root_key = root.get("actor_pid", "?") + ":" + root.get("actor_start", "?")
+      sig      = root_key + "|" + phase + "|" + ",".join(stage_ids)
+      seen     = store_get("seen")
+      if seen == None:
+          seen = {}
+      fresh = {}
+      for k in seen:
+          if trig_ts - int(seen[k]) < DEDUP_TTL_NS:
+              fresh[k] = seen[k]
+      if sig in fresh:
+          return "allow"
+      fresh[sig] = str(trig_ts)
+      if store_usage()["free"] > 8192:
+          store_set("seen", fresh)
+      else:
+          store_reset()
+
+      what = "acquisition"
+      if phase == "run":
+          what = "invocation"
+      verdict = "Unverified PyPI package 'creativetasks' " + what + " observed in session " + lineage_str
+      if len(hooks) > 0:
+          verdict = verdict + "; installer spawned " + str(len(hooks)) + " shell/network child process(es)"
+      if len(creds) > 0:
+          verdict = verdict + "; package process read " + str(len(creds)) + " credential-path file(s)"
+      if len(egress) > 0:
+          verdict = verdict + "; " + str(len(egress)) + " non-installer egress event(s) in the same session"
+      if len(lineage) < 2:
+          verdict = verdict + " [attribution: degraded - lineage truncated]"
+
+      print("creativetasks supply-chain observation: " + ",".join(stage_ids) + " via " + lineage_str)
+      return {"action": "report", "reason": verdict, "chain": chain}
+
+  result = run()
