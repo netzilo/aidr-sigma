@@ -1,0 +1,105 @@
+title: MCP Supply Chain - DaVinci Resolve MCP Server Install or Launch
+id: 7c1f4b2e-9a63-4d18-b0f5-2e8c47ad6913
+status: experimental
+level: medium
+description: |
+  Detects an agent-spawned process that installs, ephemerally runs, or launches the
+  PyPI-distributed DaVinci Resolve MCP server (davinci-resolve-lite-mcp and name
+  variants). Installing this package grants the calling AI agent programmatic control
+  of the DaVinci Resolve application - project manipulation, media/render paths, and
+  file access with the privileges of the Resolve process - so the package becomes a
+  supply-chain and capability-expansion surface if it is typosquatted, compromised
+  upstream, or pulled in autonomously by an agent rather than by a human operator.
+
+  Single-event content rule on execute_process only: the engine exposes no
+  package_installed / mcp_server_instantiated event and no INSTALLED_PACKAGE or
+  INSTANTIATED_MCP_SERVER edge, so the command line of the installer or of the
+  console-script entry point is the only observable signal. Report-only: installation
+  is legitimate for media-production workflows, and the value here is an audit trail
+  of when a new agent capability was acquired, not enforcement.
+author: Evgen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://pypi.org/project/davinci-resolve-lite-mcp/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # Scope: process-exec events only. content = the spawned command line.
+  sel_event:
+    event_type: execute_process
+
+  # Arm 1a - a Python package-manager install verb is present on the command line.
+  sel_installer:
+    content|re:
+      - '(?i)\b(?:pip|pip3|pip3\.\d+)\s+install\b'
+      - '(?i)\bpython[0-9.]*\s+-m\s+pip\s+install\b'
+      - '(?i)\bpipx\s+(?:install|run)\b'
+      - '(?i)\buv\s+(?:pip\s+install|tool\s+install|add)\b'
+      - '(?i)\b(?:poetry|pdm|rye|hatch)\s+add\b'
+
+  # Arm 1b - the target package name (PyPI-normalised dash/underscore/dot variants,
+  # with up to three optional qualifier segments such as -lite / -server).
+  sel_pkg_name:
+    content|re:
+      - '(?i)\bdavinci[-_.]?resolve(?:[-_.][a-z0-9]+){0,3}[-_.]mcp\b'
+      - '(?i)\bmcp[-_.](?:server[-_.])?davinci[-_.]?resolve\b'
+
+  # Arm 2 - the server itself is launched: module form, path-qualified console
+  # script (venv/bin entry point or local wheel), or uvx ephemeral fetch-and-run.
+  # Deliberately requires an execution marker so that a bare mention of the package
+  # name as an argument (e.g. to a removal command) does not satisfy this arm.
+  sel_server_launch:
+    content|re:
+      - '(?i)\bpython[0-9.]*\s+-m\s+davinci[-_.]?resolve(?:[-_.][a-z0-9]+){0,3}[-_.]mcp\b'
+      - '(?i)[/\\]davinci[-_.]?resolve(?:[-_.][a-z0-9]+){0,3}[-_.]mcp(?:\.exe|\.cmd)?\b'
+      - '(?i)\buvx\s+(?:--?[a-zA-Z0-9-]+(?:[= ]\S+)?\s+)*davinci[-_.]?resolve(?:[-_.][a-z0-9]+){0,3}[-_.]mcp\b'
+
+  # Suppression: no state is actually changed by these invocations.
+  filter_no_op:
+    content|re:
+      - '--dry-run\b'
+      - '(?:^|\s)--help(?:\s|$)'
+      - '(?:^|\s)-h(?:\s|$)'
+      - '(?:^|\s)--version(?:\s|$)'
+      - '(?i)\bpip[0-9.]*\s+install\s+--report\b'
+
+  # Suppression: the command is reading or searching documentation that merely
+  # quotes the install line, not executing it.
+  filter_doc_read:
+    content|re:
+      - '(?i)\b(?:grep|egrep|rg|ripgrep|ack|ag)\b[^\n]{0,120}?\bdavinci[-_.]?resolve'
+      - '(?i)\b(?:cat|bat|less|more|head|tail|man|open)\s+[^\s"]{0,200}(?:README|CHANGELOG|CONTRIBUTING|INSTALL)[^\s"]{0,40}'
+      - '(?i)\b(?:cat|bat|less|more|head|tail)\s+[^\s"]{0,200}\.(?:md|rst|adoc)\b'
+      - '(?i)\b(?:echo|printf)\s+["\x27][^"\x27]{0,200}\bpip[0-9.]*\s+install\b'
+
+  condition: >
+    sel_event
+    and ((sel_installer and sel_pkg_name) or sel_server_launch)
+    and not (filter_no_op or filter_doc_read)
+
+falsepositives:
+  - Media or post-production engineer intentionally installing the DaVinci Resolve MCP
+    integration on a workstation so an assistant can drive Resolve - expected and benign,
+    but still worth an audit record of when the capability appeared.
+  - CI/provisioning or container-build scripts that install the package as part of a
+    pinned requirements set for a video-automation pipeline.
+  - Developers of the package itself running the console script or `python -m` module
+    form locally during development or test.
+  - Reinstall/upgrade churn (`pip install -U ...`) producing repeated events for an
+    already-approved integration.
+  - Documentation, tutorial, or demo tooling that shells out to reproduce the published
+    install command; the filter_doc_read and filter_no_op selections suppress the common
+    grep/cat/echo/--dry-run/--help forms of this.
+
+action: report
