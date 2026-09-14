@@ -1,0 +1,96 @@
+title: Unsafe LLM Output Execution via Python Inline Interpreter
+id: 7b3f1c2e-9a54-4d61-b8e7-2f4c6a1d09b3
+status: experimental
+level: high
+description: |
+  Detects a spawned Python interpreter that executes inline source code (-c) where the
+  code both (a) carries the fingerprint of LLM-generated plotting output (matplotlib /
+  seaborn / pandas / PlotAI markers) and (b) contains an arbitrary-code-execution
+  primitive (os.system, subprocess.*, exec/eval, __import__ of os/socket/pty/ctypes,
+  pty.spawn, socket.socket, base64.b64decode, ctypes loader), or directly exec()/eval()s
+  a value whose identifier names an LLM response / generated code buffer.
+
+  This is the observable tail of the PlotAI unsafe-output-execution flaw: the application
+  hands unvalidated model output to a Python interpreter, so an attacker who steers the
+  model's completion achieves code execution with the host process privileges. Plot
+  code that legitimately renders a figure has no reason to shell out, open a socket, or
+  decode and execute a blob in the same one-liner \u2014 the combination is the signal.
+
+  Single-event content rule on execute_process only (the engine exposes no EXECUTE_CODE or
+  LLM_GENERATED_OUTPUT edge, and no llm_inference event type, so no graph correlation is
+  available for this threat).
+author: Egemen
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1059/006/
+  - https://atlas.mitre.org/techniques/AML.T0051
+  - https://genai.owasp.org/llmrisk/llm02-insecure-output-handling/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - atlas.aml.t0051
+  - owasp.llm02
+falsepositives:
+  - Legacy pip / setuptools setup.py shim, which runs exec(compile(getattr(tokenize,'open',open)(__file__).read()...)) in a python -c one-liner \u2014 excluded by filter_benign.
+  - PEP 517 build backend probes that reference setuptools.build_meta \u2014 excluded by filter_benign.
+  - Test-harness one-liners that import pytest/unittest/doctest and shell out to a plotting fixture \u2014 excluded by filter_benign.
+  - Headless-backend and version probes such as python -c "import matplotlib; print(matplotlib.__version__)" \u2014 excluded by filter_benign.
+  - Documentation and notebook build pipelines (sphinx, nbconvert, nbsphinx, papermill) that execute notebooks containing both plotting and subprocess calls \u2014 excluded by filter_benign.
+  - Security research, advisory reproduction, and training material that quotes the PlotAI payload verbatim in a command line \u2014 CVE-identifier text is excluded by filter_benign.
+  - A data-science automation script that genuinely renders a chart and then invokes an external converter (e.g. dot, ffmpeg) from the same inline command. Rule is report-only so this does not interrupt work.
+
+logsource:
+  product: ai_agent
+  category: agent_events
+
+detection:
+  # Stage 1 \u2014 a Python interpreter is spawned with inline source code.
+  sel_py_inline:
+    event_type: execute_process
+    content|re: '\b(?i:python)[0-9.]{0,4}(?:\.exe)?[^\r\n]{0,120}?\s-c[\s"\x{0027}]'
+
+  # Stage 2a \u2014 an arbitrary-code-execution / egress primitive inside that inline code.
+  sel_rce_primitive:
+    content|re:
+      - '\bos\.(?:system|popen|execv|execve|execvp|execvpe|spawn[lvpe]{1,3})\s*\('
+      - '\bsubprocess\.(?:run|Popen|call|check_call|check_output|getoutput|getstatusoutput)\s*\('
+      - '\b__import__\s*\(\s*[\x{0027}"](?:os|subprocess|socket|pty|ctypes)[\x{0027}"]'
+      - '\bexec\s*\('
+      - '\beval\s*\('
+      - '\bpty\.spawn\s*\('
+      - '\bsocket\.socket\s*\('
+      - '\bbase64\.b64decode\s*\('
+      - '\bctypes\.(?:CDLL|cdll|windll|WinDLL)\b'
+
+  # Stage 2b \u2014 the inline code is recognisably LLM-generated plotting output.
+  sel_llm_plot_context:
+    content|re:
+      - '(?i:plotai|plot_ai)'
+      - '(?i:matplotlib|seaborn)'
+      - '\b(?i:plt)\.(?:plot|show|savefig|figure|bar|barh|hist|scatter|subplots|imshow|pie)\s*\('
+      - '\b(?i:sns)\.[A-Za-z_]{2,20}\s*\('
+      - '\b(?i:pd)\.read_(?:csv|excel|json|parquet|sql|table)\s*\('
+      - '\b(?i:pandas)\.[A-Za-z_]{2,20}\s*\('
+
+  # Alternative stage 2 \u2014 the inline code exec()s a model-output buffer outright.
+  sel_exec_llm_output:
+    content|re:
+      - '(?i:exec|eval)\s*\(\s*[^)\r\n]{0,60}(?i:llm|gpt|plotai|response|completion|generated|model_output|code_str|plot_code|chat_reply|answer)'
+      - '(?i:exec)\s*\(\s*(?i:open)\s*\([^)\r\n]{0,120}\)\s*\.\s*(?i:read)\s*\('
+
+  # Benign shapes that legitimately combine an inline interpreter with these primitives.
+  filter_benign:
+    content|re:
+      - '(?i:setuptools)[\s\S]{0,400}(?i:tokenize)'
+      - '(?i:setuptools\.build_meta)'
+      - '\b(?i:import)\s+(?:pytest|unittest|doctest)\b'
+      - '\b(?i:unittest)\.main\s*\('
+      - '(?i:print)\s*\(\s*(?:sys\.version|sys\.executable|(?i:matplotlib)\.__version__|(?i:matplotlib)\.get_backend\s*\(\s*\))'
+      - '\b(?i:sphinx|nbconvert|nbsphinx|papermill)\b'
+      - '\b(?i:cve)-[0-9]{4}-[0-9]{4,7}\b'
+
+  condition: >
+    (sel_py_inline and sel_rce_primitive and sel_llm_plot_context and not filter_benign)
+    or (sel_py_inline and sel_exec_llm_output and not filter_benign)
+
+action: report
