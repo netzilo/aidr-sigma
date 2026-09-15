@@ -1,0 +1,42 @@
+title: Supply Chain - cudaq-docs-mcp Package Install via PyPI Tooling
+id: c1a9e4d2-7b3f-4a6e-9c1d-5f8b3e2a1d47
+status: experimental
+level: high
+description: |
+  Detects an execute_process event whose command line installs or ephemerally
+  runs the cudaq-docs-mcp package via a Python packaging tool (pip, pipx, uv,
+  poetry). This package is the described attack surface for a supply-chain
+  compromise: a trojanized or compromised cudaq-docs-mcp published to PyPI
+  would be pulled onto the host by exactly this class of command, before the
+  MCP server ever serves manipulated documentation/examples to an agent.
+  This is a single-event, content-only detection scoped to the process exec
+  command line — it does not attempt to inspect package contents.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1195/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - owasp.llm03
+falsepositives:
+  - An AppSec/security-review team deliberately installing cudaq-docs-mcp inside an isolated sandbox to audit the package before approving it for production use.
+  - Shell history, tutorials, READMEs, or CI logs whose command line merely echoes/prints/greps the install instruction text rather than actually invoking pip/pipx/uv (mitigated by filter_display_only).
+  - A pip/pipx/uv uninstall or removal command that references the package name (mitigated by filter_uninstall).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_install:
+    event_type: execute_process
+    command|re: '(?i)\b(pip3?|pipx|uv|poetry)\b[^\n]{0,80}\b(install|add)\b[^\n]{0,150}\bcudaq[-_]docs[-_]mcp\b'
+  sel_ephemeral_run:
+    event_type: execute_process
+    command|re: '(?i)\b(uvx|pipx\s+run|uv\s+run)\b[^\n]{0,60}\bcudaq[-_]docs[-_]mcp\b'
+  filter_display_only:
+    command|re: '(?i)^\s*(echo|printf|cat|grep|less|more|head|tail)\b'
+  filter_uninstall:
+    command|re: '(?i)\buninstall\b'
+  condition: (sel_install or sel_ephemeral_run) and not (filter_display_only or filter_uninstall)
+action: report
