@@ -1,0 +1,59 @@
+title: MySQL MCP Server Unauthenticated SQL Exploitation via SSE Transport
+id: 7b2f4b7a-9c3e-4b7a-9a3e-3d5c9f1a2b6e
+status: experimental
+level: high
+description: |
+  Detects HTTP requests to the MySQL MCP Server's /sse transport endpoint
+  invoking the execute_sql tool together with high-confidence malicious SQL
+  constructs (UNION-based injection, FILE-privilege abuse via INTO
+  OUTFILE/DUMPFILE or LOAD_FILE/LOAD DATA INFILE, mysql.user enumeration, or
+  time-based blind injection probes). mysql_mcp_server's SSE/HTTP transport
+  does not validate Origin or Host headers, disabling DNS-rebinding
+  protection and allowing an unauthenticated remote client -- or a victim's
+  browser redirected via DNS rebinding -- to execute arbitrary SQL against
+  the backing MySQL instance.
+author: Evgen
+date: "2025-04-02"
+references:
+  - https://owasp.org/Top10/A01_2021-Broken_Access_Control/
+  - https://owasp.org/Top10/A03_2021-Injection/
+  - https://en.wikipedia.org/wiki/DNS_rebinding
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - owasp.llm07
+falsepositives:
+  - Internal reporting or BI tooling that legitimately issues UNION SELECT
+    queries for combined result sets directly against the exposed
+    execute_sql tool over SSE transport.
+  - Database performance diagnostics that intentionally call SLEEP() or
+    BENCHMARK() while load-testing a database exposed through the MCP
+    server.
+  - Database administration tooling that queries mysql.user via the
+    execute_sql tool for legitimate account auditing.
+  - Any of the above still warrants human security review, since they are
+    reaching the database through an unauthenticated SSE transport path.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_sse_endpoint:
+    event_type: http_request
+    path|re: '(?i)^/sse(/|\?|$)'
+  sel_execute_sql_call:
+    content|re:
+      - '(?i)"name"\s*:\s*"execute_sql"'
+      - '(?i)"tool_name"\s*:\s*"execute_sql"'
+      - '(?i)"tool"\s*:\s*"execute_sql"'
+  sel_dangerous_sql:
+    content|re:
+      - '(?i)\bunion\s+select\b'
+      - '(?i)\binto\s+outfile\b'
+      - '(?i)\binto\s+dumpfile\b'
+      - '(?i)\bload_file\s*\('
+      - '(?i)\bload\s+data\s+infile\b'
+      - '(?i)\bmysql\.user\b'
+      - '(?i)\bsleep\s*\(\s*[0-9]'
+      - '(?i)\bbenchmark\s*\('
+  condition: sel_sse_endpoint and sel_execute_sql_call and sel_dangerous_sql
+action: report
