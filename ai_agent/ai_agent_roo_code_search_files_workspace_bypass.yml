@@ -1,0 +1,54 @@
+title: Roo Code search_files Workspace Boundary Bypass via Prompt Injection
+id: 8a2e1c4d-9b3f-4a6e-8d21-5f9c7b3a10e2
+status: experimental
+level: high
+description: |
+  Detects the ripgrep subprocess that Roo Code's search_files tool spawns to
+  perform in-workspace text search, when the search/path argument shows signs
+  of escaping the workspace boundary: either a deep (3+) parent-directory
+  traversal sequence, or a direct path reference into a well-known credential
+  or secrets location (.ssh keys, AWS credentials, kube config, /etc/passwd,
+  /etc/shadow, .netrc, .git-credentials).
+
+  This targets stage 2-3 of the Roo Code search_files workspace boundary
+  bypass (pre-3.20.3): an attacker who can inject a prompt into the agent
+  instructs it to invoke search_files against a path outside the intended
+  VS Code workspace, reading sensitive files that are later exfiltrated by
+  having the agent write their contents into a JSON schema reference that
+  VS Code's schema-fetching feature will then request over the network.
+author: Evgen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1083/
+  - https://attack.mitre.org/techniques/T1552/
+tags:
+  - attack.discovery
+  - attack.t1083
+  - attack.credential-access
+  - attack.t1552
+  - atlas.aml.t0051
+  - owasp.llm01
+  - owasp.llm04
+falsepositives:
+  - A monorepo build or lint tool that legitimately invokes ripgrep with 3+ levels of relative traversal to reach a shared root-level config (tsconfig, eslintrc, workspace manifest) from a deeply nested package.
+  - A developer or security-review agent intentionally searching the codebase for the literal string "id_rsa" or "credentials" to find where a key path is referenced in scripts or documentation, rather than targeting the actual key file.
+  - A dotfiles repository that legitimately version-controls a template .ssh/config or .aws/credentials.example file inside the workspace.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_search_binary:
+    event_type: execute_process
+    command|re: '(?i)(^|[\\/])(rg|ripgrep)(\.exe)?(\s|$)'
+  sel_traversal_depth:
+    command|re: '(\.\.[\\/]){3,}'
+  sel_sensitive_target:
+    command|re:
+      - '(?i)(^|[\\/\s~])\.ssh[\\/](id_rsa|id_ed25519|id_ecdsa|authorized_keys)\b'
+      - '(?i)(^|[\\/\s~])\.aws[\\/]credentials\b'
+      - '(?i)(^|[\\/\s~])\.netrc\b'
+      - '(?i)(^|[\\/\s~])\.git-credentials\b'
+      - '(?i)(^|[\\/\s~])\.kube[\\/]config\b'
+      - '(?i)(^|[\\/\s~])etc[\\/](passwd|shadow)\b'
+  condition: sel_search_binary and (sel_traversal_depth or sel_sensitive_target)
+action: report
