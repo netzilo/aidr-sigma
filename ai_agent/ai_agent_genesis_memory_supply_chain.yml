@@ -1,0 +1,203 @@
+title: Genesis-Memory Package Suspicious Subprocess Chain
+id: f2b8b8b0-9c1e-4a2d-8f3a-6c1d2e8a4b7c
+status: experimental
+level: medium
+description: |
+  genesis-memory is a PyPI package marketed as a "cognitive memory system" for
+  AI coding agents, advertising privacy and token-management features. No
+  confirmed malicious payload, IOC, or CVE has been tied to this package --
+  this is a supply-chain hypothesis, not a demonstrated exploit. The engine
+  has no INSTALLED_PACKAGE / EXECUTED_CODE edge and no package_install event
+  type, so the install-to-execution causal chain described in the threat
+  narrative cannot be modeled directly. The only live signal is
+  execute_process.
+
+  This rule does not treat "a process spawned" as evidence on its own -- that
+  is indistinguishable from any other process-spawn alert, which is exactly
+  the objection raised in triage. It requires BOTH: (1) the string
+  "genesis-memory" (or "genesis_memory") appears somewhere in the *same
+  process instance's own ancestry*, resolved via caller_pid -> proc_instance
+  -> proc_lineage -> query_events (never a path-keyed graph scan), AND (2) a
+  shell/network/interpreter subprocess is spawned within that same session.
+  It never expands beyond the triggering instance's own lineage, so it
+  cannot attribute a genesis-memory reference in one agent session to a
+  subprocess spawned by an unrelated session.
+
+  Because the underlying report is speculative, this rule only ever reports
+  -- it never blocks. It exists to give the detection team instance-resolved
+  visibility into genesis-memory-adjacent process activity for manual
+  triage, not to enforce a verdict on an unconfirmed hypothesis. It is
+  intentionally package-specific rather than folded into a generic
+  AI-memory-package rule (e.g. the ankora-memory rule 7c3f5a91) so that the
+  package name anchor stays precise; a future generalization pass can merge
+  these once more lookalike packages are confirmed.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://pypi.org/project/genesis-memory/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0010
+  - owasp.llm05
+falsepositives:
+  - Legitimate CI/CD pipelines installing genesis-memory that invoke build
+    tooling (e.g. setup.py shelling out to a build wrapper) as part of a
+    normal wheel build
+  - Corporate package-mirror proxies that shell out to curl/wget to fetch
+    genesis-memory or its dependencies from an internal artifact cache
+    during a routine pip install
+  - A bundled postinstall script shipped with genesis-memory that prints or
+    references the package's own name while performing benign setup work
+  - Any unrelated curl/bash/python subprocess that happens to run in the
+    same shell session as a genesis-memory install with no causal link to it
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    content|re: '.'
+  condition: sel_trigger
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  LOOK_BACK_NS = 300000000000  # 5 minutes -- cluster window around the trigger
+
+  SUSPICIOUS_PATTERNS = [
+      r"(?i)\bcurl\b",
+      r"(?i)\bwget\b",
+      r"(?i)\bbash\b",
+      r"(?i)\bsh\b",
+      r"(?i)/bin/sh",
+      r"(?i)\bpowershell\b",
+      r"(?i)\bpython[23]?\s+-c\b",
+      r"(?i)\bbase64\b",
+      r"(?i)\bnc\b",
+      r"(?i)\bncat\b",
+      r"(?i)/dev/tcp/",
+  ]
+
+  PACKAGE_PATTERNS = [
+      r"(?i)genesis-memory",
+      r"(?i)genesis_memory",
+  ]
+
+  def matches_any(patterns, s):
+      for p in patterns:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  def ev_edge(e):
+      # EXECUTE_PROCESS rows carry the CHILD in actor_path/target_id; the
+      # parent lives in parent_path. Using actor_path for "from" would
+      # self-loop -- always take "from" from parent_path for this kind.
+      kind = e.get("kind", "EXECUTE_PROCESS")
+      if kind == "EXECUTE_PROCESS":
+          frm = e.get("parent_path", e.get("actor_path", ""))
+      else:
+          frm = e.get("actor_path", "")
+      to = e.get("target_id", "")
+      if to == "":
+          to = "process://" + e.get("actor_path", "")
+      return {
+          "from": "process://" + frm,
+          "to": to,
+          "kind": kind,
+          "ts": e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts": e.get("ts", "0"),
+      }
+
+  def is_relevant_event():
+      # Cheap, pure, meta-only gate -- no graph/log calls here.
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      return matches_any(SUSPICIOUS_PATTERNS, cmd) or matches_any(PACKAGE_PATTERNS, cmd)
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"                       # no attributable instance
+
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"                       # degraded -- re-fires once logged
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # STRICT SESSION SCOPE: only this instance's own ancestry chain is ever
+      # consulted. No sibling expansion, no cross-session correlation.
+      anchor = None
+      for x in lineage:
+          pid = int(x.get("actor_pid", "0"))
+          start = int(x.get("actor_start", "0"))
+          if pid == 0:
+              continue
+          rows = query_events(kind="EXECUTE_PROCESS", actor_pid=pid, actor_start=start, limit=20)
+          for r in rows:
+              if matches_any(PACKAGE_PATTERNS, r.get("cmdline", "")):
+                  if anchor == None or int(r.get("ts", "0")) < int(anchor.get("ts", "0")):
+                      anchor = r
+
+      cur_cmd = meta.get("content", "")
+      if anchor == None and matches_any(PACKAGE_PATTERNS, cur_cmd):
+          # the triggering spawn itself references the package (e.g. its own
+          # build/postinstall hook shelling out)
+          anchor = {
+              "ts": str(event_ts),
+              "kind": "EXECUTE_PROCESS",
+              "actor_pid": str(cp),
+              "actor_path": inst.get("actor_path", ""),
+              "parent_path": inst.get("parent_path", ""),
+              "target_id": "process://" + inst.get("actor_path", ""),
+              "cmdline": cur_cmd,
+          }
+
+      if anchor == None:
+          return "allow"          # no genesis-memory reference anywhere in this session
+
+      a_ts = int(anchor.get("ts", "0"))
+      if event_ts > 0 and a_ts > 0 and (event_ts - a_ts) > LOOK_BACK_NS:
+          return "allow"          # reference is stale relative to this spawn
+
+      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain.append(step(
+          ev_edge(anchor),
+          stage_id="Package Reference",
+          stage_desc="genesis-memory referenced in this session's process tree: " + anchor.get("cmdline", ""),
+      ))
+
+      trigger_edge = {
+          "from": "process://" + inst.get("parent_path", inst.get("actor_path", "")),
+          "to": "process://" + inst.get("actor_path", ""),
+          "kind": "EXECUTE_PROCESS",
+          "ts": str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts": str(event_ts),
+      }
+      chain.append(step(
+          trigger_edge,
+          stage_id="Suspicious Subprocess",
+          stage_desc="shell/network/interpreter subprocess spawned in same session: " + cur_cmd,
+      ))
+
+      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
+      return {
+          "action": "report",
+          "reason": "genesis-memory reference + suspicious subprocess in one session lineage: " + names,
+          "chain": chain,
+      }
+
+  result = run()
