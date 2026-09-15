@@ -1,0 +1,159 @@
+title: PyPI Bridge Package Deceptive Naming Leads to Process Execution
+id: 4b8e2f31-7c9a-4d5e-8b1a-6f3c9d2a7e04
+status: experimental
+level: high
+description: |
+  Detects the sequence in which an agent acquires an externally-sourced package
+  or skill document whose name is crafted to mimic a legitimate integration
+  "bridge" for AI coding-assistant terminals (Claude Code, Codex, Copilot,
+  Cursor) -- e.g. a PyPI package such as "mozyo-bridge" described as a
+  "Redmine-gated pane notification bridge for Claude Code and Codex
+  terminals" -- and shortly afterward a child process is spawned within the
+  same process lineage. Individually, acquiring a document and spawning a
+  process are both routine agent behaviors. The sequence -- deceptive
+  bridge-branded acquisition followed by execution within a bounded window --
+  is the observable signature of PyPI supply-chain packages that trade on
+  the trust developers place in "integration" tooling for their AI coding
+  assistants. This mirrors the modus operandi already documented for other
+  deceptively-named "bridge" packages targeting AI terminal tools; the
+  package name and precise lure text vary, the sequence does not.
+author: Evgen
+date: "2026-03-01"
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195
+  - attack.t1195.001
+  - owasp.llm05
+falsepositives:
+  - A genuine, developer-installed integration tool whose name legitimately
+    contains "bridge" (e.g. an official or well-known Redmine/Jira/Slack
+    notification bridge for Claude Code, Codex, or another AI terminal) that
+    also spawns a helper subprocess as part of normal startup.
+  - CI or test fixtures that install and immediately exercise many
+    third-party "*-bridge" or "*-notify" packages as part of a routine
+    dependency test suite, none of which are malicious.
+  - Internal, vetted tooling named e.g. "jira-bridge" or "slack-bridge" that
+    is acquired from a trusted internal skill/MCP source and legitimately
+    spawns a child process for its notification logic.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+  condition: sel_trigger
+action: report
+on_timeout: allow
+on_error: allow
+script: |
+  BRIDGE_RE = r'(?i)\bbridge\b'
+  AI_TERMS  = ["claude code", "codex", "claude", "copilot", "cursor"]
+  WINDOW_NS = 900000000000  # 15 minutes between skill acquisition and first execution
+
+  def is_relevant_event():
+      return meta.get("context_type", "") == "execute_process"
+
+  def skill_is_deceptive_bridge(skill_node):
+      name = skill_node.get("name", "")
+      sid  = skill_node.get("id", "")
+      if re.find(BRIDGE_RE, name) == None and re.find(BRIDGE_RE, sid) == None:
+          return False
+      for term in AI_TERMS:
+          pat = r'(?i)' + term.replace(" ", r'\s*')
+          if re.find(pat, name) != None:
+              return True
+          if search_in(sid, term):
+              return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      session_paths = {}
+      for x in lineage:
+          p = x.get("actor_path", "")
+          if p != "":
+              session_paths[p] = True
+
+      best_edge  = None
+      best_skill = None
+      best_ts    = -1
+
+      for a in graph(type="Process"):
+          apath = a.get("path", "")
+          if apath not in session_paths:
+              continue
+          for e in edges(a["id"], dir="out", kind="ACQUIRED_SKILL"):
+              sk = node(e["to"])
+              if sk == None:
+                  continue
+              if not skill_is_deceptive_bridge(sk):
+                  continue
+              ts = int(e.get("ts", "0"))
+              if ts <= 0 or event_ts <= 0:
+                  continue
+              if ts > event_ts:
+                  continue                    # acquired after this exec -- not the cause
+              if (event_ts - ts) > WINDOW_NS:
+                  continue                    # too stale to be this sequence
+              if ts > best_ts:
+                  best_ts    = ts
+                  best_edge  = e
+                  best_skill = sk
+
+      if best_edge == None:
+          return "allow"
+
+      root_path = lineage[-1].get("actor_path", "")
+      dedup_key = best_skill.get("id", "") + "|" + root_path
+      seen = store_get("reported") or {}
+      if dedup_key in seen and (event_ts - int(seen[dedup_key])) < WINDOW_NS:
+          return "allow"                      # already reported this exact chain recently
+
+      chain = new_chain("process://" + root_path)
+
+      chain.append(step(best_edge, stage_id="Deceptive Package Acquired",
+                         stage_desc="agent acquired a bridge-named package/skill mimicking an AI coding-assistant integration: " +
+                                     best_skill.get("name", best_skill.get("id", "?"))))
+
+      parent_path = inst.get("parent_path", "")
+      actor_path  = inst.get("actor_path", "")
+      trigger_edge = {
+          "from":     "process://" + parent_path,
+          "to":       "process://" + actor_path,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+      }
+      chain.append(step(trigger_edge, stage_id="Downstream Process Execution",
+                         stage_desc="child process spawned following acquisition of the deceptively-named package: " +
+                                     meta.get("content", "")[:200]))
+
+      if store_usage().get("free", 0) > 4096:
+          seen[dedup_key] = str(event_ts)
+          store_set("reported", seen)
+
+      return {
+          "action": "report",
+          "reason": "Deceptively-named PyPI 'bridge' package acquired then triggered process execution -- possible supply-chain evasion (package: " +
+                     best_skill.get("name", best_skill.get("id", "?")) + ")",
+          "chain": chain,
+      }
+
+  result = run()
