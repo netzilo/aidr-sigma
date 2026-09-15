@@ -1,0 +1,55 @@
+title: SQL Injection via ref_doc_id in DuckDBVectorStore Delete
+id: 7e2b9a44-6f3d-4c8b-9e21-5a0d3f8c9b17
+status: experimental
+level: high
+description: |
+  Detects SQL injection attempts against the delete() function of llama_index's
+  DuckDBVectorStore (affects v0.12.19), where the unsanitized ref_doc_id
+  parameter is concatenated directly into a DuckDB SQL statement instead of
+  being bound as a parameter. A successful exploit lets an attacker break out
+  of the intended string context and invoke DuckDB's file I/O primitives
+  (ATTACH DATABASE, COPY ... TO/FROM, read_csv, read_parquet, read_json, glob,
+  INSTALL/LOAD httpfs) to read or write arbitrary files on the host — a
+  documented path to remote code execution. Fires on the raw HTTP request
+  carrying the malicious ref_doc_id value sent to the delete endpoint, or on a
+  spawned process invoking the DuckDB engine with the same injected SQL.
+author: Selhan
+date: "2025-06-18"
+tags:
+  - attack.initial-access
+  - attack.t1190
+falsepositives:
+  - Administrative or backup scripts that legitimately pair a ref_doc_id filter with COPY ... TO / EXPORT DATABASE to produce CSV or Parquet snapshots of vector store documents.
+  - Regression or security test suites that submit UNION SELECT / quote-breakout payloads containing ref_doc_id to confirm the vulnerable code path has been patched.
+  - Database maintenance sessions running PRAGMA database_list or ATTACH DATABASE against the same DuckDB instance while an unrelated ref_doc_id value happens to appear elsewhere in the same logged request or command line.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_exec:
+    event_type: execute_process
+  sel_param:
+    content|re: '(?i)\bref_doc_ids?\b'
+  sel_sqli_break:
+    content|re:
+      - '(?i)''\s*(or|and)\b[^=]{0,20}='
+      - '(?i)''\s*;\s*--'
+      - '(?i)\)\s*;\s*--'
+      - '(?i)union\s+select'
+  sel_duckdb_fileio:
+    content|re:
+      - '(?i)attach\s+database'
+      - '(?i)copy\s*\([\s\S]*?\)\s*to\s'
+      - '(?i)copy\s+\S+\s+to\s'
+      - '(?i)read_csv(_auto)?\s*\('
+      - '(?i)read_parquet\s*\('
+      - '(?i)read_json(_auto)?\s*\('
+      - '(?i)glob\s*\('
+      - '(?i)install\s+httpfs'
+      - '(?i)load\s+httpfs'
+      - '(?i)export\s+database'
+      - '(?i)pragma\s+database_list'
+  condition: (sel_http or sel_exec) and sel_param and (sel_sqli_break or sel_duckdb_fileio)
+action: report
