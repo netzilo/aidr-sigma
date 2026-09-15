@@ -1,0 +1,61 @@
+title: Living-off-the-Land Data Exfiltration via LOLBins
+id: 6f3e9c2a-8b41-4d7a-9f3c-2e5b7a1d4c9e
+status: experimental
+level: high
+description: |
+  Detects an AI agent spawning legitimate, built-in system utilities in
+  command-line patterns that are known living-off-the-land (LOLBin) staging
+  or transfer techniques for moving data out through channels other than a
+  monitored HTTP client: SSH-based push transfer (scp/rsync/sftp to a
+  remote user@host target), raw TCP push via nc/ncat/netcat, an openssl
+  s_client session fed from a local file, SMTP-based exfiltration via
+  sendmail/mutt with an attachment or piped input, base64/certutil staging
+  of data immediately piped into a transfer utility, and BITS-based uploads
+  via bitsadmin /upload. Evaluated purely on the execute_process command
+  line, independent of whether a corresponding HTTP_REQUEST edge is ever
+  recorded for the same activity.
+author: Egemen
+date: "2026-03-15"
+references:
+  - https://attack.mitre.org/techniques/T1048/
+  - https://attack.mitre.org/techniques/T1132/
+tags:
+  - attack.exfiltration
+  - attack.t1048
+  - attack.t1132
+  - atlas.aml.t0025
+  - owasp.llm06
+falsepositives:
+  - "Legitimate rsync/scp/sftp deployment or backup jobs that push build artifacts or archives to a remote host using the user@host: target syntax"
+  - "Scripted TLS/certificate connectivity checks using openssl s_client fed from /dev/null (filtered explicitly)"
+  - "Automated reporting jobs that email log files or reports as attachments via sendmail or mutt"
+  - "Rare legitimate certutil -encode usage to convert a certificate to base64/PEM format"
+  - "Rsync executed with --dry-run during deployment testing (filtered explicitly)"
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_context:
+    event_type: execute_process
+  sel_ssh_transfer:
+    command|re: '(?i)\b(scp|rsync|sftp)\b[^\n]{0,200}\s[A-Za-z0-9_.-]+@[A-Za-z0-9_.-]+:'
+  sel_raw_socket_push:
+    command|re:
+      - '(?i)\b(nc|ncat|netcat)\b[^\n]{0,80}<\s*\S+'
+      - '(?i)\b(cat|type)\b[^\n]{0,40}\|\s*(nc|ncat|netcat)\b'
+  sel_openssl_push:
+    command|re: '(?i)\bopenssl\s+s_client\b[^\n]{0,120}<\s*\S+'
+  sel_mail_exfil:
+    command|re: '(?i)\b(sendmail|mutt)\b[^\n]{0,120}(-a\s+\S+|--attach\S*|<\s*\S+)'
+  sel_encode_stage:
+    command|re:
+      - '(?i)\bcertutil\b[^\n]{0,60}-encode\b'
+      - '(?i)\bbase64\b[^\n]{0,20}\|\s*(curl|wget|nc|ncat|netcat|mail|mutt|sendmail)\b'
+  sel_bits_upload:
+    command|re: '(?i)\bbitsadmin\b[^\n]{0,120}/upload\b'
+  filter_openssl_devnull:
+    command|re: '(?i)<\s*/dev/null\b'
+  filter_rsync_dryrun:
+    command|re: '(?i)--dry-run\b'
+  condition: sel_context and (sel_ssh_transfer or sel_raw_socket_push or sel_openssl_push or sel_mail_exfil or sel_encode_stage or sel_bits_upload) and not (filter_openssl_devnull or filter_rsync_dryrun)
+action: report
