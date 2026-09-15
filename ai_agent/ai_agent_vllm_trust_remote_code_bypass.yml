@@ -1,0 +1,51 @@
+title: vLLM RCE via Hardcoded trust_remote_code Bypass
+id: 3e7a1c9d-8f2b-4a6e-9c3d-5b6f8e1a2d4c
+status: experimental
+level: critical
+description: |
+  Detects a child process spawned from a HuggingFace `transformers_modules`
+  dynamic code cache directory that also carries shell/reverse-shell/payload
+  execution primitives in its own command line. The `transformers_modules`
+  cache is only populated when trust_remote_code custom model code was
+  fetched from a model repository and imported at runtime -- it should never
+  exist when an operator has explicitly disabled remote code trust. Two vLLM
+  model-loading implementation files are known to hardcode
+  trust_remote_code=True for sub-component loading regardless of the
+  caller's --trust-remote-code=False flag, letting an attacker-controlled
+  model repository execute arbitrary code even when the operator believed
+  remote code execution was disabled. This rule fires on the observable
+  downstream artifact: a process launched out of the dynamic module cache
+  that itself exhibits code-execution behavior (piped shell, -c execution,
+  raw TCP shell, netcat reverse shell, base64 decode-and-run).
+author: Evgen
+date: "2026-03-01"
+tags:
+  - attack.execution
+  - attack.initial-access
+  - attack.t1195.002
+  - attack.t1203
+references:
+  - https://github.com/vllm-project/vllm/security/advisories
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_hf_modules_path:
+    content|re: '(?i)transformers_modules[\\/][A-Za-z0-9_.-]+[\\/]'
+  sel_payload_indicators:
+    content|re:
+      - '(?i)\b(curl|wget)\b[^\n]{0,80}\|\s*(bash|sh|python[23]?)\b'
+      - '(?i)\b(bash|sh|python[23]?)\s+-c\s'
+      - '(?i)/dev/tcp/[0-9]'
+      - '(?i)\bnc\s+-e\s'
+      - '(?i)base64\s+-d\b'
+  filter_test_suite:
+    content|re: '(?i)\b(pytest|unittest|py\.test)\b'
+  condition: sel_event and sel_hf_modules_path and sel_payload_indicators and not filter_test_suite
+falsepositives:
+  - Custom model repositories whose modeling code intentionally shells out during first-time initialization to compile a CUDA/C++ extension or fetch additional model shards from inside the transformers_modules cache directory.
+  - CI pipelines running the vendored model's own pytest/unittest suite against code staged in transformers_modules (excluded by filter_test_suite unless the suite itself also matches a payload pattern).
+  - Package post-install hooks that byte-compile freshly downloaded transformers_modules files via a subprocess invocation of the interpreter with -c.
+action: report
