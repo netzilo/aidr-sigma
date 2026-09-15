@@ -1,0 +1,39 @@
+title: Claude-Sandbox Egress Allowlist Bypass Attempt
+id: d3a1e9f2-4b7c-4c1a-9e3f-7b2a6d9c1e45
+status: experimental
+level: high
+description: |
+  Detects process-execution command lines inside a Claude-sandbox (bubblewrap-based)
+  execution environment that are consistent with attempts to defeat the sandbox's
+  network-namespace isolation or its egress allowlist enforcement (claude-sandbox
+  4.4.0b2). Covers direct re-enablement of network sharing in bwrap, joining the
+  host network namespace via nsenter/ip-netns, flushing or opening the local
+  firewall policy, and tampering with /etc/hosts or /etc/resolv.conf to redirect
+  allowlisted hostnames to an attacker-controlled destination.
+author: Selhan
+date: "2025-06-02"
+tags:
+  - attack.defense-evasion
+  - attack.privilege-escalation
+  - attack.t1611
+  - attack.t1599
+  - owasp.llm06
+falsepositives:
+  - Network diagnostics run intentionally by an operator via nsenter to inspect host networking from inside a debugging container
+  - CI/CD or test-suite jobs that legitimately flush and reapply firewall rules to validate network-isolation test cases
+  - Container entrypoint or provisioning scripts that append service-discovery records to /etc/hosts or rewrite /etc/resolv.conf during normal startup
+  - Sandbox test fixtures that intentionally invoke bwrap --share-net to validate network-allowed test cases for the sandbox itself
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_bypass:
+    event_type: execute_process
+    command|re:
+      - '(?i)\bbwrap\b[^\n]{0,200}--share-net\b'
+      - '(?i)\bnsenter\b[^\n]{0,120}(--net=/proc/1/ns/net\b|-t\s*1\b|--target[= ]?1\b)'
+      - '(?i)\bip\s+netns\s+exec\b'
+      - '(?i)\b(iptables|ip6tables|nft)\b[^\n]{0,160}(-F\b|--flush\b|-P\s+OUTPUT\s+ACCEPT\b|add\s+rule[^\n]{0,80}\baccept\b)'
+      - '(?i)(>>?\s*/etc/hosts\b)|(>\s*/etc/resolv\.conf\b)'
+  condition: sel_bypass
+action: report
