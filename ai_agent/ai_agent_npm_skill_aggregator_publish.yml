@@ -1,0 +1,52 @@
+title: Skills Aggregation and Distribution via npm Package
+id: b2b3d47a-9f61-4b8b-8e0a-3d6f1c9a5e02
+status: experimental
+level: medium
+description: |
+  Detects an npm registry publish event (HTTP PUT/POST to registry.npmjs.org)
+  whose package metadata (description, keywords, or embedded README text)
+  simultaneously references at least two distinct AI agent platforms
+  (Claude, Copilot, Gemini) alongside explicit skill/capability aggregation,
+  directory, or marketplace language. This is the textual signature of a
+  supply-chain package that harvests and redistributes proprietary agent
+  skill or capability directories sourced from multiple AI platforms and
+  plugin marketplaces without authorization.
+author: Evgen
+date: "2025-05-20"
+references:
+  - https://genai.owasp.org/llmrisk/llm03-2025-supply-chain/
+  - https://attack.mitre.org/techniques/T1195/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - owasp.llm03
+falsepositives:
+  - Legitimate SDKs or developer tools that advertise compatibility with multiple AI coding assistants (e.g. "works with Claude, Copilot, and Gemini") without redistributing any platform's proprietary skill or capability content.
+  - Documentation, comparison, or benchmarking packages whose README or keywords mention several AI platforms for informational purposes only, with no aggregation or marketplace language present.
+  - Internal or company packages whose description simply lists supported AI assistant integrations rather than describing a skill or capability aggregation/harvesting service.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_npm_publish:
+    event_type: http_request
+    method:
+      - PUT
+      - POST
+    host|contains: 'registry.npmjs.org'
+  sel_platform_claude:
+    content|re: '(?i)\bclaude\b'
+  sel_platform_copilot:
+    content|re: '(?i)\bcopilot\b'
+  sel_platform_gemini:
+    content|re: '(?i)\bgemini\b'
+  sel_aggregation_term:
+    content|re: '(?i)\b(skills?[-\s]?(aggregat\w*|director\w*|marketplace\w*|hub)|aggregat\w*\s+(agent\s+)?skills?|multi[-\s]?platform\s+(agent\s+)?skills?|cross[-\s]?platform\s+(agent\s+)?skills?|plugin\s+marketplace\w*|skill\s+pack(age)?s?\s+(from|across)|capabilit\w*\s+director\w*)\b'
+  condition: >
+    sel_npm_publish and sel_aggregation_term and
+    (
+      (sel_platform_claude and sel_platform_copilot) or
+      (sel_platform_claude and sel_platform_gemini) or
+      (sel_platform_copilot and sel_platform_gemini)
+    )
+action: report
