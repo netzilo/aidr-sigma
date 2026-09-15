@@ -1,0 +1,48 @@
+title: "PyPI Package Masquerading as LangChain Integration — Install Attempt"
+id: b6f2d8a4-3c9e-4a1f-8d7b-2e5f9c1a6b3d
+status: experimental
+level: critical
+description: |
+  Detects a package-manager process (pip, pip3, pipx, uv, poetry, pipenv,
+  conda) being spawned with an install/add verb that names the PyPI package
+  'langchain-adam-network'. This package presents itself as a LangChain /
+  LangGraph integration for autonomous agent message streams but is not an
+  official LangChain or LangGraph package — the name is crafted to be
+  discovered by developers searching for legitimate LangChain tooling.
+  Installing it can execute arbitrary code in the build/runtime environment
+  and compromise any agent process that later imports it.
+
+  This aligns conceptually with OWASP Top 10 Web categories A06:2021
+  (Vulnerable and Outdated Components) and A08:2021 (Software and Data
+  Integrity Failures); those identifiers are not expressed as rule tags
+  because they are not part of the OWASP LLM/ASI taxonomy this engine tags
+  against, and no corresponding MITRE ATLAS technique applies to this
+  detection.
+author: Selhan
+date: "2026-03-01"
+tags:
+  - attack.resource-development
+  - attack.t1195
+  - attack.t1195.001
+falsepositives:
+  - A security researcher or incident responder deliberately installing the
+    package inside an isolated sandbox to analyze it
+  - An SBOM or dependency-audit tool that shells out to a dry-run install
+    (e.g. "pip install --dry-run langchain-adam-network") while cataloguing a
+    suspicious lockfile or requirements.txt entry that references the name
+  - A read-only metadata lookup such as "pip show langchain-adam-network" or
+    "pip index versions langchain-adam-network" will not match this rule at
+    all, since no install/add verb is present in the command line
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_installer_verb:
+    event_type: execute_process
+    command|re:
+      - '(?i)\b(pip3?|pipx|uv|poetry|pipenv|conda)\b[^\n]{0,80}\b(install|add)\b'
+      - '(?i)\bpython[23]?\s+-m\s+pip\b[^\n]{0,80}\binstall\b'
+  sel_pkg_name:
+    command|contains: 'langchain-adam-network'
+  condition: sel_installer_verb and sel_pkg_name
+action: report
