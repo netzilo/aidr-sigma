@@ -1,0 +1,46 @@
+title: Encoded IMDS Endpoint Address in Tool Command
+id: e4a1c9d2-6f3b-4a8e-9c1d-7f2b8e4a6d3c
+status: experimental
+level: high
+description: |
+  Detects curl/wget invocations (via tool_call command arguments) that
+  reference the AWS Instance Metadata Service endpoint (169.254.169.254)
+  using an alternative address encoding — decimal, 32-bit hex, per-octet
+  hex, dotted-octal, or IPv6 (fd00:ec2::254) — rather than the literal
+  dotted-quad IP. These encodings are a known technique for evading
+  naive string/CIDR filters that only block the literal address, while
+  still resolving to the same metadata service and its credential
+  material.
+author: Evgen
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1552/005/
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+falsepositives:
+  - Security regression/unit test suites that deliberately issue encoded-IMDS curl or wget commands to assert that their own SSRF/IMDS filters correctly reject them (e.g. test_imds_ssrf.py, ssrf_regression_tests, imds_bypass_spec)
+  - Documentation, runbooks, or training material that quotes the encoded address as a worked example of the bypass technique itself without an accompanying curl/wget invocation
+  - Network/IP-utility scripts that enumerate all representations of a target address for audit or logging purposes without ever fetching it
+tags:
+  - attack.credential-access
+  - attack.t1552.005
+  - owasp.llm06
+  - owasp.llm08
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: tool_call
+    command|re: '(?i)\b(curl|wget)\b'
+  sel_encoded_ip:
+    command|re:
+      - '(?i)\b2852039166\b'
+      - '(?i)\b0xa9fea9fe\b'
+      - '(?i)0xa9\.0xfe\.0xa9\.0xfe'
+      - '0251\.0376\.0251\.0376'
+      - '(?i)fd00:ec2::254'
+      - '(?i)\[fd00:ec2::254\]'
+  filter_selftest:
+    command|re: '(?i)(assert|expect|pytest|unittest|test_imds|ssrf_regression|should[_ -]?(block|reject|fail))'
+  condition: sel_trigger and sel_encoded_ip and not filter_selftest
+action: report
