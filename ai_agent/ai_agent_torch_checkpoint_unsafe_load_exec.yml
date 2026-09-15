@@ -1,0 +1,298 @@
+title: Unsafe Torch Checkpoint Deserialization to Process Execution
+id: 9c4b7e21-3f6a-4d18-b5e2-7a0c94d61f8b
+status: experimental
+level: high
+description: |
+  Detects arbitrary code execution arising from unsafe deserialization of PyTorch
+  checkpoint artifacts by the HuggingFace Transformers Trainer (e.g. the
+  `_load_rng_state()` path, which calls torch.load() without weights_only=True).
+
+  A malicious rng_state*.pth / optimizer.pt / *.bin checkpoint carries a pickle
+  __reduce__ payload that runs the moment the Trainer resumes. The only signal the
+  engine can see for that in-process pickle execution is what the payload does next:
+  the python runtime that read the artifact spawns a child process.
+
+  The rule is instance-resolved. It anchors on meta["caller_pid"] for the
+  execute_process event, resolves the exact process instance with proc_instance(),
+  walks the real spawn chain with proc_lineage(), then queries the event log
+  (query_events kind=READ_FILE, scoped to that instance's pid+start) for a pickled
+  checkpoint read that PRECEDES the spawn inside a 5-minute window. Attribution
+  therefore never crosses sessions or process instances: only python runtimes that
+  are ancestors of the spawned process are considered as the deserializing reader.
+
+  Maps to OWASP A08:2021 - Software and Data Integrity Failures (the LLM-Top-10
+  equivalent is LLM03 Supply Chain, tagged below).
+author: Tanya
+date: "2026-06-02"
+references:
+  - https://owasp.org/Top10/A08_2021-Software_and_Data_Integrity_Failures/
+  - https://pytorch.org/docs/stable/generated/torch.load.html
+  - https://huggingface.co/docs/transformers/main_classes/trainer
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - attack.t1204.002
+  - atlas.aml.t0010
+  - atlas.aml.t0011
+  - owasp.llm03
+falsepositives:
+  - Training script that legitimately resumes from a checkpoint and then spawns curl
+    or wget to download a dataset shard or upload an artifact. Mitigated by requiring
+    the fetch to be spawned inside the lineage of the exact python instance that read
+    a pickled checkpoint, within 5 minutes, and by reporting (never blocking).
+  - MLflow / Weights-and-Biases integrations shelling out (git, gcloud, aws) around a
+    checkpoint load. Mitigated by excluding bare shell invocations from the
+    sufficient (tier-A) indicator set - a plain `sh -c` / `python -c` child is only
+    reported when the checkpoint itself was read out of a writable staging directory
+    (/tmp, /var/tmp, /dev/shm, Downloads, Users/Shared).
+  - Distributed launchers (torchrun, deepspeed, accelerate) spawning worker python
+    processes with `-c`. Same tier-B gate applies.
+  - Bootstrap or Dockerfile-style setup steps that run `chmod +x` or a base64-decoded
+    installer in the same process tree as a resumed training run.
+  - Checkpoint conversion utilities that load a legacy .bin/.pth and then invoke a
+    packaging helper. Reported once per (reader instance, artifact) thanks to the
+    rule store de-duplication, so this cannot become alert spam.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_exec:
+    event_type: execute_process
+  condition: sel_exec
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ── Rule-owned tunables (never persisted) ─────────────────────────────────
+  WINDOW_NS = 300000000000        # 5 min: checkpoint deserialization -> payload exec
+  MAX_READS = 800                 # per-instance READ_FILE cap (scoped query)
+  MAX_CMD   = 300
+
+  # Artifacts HF Trainer feeds to torch.load() without weights_only=True
+  PICKLE_ARTIFACTS = [
+      "optimizer.pt", "optimizer.bin", "scheduler.pt", "scaler.pt",
+      "training_args.bin", "pytorch_model.bin", "adapter_model.bin",
+      "model.ckpt", "last.ckpt",
+  ]
+
+  # Sufficient on their own: a checkpoint loader has no business doing these.
+  TIER_A = [
+      ["remote fetch",       r"(?i)\b(curl|wget|fetch)\b"],
+      ["reverse shell",      r"(?i)\b(ncat|socat)\b"],
+      ["reverse shell",      r"(?i)\bnc\b\s+-{1,2}[a-z]"],
+      ["reverse shell",      r"/dev/tcp/"],
+      ["reverse shell",      r"(?i)\bmkfifo\b"],
+      ["interactive shell",  r"(?i)\bbash\b\s+-i\b"],
+      ["inline interpreter", r"(?i)\b(perl|ruby|node|php)\b\s+-{1,2}e\b"],
+      ["encoded payload",    r"(?i)\bbase64\b\s+-{1,2}[dD]"],
+      ["encoded payload",    r"(?i)\bb64decode\b"],
+      ["encoded payload",    r"(?i)\bopenssl\b\s+enc\b"],
+      ["in-band exec call",  r"(?i)\bos\.(system|popen|execv|execve|spawn)"],
+      ["in-band exec call",  r"(?i)\bsubprocess\.(popen|call|run|check_output|check_call)"],
+      ["in-band exec call",  r"(?i)\b(eval|exec)\(\s*(compile|__import__|base64|marshal)"],
+      ["persistence",        r"(?i)\b(crontab|launchctl|schtasks)\b"],
+      ["make executable",    r"(?i)\bchmod\b\s+[0-7rwxaugos+]*x"],
+      ["credential path",    r"(?i)(/\.ssh/|/\.aws/credentials|/etc/shadow|/\.kube/config|/\.netrc)"],
+      ["script host",        r"(?i)\b(osascript|powershell|pwsh|cscript|wscript)\b"],
+  ]
+
+  # Only reported when the artifact came from a writable staging directory.
+  TIER_B = [
+      ["shell -c",       r"(?i)\b(sh|bash|zsh|dash|ksh|ash)\b\s+-{1,2}c\b"],
+      ["inline python",  r"(?i)\bpython[0-9.]*\b\s+-{1,2}c\b"],
+  ]
+
+  STAGING_DIRS = ["/tmp/", "/private/tmp/", "/var/tmp/", "/dev/shm/",
+                  "/downloads/", "/users/shared/", "/public/"]
+
+  # ── Pure helpers (no graph / log / fts calls) ─────────────────────────────
+  def base_name(p):
+      parts = p.split("/")
+      return parts[len(parts) - 1].lower()
+
+  def is_py_runtime(p):
+      b = base_name(p)
+      if b.startswith("python") or b.startswith("pythonw"):
+          return True
+      return b in ["torchrun", "accelerate", "deepspeed", "ipython"]
+
+  def is_unsafe_ckpt(p):
+      lp = p.lower()
+      b  = base_name(p)
+      # CVE vector: Trainer._load_rng_state() -> rng_state.pth / rng_state_<rank>.pth
+      if b.startswith("rng_state") and b.endswith(".pth"):
+          return True
+      for a in PICKLE_ARTIFACTS:
+          if lp.endswith(a):
+              return True
+      if "/checkpoint-" in lp or "/checkpoints/" in lp:
+          for ext in [".pth", ".pt", ".bin", ".ckpt", ".pkl"]:
+              if lp.endswith(ext):
+                  return True
+      return False
+
+  def is_rng_state(p):
+      b = base_name(p)
+      return b.startswith("rng_state") and b.endswith(".pth")
+
+  def staged_dir(p):
+      lp = p.lower()
+      for d in STAGING_DIRS:
+          if d in lp:
+              return True
+      return False
+
+  def match_sigs(cmd, sigs):
+      hits = []
+      for s in sigs:
+          if re.find(s[1], cmd) != None:
+              if s[0] not in hits:
+                  hits.append(s[0])
+      return hits
+
+  def ev_edge(e, to_override):
+      to = to_override if to_override != "" else e.get("target_id", "")
+      return {
+          "from":     "process://" + e.get("actor_path", ""),
+          "to":       to,
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  # ── One report per (reader instance, artifact) ────────────────────────────
+  def already_reported(k):
+      seen = store_get("reported")
+      if seen == None:
+          return False
+      return k in seen
+
+  def mark_reported(k, ts):
+      seen = store_get("reported")
+      if seen == None:
+          seen = {}
+      if len(seen) > 400:
+          seen = {}
+      seen[k] = ts
+      u = store_usage()
+      if u["free"] > 16384:
+          store_set("reported", seen)
+
+  def run():
+      # ── 1. relevance gate: pure string work on meta, no traversal ────────
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
+      if cmd == "":
+          return "allow"
+      a_hits = match_sigs(cmd, TIER_A)
+      b_hits = match_sigs(cmd, TIER_B)
+      if not a_hits and not b_hits:
+          return "allow"
+
+      # ── 2. anchor on the exact triggering instance ───────────────────────
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"                     # periodic / unresolved PID
+      trig_ts = int(meta.get("event_ts", "0"))
+      if trig_ts <= 0:
+          return "allow"
+      inst = proc_instance(cp, trig_ts)
+      if inst == None:
+          return "allow"                     # degraded: create row not landed yet
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # ── 3. REQUIRED anchor: a python runtime in THIS lineage read an
+      #        unsafely-pickled checkpoint before the spawn, in-window ─────
+      read_ev   = None
+      read_path = ""
+      reader    = None
+      since     = trig_ts - WINDOW_NS
+      for x in lineage:
+          if not is_py_runtime(x.get("actor_path", "")):
+              continue
+          rows = query_events(kind="READ_FILE",
+                              actor_pid=int(x["actor_pid"]),
+                              actor_start=int(x["actor_start"]),
+                              since_ns=since, until_ns=trig_ts,
+                              limit=MAX_READS)
+          for r in rows:
+              p = r.get("path", "")
+              if p == "" or not is_unsafe_ckpt(p):
+                  continue
+              rt = int(r.get("ts", "0"))
+              if rt <= 0 or rt > trig_ts or (trig_ts - rt) > WINDOW_NS:
+                  continue
+              if read_ev == None or rt > int(read_ev.get("ts", "0")):
+                  read_ev   = r
+                  read_path = p
+                  reader    = x
+      if read_ev == None:
+          return "allow"                     # no unsafe deserialization -> nothing to say
+
+      # ── 4. tier-B commands need a writable staging dir to qualify ───────
+      staged = staged_dir(read_path)
+      if not a_hits and not staged:
+          return "allow"
+
+      # ── 5. de-duplicate per reader instance + artifact ──────────────────
+      key = reader["actor_pid"] + ":" + reader["actor_start"] + ":" + read_path
+      if already_reported(key):
+          return "allow"
+
+      # ── 6. kill chain, rooted at the session owner ──────────────────────
+      root  = lineage[len(lineage) - 1]
+      chain = new_chain("process://" + root.get("actor_path", ""))
+
+      vector = "torch.load() of pickled checkpoint"
+      if is_rng_state(read_path):
+          vector = "Trainer._load_rng_state() torch.load() without weights_only"
+      dsc = vector + " by " + base_name(reader.get("actor_path", "")) + \
+            " (pid " + reader["actor_pid"] + "): " + read_path
+      if staged:
+          dsc = dsc + " [artifact staged in writable dir]"
+      chain.append(step(ev_edge(read_ev, read_path),
+                        stage_id="Unsafe Deserialization",
+                        stage_desc=dsc))
+
+      argv0     = re.find(r"/[A-Za-z0-9_./+-]+", cmd)
+      trig_from = "process://" + inst.get("actor_path", "")
+      trig_to   = "process://" + (argv0 if argv0 != None else inst.get("actor_path", ""))
+      trig_edge = {
+          "from":     trig_from,
+          "to":       trig_to,
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       str(trig_ts),
+          "first_ts": str(trig_ts),
+          "last_ts":  str(trig_ts),
+          "cmdline":  cmd[:MAX_CMD],
+      }
+      sigs = a_hits + b_hits
+      chain.append(step(trig_edge,
+                        stage_id="Payload Execution",
+                        stage_desc="checkpoint loader spawned [" + ", ".join(sigs) +
+                                   "]: " + cmd[:MAX_CMD]))
+
+      names = []
+      for x in lineage:
+          names.append(base_name(x.get("actor_path", "")))
+      gap = (trig_ts - int(read_ev.get("ts", "0"))) // 1000000000
+      attribution = "exact" if len(lineage) > 1 else "degraded (lineage truncated)"
+      reason = ("Unsafe torch checkpoint deserialization followed by process execution: " +
+                base_name(reader.get("actor_path", "")) + " read " + read_path +
+                ", then " + " / ".join(sigs) + " ran " + str(gap) + "s later; lineage " +
+                " -> ".join(names) + "; attribution " + attribution)
+      print(reason)
+      mark_reported(key, str(trig_ts))
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
