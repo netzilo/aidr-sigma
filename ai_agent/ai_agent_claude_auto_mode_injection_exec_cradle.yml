@@ -1,0 +1,60 @@
+title: Claude Code Auto Mode - Prompt Injection Download-and-Execute Cradle
+id: e4a2f6d8-9c3b-4a1e-8f7d-2b6c5a9e3d10
+status: experimental
+level: critical
+description: |
+  Detects the terminal code-execution stage of a prompt-injection attack against
+  Claude Code Opus 5 Auto Mode: a malicious website-summarization request smuggles
+  instructions that cause the agent's safety classifier to auto-approve a spawned
+  process, which then downloads and executes attacker-controlled code (curl/wget
+  piped to a shell interpreter, base64/PowerShell-encoded payload execution, or a
+  scripting interpreter fetching and exec()-ing remote content) without a human
+  approval step. This is a single-event, content-only detector scoped to processes
+  attributed to Claude Code; it complements, rather than replaces, graph-based rules
+  that correlate the full ingestion-to-execution sequence across multiple events.
+author: Egemen
+date: "2026-02-18"
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - A developer explicitly instructs Claude Code to run an official vendor install
+    script that follows the curl-pipe-to-shell convention (e.g. rustup, nvm, Homebrew
+    installers) during a normal coding session.
+  - CI or regression test harnesses that intentionally invoke download-and-execute or
+    base64-decode-and-execute syntax to validate this detection rule or a sandboxed
+    fixture, rather than to perform a real attack.
+  - Legitimate use of PowerShell -EncodedCommand or base64-encoded payloads for
+    approved deployment or configuration automation unrelated to any web content
+    the agent was asked to summarize.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_agent_scope:
+    agent_name|contains: 'claude'
+  sel_download_exec:
+    command|re:
+      - '(?i)\b(curl|wget)\b[^\n]{0,200}\b(https?|ftp)://[^\n]{0,200}\|\s*(bash|sh|zsh|python[23]?|perl|ruby|node)\b'
+      - '(?i)\b(python[23]?|perl|ruby|node)\b[^\n]{0,100}\s-c\s[^\n]{0,300}\b(urllib|requests|http\.client|socket)\b[^\n]{0,300}\bexec\('
+  sel_encoded_exec:
+    command|re:
+      - '(?i)\bbase64\b[^\n]{0,60}(-d|--decode)\b[^\n]{0,120}\|\s*(bash|sh|zsh)\b'
+      - '(?i)\beval\s+\$\('
+      - '(?i)-enc(?:odedcommand)?\s+[A-Za-z0-9+/]{20,}'
+  filter_test_harness:
+    command|contains:
+      - 'pytest'
+      - 'unittest'
+      - 'dry-run'
+      - '--dry-run'
+  filter_help_flags:
+    command|re: '(?i)\s--(help|version)\b'
+  condition: >
+    sel_event and sel_agent_scope and (sel_download_exec or sel_encoded_exec)
+    and not (filter_test_harness or filter_help_flags)
+action: report
