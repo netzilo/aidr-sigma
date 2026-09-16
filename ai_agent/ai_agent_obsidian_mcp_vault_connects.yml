@@ -1,0 +1,41 @@
+title: Obsidian MCP Vault Bridge Network Connection
+id: 3e9c1a4d-6b2f-4d3a-9f7e-8c2b5a1d6e4f
+status: experimental
+level: medium
+description: |
+  Detects outbound network connections attributable to the Python MCP server
+  for Obsidian vault access (py-obsidian-mcp / mcp-obsidian). This server
+  bridges any connected MCP client to direct read and write access over a
+  local Obsidian vault without per-operation human confirmation, matching
+  the OWASP LLM06 Excessive Agency and LLM04 Model DoS risk patterns. Every
+  connection resolved to this specific server binary is reported for audit
+  visibility, since no file_read/file_write event type or MCP-specific edge
+  kind is currently instrumented for this component at this engine version
+  and the only verified observable signal is the raw 'connects' event.
+author: Selhan
+date: "2025-01-15"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+tags:
+  - attack.collection
+  - attack.t1213
+  - owasp.llm04
+  - owasp.llm06
+falsepositives:
+  - Expected, authorized operation of the py-obsidian-mcp server as part of
+    an approved MCP integration; this server legitimately opens a new
+    connection for every vault read/write cycle it services on behalf of a
+    trusted client.
+  - Development, staging, or CI checkouts of the py-obsidian-mcp project (or
+    a renamed fork) whose resolved executable path happens to satisfy the
+    naming pattern without representing an actual production vault-access
+    session.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_connects:
+    event_type: connects
+    agent_name|re: '(?i)\b(mcp[-_]?obsidian|obsidian[-_]?mcp)\b'
+  condition: sel_connects
+action: report
