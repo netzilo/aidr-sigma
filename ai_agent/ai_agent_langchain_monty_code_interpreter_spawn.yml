@@ -1,0 +1,39 @@
+title: LangChain-Monty Code Interpreter Process Spawn
+id: 3f1a9c2e-6b7d-4e5a-9c3f-1b2d4e5f6a7b
+status: experimental
+level: low
+description: |
+  Detects a spawned process whose command line references the langchain-monty
+  middleware package/module in a way that goes beyond routine package
+  management, search, or test invocation. langchain-monty integrates code
+  interpretation capabilities into LangChain agents; the source material gives
+  no attack narrative, PoC, or CVE, and the graph schema has no dedicated
+  ACQUIRED_CAPABILITY or EXECUTE_CODE edge kind to model a capability-then-
+  execution chain precisely. The only verified observable is the generic
+  execute_process event, so this rule is a narrow, audit-only content check
+  on that single event scoped tightly to the middleware's own name, intended
+  to establish a baseline of how/whether this component actually spawns
+  processes before any stronger rule is considered.
+author: Selhan
+date: "2026-03-01"
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0050
+  - owasp.llm07
+falsepositives:
+  - Developer or CI job running `pip install langchain-monty` / `pip show langchain-monty` during environment setup
+  - Dependency audit or code search (grep/rg/find/git grep) scanning a repository for references to langchain-monty
+  - pytest or other test runner invoked against test files that import langchain_monty, where the module name appears in the command line as a file/argument reference rather than an active interpreter invocation
+  - Documentation build or lint step passing the package name as a plain argument
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_monty_spawn:
+    event_type: execute_process
+    content|re: '(?i)\blangchain[_-]monty\b'
+  filter_benign_admin:
+    content|re: '(?i)\b(pip3?\s+(install|show|list|download|uninstall)|poetry\s+(add|show|lock|remove)|npm\s+(install|view|list|uninstall)|yarn\s+(add|info|remove)|git\s+(clone|log|diff|show|status|grep)|grep|rg|find|locate|which|ls|cat|less|more|man|pytest|python3?\s+-m\s+pytest|--help|-h\b)\b'
+  condition: sel_monty_spawn and not filter_benign_admin
+action: report
