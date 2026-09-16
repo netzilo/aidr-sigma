@@ -1,0 +1,54 @@
+title: Docx-scalpel Invocation Chained to Network/Encoding Tool
+id: c4f2a8e6-7b3d-4a19-9e2c-6f8b1d4a5c73
+status: experimental
+level: medium
+description: |
+  Detects a single process invocation where the docx-scalpel anchor-addressed
+  DOCX editing library is invoked in the same command line as a network
+  transfer tool (curl, wget, nc, ncat), a raw /dev/tcp redirection, or a
+  base64 encode immediately followed by a pipe. Docx-scalpel is an
+  LLM-agent-facing document editing tool; a compromised or misused instance
+  could use anchor-addressed edits to surgically alter document content or
+  extract confidential DOCX content without the surface-level footprint of
+  a normal file copy. This is a content-only, single-event heuristic: it has
+  no visibility into whether the docx-scalpel package itself is compromised,
+  only into whether one process invocation exhibits an edit-then-exfil shell
+  pattern. There is no CVE or PoC behind this pattern today — it is shipped
+  as report-only specifically because the underlying supply-chain scenario
+  is unconfirmed and the live-available signals (execute_process command
+  line; READ_FILE/WRITE_FILE graph edges) cannot distinguish a compromised
+  library from a legitimate anchor edit followed by an unrelated upload.
+author: Haibo
+date: "2025-06-02"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0053
+tags:
+  - attack.exfiltration
+  - attack.t1567
+  - atlas.aml.t0053
+  - owasp.llm07
+  - owasp.llm06
+falsepositives:
+  - A CI/CD pipeline step that runs docx-scalpel to apply an anchor edit and then curl/wget-uploads the resulting DOCX to an internal artifact repository or webhook in the same shell invocation.
+  - A developer debugging an anchor edit by piping extracted document text through base64 to paste it into a terminal or chat window.
+  - A support or ticketing automation script that emails a base64-encoded excerpt of an edited document to a helpdesk system via mail/sendmail.
+  - A documentation or demo script that chains docx-scalpel output to a local netcat listener for manual inspection during development.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_docx_scalpel:
+    event_type: execute_process
+    command|re: '(?i)\bdocx[-_]scalpel\b'
+  sel_exfil_chain:
+    command|re:
+      - '(?i)\|\s*(curl|wget|nc|ncat|base64)\b'
+      - '(?i)\bcurl\s+-[A-Za-z]*[dDF]\b'
+      - '(?i)\bwget\s+--post'
+      - '(?i)>\s*/dev/tcp/'
+      - '(?i)\bbase64\s+(-w0|--wrap=0)?\s*\|'
+  filter_help:
+    command|re: '(?i)(--help|--version|\s-h\b|--dry-run)'
+  condition: sel_docx_scalpel and sel_exfil_chain and not filter_help
+action: report
