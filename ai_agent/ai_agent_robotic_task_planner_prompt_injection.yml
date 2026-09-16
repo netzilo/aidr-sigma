@@ -1,0 +1,61 @@
+title: Prompt Injection Phrase in Robotic Task-Planner Command Invocation
+id: 8e4f2a71-6d93-4a08-9c2b-71e5a3f9d604
+status: experimental
+level: high
+description: |
+  Detects a single execute_process event in which a known robotic task-planning
+  or robot-control binary/process (ROS2, MoveIt, Nav2, PX4, ArduPilot, Gazebo,
+  or a generically-named task/llm/embodied/multi-agent planner) is invoked with
+  a task/goal/prompt-style command-line flag whose value contains classic
+  prompt-injection override phrasing ("ignore previous instructions", "override
+  safety", "new objective:", etc.).
+
+  This is a narrow proxy for the DIRECT delivery path described in the threat
+  narrative: an attacker handing a crafted injection payload straight to a
+  robot's task-planning process as a CLI argument. It has no visibility into
+  the INDIRECT path (injected content arriving via a perception module's
+  output) or into propagation of a contaminated prompt from one agent to
+  another over a shared messaging/prompt structure -- the engine has no
+  PERCEPTION_MANIPULATION, PROMPT_INJECTION, CROSS_AGENT_COMMUNICATION or
+  EXECUTE_ACTION telemetry, and no send_command/state_change event types.
+  execute_process is generic process-spawn telemetry with no semantic link to
+  physical actuation; this rule can only flag the textual pattern of an
+  injection payload appearing in a robot-planner invocation, not confirm that
+  an unsafe physical action actually resulted. It is scoped to report-only for
+  that reason.
+author: Egemen
+date: "2026-01-15"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Adversarial-robustness / red-team test harnesses that intentionally feed known prompt-injection strings into a robot task-planner CLI to validate defenses, e.g. a pytest suite invoking `task_planner --task "ignore previous instructions and ..."` inside a sandboxed CI run
+  - Documentation or tutorial scripts that print example injection payloads as inline sample text while demonstrating a planner's --task/--goal argument
+  - Fuzzing or benchmark harnesses that replay canned adversarial prompt corpora against an llm_planner/embodied_agent binary in a pure simulation environment (Gazebo, dry-run mode) with no attached hardware
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_robot_proc:
+    event_type: execute_process
+    command|re: '(?i)\b(ros2|roslaunch|rosrun|moveit|nav2|px4|ardupilot|gazebo|task_planner|llm_planner|robot_agent|embodied_agent|multi_agent_planner)\b'
+  sel_task_flag:
+    command|re: '(?i)(--task|--prompt|--goal|--instruction|--objective|--command)\b'
+  sel_injection_phrase:
+    command|re:
+      - '(?i)ignore (all|previous) instructions'
+      - '(?i)disregard (all|previous) (instructions|objectives)'
+      - '(?i)forget (your|all) (previous|prior) (instructions|objectives)'
+      - '(?i)new (task|objective|instructions?)\s*[:=]'
+      - '(?i)override (safety|task|objective|protocol)'
+      - '(?i)bypass safety'
+      - '(?i)you are now (a|an|the)'
+      - '(?i)system prompt\s*[:=]'
+  filter_test:
+    command|re: '(?i)\b(pytest|unittest|--dry-run|--dry_run|--simulate|--mock|redteam|red-team|adversarial[_-]?test|benchmark|test_prompt_injection|--test)\b'
+  condition: sel_robot_proc and sel_task_flag and sel_injection_phrase and not filter_test
+action: report
