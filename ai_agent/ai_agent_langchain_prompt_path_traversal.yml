@@ -1,0 +1,57 @@
+title: LangChain Prompt Config Path Traversal File Read Attempt
+id: 7e4b2f1a-9c3d-4a62-8f7e-1d9b6c2a5e30
+status: experimental
+level: high
+description: |
+  Detects LangChain's serialized-prompt-configuration schema marker
+  ("_type": "prompt" / "few_shot" / "few_shot_with_templates") co-occurring
+  in the same event body with a "*_path" key whose value performs two or
+  more directory-traversal hops ("../" or "..\") or points directly at a
+  known-sensitive absolute path (e.g. /etc/passwd, ~/.ssh/, C:\Windows\System32).
+  load_prompt() and load_prompt_from_config() deserialize these configs and
+  read the referenced file without validating the path against traversal or
+  absolute-path injection, constrained only by extension checks (.txt/.json/.yaml).
+author: Selhan
+date: "2025-06-12"
+references:
+  - https://github.com/langchain-ai/langchain/security/advisories
+tags:
+  - attack.collection
+  - attack.t1005
+  - owasp.llm02
+falsepositives:
+  - Legitimate multi-file LangChain prompt projects referencing shared prompt
+    fragments via relative "_path" fields crossing a directory level in a
+    monorepo layout (two-or-more "../" hops are uncommon in legitimate configs
+    but a single hop is not; this rule requires two or more).
+  - Unit or regression test fixtures for the LangChain prompt loader itself that
+    intentionally embed traversal strings as CVE reproduction or patch-validation
+    test data, typically alongside "pytest", "unit test", or a CVE identifier.
+  - Security blog posts or vulnerability write-ups quoting the exact vulnerable
+    JSON payload verbatim for educational purposes.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event_scope:
+    event_type:
+      - tool_call
+      - tool_response
+  sel_schema_marker:
+    content|re: '(?i)"_type"\s*:\s*"(prompt|few_shot|few_shot_with_templates)"'
+  sel_traversal_posix:
+    content|re: '(?i)"[a-zA-Z_]{1,40}_path"\s*:\s*"[^"]{0,20}(\.\./){2,}'
+  sel_traversal_win:
+    content|re: '(?i)"[a-zA-Z_]{1,40}_path"\s*:\s*"[^"]{0,20}(\.\.\\){2,}'
+  sel_absolute_sensitive:
+    content|re: '(?i)"[a-zA-Z_]{1,40}_path"\s*:\s*"(/etc/passwd|/etc/shadow|/etc/hosts|~/\.ssh/|/root/\.ssh/|/proc/self/environ|[A-Za-z]:\\Windows\\System32)'
+  filter_test_or_doc:
+    content|contains:
+      - 'CVE-2024'
+      - 'CVE-2025'
+      - 'proof of concept'
+      - 'regression test'
+      - 'unit test'
+      - 'pytest'
+  condition: sel_event_scope and sel_schema_marker and (sel_traversal_posix or sel_traversal_win or sel_absolute_sensitive) and not filter_test_or_doc
+action: report
