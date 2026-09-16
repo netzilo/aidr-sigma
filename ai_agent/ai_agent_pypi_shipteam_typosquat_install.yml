@@ -1,0 +1,45 @@
+title: Potentially Malicious PyPI Package - shipteam
+id: 6e2a1f3d-8c4b-4a9e-9f1d-3b7c5e2a8d6f
+status: experimental
+level: medium
+description: |
+  Detects a monitored process spawning a pip/pipx/uv/uvx installer command
+  that targets the PyPI package named exactly "shipteam" — a package whose
+  name and description ("Claude Code and Codex CLI framework installer")
+  suggest typosquatting against legitimate Anthropic/OpenAI CLI tooling.
+  No confirmed malicious payload has been verified for this package; this
+  rule flags the install attempt for review rather than blocking it, since
+  the only live signal available is generic process-spawn visibility
+  (execute_process) and not an install-specific or dependency-resolution
+  edge in the graph.
+author: Haibo
+date: "2026-03-10"
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+falsepositives:
+  - An internal or private PyPI index/mirror hosting an unrelated, legitimately
+    named internal tool that also happens to be called "shipteam" (e.g. a
+    company shipping/logistics team's internal package).
+  - A security researcher or engineer intentionally installing the flagged
+    package inside an isolated sandbox/VM to analyze it for this exact report.
+  - A CI pipeline log or documentation snippet that echoes the string
+    "pip install shipteam" as an example without actually executing it (this
+    rule only fires on execute_process, i.e. the command was actually run,
+    not merely printed or logged as text).
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_base:
+    event_type: execute_process
+  sel_pip_install:
+    command|re: '(?i)\b(pip3?|pipx)\b[^\n]{0,200}\binstall\b[^\n]{0,200}(?:^|[^\w-])shipteam(?:[^\w-]|$)'
+  sel_uv_tool_install:
+    command|re: '(?i)\buv\b[^\n]{0,50}\btool\b[^\n]{0,50}\binstall\b[^\n]{0,200}(?:^|[^\w-])shipteam(?:[^\w-]|$)'
+  sel_python_m_pip:
+    command|re: '(?i)\bpython3?\b[^\n]{0,50}-m\s+pip\b[^\n]{0,200}\binstall\b[^\n]{0,200}(?:^|[^\w-])shipteam(?:[^\w-]|$)'
+  sel_uvx_run:
+    command|re: '(?i)\buvx\b[^\n]{0,200}(?:^|[^\w-])shipteam(?:[^\w-]|$)'
+  condition: sel_base and (sel_pip_install or sel_uv_tool_install or sel_python_m_pip or sel_uvx_run)
+action: report
