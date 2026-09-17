@@ -1,0 +1,35 @@
+title: Supply Chain - Warden DB MCP Linux x64 Package Execution
+id: 7f3c9d2e-4b6a-4f18-9d3e-2a6b7c8e1f0a
+status: experimental
+level: high
+description: |
+  Detects process execution whose command line references the npm package
+  @rodrigodotdev/warden-db-mcp-linux-x64 — a pre-compiled Linux x64 "Warden"
+  binary pulled in automatically as a transitive dependency of warden-db-mcp.
+  The package's publisher, provenance, and purpose are unverified. Because it
+  installs automatically (not by explicit user choice), any process spawn
+  referencing its path — an npm/npx/yarn/pnpm install step, a postinstall
+  hook, or direct invocation of the extracted binary — is a supply-chain
+  event worth surfacing for review, independent of whether it is ultimately
+  malicious.
+author: Tanya
+date: "2026-03-01"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.001
+falsepositives:
+  - "Running `npm view @rodrigodotdev/warden-db-mcp-linux-x64`, `npm info`, or similar registry metadata lookups during a manual dependency audit"
+  - "Security or SBOM tooling (`npm audit`, `grep`, `rg`, `find`, `jq`) scanning package.json / package-lock.json / node_modules for the package name as part of a supply-chain review"
+  - "Directory listing or inspection commands (`ls`, `tree`, `cat`, `file`, `du`) run against node_modules that happen to include the package path in their arguments without invoking the bundled binary"
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_pkg_exec:
+    event_type: execute_process
+    command|contains: '@rodrigodotdev/warden-db-mcp-linux-x64'
+  filter_readonly_inspection:
+    command|re: '(?i)\b(ls|cat|less|more|head|tail|grep|rg|find|tree|file|du|jq|npm\s+(view|info|show|ls|list|outdated|audit)|yarn\s+(info|list|why)|pnpm\s+(info|list|why))\b'
+  condition: sel_pkg_exec and not filter_readonly_inspection
+action: report
