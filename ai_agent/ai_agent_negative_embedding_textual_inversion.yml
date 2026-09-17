@@ -1,0 +1,133 @@
+title: Suspicious Textual-Inversion Embedding Fetched and Placed in Embeddings Folder
+id: e2f4a716-8c39-4f1d-9a2b-6d4e8f1c3b7a
+status: experimental
+level: medium
+description: |
+  Detects a process whose command line references textual-inversion / negative-
+  embedding distribution indicators (embedding-typical file extensions, known
+  distribution platforms, or the terms "textual inversion" / "negative embedding")
+  and which itself performs a WRITE_FILE into a path containing an "embeddings"
+  path segment -- the same location Stable Diffusion webuis (e.g. AUTOMATIC1111)
+  load textual-inversion embeddings from. This operationalizes the acquisition and
+  placement stages of a negative-embedding supply-chain attack using only the two
+  live-verified signals available in this environment (execute_process content,
+  WRITE_FILE graph edges). It does not and cannot confirm that the embedding is
+  malicious -- no model-load or embedding-content telemetry exists to observe the
+  downstream effect on generation -- so this is a report-only audit signal, not a
+  block.
+author: Selhan
+date: "2025-05-20"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - owasp.llm03
+  - owasp.llm04
+falsepositives:
+  - A user manually and legitimately downloading a real textual-inversion embedding, LoRA, or hypernetwork from Civitai or a HuggingFace dataset with curl/wget/git and placing it into their own webui embeddings folder
+  - First-run or install scripts for AUTOMATIC1111 / ComfyUI / InvokeAI that pre-populate the embeddings folder with bundled community embeddings during setup
+  - A Python environment or package installer (pip/conda) whose command line or target path incidentally contains the substring "embedding" or "embeddings" (e.g. an NLP library's site-packages directory) with no connection to Stable Diffusion
+  - Generic .bin/.pt/.safetensors artifact installs (model checkpoints, tokenizer files) unrelated to textual inversion that happen to match the extension indicators
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    content|re: '.'
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # Only two signals are verified live in this environment: execute_process
+  # command-line content, and WRITE_FILE graph edges. No model_load / LOAD_MODEL /
+  # INJECTION telemetry exists, so we cannot observe the embedding's actual effect
+  # on generation -- we can only correlate "fetched something embedding-shaped"
+  # with "wrote it into an embeddings-named path", by the SAME process, and
+  # report it for human review. This deliberately never blocks.
+
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct != "execute_process":
+          return False
+      cmd = meta.get("content", "")
+      # cheap pre-filter: only bother if this looks like a fetch/placement tool at all
+      for t in [r"\bcurl\b", r"\bwget\b", r"\bgit\b", r"(?i)huggingface-cli",
+                r"\bpython[23]?\b", r"\bcp\b", r"\bmv\b", r"\bunzip\b",
+                r"(?i)invoke-webrequest", r"\bpowershell\b"]:
+          if re.find(t, cmd) != None:
+              return True
+      return False
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cmd = meta.get("content", "")
+
+      # Discriminator 1 -- command line references embedding / textual-inversion
+      # distribution indicators (extension, terminology, or known dataset host).
+      source_hit = None
+      for t in [r"(?i)textual.?inversion", r"(?i)negative.?embedding", r"(?i)embedding",
+                r"(?i)\.pt\b", r"(?i)\.safetensors\b", r"(?i)\.bin\b",
+                r"(?i)civitai", r"(?i)huggingface\.co/datasets"]:
+          m = re.find(t, cmd)
+          if m != None:
+              source_hit = m
+              break
+      if source_hit == None:
+          return "allow"
+
+      # Discriminator 2 -- the SAME process actually wrote a file into a path
+      # containing an "embeddings" segment (the webui embeddings folder pattern).
+      aid = meta.get("agent_name", "")
+      cp  = meta.get("caller_pid", "0")
+
+      write_edge = None
+      write_path = ""
+      owner = None
+      for p in graph(type="Process"):
+          path_match = (aid != "" and aid in p.get("path", ""))
+          pid_match  = (cp != "0" and p.get("pid", "") == cp)
+          if not (path_match or pid_match):
+              continue
+          for e in edges(p["id"], dir="out", kind="WRITE_FILE"):
+              fs = node(e["to"])
+              if fs == None:
+                  continue
+              entries = fs_activity(fs["id"], "WRITE", '"embeddings"')
+              if entries:
+                  write_edge = e
+                  write_path = entries[0]["path"]
+                  owner = p
+                  break
+          if write_edge != None:
+              break
+
+      if write_edge == None:
+          return "allow"
+
+      # Dedup per file path so repeated triggering command executions in the same
+      # session don't produce a report storm for the same artifact.
+      seen = store_get("reported_paths") or {}
+      if write_path in seen:
+          return "allow"
+      if store_usage()["free"] > 2048:
+          seen[write_path] = meta.get("event_ts", "0")
+          store_set("reported_paths", seen)
+
+      chain = new_chain(owner["id"])
+      chain.append(step(write_edge, stage_id="Embeddings Folder Write",
+                         stage_desc="file written into a path containing 'embeddings': " + write_path +
+                                     " -- triggering process command referenced: " + source_hit))
+
+      print("candidate textual-inversion embedding placement: " + write_path +
+            " | fetch/placement command matched indicator: " + source_hit)
+
+      return {
+          "action": "report",
+          "reason": "Fetch/placement command referenced textual-inversion / embedding distribution indicators and the same process wrote a file into an 'embeddings'-named path: " + write_path + ". NOT confirmed malicious -- no model-load or embedding-content telemetry is available to verify effect on generation. Flagged for manual review.",
+          "chain": chain,
+      }
+
+  result = run()
