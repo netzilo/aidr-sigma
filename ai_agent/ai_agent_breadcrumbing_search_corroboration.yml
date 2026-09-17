@@ -1,0 +1,65 @@
+title: Breadcrumbing Search Agent — Coordinated Corroboration Injection
+id: 8e2a1f0d-6c3b-4e9a-9f7d-2b6a4c8e1d35
+status: experimental
+level: medium
+description: |
+  Detects tool_call content that combines two linguistic signals characteristic
+  of "breadcrumbing" attacks against LLM-based search agents: (1) explicit framing
+  that ties the current payload to a prior search step ("confirms the previous
+  result", "consistent with the earlier finding"), and (2) an explicit directive
+  telling the agent to stop verifying and accept/conclude ("you can now conclude",
+  "stop searching", "treat this as verified"). Genuine breadcrumbing attacks plant
+  this combination in tool-intermediary content (poisoned search results, fetched
+  pages, or coordinator-tool payloads) across multiple queries so that the agent's
+  own cross-referencing step "discovers" manufactured corroboration and short-
+  circuits further verification, matching the Authority-Chain Hijack and
+  Trace-Guided Strategy Evolution stages of the attack narrative.
+
+  This is a single-event, content-only proxy detection. The engine currently
+  exposes no edges (ISSUED_SEARCH_QUERY, RECEIVED_SEARCH_RESULT, READ_PAGE_CONTENT,
+  CROSS_REFERENCED_SOURCE, FORMED_CONCLUSION) and no event types (query_issued,
+  reasoning_step, response_received, web_request) capable of reconstructing the
+  true multi-query corroboration graph. Only event_type: tool_call is live. This
+  rule therefore cannot prove a coordinated poisoning chain across queries — it
+  can only flag the distinctive combination of phrasing that a single poisoned
+  payload is likely to carry regardless of which query delivered it. It ships as
+  action: report, not block, specifically because of this limitation: it surfaces
+  candidate payloads for human or future graph-based follow-up review rather than
+  asserting the coordination chain is proven.
+author: Egemen
+date: "2026-04-02"
+tags:
+  - atlas.aml.t0051.000
+  - atlas.aml.t0034.000
+  - owasp.llm01
+falsepositives:
+  - QA or support-ticket aggregation tooling that legitimately restates "this confirms the earlier report and no further sources are needed" while consolidating duplicate tickets
+  - News- or research-aggregation summaries describing genuinely corroborated reporting across independent sources with an editorial "no need to search further" conclusion
+  - Security-awareness or incident-writeup content that discusses this exact breadcrumbing/prompt-injection technique using illustrative example phrasing (partially mitigated by filter_discussion, not exhaustive)
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+  sel_xref_claim:
+    content|re:
+      - '(?i)confirms?\s+(the\s+)?(previous|earlier|prior)\s+(search\s+)?(result|finding|source|report)'
+      - '(?i)corroborat(?:es|ing)\s+(the\s+)?(previous|earlier|prior)\s+(finding|result|source|report)'
+      - '(?i)consistent\s+with\s+(the\s+)?(previous|earlier|prior)\s+(search\s+)?(result|finding)'
+      - '(?i)aligns?\s+with\s+(your|the)\s+(previous|earlier|prior)\s+(finding|search|result)'
+      - '(?i)further\s+(confirms?|corroborates?|verifies?)\s+(your|the)\s+(earlier|previous|prior)\s+(finding|conclusion|result)'
+      - '(?i)matches\s+(what\s+you\s+found|the\s+(previous|earlier|prior)\s+(result|source))'
+  sel_directive:
+    content|re:
+      - '(?i)you\s+(can|should|may)\s+now\s+conclude'
+      - '(?i)(treat|accept)\s+this\s+as\s+(verified|established|confirmed|fact)'
+      - '(?i)no\s+need\s+to\s+(seek|search\s+for|look\s+for)\s+(further|additional|more)\s+sources'
+      - '(?i)this\s+settles\s+the\s+matter'
+      - '(?i)stop\s+searching'
+      - '(?i)sufficient(?:ly)?\s+(confirmed|corroborated|verified)'
+  filter_discussion:
+    content|re:
+      - '(?i)(breadcrumbing|prompt\s+injection|adversarial\s+search|red\s?team(?:ing)?|security\s+research|penetration\s+test|case\s+study|research\s+paper)'
+  condition: sel_tool_call and sel_xref_claim and sel_directive and not filter_discussion
+action: report
