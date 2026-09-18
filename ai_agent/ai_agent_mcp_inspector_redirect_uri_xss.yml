@@ -1,0 +1,77 @@
+title: MCP Inspector Malicious Redirect URI XSS Payload
+id: 4c1e2a9d-7f3b-4a68-9c2e-1d5b8a4f6e2c
+status: experimental
+level: high
+description: |
+  Detects an OAuth-style redirect_uri/redirect_url parameter — sent in an
+  outbound HTTP request from an MCP client/inspector proxy — that carries an
+  HTML/JavaScript injection payload (a raw or percent-encoded <script> tag, a
+  javascript: URI scheme, an inline event-handler attribute such as onerror=,
+  or a data:text/html payload) instead of an ordinary callback URL.
+
+  This is the network-observable half of the MCP Inspector XSS-via-redirect-URI
+  flaw (Inspector < 0.16.6): an attacker-controlled remote MCP server supplies
+  a crafted redirect_uri during the OAuth authorization handshake; when the
+  developer's Inspector processes it, the payload executes in the Inspector's
+  UI context and can pivot to interacting with the local inspector proxy. The
+  actual DOM-side script execution has no corresponding event type in this
+  engine (browser rendering is invisible to the graph) — this rule detects the
+  one deterministic, telemetry-visible artifact of the attack: the malicious
+  redirect_uri value transiting as an HTTP request.
+
+  Scope note: this rule intentionally matches on HTML/JS injection syntax
+  (script tags, javascript: scheme, event-handler attributes) inside a
+  redirect_uri/redirect_url parameter specifically — not on shell
+  metacharacters (;, |, $(), backticks) in a generic command field. That is a
+  distinct, narrower signature from OS command-injection detection and does
+  not overlap with rules that key on shell metacharacter sequences; it exists
+  because the exploit vector here is browser-side markup/script reflection,
+  not direct process-argument injection.
+author: Haibo
+date: "2026-03-01"
+modified: "2026-03-01"
+references:
+  - https://github.com/modelcontextprotocol/inspector/security/advisories
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1059
+falsepositives:
+  - Legacy OAuth/implicit-flow clients (including some Google API client
+    libraries) that intentionally set redirect_uri=javascript:void(0) as a
+    no-op placeholder for postMessage-based popup authentication — excluded
+    explicitly by filter.
+  - Automated web security scanners (ZAP, Burp Suite, internal red-team
+    tooling) deliberately probing an MCP server's OAuth endpoints for XSS as
+    part of authorized testing — will legitimately match and should be
+    reviewed, not treated as a true incident.
+  - A redirect_uri value that legitimately points to a file whose name
+    contains the substring "javascript" (e.g. .../assets/javascript-sdk.js)
+    combined with an unrelated onload= attribute elsewhere in the same query
+    string — rare, but possible with verbose CDN asset URLs; review before
+    escalating.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_http:
+    event_type: http_request
+  sel_xss_redirect_url:
+    url.full|re:
+      - '(?i)redirect_(uri|url)=[^&]*(%3cscript|<script)'
+      - '(?i)redirect_(uri|url)=[^&]*(javascript%3a|javascript:)'
+      - '(?i)redirect_(uri|url)=[^&]*(on(error|load|focus|mouseover)(%3d|=))'
+      - '(?i)redirect_(uri|url)=[^&]*(data%3atext%2fhtml|data:text/html)'
+  sel_xss_redirect_body:
+    content|re:
+      - '(?i)"redirect_(uri|url)"\s*:\s*"[^"]*(%3cscript|<script)'
+      - '(?i)"redirect_(uri|url)"\s*:\s*"[^"]*(javascript%3a|javascript:)'
+      - '(?i)"redirect_(uri|url)"\s*:\s*"[^"]*(on(error|load|focus|mouseover)(%3d|=))'
+      - '(?i)"redirect_(uri|url)"\s*:\s*"[^"]*(data%3atext%2fhtml|data:text/html)'
+  filter_bookmarklet_void_body:
+    content|contains: 'javascript:void(0)'
+  filter_bookmarklet_void_url:
+    url.full|contains: 'javascript:void(0)'
+  condition: sel_http and (sel_xss_redirect_url or sel_xss_redirect_body) and not (filter_bookmarklet_void_body or filter_bookmarklet_void_url)
+action: report
