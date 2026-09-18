@@ -1,0 +1,41 @@
+title: PAIR Jailbreak Scaffolding Text in Executed Command Line
+id: 7c9e6b1a-4f2d-4a3b-8e6d-2f9b7a5c3d18
+status: experimental
+level: high
+description: |
+  Detects operating-system process spawns whose command line contains
+  characteristic prompt-injection / jailbreak scaffolding phrases (persona
+  override, "ignore instructions", "developer mode enabled", "no
+  restrictions") associated with direct harmful-request and adaptive
+  PAIR-style jailbreak attacks against LLM agents (EvoSafeHarness threat
+  model). A benign process spawn should not carry this literal scaffolding
+  text in its command line; its presence indicates injected or adversarial
+  prompt content reached actual command execution.
+author: Evgen
+date: "2026-03-01"
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051.000
+  - owasp.llm01
+falsepositives:
+  - Security researchers or red-team engineers running grep/rg/cat across log files or corpora to locate known jailbreak/PAIR template phrases for manual review (mitigated by filter_readonly_inspection)
+  - Documentation or training-data generation scripts that print example jailbreak phrases to a terminal via cat/less/head for review, without any interpreter executing the phrase as an instruction
+  - Automated regression tests that echo/cat reference jailbreak strings to compare scanner output text, without spawning an interpreter that treats the phrase as a live instruction
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_scaffold:
+    event_type: execute_process
+    command|re:
+      - '(?i)\bignore\s+(all|any|previous|prior)\s+(system\s+)?instructions\b'
+      - '(?i)\byou are (now |currently )?(a |an )?(DAN|unfiltered ai|jailbroken ai)\b'
+      - '(?i)\bdeveloper mode\s+(is\s+)?enabled\b'
+      - '(?i)\bwithout any (restrictions|filters|guardrails)\b'
+      - '(?i)\bdisregard (your|the) (previous|prior|safety) (instructions|guidelines|policy)\b'
+      - '(?i)\brespond as an? ai with no (restrictions|filters)\b'
+  filter_readonly_inspection:
+    command|re: '(?i)^\s*(grep|egrep|fgrep|rg|ag|cat|less|more|head|tail|awk|sed)\b'
+  condition: sel_scaffold and not filter_readonly_inspection
+action: report
