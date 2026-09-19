@@ -1,0 +1,57 @@
+title: vLLM Tool Schema Malformed Pattern or Type Field
+id: 7e2a4f16-9c3d-4b8a-8f21-6d5c9a3e7b10
+status: experimental
+level: high
+description: |
+  Detects HTTP requests to an LLM inference endpoint carrying an OpenAI-style
+  tool/function schema whose "pattern" field contains a syntactically
+  malformed or resource-exhausting regex construct (unclosed character class,
+  nested ReDoS-style quantifier, or an oversized repetition count), or whose
+  "type" field is a non-string JSON literal (true/false/null/number) where the
+  JSON Schema specification requires a string or array of strings. Both are
+  known trigger shapes for the vLLM tool-schema-to-native-regex-compiler crash
+  path, where an unvalidated pattern/type value reaches the C++ regex
+  compiler through Jinja2 rendering and takes the inference worker down until
+  it is manually restarted. This rule inspects the outbound request payload
+  itself — the malicious input — rather than any crash/outage signal, because
+  no process-crash or service-unavailable event/edge exists in this engine's
+  schema for this endpoint.
+author: Tanya
+date: "2025-05-12"
+tags:
+  - attack.impact
+  - attack.t1499.004
+falsepositives:
+  - A legitimate tool schema using an intentionally large bounded-length
+    validator pattern, e.g. '.{0,2000}' on a free-text field, trips the
+    oversized-repetition indicator even though the regex itself is well-formed
+    and safe to compile.
+  - A documentation page, changelog, or unit-test fixture that deliberately
+    embeds a known-malformed pattern as a negative test case will match the
+    same syntactic signatures as a live attack attempt if it is proxied
+    through this endpoint as request content.
+  - An unrelated JSON field also literally named "type" elsewhere in the same
+    request body (for example inside tool_choice or response_format metadata)
+    holding a null or numeric value can trigger the non-string type indicator
+    even when every JSON Schema type declaration inside the actual tool
+    definition is well-formed, because this is content-wide regex matching,
+    not a JSON-aware, nested-scope parser.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_schema:
+    event_type: http_request
+    content|re: '(?i)"tools"\s*:\s*\['
+  sel_has_parameters:
+    content|re: '(?i)"parameters"\s*:\s*\{'
+  sel_unclosed_bracket:
+    content|re: '(?i)"pattern"\s*:\s*"[^"\\]*\[[^\]"\\]*"'
+  sel_redos_nested_quantifier:
+    content|re: '(?i)"pattern"\s*:\s*"[^"]*\([^)"]*[+*][^)"]*\)[+*]'
+  sel_excessive_repetition:
+    content|re: '(?i)"pattern"\s*:\s*"[^"]*\{[0-9]{4,}(,[0-9]*)?\}'
+  sel_invalid_type_literal:
+    content|re: '(?i)"type"\s*:\s*(true|false|null|[0-9]+)\b'
+  condition: sel_tool_schema and sel_has_parameters and (sel_unclosed_bracket or sel_redos_nested_quantifier or sel_excessive_repetition or sel_invalid_type_literal)
+action: report
