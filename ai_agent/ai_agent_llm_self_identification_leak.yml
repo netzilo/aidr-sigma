@@ -1,0 +1,71 @@
+title: Model Self-Identification Leak in Tool Call Arguments
+id: 1f0d2e2c-6a4b-4c8e-9f3a-2b7c5d9e0a41
+status: experimental
+level: medium
+description: |
+  Detects first-person AI self-identification phrases (e.g. "I am ChatGPT",
+  "I'm Claude", "as an AI language model developed by OpenAI", knowledge-
+  cutoff disclaimers) appearing inside structured MCP/tool-call argument
+  content. Tool call arguments are expected to carry only structured
+  parameters, not free-text model self-description. In agentic deployments
+  where the serving stack discards raw text output and exposes only
+  structured tool calls, this kind of leakage is one of the few remaining
+  observable channels that can surface a mismatch between the model a
+  provider claims to be serving and the model actually generating output -
+  a technique that can conceal cost-motivated substitution, quantization,
+  or wrapping of the advertised foundation model. This is a low-confidence
+  audit trigger, not a confirmed finding: it flags candidate events for
+  manual comparison against the provider's advertised model. It does not
+  itself establish that a substitution occurred, and it cannot compare
+  claimed vs. actual model identity on its own - only tool_call events and
+  their content are observable in this deployment; no llm_request/response,
+  API_COMMUNICATION, MODEL_SUBSTITUTION, or TOOL_INVOCATION signal exists
+  to perform that comparison directly.
+author: Selhan
+date: "2026-03-10"
+tags:
+  - attack.t1195
+  - atlas.aml.t0010
+  - owasp.asi09
+falsepositives:
+  - A tool call argument that legitimately quotes or relays another AI
+    system's stated self-introduction for comparison, translation, or
+    analysis (e.g. a "summarize this chatbot transcript" task).
+  - A custom agent persona or fictional character deliberately named
+    "Gemini", "Claude", "Llama", or similar, scripted to say "I am
+    <persona-name>" for role-play, branding, or naming reasons unrelated
+    to the actual underlying model.
+  - Model-evaluation or red-team test harnesses whose fixture prompts are
+    designed to elicit a self-identification answer from a target model
+    as part of an intentional, authorized audit.
+  - Documentation, README, or training-example content that quotes a
+    well-known LLM self-introduction phrase as illustrative text rather
+    than as an actual live assistant reply.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_tool_call:
+    event_type: tool_call
+  sel_self_id:
+    content|re:
+      - '(?i)\bi\s*am\s+(chatgpt|gpt-3\.5|gpt-4(\.\d)?|claude(\s*[0-9.]*)?|gemini(\s*[0-9.]*)?|llama\s*[0-9.]*|mistral|copilot|bard)\b'
+      - '(?i)\bi''m\s+(chatgpt|claude|gemini|llama|copilot|bard)\b'
+      - '(?i)\bas an ai (language model|assistant)\b[^.\n]{0,60}\b(developed|created|trained|built)\s+by\s+(openai|anthropic|google|meta|mistral ai|microsoft)\b'
+      - '(?i)\bi (was|am) (trained|developed|created) by (openai|anthropic|google|meta|mistral ai|microsoft)\b'
+      - '(?i)\bmy (training data|knowledge) (cut-?off)\b'
+  filter_quoted_example:
+    content|contains:
+      - 'for example'
+      - 'e.g.'
+      - 'sample transcript'
+      - 'test fixture'
+      - 'unit test'
+      - 'docstring'
+      - 'lorem ipsum'
+      - 'role-play'
+      - 'roleplay'
+      - 'persona'
+      - 'character name'
+  condition: sel_tool_call and sel_self_id and not filter_quoted_example
+action: report
