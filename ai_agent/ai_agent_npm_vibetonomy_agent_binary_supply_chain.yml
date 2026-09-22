@@ -1,0 +1,55 @@
+title: NPM Supply Chain - Suspicious @vibetonomy/agent-win-x64 Package Install or Execution
+id: 6d4e8a2f-9c1b-4a7e-8f3d-2b6c9e1a4d57
+status: experimental
+level: medium
+description: |
+  Detects install-time or execution-time evidence of the NPM package
+  @vibetonomy/agent-win-x64, which advertises itself as a "Vibetonomy agent
+  binary" for Windows x64 systems. No legitimate, verifiable publisher has
+  been identified for this scoped package, and shipping a compiled
+  executable through the NPM registry as a purported "agent binary" is a
+  known supply-chain distribution pattern: attacker publishes the package ->
+  a developer or CI/build system installs it as a dependency -> the bundled
+  binary executes with the installing user's or process's privileges.
+
+  This rule fires on the only evidence the engine currently exposes for this
+  narrative: the execute_process event's captured command line. There is no
+  package_install event type and no ACQUIRED_DEPENDENCY / EXECUTE_BINARY
+  edge kind in this engine, so the install-time and dependency-graph
+  portions of the attack cannot be observed directly. What can be observed
+  is (a) an npm/yarn/pnpm install invocation whose command line references
+  the package, or (b) a spawned binary living inside this package's
+  node_modules path.
+author: Evgen
+date: "2026-03-01"
+references:
+  - https://owasp.org/Top10/A06_2021-Vulnerable_and_Outdated_Components/
+tags:
+  - attack.initial-access
+  - attack.t1195
+falsepositives:
+  - Security or dependency-audit tooling running read-only npm/yarn/pnpm
+    verbs (ls, list, view, show, audit, outdated, why, pack, info, explain)
+    against the package name to check for its presence, without installing
+    or executing anything.
+  - A developer or CI pipeline running an install with --dry-run to preview
+    what would be installed, without the package's binary ever executing.
+  - A QA or red-team test harness that intentionally spawns a dummy file at
+    a path matching node_modules/@vibetonomy/agent-win-x64/*.exe solely to
+    validate this detection rule, with no real payload involved.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_npm_install:
+    event_type: execute_process
+    command|re: '(?i)\b(npm(\.cmd)?|yarn|pnpm)\s+(install|i|add|ci)\b[\s\S]{0,200}@vibetonomy/agent-win-x64'
+  sel_binary_exec:
+    event_type: execute_process
+    command|re: '(?i)node_modules[\\/]@vibetonomy[\\/]agent-win-x64[\\/][^\s"]{1,100}\.(exe|bat|cmd|ps1|dll)'
+  filter_benign:
+    command|re:
+      - '(?i)\b(npm(\.cmd)?|yarn|pnpm)\s+(ls|list|view|show|audit|outdated|why|pack|info|explain)\b'
+      - '(?i)--dry-run\b'
+  condition: (sel_npm_install or sel_binary_exec) and not filter_benign
+action: report
