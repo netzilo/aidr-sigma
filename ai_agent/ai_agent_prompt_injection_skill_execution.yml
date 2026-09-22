@@ -1,0 +1,64 @@
+title: Prompt Injection Payload in Skill Execution Command Line
+id: 3d8f1a2e-9c47-4b6a-8e2d-71f9c4a5b6d7
+status: experimental
+level: high
+description: |
+  Detects prompt-injection trigger phrases (e.g. "ignore previous instructions",
+  "you are now in developer mode") appearing directly in the command line of a
+  spawned process that is also loading, running, or referencing an AI agent
+  skill (skill.json/yaml/md, skills.sh, a skill runner/loader binary, or a
+  --skill flag). This is the SkillSecurer-class attack: an attacker embeds a
+  context-compatible prompt injection inside a skill's configuration, script,
+  or instructions so that when the skill is executed, the injected text is
+  passed through to the agent's reasoning and hijacks its subsequent actions.
+  The rule fires only on the co-occurrence of an injection phrase AND explicit
+  skill-execution context in the same command line, which sharply narrows
+  matches away from unrelated processes that merely mention these phrases.
+author: Egemen
+date: "2026-01-12"
+references:
+  - https://atlas.mitre.org/techniques/AML.T0051
+tags:
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Security research or red-team tooling (e.g. SkillSecurer-style benchmarking
+    scripts) that intentionally invokes a skill loader with known injection
+    test payloads in order to evaluate a skill's sanitization defenses.
+  - CI/CD test suites that pass canonical prompt-injection strings as fixture
+    arguments into a skill-loading test harness to validate a detector or
+    sanitizer, without any real skill being executed against a live agent.
+  - Documentation or security-advisory tooling that regenerates example
+    injection strings as command-line arguments while rebuilding skill
+    vulnerability write-ups or changelogs.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+  sel_injection:
+    command|re:
+      - '(?i)\bignore\s+(all\s+)?(previous|prior|above)\s+instructions\b'
+      - '(?i)\bdisregard\s+(all\s+)?(previous|prior|system)\s+(instructions|prompts?)\b'
+      - '(?i)\byou\s+are\s+now\s+(in\s+)?(developer|debug|jailbreak|dan)\s+mode\b'
+      - '(?i)\boverride\s+(your|the)\s+(system\s+)?instructions\b'
+      - '(?i)\bnew\s+system\s+prompt\b'
+      - '(?i)\bforget\s+(everything|all)\s+(you\s+)?(were\s+told|above|before)\b'
+  sel_skill_context:
+    command|re:
+      - '(?i)\bskill\.(json|yaml|yml|md)\b'
+      - '(?i)\bskills?[-_.]sh\b'
+      - '(?i)\bskill[-_]?(runner|exec|loader)\b'
+      - '(?i)\b(run|load|exec(ute)?)[-_]?skill\b'
+      - '(?i)--skill\b'
+  filter_test_harness:
+    command|re:
+      - '(?i)\bpytest\b'
+      - '(?i)\bunittest\b'
+      - '(?i)--dry-run\b'
+      - '(?i)\btest[-_]?fixtures?\b'
+  condition: sel_trigger and sel_injection and sel_skill_context and not filter_test_harness
+action: report
