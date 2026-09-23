@@ -1,0 +1,174 @@
+title: Anti-Detection Browser Evasion — CAPTCHA-Solving API Contacted (aihawk-style)
+id: d3f1b8ec-9a2e-4b7c-8f61-2e4d6a9c1b3d
+status: experimental
+level: medium
+description: |
+  Detects a single process instance contacting a well-known CAPTCHA-solving /
+  anti-detection API host (2captcha, anti-captcha, capsolver, deathbycaptcha,
+  nopecha, capmonster, rucaptcha, azcaptcha, 9kw, and lookalike vendor domains).
+  This is the observable fingerprint of anti-detection browser automation such
+  as the publicly available "aihawk" toolkit, which is explicitly marketed to
+  bypass CAPTCHA challenges and evade bot-detection while automating web
+  interactions (e.g. automated job applications, credential stuffing, or
+  scraping while masking the automated nature of the traffic).
+
+  The engine schema was verified for this threat and does NOT expose an
+  'AUTOMATED_ACTION' or 'EVASION_TECHNIQUE' edge kind, nor 'process_execution'
+  or 'network_connection' event types for this narrative — only
+  event_type=http_request / edge kind=HTTP_REQUEST are live producers. This
+  rule is therefore built exclusively on that one telemetry class. To keep the
+  detection precise despite that single signal, it is INSTANCE-RESOLVED: it
+  anchors on meta.caller_pid, resolves the exact process instance via
+  proc_instance(), walks its lineage via proc_lineage(), and (optionally)
+  looks for a prior outbound HTTP_REQUEST made by that SAME instance in a
+  bounded look-back window via query_events() — never across sibling sessions,
+  never via the path-keyed aggregate graph. A kill chain is always emitted via
+  new_chain()/step() so an investigator sees exactly which instance did what,
+  in what order.
+
+  Because corroboration is optional (the schema gives us no second signal
+  class to require), and because legitimate CAPTCHA-solving usage exists
+  (accessibility tooling, authorized QA/pentest automation), this rule
+  reports for investigation only — it never blocks.
+author: Haibo
+date: "2025-06-18"
+references:
+  - https://github.com/feder-cr/Auto_Jobs_Applier_AIHawk
+tags:
+  - attack.defense-evasion
+falsepositives:
+  - Accessibility services that route CAPTCHA challenges through a solver API on behalf of visually impaired users
+  - QA / end-to-end test automation suites that intentionally integrate a commercial CAPTCHA-solving API in staging environments to unblock automated test runs
+  - Authorized penetration-testing or bug-bounty tooling contracted to bypass a target's own CAPTCHA during a scoped engagement
+  - Internal test farms or synthetic-monitoring bots with a legitimate paid CAPTCHA-solving subscription for non-production form testing
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: http_request
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  CAPTCHA_SOLVER_HOSTS = [
+      "2captcha.com",
+      "anti-captcha.com",
+      "anticaptcha.com",
+      "capsolver.com",
+      "deathbycaptcha.com",
+      "nopecha.com",
+      "capmonster.cloud",
+      "rucaptcha.com",
+      "azcaptcha.com",
+      "cap-solver.com",
+      "9kw.eu",
+  ]
+
+  WINDOW_NS = 600000000000  # 10 minute look-back, scoped to the SAME process instance only
+
+  def host_is_captcha_solver(h):
+      h = h.lower()
+      for c in CAPTCHA_SOLVER_HOSTS:
+          if h == c or h.endswith("." + c):
+              return True
+      return False
+
+  def is_relevant_event():
+      if meta.get("context_type", "") != "http_request":
+          return False
+      return host_is_captcha_solver(meta.get("host", ""))
+
+  def ev_http_edge(actor_path, host, target_id, ts):
+      to = target_id if target_id != "" else ("https://" + host)
+      return {
+          "from": "process://" + actor_path,
+          "to": to,
+          "kind": "HTTP_REQUEST",
+          "ts": ts,
+          "first_ts": ts,
+          "last_ts": ts,
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"          # no caller instance to anchor on — never guess attribution
+
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"          # degraded: create-row not ingested yet, will re-fire cleanly
+
+      actor_pid   = int(inst["actor_pid"])
+      actor_start = int(inst["actor_start"])
+      lineage     = proc_lineage(actor_pid, actor_start)
+      if not lineage:
+          return "allow"
+
+      since = event_ts - WINDOW_NS
+      if since < 0:
+          since = 0
+
+      # Scoped to the EXACT triggering process instance only — never expanded to
+      # siblings, children, or other sessions. This is single-instance attribution.
+      prior = query_events(
+          kind="HTTP_REQUEST",
+          actor_pid=actor_pid,
+          actor_start=actor_start,
+          since_ns=since,
+          until_ns=event_ts,
+          limit=200,
+      )
+
+      corroborating = None
+      for e in prior:
+          h = e.get("host", "")
+          if h != "" and not host_is_captcha_solver(h):
+              corroborating = e
+              break
+
+      chain = new_chain(lineage[-1]["actor_path"])
+
+      if corroborating != None:
+          corr_edge = ev_http_edge(
+              corroborating.get("actor_path", inst["actor_path"]),
+              corroborating.get("host", ""),
+              corroborating.get("target_id", ""),
+              corroborating.get("ts", "0"),
+          )
+          chain.append(step(
+              corr_edge,
+              stage_id="Automated Browsing",
+              stage_desc="same process instance previously fetched " + corroborating.get("host", "?") +
+                          " before contacting the CAPTCHA-solving API",
+          ))
+
+      trigger_edge = ev_http_edge(inst["actor_path"], meta.get("host", ""), "", meta.get("event_ts", "0"))
+      chain.append(step(
+          trigger_edge,
+          stage_id="CAPTCHA Bypass Service Contacted",
+          stage_desc="process instance contacted a known CAPTCHA-solving / anti-detection API: " + meta.get("host", ""),
+      ))
+
+      names = " -> ".join([x["actor_path"].split("/")[-1] for x in lineage])
+      if corroborating != None:
+          note = " with a prior outbound fetch by the same instance in the preceding window"
+      else:
+          note = " (single-signal — no corroborating prior fetch found by this instance in the window)"
+
+      print("anti-detection browsing signal: " + names + note)
+
+      return {
+          "action": "report",
+          "reason": "Process instance " + names + " contacted known CAPTCHA-solving/anti-detection API " +
+                     meta.get("host", "") + note + " — consistent with anti-detection browser automation " +
+                     "such as the aihawk toolkit.",
+          "chain": chain,
+      }
+
+  result = run()
