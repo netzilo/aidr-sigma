@@ -1,0 +1,48 @@
+title: Suspicious npm Package - LangChain Namespace Impersonation with Prebuilt Binary
+id: b47e6d92-1a4c-4f8b-9e3d-5c2a7f691d0e
+status: experimental
+level: high
+description: |
+  Detects execution of a process spawned from, or invoking, a prebuilt binary
+  shipped inside an npm package published under the @langchain scope whose
+  package name follows the platform-arch suffix convention (e.g. -darwin-x64,
+  -linux-arm64) that is not used by any legitimate LangChain JS package
+  (@langchain/core, @langchain/community, @langchain/openai,
+  @langchain/langgraph, etc). This naming convention is normally reserved for
+  native-binary distribution packages and has been observed used to
+  impersonate the trusted @langchain namespace via a package named
+  @langchain/managed-deepagents-darwin-x64, which ships and executes a
+  prebuilt darwin/x64 binary as a supply-chain implant (maps to OWASP
+  A08:2021 - Software and Data Integrity Failures). Fires on execute_process
+  when the spawned command line, executable path, or process content
+  references such a package directory.
+author: Tanya
+date: "2026-03-18"
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - owasp.llm03
+falsepositives:
+  - 'Incident response or dependency-audit commands that reference the known-malicious package name to inspect or remove it, e.g. "npm ls @langchain/managed-deepagents-darwin-x64" or "npm uninstall @langchain/managed-deepagents-darwin-x64" run during remediation.'
+  - 'SBOM generation or static-analysis tooling that enumerates node_modules directory names (e.g. find node_modules/@langchain -maxdepth 1 -iname "*-darwin-x64") as a listing operation without ever invoking the payload inside the matched directory.'
+  - 'A future legitimate @langchain-scope package that adopts the same platform-arch binary naming convention used elsewhere in the npm ecosystem (e.g. esbuild ships @esbuild/darwin-x64) for native bindings; no such package is published by the LangChain maintainers today.'
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_content_pattern:
+    content|re:
+      - '(?i)node_modules/@langchain/[a-z0-9._-]*-(?:darwin|linux|win32)-(?:x64|arm64|ia32)(?:/|$)'
+      - '(?i)@langchain/managed-deepagents-darwin-x64'
+  sel_filepath_pattern:
+    file_path|re:
+      - '(?i)node_modules/@langchain/[a-z0-9._-]*-(?:darwin|linux|win32)-(?:x64|arm64|ia32)(?:/|$)'
+      - '(?i)@langchain/managed-deepagents-darwin-x64'
+  sel_command_pattern:
+    command|re:
+      - '(?i)node_modules/@langchain/[a-z0-9._-]*-(?:darwin|linux|win32)-(?:x64|arm64|ia32)(?:/|$)'
+      - '(?i)@langchain/managed-deepagents-darwin-x64'
+  condition: sel_event and (sel_content_pattern or sel_filepath_pattern or sel_command_pattern)
+action: report
