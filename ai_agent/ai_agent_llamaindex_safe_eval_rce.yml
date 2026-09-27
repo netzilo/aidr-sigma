@@ -1,0 +1,55 @@
+title: LlamaIndex exec_utils safe_eval Sandbox-Escape RCE (CVE-2023-39662 Bypass)
+id: b6f0a2e4-7c1d-4a9f-9e33-2f6d8c714aa0
+status: experimental
+level: critical
+description: |
+  Detects a spawned OS process whose command line simultaneously contains (a) a
+  classic Python restricted-eval sandbox-escape gadget chain (__subclasses__,
+  __globals__, __builtins__, __bases__, __mro__) and (b) a call to a dangerous
+  execution sink (os.system, subprocess.*, eval, exec, __import__).
+
+  This combination is the observable fingerprint of the llama_index exec_utils
+  safe_eval() bypass: attacker-supplied input evades the function's method
+  restriction list via prompt injection, and the restricted eval escapes its
+  sandbox to reach a real execution primitive. This flaw is a bypass of the
+  previously patched CVE-2023-39662. The public proof-of-concept demonstrates
+  impact by creating a file on the target host, which surfaces here as a
+  process-spawn event carrying the gadget chain and sink call together.
+
+  Content-only, single-event detection: no graph traversal is used. Ships as
+  action: report to establish a false-positive baseline on this specific
+  command-line signature before any enforcement action is considered.
+author: Haibo
+date: "2026-03-10"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2023-39662
+tags:
+  - attack.execution
+  - attack.t1059
+  - attack.t1203
+  - owasp.llm01
+  - owasp.llm05
+falsepositives:
+  - Regression test suites (pytest) that intentionally re-run the CVE-2023-39662 gadget payload to confirm the patched safe_eval() now rejects it
+  - Security scanners such as Bandit, Semgrep, or Nuclei whose command line embeds this exact gadget string as a static detection signature rather than executing it
+  - Python security-training or CTF material that spawns a process to demonstrate the __subclasses__/__globals__ sandbox-escape technique for educational purposes
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+  sel_gadget:
+    command|re: '__subclasses__\s*\(\s*\)|__globals__\s*\[|__builtins__\s*\[|__bases__\s*\[|__mro__\s*\['
+  sel_sink:
+    command|re: '(?i)os\.system\s*\(|subprocess\.(popen|call|run|check_output)\s*\(|__import__\s*\(|\beval\s*\(|\bexec\s*\('
+  filter_test:
+    command|contains:
+      - 'test_safe_eval'
+      - 'pytest'
+      - 'CVE-2023-39662'
+      - 'bandit'
+      - 'semgrep'
+      - 'nuclei'
+  condition: sel_event and sel_gadget and sel_sink and not filter_test
+action: report
