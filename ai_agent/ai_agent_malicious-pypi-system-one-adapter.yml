@@ -1,0 +1,147 @@
+title: Malicious PyPI Package system-one-adapter - Install and Backend Callout
+id: c47e9d2a-8b1f-4e6a-9c3d-5f7a1b2e9d44
+status: experimental
+level: high
+description: |
+  Detects execution of a process referencing the malicious PyPI package
+  "system-one-adapter", published as a drop-in TypeSafeClient replacement but
+  actually backed by LLM APIs under attacker control. Anchors on the exact
+  process instance that triggered the event via caller_pid -> proc_instance
+  -> proc_lineage, scopes strictly to that resolved session (the ancestor
+  lineage plus any children it spawned), and correlates any outbound
+  HTTP_REQUEST activity from that same session within a bounded time window
+  around the trigger. Surfaces the "install/invoke -> phone home" pattern as
+  an instance-exact kill chain. This is a first-deployment detection for a
+  newly identified supply-chain package: the rule reports for triage so the
+  false-positive rate can be measured before any enforcement decision is
+  made.
+author: Evgen
+date: "2026-03-01"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - atlas.aml.t0010
+  - owasp.llm05
+falsepositives:
+  - Security researchers or malware analysts intentionally installing system-one-adapter in an isolated sandbox to analyze it
+  - Automated software-composition-analysis tools (pip-audit, Snyk, Dependabot, etc.) that reference the package name in advisory text or scan output without ever executing its code
+  - A developer grepping or searching source trees, chat logs, or this advisory itself for the string "system-one-adapter", where the search command line happens to contain the package name
+  - A coincidentally-named internal or vendored package sharing the "system-one-adapter" token in an unrelated monorepo
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    command|re: '(?i)system[-_]one[-_]adapter'
+  condition: sel_trigger
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  PKG_RE = "(?i)system[-_]one[-_]adapter"
+  WINDOW_NS = 900000000000  # 15 minutes either side of the trigger - this rule's own window
+
+  def is_relevant_event():
+      if meta.get("context_type", "") != "execute_process":
+          return False
+      return re.find(PKG_RE, meta.get("content", "")) != None
+
+  def ev_edge(e):
+      # Branch on kind: for EXECUTE_PROCESS the actor is the CHILD, so "from"
+      # must be the parent, or the edge self-loops.
+      if e.get("kind", "") == "EXECUTE_PROCESS":
+          from_path = e.get("parent_path", e.get("actor_path", ""))
+      else:
+          from_path = e.get("actor_path", "")
+      return {
+          "from":     "process://" + from_path,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+
+      event_ts = int(meta.get("event_ts", "0"))
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          return "allow"          # degraded -- create row not yet landed; re-fires next event
+
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      # Session = the resolved ancestor lineage only -- never cross-session.
+      session = {}
+      for x in lineage:
+          session[x["actor_pid"]] = x["actor_start"]
+
+      # Bounded, single-pass expansion to children spawned BY this session,
+      # so a post-install hook run by the invoking process stays in scope.
+      for e in query_events(kind="EXECUTE_PROCESS", limit=2000):
+          if e.get("parent_pid", "") in session:
+              session[e["actor_pid"]] = e["actor_start"]
+
+      root  = lineage[-1]
+      chain = new_chain("process://" + root["actor_path"])
+
+      # Trigger stage -- taken directly from meta (the event that fired this
+      # rule), never re-queried, since the just-fired row may race the async
+      # event-log ingest.
+      trigger_edge = {
+          "from":     "process://" + inst.get("parent_path", root["actor_path"]),
+          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "EXECUTE_PROCESS",
+          "ts":       meta.get("event_ts", "0"),
+          "first_ts": meta.get("event_ts", "0"),
+          "last_ts":  meta.get("event_ts", "0"),
+      }
+      chain.append(step(
+          trigger_edge,
+          stage_id="Package Invocation",
+          stage_desc="process referencing system-one-adapter spawned: " + meta.get("content", "")[:200],
+      ))
+
+      # Session-scoped HTTP_REQUEST correlation -- scoped per instance, never
+      # a broad unscoped scan, bounded to a window around the trigger.
+      found_http = False
+      for pid_str, start_val in session.items():
+          pid = int(pid_str)
+          start = int(start_val) if start_val else 0
+          for e in query_events(kind="HTTP_REQUEST", actor_pid=pid, actor_start=start, limit=200):
+              ts = int(e.get("ts", "0"))
+              if ts == 0:
+                  continue
+              diff = ts - event_ts
+              if diff < 0:
+                  diff = -diff
+              if diff > WINDOW_NS:
+                  continue
+              host = e.get("host", "unknown")
+              chain.append(step(
+                  ev_edge(e),
+                  stage_id="Backend Callout",
+                  stage_desc="process in this session made an outbound HTTP request to: " + host,
+              ))
+              found_http = True
+
+      reason = "Malicious PyPI package system-one-adapter: process invocation detected in this session"
+      if found_http:
+          reason += "; correlated outbound HTTP callout(s) observed - possible attacker-controlled LLM backend"
+
+      return {
+          "action": "report",
+          "reason": reason,
+          "chain":  chain,
+      }
+
+  result = run()
