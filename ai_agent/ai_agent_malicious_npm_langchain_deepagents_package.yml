@@ -1,0 +1,33 @@
+title: Malicious npm Package Execution - @langchain/managed-deepagents-win32-arm64
+id: 3e8a2f1c-9d4b-4a67-8c2e-1f7b6d9a05c3
+status: experimental
+level: high
+description: |
+  Detects execution of a process whose command line references the npm package
+  "@langchain/managed-deepagents-win32-arm64" -- a fake or namesquatted prebuilt
+  binary package that impersonates a LangChain dependency for Windows ARM64.
+  This package is not a legitimate LangChain artifact; any process execution
+  whose command line contains its scoped path (as laid out by npm, yarn, or
+  pnpm's flattened virtual store) indicates the package was resolved, its
+  postinstall step ran, or its prebuilt binary was invoked on the host -- the
+  delivery mechanism for this software supply-chain attack against LangChain-
+  based AI agent deployments.
+author: Tanya
+date: "2026-03-15"
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - owasp.llm05
+falsepositives:
+  - Security scanning or SBOM/dependency-audit tooling (npm audit, Socket.dev CLI, Snyk CLI, OSV-Scanner) that spawns a subprocess referencing the package name while checking a lockfile or dependency tree for this known-bad entry
+  - Dependency inventory commands such as `npm ls @langchain/managed-deepagents-win32-arm64` or `yarn why @langchain/managed-deepagents-win32-arm64` run by a security team specifically to confirm the package is NOT present in the tree
+  - Grep/ripgrep sweeps of source trees or lockfiles run during an incident-response audit that pass the package name as a search argument without ever installing or executing it
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  selection:
+    event_type: execute_process
+    content|re: '(?i)@langchain[\\/+]{1,2}managed[-_]deepagents[-_]win32[-_]arm64'
+  condition: selection
+action: report
