@@ -1,0 +1,57 @@
+title: Malicious PyPI Package Install/Exec — llm-project-generator
+id: b6f2a4d0-8e13-4c2f-9a6b-3d7e1f0c5a92
+status: experimental
+level: high
+description: |
+  Detects a spawned process installing or invoking the PyPI package
+  "llm-project-generator", a package published under a benign-sounding
+  name ("generate a tested Groq terminal chatbot project") that developers
+  building LLM tooling may be lured into installing. This is a software
+  supply-chain threat (OWASP Top 10 2021 A06 — Vulnerable and Outdated
+  Components; no direct LLM01-10/ASI01-10 mapping applies, so no owasp.
+  tag is attached — see rationale) delivered via package index rather
+  than via agent prompt content, so detection is anchored on the
+  execute_process event: pip/pipx/uv/poetry/conda install invocations
+  naming the package, direct execution of its console-script entry
+  point, and python -m / import invocations of its module.
+  This is a report-only, experimental single-event content rule — no
+  graph traversal, no sequence logic. It is a pre-filter tripwire for
+  human triage, not a blocking control.
+author: Evgen
+date: "2026-03-01"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.execution
+falsepositives:
+  - "pip show llm-project-generator or pip uninstall llm-project-generator run by a
+     security team inspecting or removing the package after an advisory — excluded
+     because sel_install requires an install|add verb, not show|uninstall|download."
+  - "A CI job or script that greps/greps-through an installed-package list or a
+     requirements.txt for the string without actually invoking pip/pipx/uv/poetry/conda
+     with an install|add verb — does not match sel_install."
+  - "A hypothetical, unrelated legitimate package whose name has this exact string as
+     a prefix (e.g. llm-project-generator-extras) could still match sel_direct_exec if
+     invoked with a trailing separator boundary; no such package is known to exist on
+     PyPI at authoring time. Because this rule only reports, the cost of that edge case
+     is a triage entry, not a block."
+  - "A developer inspecting the malicious package's source locally (e.g. opening it in
+     an editor, reading its files) without spawning a process that installs or runs it
+     does not match — execute_process only fires on actual process spawns."
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_install:
+    event_type: execute_process
+    command|re: '(?i)\b(pip3?|pipx|uv|poetry|conda)\b[^\n]{0,40}\b(install|add)\b[^\n]{0,120}\bllm[-_]project[-_]generator\b'
+  sel_direct_exec:
+    event_type: execute_process
+    command|re: '(?i)(^|[\s/\\])llm[-_]project[-_]generator(\s|$)'
+  sel_module_import:
+    event_type: execute_process
+    command|re: '(?i)\bpython3?\b[^\n]{0,60}(-m\s+llm_project_generator\b|import\s+llm_project_generator\b)'
+  filter_uninstall_show:
+    command|re: '(?i)\b(pip3?|pipx)\b[^\n]{0,40}\b(uninstall|show|download)\b[^\n]{0,120}\bllm[-_]project[-_]generator\b'
+  condition: (sel_install or sel_direct_exec or sel_module_import) and not filter_uninstall_show
+action: report
