@@ -1,0 +1,62 @@
+title: Suspicious npm Package @vibetonomy/agent-linux-x64 Execution
+id: 3f1e9c2a-6b7d-4a1f-9c3e-8d2b5a7f1e64
+status: experimental
+level: medium
+description: |
+  Detects process command lines that install, fetch, or directly execute the
+  npm package @vibetonomy/agent-linux-x64 — a package name that mimics a
+  legitimate 'Vibetonomy agent' Linux x64 binary distribution. This naming
+  pattern is consistent with npm supply-chain typosquatting/impersonation
+  used to get victims to install and run an attacker-controlled binary under
+  the guise of an agent runtime.
+
+  VISIBILITY LIMITATION (documented, not hidden): the engine only exposes
+  execute_process for this scenario. install_package, network_connection,
+  ACQUIRED_DEPENDENCY, and EXECUTE_BINARY are not live event/edge kinds in
+  this deployment, so the npm registry fetch, dependency-acquisition step,
+  and any post-execution C2 callback are NOT observable by this rule. This
+  rule can only see the command line of a spawned process that names the
+  package — it cannot confirm the package was actually resolved from the
+  npm registry, that it was malicious, or that a callback occurred. There is
+  no CVE and no confirmed payload behind this package name; it is a
+  naming-convention indicator, not a demonstrated exploit. Action is
+  calibrated to report accordingly — this rule does not block.
+author: Egemen
+date: "2026-03-01"
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm05
+falsepositives:
+  - Security researchers or SOC analysts grepping/catting package-lock.json, yarn.lock, pnpm-lock.yaml, or an SBOM to audit whether this package name is present anywhere in the dependency tree
+  - npm/pnpm/yarn metadata queries (npm view, npm info, npm audit, npm ls, npm why) run during dependency review that reference the package name without installing or executing it
+  - Remediation/removal commands (npm uninstall, npm rm, pnpm remove, yarn remove) that reference the package while cleaning up a suspected compromise
+  - CI/CD security scanners or SCA tools whose own command line embeds the package name as a known-bad string for detection/blocklist purposes
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_install:
+    event_type: execute_process
+    content|re: '(?i)\b(npm|pnpm|yarn)\b[^\n]{0,40}\b(install|i|add|dlx)\b[^\n]{0,160}@vibetonomy/agent-linux-x64\b'
+  sel_alt_pm:
+    event_type: execute_process
+    content|re: '(?i)\b(bunx|corepack)\b[^\n]{0,80}@vibetonomy/agent-linux-x64\b'
+  sel_npx:
+    event_type: execute_process
+    content|re: '(?i)\bnpx\b[^\n]{0,80}@vibetonomy/agent-linux-x64\b'
+  sel_direct_exec:
+    event_type: execute_process
+    content|re: '(?i)node_modules/@vibetonomy/agent-linux-x64/[^\s]+'
+  filter_read_only:
+    event_type: execute_process
+    content|re: '(?i)\b(grep|rg|ripgrep|cat|less|more|head|tail|find|awk|sed)\b[^\n]{0,80}@vibetonomy/agent-linux-x64'
+  filter_npm_metadata:
+    event_type: execute_process
+    content|re: '(?i)\b(npm|pnpm|yarn)\b[^\n]{0,40}\b(view|info|show|search|audit|ls|list|why)\b[^\n]{0,120}@vibetonomy/agent-linux-x64'
+  filter_uninstall:
+    event_type: execute_process
+    content|re: '(?i)\b(npm|pnpm|yarn)\b[^\n]{0,40}\b(uninstall|remove|rm|un)\b[^\n]{0,120}@vibetonomy/agent-linux-x64'
+  condition: (sel_install or sel_alt_pm or sel_npx or sel_direct_exec) and not (filter_read_only or filter_npm_metadata or filter_uninstall)
+action: report
