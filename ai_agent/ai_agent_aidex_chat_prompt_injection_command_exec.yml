@@ -1,0 +1,58 @@
+title: Prompt Injection - Aidex Chat API Command Execution Attempt
+id: 6f2a1d3c-8e47-4b1a-9c2d-5f8b3a7e1d4c
+status: experimental
+level: critical
+description: |
+  Detects payloads submitted to the Aidex chat API's /api/<chat>/message endpoint
+  (versions prior to 1.7) that attempt to exploit a prompt injection vulnerability
+  in the 'content' parameter. The vulnerability allows an authenticated user to
+  cause the backend to execute unsanitized Unix OS commands, invoke PHP/MySQL
+  functions directly, or call native Laravel/Symfony framework primitives
+  (Artisan::call, DB::select, Illuminate\Support\Facades, Symfony\Component\Process)
+  from within chat content. This is a single-event, content-only heuristic scoped
+  to the vulnerable endpoint path; it does not confirm exploitation, only flags
+  suspicious payload shape for review.
+author: Tanya
+date: "2025-05-20"
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - atlas.aml.t0051
+  - owasp.llm01
+falsepositives:
+  - Developers using Aidex's coding-assistant chat to review or debug their own PHP scripts that legitimately call exec()/shell_exec()/system()/passthru()
+  - Support or onboarding conversations explaining Laravel Artisan::call(), DB::select(), or the Symfony Process component as part of normal documentation Q&A
+  - Users pasting Stack-Overflow-style snippets with backticked shell commands (e.g. `whoami`, `cat file`) while asking "what does this script do"
+  - Authorized security/QA testing of the /message endpoint with crafted payloads during a sanctioned penetration test or regression test of the CVE fix
+  - Database tutorials or query-debugging chats that reference mysqli_query()/PDO::query() syntax without an actual injected argument
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_endpoint:
+    event_type: http_request
+    method: POST
+    path|re: '(?i)^/api/[^/]+/message/?$'
+  sel_injection:
+    content|re:
+      - '(?i)(;|\|\||&&|\|)\s*(whoami|id|uname|cat|wget|curl|nc|bash|sh)\b'
+      - '(?i)(;|\|\||&&|\|)\s*/bin/(bash|sh)\b'
+      - '`[^`\n]{0,100}\b(whoami|id|uname|cat|wget|curl|nc|bash|sh)\b[^`\n]{0,100}`'
+      - '\$\(\s*(whoami|id|uname|cat|wget|curl|nc|bash|sh)\b[^)]{0,200}\)'
+      - '(?i)\b(system|exec|shell_exec|passthru|proc_open|popen|pcntl_exec)\s*\(\s*[\x27"$]'
+      - '(?i)\b(mysqli_query|mysql_query|PDO::query)\s*\(\s*[\x27"$]'
+      - '(?i)\bUNION\s+SELECT\b[\s\S]{0,200}\bFROM\s+information_schema\b'
+      - '(?i)\b(Artisan::call|DB::select|DB::statement)\s*\('
+      - '(?i)\\?Illuminate\\Support\\Facades\\[A-Za-z]+::[A-Za-z_]+\s*\('
+      - '(?i)\\?Symfony\\Component\\Process\\Process\s*\('
+      - '(?i)\bapp\(\)\s*->\s*make\s*\('
+  filter_benign_context:
+    content|contains:
+      - 'can you explain this code'
+      - 'what does this code do'
+      - 'code review'
+      - 'help me debug'
+      - 'documentation example'
+      - 'stack overflow'
+  condition: sel_endpoint and sel_injection and not filter_benign_context
+action: report
