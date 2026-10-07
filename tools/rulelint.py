@@ -715,6 +715,12 @@ def check_filename(path: Path, out: list[Finding]) -> None:
 
 
 def main() -> int:
+    # Findings contain non-ASCII characters (e.g. em dashes); on Windows,
+    # redirected stdout defaults to cp1252 and print() raises
+    # UnicodeEncodeError, truncating the report.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("paths", nargs="*", default=["ai_agent"],
