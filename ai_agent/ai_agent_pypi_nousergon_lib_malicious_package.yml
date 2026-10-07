@@ -1,0 +1,38 @@
+title: PyPI nousergon-lib Malicious Package Reference in Process Execution
+id: 3e8a1c2b-6f47-4b9a-9e21-7d5f8c4a1b6e
+status: experimental
+level: critical
+description: |
+  Detects process execution referencing the PyPI package "nousergon-lib"
+  (published as version 0.124.131), a suspected trojanized supply-chain
+  package presenting itself as shared AWS/logging/AI-integration utilities
+  for "Nous Ergon" modules. Matches any execve command line that names the
+  package (pip/pip3/poetry/pipenv/uv install, direct python import, setup.py,
+  easy_install, etc.) while excluding read-only inspection and SBOM/dependency
+  audit tooling that merely references the name without installing or
+  executing it.
+author: Evgen
+date: "2026-03-18"
+references:
+  - https://pypi.org/project/nousergon-lib/
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm05
+falsepositives:
+  - Security or SBOM scanning tools (pip-audit, safety, syft, grype, trivy, osv-scanner) auditing dependency manifests or lockfiles for known-malicious package names without installing them
+  - Read-only inspection commands (grep, cat, less, more, head, tail, find, echo, pip show/list/freeze) run during incident response to check whether the package appears in requirements files or installed package lists
+  - Automated dependency-review or CI reporting pipelines that print, log, or diff the package name for an advisory report without installing or importing the library
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_package_ref:
+    event_type: execute_process
+    command|re: '(?i)\bnousergon[-_]lib\b'
+  filter_informational:
+    command|re: '(?i)\b(grep|egrep|fgrep|cat|less|more|head|tail|find|echo|printf|apt-cache|dpkg)\b|\bpip3?\s+(show|list|freeze)\b|\b(safety|pip-audit|bandit|trivy|grype|syft|osv-scanner)\b'
+  condition: sel_package_ref and not filter_informational
+action: report
