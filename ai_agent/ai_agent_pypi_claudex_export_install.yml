@@ -1,0 +1,105 @@
+title: Supply Chain PyPI Install of claudex-export
+id: 7c1f2b64-9d3a-4a58-b0e7-5f2c8e41d93a
+status: experimental
+level: medium
+description: |
+  Reports a single execute_process event in which an AI agent (or a subprocess it
+  spawned) invokes a Python package installer against the specific PyPI
+  distribution `claudex-export` (normalised forms: claudex-export,
+  claudex_export, claudex.export, and its wheel/sdist filenames or a VCS/direct
+  URL that names it).
+
+  Threat context: `claudex-export` is an unvetted, recently published PyPI
+  package advertised as a Codex / Claude Code session exporter. Session export
+  tooling is exactly the class of dependency that has legitimate read access to
+  conversation transcripts, MCP configs and API keys, and pip executes arbitrary
+  code from setup.py / PEP 517 build backends / post-install hooks at INSTALL
+  time, before any human reviews the code.
+
+  This rule deliberately makes NO claim that the package is malicious. No payload,
+  CVE or callback has been confirmed. What is observable, and what this rule
+  records, is a verifiable fact with high investigative value: an agent-driven
+  process attempted to install this specific named distribution. That is why the
+  action is `report` and never `block` — the verdict is inventory and provenance,
+  not enforcement.
+
+  Scope and known gaps (stated so no one mistakes this for full coverage):
+    * `pip install -r requirements.txt` does not name the package on the command
+      line and is therefore NOT detected by this rule.
+    * The claimed edges INSTALLED_PACKAGE / EXECUTED_CODE / EXFILTRATED_DATA and
+      the event types package_installation / network_connection / file_read /
+      file_write do not exist in this engine, so post-install code execution and
+      exfiltration cannot be correlated here. Only the install invocation itself
+      is in scope; downstream subprocess and HTTP_REQUEST behaviour is left to the
+      existing behavioural rules that own those edge kinds.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://attack.mitre.org/techniques/T1195/002/
+  - https://atlas.mitre.org/techniques/AML.T0010
+  - https://packaging.python.org/en/latest/specifications/name-normalization/
+tags:
+  - attack.initial-access
+  - attack.t1195.002
+  - atlas.aml.t0010
+  - owasp.llm03
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Gate 1 — the event must be a real process execution, not text about one.
+  sel_event:
+    event_type: execute_process
+
+  # Gate 2 — the command line must actually be an installer invocation with an
+  # install/add verb. `\binstall\b` cannot match inside "uninstall" (no word
+  # boundary after 'n'), so removals are excluded by construction.
+  sel_installer:
+    content|re:
+      - '(?i)\bpip[0-9.]*\b[^\n]{0,300}\binstall\b'
+      - '(?i)\bpipx\b[^\n]{0,300}\b(?:install|run)\b'
+      - '(?i)\buv\b[^\n]{0,300}\b(?:add|pip\s+install)\b'
+      - '(?i)\b(?:poetry|pdm|rye|hatch)\b[^\n]{0,300}\badd\b'
+      - '(?i)\bsetup\.py\b[^\n]{0,120}\b(?:install|develop)\b'
+
+  # Gate 3 — the exact distribution, all PyPI-normalised separators, with a
+  # non-alphanumeric left boundary so `myclaudex-exporter` / `xclaudex_export`
+  # cannot match. Trailing \b keeps wheel names (claudex_export-0.1.0-py3-...)
+  # and version pins (claudex-export==0.1.0) in scope.
+  sel_package:
+    content|re: '(?i)(?:^|[^0-9A-Za-z_.-])claudex[-_.]export\b'
+
+  # FP suppression 1 — read-only inspection of the name (docs, code search,
+  # transcript greps, man pages, JSON munging). Requires the viewer binary to
+  # appear as its own token followed by whitespace, so it does not fire on
+  # substrings such as "/Appli(cat)ions".
+  filter_readonly_inspection:
+    content|re: '(?i)(?:^|["\s/])(?:grep|egrep|fgrep|zgrep|rg|ack|cat|bat|less|more|head|tail|man|jq|wc|diff)\s'
+
+  # FP suppression 2 — non-mutating pip subcommands, SCA/audit tooling and
+  # explicit no-op runs. These legitimately name the package while installing
+  # nothing.
+  filter_audit_or_dryrun:
+    content|re:
+      - '(?i)\b--dry-run\b'
+      - '(?i)\b--help\b'
+      - '(?i)\bpip[-_]audit\b'
+      - '(?i)\b(?:pipdeptree|pip-licenses|deptry|safety|bandit|osv-scanner)\b'
+      - '(?i)\bpip[0-9.]*\s+(?:download|show|list|index|cache|config|debug|check|freeze)\b'
+
+  condition: sel_event and sel_installer and sel_package and not (filter_readonly_inspection or filter_audit_or_dryrun)
+
+falsepositives:
+  - A developer or security researcher deliberately installing claudex-export to
+    evaluate, reverse-engineer or triage it. This is the single most likely
+    match and is precisely why the rule reports rather than blocks.
+  - A team that has already reviewed and approved claudex-export as a sanctioned
+    session-export utility; every subsequent pip install, upgrade or reinstall
+    (including troubleshooting reinstalls and virtualenv rebuilds) will report.
+  - CI/CD or container build steps that install the package as a pinned
+    dependency; each build run produces one report event per install invocation.
+  - An internal or vendored distribution that happens to normalise to the same
+    name (e.g. a local fork published to a private index under claudex_export).
+  - A shell demo or onboarding script that executes a README line verbatim; the
+    read-only-inspection filter only removes viewing of that text, not executing it.
+action: report
