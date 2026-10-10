@@ -1,0 +1,192 @@
+title: Supply Chain - PyPI 'crowsnest' Package Executed in Claude Code Session Lineage
+id: e3b0f9d2-4a1b-4c3d-8f2e-7a6b5c4d3e21
+status: experimental
+level: medium
+description: |
+  Detects process execution whose command line references the PyPI package
+  'crowsnest', reported to monitor other Claude Code sessions (session
+  status, user messages, inter-session communication) -- a supply-chain
+  compromise that, if the reported behavior is accurate, would enable
+  unauthorized surveillance of concurrent AI agent activity.
+
+  SCHEMA LIMITATION (documented, not worked around): the only live
+  telemetry for this threat is the 'execute_process' event type. None of
+  MONITOR_PROCESS, READ_SESSION_DATA, EXFILTRATE_DATA, INSTALLED_PACKAGE,
+  network_connect, load_package or read_memory exist as edge kinds or event
+  types in this engine. This rule therefore cannot observe the package
+  actually reading another session's data or exfiltrating it -- only that a
+  process's command line names it. That is, by itself, the same class of
+  signal as the existing generic PyPI acquisition+execution rule
+  (7c3f9a41).
+
+  To be a genuinely narrower signature rather than a restatement of that
+  existing rule, this adds the one thing the generic rule does not check:
+  whether the flagged process is itself a descendant, in its OWN
+  instance-resolved spawn lineage (caller_pid -> proc_instance ->
+  proc_lineage), of an active Claude Code process. That is the only
+  available corroborating context for "this process is running where it
+  could plausibly observe a Claude Code session" -- it does NOT confirm the
+  process actually read or exfiltrated anything, and the reason string says
+  so explicitly every time.
+
+  Because exploitability is unconfirmed (no PoC telemetry or IOC is cited)
+  and the mechanism cannot be directly observed with the fields available,
+  this rule only ever reports -- it never blocks, allows, redirects, or
+  replaces traffic -- and every result is scoped strictly to the single
+  triggering process instance (caller_pid -> proc_instance -> proc_lineage
+  -> query_events, all keyed to that one actor_pid/actor_start pair). It
+  never reads or attributes activity belonging to any other session.
+author: Tanya
+date: "2025-06-02"
+tags:
+  - attack.initial-access
+  - attack.t1195
+  - attack.execution
+falsepositives:
+  - Internal, personal, or student projects unrelated to Claude Code that
+    are coincidentally named 'crowsnest' (e.g. a maritime-themed dashboard,
+    a build tool, a monitoring script) invoked with a matching command
+    line.
+  - Security researchers or red-team engineers deliberately executing the
+    crowsnest package inside an isolated sandbox to analyze its behavior,
+    which produces the same execute_process signature with no live Claude
+    Code session actually present to monitor.
+  - Test fixtures or CI jobs that spawn a process whose command line
+    contains the literal string 'crowsnest' as fixture/test-data naming,
+    unrelated to the PyPI package or any AI agent session.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_trigger:
+    event_type: execute_process
+    content|re: '(?i)\bcrowsnest\b'
+  condition: sel_trigger
+action: execute
+on_timeout: report
+on_error: report
+script: |
+  WINDOW_NS = 300000000000  # 5 minutes -- bound on how far back we look for this instance's own spawn record
+
+  def run():
+      ct = meta.get("context_type", "")
+      if ct != "execute_process":
+          return "allow"
+
+      content = meta.get("content", "")
+      if re.find(r"(?i)\bcrowsnest\b", content) == None:
+          return "allow"
+
+      cp = int(meta.get("caller_pid", "0"))
+      if cp == 0:
+          return "allow"
+
+      event_ts = int(meta.get("event_ts", "0"))
+
+      # Resolve the EXACT process instance that triggered this event (reuse-proof --
+      # a bare PID is not an identity, the OS recycles them).
+      inst = proc_instance(cp, event_ts)
+      if inst == None:
+          # Degraded: the create row for this instance has not landed in the event
+          # log yet. Report the raw signal, do not guess at lineage/attribution.
+          chain = new_chain("process://unknown:" + str(cp))
+          trigger_edge = {
+              "from": "process://unknown",
+              "to":   "process://unknown:" + str(cp),
+              "kind": "EXECUTE_PROCESS",
+              "ts":       str(event_ts),
+              "first_ts": str(event_ts),
+              "last_ts":  str(event_ts),
+          }
+          chain.append(step(trigger_edge, stage_id="Suspicious Package Execution (Degraded Attribution)",
+                             stage_desc="process command line references PyPI package 'crowsnest': " +
+                                        content[:200] + " -- instance not yet resolved in event log"))
+          return {
+              "action": "report",
+              "reason": "Process command line references PyPI package 'crowsnest' (pid " + str(cp) +
+                        ") but the process instance is not yet resolved in the event log -- " +
+                        "attribution deferred, no session lineage available yet.",
+              "chain": chain,
+          }
+
+      actor_pid   = int(inst.get("actor_pid", str(cp)))
+      actor_start = int(inst.get("actor_start", "0"))
+
+      # Walk THIS instance's own spawn lineage only -- proc_lineage is deterministic
+      # and never crosses into another process's session.
+      lineage = proc_lineage(actor_pid, actor_start)
+      if len(lineage) == 0:
+          lineage = [inst]
+
+      # Confirm this instance's own create record, scoped strictly to
+      # actor_pid/actor_start -- never a broad, unscoped event-log scan.
+      since = event_ts - WINDOW_NS if event_ts > WINDOW_NS else 0
+      own = query_events(kind="EXECUTE_PROCESS", actor_pid=actor_pid, actor_start=actor_start,
+                          since_ns=since, until_ns=event_ts, limit=10)
+
+      actor_path  = inst.get("actor_path", "")
+      parent_path = inst.get("parent_path", "")
+      if own:
+          actor_path  = own[0].get("actor_path", actor_path)
+          parent_path = own[0].get("parent_path", parent_path)
+
+      root_path = lineage[-1].get("actor_path", actor_path) if len(lineage) > 0 else actor_path
+      root_name = root_path.split("/")[-1] if root_path else "unknown"
+      chain = new_chain("process://" + root_name + ":" + str(actor_pid))
+
+      # Trigger stage is built from the triggering event's own instance data
+      # (meta/proc_instance), never re-queried -- the just-fired event races the
+      # async event-log writer and may not be independently queryable yet.
+      trigger_edge = {
+          "from": "process://" + (parent_path if parent_path else "unknown"),
+          "to":   "process://" + (actor_path if actor_path else "unknown") + ":" + str(actor_pid),
+          "kind": "EXECUTE_PROCESS",
+          "ts":       str(event_ts),
+          "first_ts": str(event_ts),
+          "last_ts":  str(event_ts),
+      }
+      chain.append(step(trigger_edge, stage_id="Suspicious Package Execution",
+                         stage_desc="process command line references PyPI package 'crowsnest': " +
+                                    content[:200]))
+
+      # Corroborating signal, scoped ENTIRELY to this instance's own lineage: does
+      # this process descend from an active Claude Code process? This is the only
+      # narrowing signal available in this schema -- there is no MONITOR_PROCESS or
+      # READ_SESSION_DATA edge to observe the actual cross-session read. It
+      # distinguishes "crowsnest ran somewhere on the box" from "crowsnest ran as a
+      # child of the exact session it would need to be inside of to monitor it" --
+      # still a single session's own lineage, never another session.
+      claude_ancestor = None
+      for i in range(len(lineage) - 1):
+          parent = lineage[i + 1]
+          if re.find(r"(?i)\bclaude\b", parent.get("actor_path", "")) != None:
+              claude_ancestor = (lineage[i], parent)
+              break
+
+      if claude_ancestor != None:
+          child, parent = claude_ancestor
+          anc_ts = child.get("ts", str(event_ts))
+          anc_edge = {
+              "from": "process://" + parent.get("actor_path", ""),
+              "to":   "process://" + child.get("actor_path", ""),
+              "kind": "EXECUTE_PROCESS",
+              "ts":       anc_ts,
+              "first_ts": anc_ts,
+              "last_ts":  anc_ts,
+          }
+          chain.append(step(anc_edge, stage_id="Claude Session Lineage",
+                             stage_desc="crowsnest process descends from active Claude Code process: " +
+                                        parent.get("actor_path", "")))
+          reason = ("PyPI package 'crowsnest' executed (pid " + str(actor_pid) +
+                    ") as a descendant of an active Claude Code session -- matches the reported " +
+                    "session-surveillance package signature. No MONITOR_PROCESS/READ_SESSION_DATA " +
+                    "telemetry exists in this deployment to confirm actual cross-session data access; " +
+                    "reporting for analyst review, not blocking.")
+      else:
+          reason = ("PyPI package 'crowsnest' executed (pid " + str(actor_pid) +
+                    "); Claude Code session lineage not confirmed from available process-spawn " +
+                    "telemetry alone -- lower-confidence signal, reporting for analyst review.")
+
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
