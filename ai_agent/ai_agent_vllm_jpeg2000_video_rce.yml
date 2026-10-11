@@ -1,0 +1,130 @@
+title: vLLM JPEG2000 Video RCE Delivery
+id: 7b3c9d54-2f8e-4a61-9c0d-5e18a7b6f342
+status: experimental
+level: high
+description: |
+  Detects the delivery and post-exploitation stages of the vLLM remote-code-execution
+  chain in which a crafted video_url is passed to /v1/chat/completions or /v1/invocations,
+  fetched by the server, and decoded by OpenCV's bundled FFmpeg 5.1 JPEG2000 decoder.
+  A malicious cdef box remaps the luma plane into the smaller chroma buffer, overflowing
+  the heap by ~0.75 * W * H bytes, overwriting an AVBuffer free callback with system()
+  and its opaque field with an attacker command string.
+
+  Three tightly-scoped single-event branches:
+
+    1. DELIVERY  - a POST to an OpenAI-compatible inference endpoint whose body carries a
+       video_url part AND a JPEG2000-in-video indicator (raw JP2 signature box in base64,
+       Motion JPEG 2000 container extension, adjacent jp2h/cdef box names, or an explicit
+       mjp2/jpeg2000 codec selector). The video_url part alone is NOT sufficient - a
+       JPEG2000 discriminator is required in the same event.
+
+    2. DELIVERY (command smuggling) - a video_url value carrying the shell string that the
+       hijacked free callback will hand to system() (command substitution, backticks,
+       metacharacter-chained interpreter, /dev/tcp, nc -e).
+
+    3. IMPACT - a shell/interpreter one-liner on the host whose payload is an interactive
+       reverse shell, i.e. the observable result of system() being invoked from the decoder.
+
+  Note on JSON escaping: the delivery patterns require unescaped JSON key syntax
+  ("type":"video_url"), so a chat message that merely quotes an exploit snippet
+  (\"video_url\": ...) does not match.
+author: Selhan
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://attack.mitre.org/techniques/T1190/
+  - https://attack.mitre.org/techniques/T1203/
+  - https://cwe.mitre.org/data/definitions/122.html
+  - https://cwe.mitre.org/data/definitions/918.html
+tags:
+  - attack.initial-access
+  - attack.t1190
+  - attack.execution
+  - attack.t1203
+  - attack.t1059.004
+  - owasp-web.a03-injection
+  - owasp-web.a10-ssrf
+  - vllm.video_url_rce
+  - ffmpeg.jpeg2000_cdef
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Branch 1/2 anchor: POST to an OpenAI-compatible inference endpoint ──────
+  sel_vllm_endpoint:
+    event_type: http_request
+    method: POST
+    path|re: '(?i)/(v[0-9]{1,2}/)?(chat/)?(completions|invocations)/?$'
+
+  # A multimodal video part is present, in unescaped JSON key form only
+  sel_video_part:
+    content|re:
+      - '(?i)"type"\s*:\s*"video_url"'
+      - '(?i)"video_url"\s*:\s*\{'
+
+  # JPEG2000-in-video discriminator — required, this is what reaches the vulnerable decoder
+  sel_jp2_payload:
+    content|re:
+      - 'AAAADGpQICANCocK'
+      - '(?i:data:(video|image)/[a-z0-9.+-]{1,32};base64,)AAAADGpQICANCocK'
+      - '(?i)"url"\s*:\s*"[^"]{1,512}\.(mj2|mjp2)([?#][^"]{0,256})?"'
+      - '(?i)"url"\s*:\s*"[^"]{1,512}\.(jp2|j2k|jpf|jpx|jpc)([?#][^"]{0,256})?"'
+      - 'jp2h[\s\S]{0,128}?cdef'
+      - '(?i)"(codec|codec_name|video_codec|vcodec)"\s*:\s*"(mjp2|mj2|j2k|jpeg[ _-]?2000)"'
+
+  # The system() argument smuggled through the video_url value
+  sel_url_cmd_inject:
+    content|re:
+      - '(?i)"video_url"[\s\S]{0,256}?\$\([\s\S]{0,64}?\)'
+      - '(?i)"video_url"[\s\S]{0,256}?`[^`"]{1,64}`'
+      - '(?i)"video_url"[\s\S]{0,200}?(;|&&|\|\||\|)\s{0,8}(/bin/)?(sh|bash|dash|curl|wget|nc|python[0-9.]{0,3})\b'
+      - '(?i)"url"\s*:\s*"[^"]{0,512}(/dev/tcp/|bash\s+-i\b|nc\s+-[a-z]{0,4}e\s)'
+
+  # ── Branch: the server-side second hop — fetch of a Motion JPEG 2000 container ──
+  sel_motion_jp2_fetch:
+    event_type: http_request
+    url.full|re: '(?i)^https?://[^"\s]{1,512}\.(mj2|mjp2)([?#][^"\s]{0,256})?$'
+
+  # ── Branch: impact — system() invoked from the freed AVBuffer callback ─────────
+  sel_rce_shell_payload:
+    event_type: execute_process
+    content|re:
+      - '(?i)\b(sh|bash|dash|zsh|ash)\b[\s\S]{0,16}?-[a-z]{0,3}c\b[\s\S]{0,256}?/dev/tcp/'
+      - '(?i)\bnc(\.traditional)?\b[\s\S]{0,64}?-[a-z]{0,4}e\s+/bin/(sh|bash)\b'
+      - '(?i)\bpython[0-9.]{0,3}\b[\s\S]{0,16}?-c\b[\s\S]{0,300}?socket[\s\S]{0,300}?dup2'
+      - '(?i)\bmkfifo\b[\s\S]{0,160}?\|\s{0,8}(/bin/)?(sh|bash)\b'
+
+  # ── Filters (no host, domain or path is trusted by these) ─────────────────────
+
+  # The video_url value is itself a template/placeholder, not a real fetchable target
+  filter_template_url:
+    content|re:
+      - '(?i)"url"\s*:\s*"<[^"]{0,64}>"'
+      - '(?i)"url"\s*:\s*"\{\{[^"]{0,64}\}\}"'
+      - '(?i)"url"\s*:\s*"(PLACEHOLDER|REPLACE_ME|CHANGEME|YOUR_VIDEO_URL|TODO)[^"]{0,32}"'
+
+  # Code/secret scanning tools that carry the reverse-shell string as a search pattern
+  filter_code_search:
+    content|re: '(?i)\b(grep|egrep|fgrep|rg|ripgrep|ack|semgrep|codeql|bandit|trivy|gitleaks)\b'
+
+  condition: >
+    (sel_vllm_endpoint and sel_video_part and (sel_jp2_payload or sel_url_cmd_inject) and not filter_template_url)
+    or sel_motion_jp2_fetch
+    or (sel_rce_shell_payload and not filter_code_search)
+
+falsepositives:
+  - Legitimate multimodal inference on genuine Motion JPEG 2000 assets (.mj2/.mjp2) — common in
+    broadcast, archival and digital-preservation pipelines — will match the fetch branch.
+  - Medical imaging (DICOM), geospatial (JP2/GeoJP2) and scanned-document workflows that pass
+    .jp2/.j2k frame assets to a vision endpoint for legitimate frame analysis.
+  - Signed or pre-signed media URLs whose query string contains an unencoded pipe, semicolon or
+    backtick immediately followed by a token such as "sh" or "nc" inside a longer parameter.
+  - Authorised red-team or CVE-validation testing against a lab vLLM instance, which reproduces
+    the exploit body verbatim.
+  - Sanctioned penetration-testing or network-debug tooling run by an agent that legitimately uses
+    /dev/tcp redirection, nc -e or a mkfifo pipe (impact branch only).
+  - A request body containing an unrelated base64 blob that happens to begin with the exact 12-byte
+    JP2 signature box encoding (AAAADGpQICANCocK) — i.e. a real JPEG2000 file being sent for a
+    non-video purpose.
+action: report
