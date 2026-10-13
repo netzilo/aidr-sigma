@@ -1,0 +1,108 @@
+title: MCP Config Tamper - Cursor Trusted Server Rewrite
+id: 7f3c9d2a-5b41-4e8c-9a17-6d2f8b40c153
+status: experimental
+level: high
+description: |
+  Detects a single spawned process whose command line rewrites a Cursor MCP
+  configuration file (mcp.json / mcp_settings.json under .cursor, or any
+  mcp*.json) or persists an inline MCP server definition containing a
+  "command" key to disk.
+
+  Once a user has approved an MCP server in Cursor, later edits to that trusted
+  configuration are executed without a re-prompt. An attacker with write access
+  to a shared repository branch or to the local filesystem can therefore swap a
+  benign, already-trusted MCP entry for an arbitrary command (calc.exe, a shell
+  one-liner, a downloader) and obtain code execution with the user's privileges
+  on the next Cursor interaction.
+
+  Detection is deliberately built as two mutually reinforcing branches, both
+  evaluated on a single execute_process event:
+    A) a mutation primitive (shell redirection, tee/dd, sed -i, cp/mv into
+       .cursor, remote fetch, PowerShell Set-Content/Out-File/Add-Content,
+       fs.writeFileSync, python open(...,'w')) whose *target in the same
+       construct* is an mcp*.json path; or
+    B) an inline MCP server object ("mcpServers" plus a "command" key) that is
+       being persisted by a write verb rather than merely printed.
+  Each regex binds the verb and the target together, so an unrelated mention of
+  mcp.json elsewhere in a long command line cannot combine with an unrelated
+  write verb to produce a match.
+author: Selhan
+date: "2026-06-12"
+references:
+  - https://attack.mitre.org/techniques/T1554/
+  - https://attack.mitre.org/techniques/T1059/
+  - https://atlas.mitre.org/techniques/AML.T0018
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  # ── Branch A — verb and mcp*.json target bound in one construct ───────────
+  sel_cfg_write:
+    content|re:
+      # shell redirection into an mcp*.json file
+      - '(?i)>{1,2}\s*["'']?[^\s"''|;&]{0,120}mcp[a-z0-9_.-]{0,16}\.json'
+      # tee into an mcp*.json file
+      - '(?i)\btee\b[^|;&]{0,120}mcp[a-z0-9_.-]{0,16}\.json'
+      # in-place stream edit of an mcp*.json file
+      - '(?i)\bsed\b[^|;&]{0,160}\s-i[^|;&]{0,160}mcp[a-z0-9_.-]{0,16}\.json'
+      # remote fetch that lands on an mcp*.json file
+      - '(?i)\b(curl|wget|scp|rsync|invoke-webrequest|iwr)\b[^|;&]{0,200}mcp[a-z0-9_.-]{0,16}\.json'
+      # PowerShell file writers targeting an mcp*.json file
+      - '(?i)\b(set-content|add-content|out-file|copy-item|move-item|new-item)\b[^|;&]{0,160}mcp[a-z0-9_.-]{0,16}\.json'
+      # copy/move specifically onto the Cursor MCP config path
+      - '(?i)\b(cp|mv|install)\b[^|;&]{0,160}\.cursor[\\/]mcp[a-z0-9_.-]{0,16}\.json'
+      # node inline write to an mcp*.json file
+      - '(?i)\bwritefilesync\s*\(\s*["''`][^"''`]{0,160}mcp[a-z0-9_.-]{0,16}\.json'
+      # python inline write-mode open of an mcp*.json file
+      - '(?i)\bopen\s*\(\s*["''][^"'']{0,160}mcp[a-z0-9_.-]{0,16}\.json["'']\s*,\s*["''][wa]'
+
+  # ── Branch B — inline MCP server object being persisted ───────────────────
+  sel_inline_mcpservers:
+    content|re: '(?i)["'']?mcpservers["'']?\s*:'
+  sel_inline_command_key:
+    content|re: '(?i)["'']command["'']\s*:\s*["'']'
+  sel_write_verb:
+    content|re:
+      - '(?i)>{1,2}\s*["'']?[^\s"''|;&]{0,160}\.json'
+      - '(?i)\b(tee|dd)\b'
+      - '(?i)\b(set-content|add-content|out-file)\b'
+      - '(?i)\bwritefilesync\b'
+      - '(?i)\bopen\s*\([^)]{0,160}["''][wa+]'
+
+  # ── Filters — benign semantics only, no host/domain/path trust entries ────
+  filter_help_or_dryrun:
+    content|contains:
+      - '--help'
+      - '--dry-run'
+      - '--version'
+  filter_git_readonly:
+    content|re: '(?i)\bgit\s+(diff|status|log|blame|ls-files)\b'
+  filter_placeholder_values:
+    content|re: '(?i)(replace[_-]?me|changeme|<your|your[_-](api[_-])?key|\$\{?YOUR_)'
+
+  condition: >
+    sel_event and
+    (sel_cfg_write or
+     (sel_inline_mcpservers and sel_inline_command_key and sel_write_verb))
+    and not (filter_help_or_dryrun or filter_git_readonly or filter_placeholder_values)
+
+falsepositives:
+  - Onboarding or dotfile bootstrap scripts that legitimately provision .cursor/mcp.json for a new machine.
+  - Repository tooling that regenerates the MCP config from a template (jq/sed pipelines writing mcp.json).
+  - Configuration managers (chezmoi, ansible shell tasks, Makefile targets) copying an mcp.json into place.
+  - Backup and restore of an existing mcp.json (cp/mv within .cursor) before an intentional change.
+  - MCP installer CLIs invoked by the user that write the config with an embedded mcpServers JSON blob.
+  - CI jobs and test suites that materialise an mcp.json fixture before running integration tests.
+
+tags:
+  - attack.persistence
+  - attack.t1554
+  - attack.execution
+  - attack.t1059
+  - atlas.aml.t0018.002
+  - owasp.llm03
+
+action: report
