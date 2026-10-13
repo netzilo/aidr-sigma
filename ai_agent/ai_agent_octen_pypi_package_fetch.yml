@@ -1,0 +1,51 @@
+title: Supply Chain Risk - octen PyPI Package Fetch
+id: 8f3c1a2b-7d4e-4f6a-9b3c-2e7f8a1d5c60
+status: experimental
+level: medium
+description: |
+  Detects an AI agent process fetching the third-party PyPI package "octen"
+  (a Python SDK for a third-party web-search / URL-extraction / embeddings /
+  LLM-chat API) via the PyPI simple index, the PyPI JSON metadata API, the
+  PyPI project page, or a direct wheel/sdist download from
+  files.pythonhosted.org.
+
+  This is a visibility rule, not a block. There is no confirmed malicious
+  payload, no CVE, and no evidence that octen 0.9.0 contains injected code.
+  ATLAS AML.T0010 (ML Supply Chain Compromise) describes a technique
+  category, not a confirmed exploitation of this package. The engine has no
+  install-time or import-time event (module_import / package_install /
+  INSTALLED_PACKAGE / ACQUIRED_CAPABILITY are all unavailable), so this rule
+  cannot and does not claim to detect a compromise in progress. It records,
+  for audit purposes only, the single observable moment available in the
+  schema: the HTTP fetch of the named package from PyPI infrastructure. Any
+  downstream symptom of an actual compromise (a spawned process phoning
+  home, unexpected EXECUTE_PROCESS -> HTTP_REQUEST chains) is out of scope
+  for this rule and is the province of separate behavioral/dependency-risk
+  tooling.
+author: Tanya
+date: "2026-03-01"
+references:
+  - https://pypi.org/project/octen/
+tags:
+  - attack.initial-access
+  - attack.t1195.001
+  - atlas.aml.t0010
+  - owasp.llm05
+falsepositives:
+  - Developers or CI pipelines legitimately installing the approved octen SDK for sanctioned integrations with the vendor's search/embeddings/LLM-chat API.
+  - Manual browsing of the octen PyPI project page during a dependency security review or vendor evaluation.
+  - Automated SBOM/dependency-scanning tools (e.g., Dependabot, Renovate) polling the PyPI JSON metadata endpoint for octen as part of routine version-check activity.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_octen_pypi_fetch:
+    event_type: http_request
+    host|re: '(?i)^(pypi\.org|files\.pythonhosted\.org)$'
+    path|re:
+      - '(?i)^/simple/octen/?$'
+      - '(?i)^/project/octen/?$'
+      - '(?i)^/pypi/octen/json$'
+      - '(?i)^/packages/.*/octen-[0-9][^/]*\.(?:whl|tar\.gz|zip)$'
+  condition: sel_octen_pypi_fetch
+action: report
