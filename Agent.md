@@ -387,7 +387,7 @@ A host declares the capabilities it produces. A rule declares the capabilities i
 | `connect` | raw outbound TCP/UDP connections | ✅ | — |
 | `skill` | `skill_acquired` semantic events | ✅ | ✅ |
 
-An endpoint with the probe, the proxy and the hooks produces every capability. The gateway governs LLM traffic on the OpenAI chat surface and every MCP call it serves; it never sees processes, files or raw connections, so rules that require `process_exec`, `file_activity` or `connect` are never loaded there.
+An endpoint with the probe, the proxy and the hooks produces every capability. The gateway governs LLM traffic on the OpenAI chat, Responses and Anthropic Messages surfaces and every MCP call it serves; it never sees processes, files or raw connections, so rules that require `process_exec`, `file_activity` or `connect` are never loaded there.
 
 ### Hook path vs proxy path
 
@@ -405,7 +405,7 @@ All paths feed the same observation log and behaviour graph and publish the same
 |---|---|
 | **MCP tool calls** | Agent → tool: the arguments sent to `read_file`, `bash`, `search`, etc., and their results. On a device: hook tool events and MCP over HTTP from intercepted apps. At the AI Gateway: every MCP call to the servers and bundles it serves (`/mcp/<slug>`) |
 | **MCP prompts / sampling** | Agent → prompt templates and sampling operations defined by MCP servers |
-| **LLM API calls** | Agent → OpenAI / Anthropic / Azure / Gemini: the full prompt and model response, including `tool_use` and `tool_result` blocks. At the AI Gateway, prompts and answers are evaluated on the OpenAI chat surface (`/v1/chat/completions`) |
+| **LLM API calls** | Agent → OpenAI / Anthropic / Azure / Gemini: the full prompt and model response, including `tool_use` and `tool_result` blocks. At the AI Gateway, prompts and answers are evaluated on `/v1/chat/completions`, `/v1/responses` and `/anthropic/v1/messages`, streamed answers included; embeddings and text completions are not evaluated |
 | **HTTP** | Any request the proxy sees (endpoint) or the gateway forwards |
 | **Process / file / connect** | Endpoint only: spawns, file activity, raw connections |
 | **Semantic events** | Synthesized by the classifier: `skill_acquired`, `external_message`, `file_upload`, etc. — see [Semantic Events](#semantic-events) |
@@ -747,7 +747,7 @@ These are the fields available in detection conditions. They are populated autom
 | `message.content` | Concatenated LLM message texts | |
 | `system_prompt` | LLM system message | |
 | `source` | How content was loaded — **semantic events only** (`skill_acquired`, `external_message`, …). It does **not** exist on `tool_call`, `llm_request` or HTTP contexts: the engine only creates it by parsing a classifier payload. Pairing `source:` with `event_type: tool_call` in one selection makes that selection false forever, because selections are AND. To scope a rule to a framework or MCP server, use `server:` (e.g. `server: openclaw`). | `http`, `mcp`, `llm` |
-| `agent_name` | Program path of the nearest agent session in the caller's lineage (on the gateway: the client name) | `/usr/bin/cursor` |
+| `agent_name` | Program path of the nearest agent session in the caller's lineage (on the gateway: the agent's name — the `NetziloAgent/<name>` it sends, else the client, e.g. `Claude Code` — on prompts, answers and tool calls alike) | `/usr/bin/cursor`, `DevOps Agent` |
 
 For semantic events (`skill_acquired`, `external_message`, etc.), `content` is a `key=value\n` payload. The engine also flattens each pair into its own field, so `skill|contains: '…'`, `host: 'evil.com'`, `platform: 'slack'` and `format: '…'` work directly — you do not have to match against the packed `content` string, though `content|contains: "host=evil.com"` also works.
 
@@ -796,10 +796,11 @@ across restarts. See
 
 #### `|re` is RE2 — four things that silently kill a rule
 
-`|re:` patterns are compiled as RE2. On a compile failure
-**that leaf simply never matches** — no load error,
-no log line, no indication the rule is dead. All four of these have shipped in this
-corpus and been caught only by running the engine:
+`|re:` patterns are compiled as RE2. On a compile failure **the rule fails to load and
+never fires**: the host counts it (`Rules updated: n loaded, k failed` in the client
+log) and names it where it lists its rules (the browser extension's status page), but
+no line in the log names the pattern — check the failed count after every edit. All four of these have shipped in this corpus and been caught only by running the
+engine:
 
 | Don't | Do | Why |
 |---|---|---|
@@ -818,6 +819,13 @@ Two more traps worth knowing:
   different flags, so a blanket `(?i)` over `'curl\b.*\s-d\s+@'` makes the rule
   match header dumps. Fold only the parts that are case-irrelevant:
   `'(?i:curl)\b.*\s-d\s+@'`.
+- **PII patterns: the separator and the "valid range" trap.** Models write SSNs and
+  card numbers with Unicode hyphens (U+2010–U+2015) and spaces as often as with `-`,
+  and the test data people paste starts with `9xx` or `000` — a pattern that excludes
+  the "invalid" SSN ranges, or accepts only `-`, misses what is actually tested. The
+  separator class is `[-\x{2010}-\x{2015} ]`. Tested in the engine on prompts and
+  answers: SSN `\b\d{3}[-\x{2010}-\x{2015} ]\d{2}[-\x{2010}-\x{2015} ]\d{4}\b`;
+  card `\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))(?:[ \x{2010}-\x{2015}-]?\d{4}){3}\b`.
 
 **Value list semantics:**
 ```yaml
@@ -1250,16 +1258,22 @@ if event_ts > 0 and s0_ts > 0 and (event_ts - s0_ts) > LOOK_BACK_NS:
 
 #### Starlark is not Python — four differences that break scripts
 
-A script that fails to **parse** produces no error anywhere the rule author will see;
-it takes the `on_error` verdict, which defaults to `allow`. These four have all
-shipped in this corpus:
+A guardrail is saved without parsing its script, and a script that fails to **parse**
+shows no error in the dashboard: it takes the `on_error` verdict, which defaults to
+`allow`. With `on_error: block` every matching call is refused with
+`execute script failed (rule <id>): <error>`, and the host logs
+`Execute script for rule <id> error: …` — run the rule's fixtures (or Replay) after every
+edit. These have all shipped in this corpus or in judge rules:
 
 | Python | Starlark | Symptom |
 |---|---|---|
 | `any(x for y in z)` | `any([x for y in z])` | **Parse error.** Starlark has list comprehensions but no bare generator expressions. |
 | `30_000_000_000` | `30000000000` | **Parse error.** No underscore digit separators — it reads as `30` followed by the identifier `_000_000_000`. |
 | `for c in s: ord(c)` | `for c in s.elem_ords():` | `.elems()` yields one-character **strings**; only `.elem_ords()` / `.codepoint_ords()` yield ints. `int ^ str` is a runtime error. |
-| top-level `for` / `if` | put everything in `def run():` | Starlark forbids `for` at module level. |
+| top-level `for` / `if` | put everything in `def run():` | **Error** — `for` and `if` must be inside a function (*"if statement not within a function"*). |
+| `result = "allow"` … `result = {...}` at top level | assign `result` once: `result = run()` | **Error** — a global is assigned once (*"cannot reassign global result"*). |
+| `("a " "b")` | `("a " + "b")` | **Parse error** (*"got string literal, want ')'"*). No implicit concatenation of adjacent literals. |
+| `"%.2f" % x` | `"%s" % x`, `"%d" % x` | **Error** (*"unknown conversion %."*) — `%` takes no precision; format a float with `%s`. |
 
 Verified against the engine's interpreter — these are **rejected**: `while` loops
 (*"this Starlark dialect does not support while loops"*), f-strings, `try`/`except`,
@@ -1311,7 +1325,7 @@ Any other value (or no assignment) → **allow**.
 | Key | Type | Purpose |
 |---|---|---|
 | `"action"` | string | Required — `"block"`, `"report"`, `"redact"`, `"redirect"`, `"inject"`, `"replace"` |
-| `"reason"` | string | Human-readable explanation written to the audit log |
+| `"reason"` | string | Human-readable explanation written to the audit log; on a `block` it is also what the caller is told (the agent sees it as the refusal, e.g. Claude Code's "API Error: …") |
 | `"chain"` | chain | Kill chain produced by `new_chain()` — **always include this for behavioral detections** |
 
 ```python
@@ -1617,7 +1631,7 @@ This produces a chain like:
 | `port` | `connects` context | Destination port as a string, e.g. `"80"`, `"443"` |
 | `protocol` | `connects` context | Transport protocol: `"tcp"` or `"udp"` |
 | `header_<name>` | HTTP contexts | Individual request header value, key lowercased (e.g. `meta["header_authorization"]`, `meta["header_x-tenant-id"]`). Synthetic keys: `header_authorization-jwt` (decoded JWT payload) and `header_authorization-basic` (decoded Basic credentials) are also injected when present. |
-| `agent_name` | all | Program path of the nearest agent session in the caller's lineage (display only — use `session` for attribution). Empty string if unknown. |
+| `agent_name` | all | Program path of the nearest agent session in the caller's lineage; on the AI Gateway, the agent's name (`NetziloAgent/<name>`, else the client). Display and scoping only — use `session` for attribution. Empty string if unknown. |
 | `callid` | event-triggered runs | The **reporting-call id** of the event that triggered this rule run (see **Call ID** below). Empty for `periodic` rules. `events(callid=meta["callid"])` returns exactly the triggering event once it is logged. |
 
 #### The `subject` dict
@@ -2567,7 +2581,7 @@ Verify every exception in both of these ways before relying on it:
 
 ### At the AI Gateway
 
-Gateway filters are evaluated by the AI Gateway per calling user, with the same order and the same verdict rules. The contexts that occur there are `llm_request` / `llm_response` (prompts and answers on the OpenAI chat surface, `/v1/chat/completions`), `tool_call` / `tool_response` (tool calls the model requests, and every MCP call through `/mcp/<slug>`), `http_request`, and `skill_acquired`. `execute_process`, `connects` and the `file_*` contexts never occur, and rules that require `process_exec`, `file_activity` or `connect` are not loaded. A `block` at the gateway answers the caller with `403` and `type: netzilo_policy`; the reason names the rule.
+Gateway filters are evaluated by the AI Gateway per calling user, with the same order and the same verdict rules. The contexts that occur there are `llm_request` / `llm_response` (prompts and answers on `/v1/chat/completions`, `/v1/responses` and `/anthropic/v1/messages`; a streamed answer is judged window by window as it streams, so `redact` works on it, and once whole at its end), `tool_call` / `tool_response` (tool calls the model requests, and every MCP call through `/mcp/<slug>`), `http_request`, and `skill_acquired`. `execute_process`, `connects` and the `file_*` contexts never occur, and rules that require `process_exec`, `file_activity` or `connect` are not loaded. A `block` at the gateway answers the caller with `400` and `type: netzilo_policy` (gateways before October 2026: `403`); the reason names the rule. A block in the middle of a streamed answer ends the stream with that error.
 
 ---
 
