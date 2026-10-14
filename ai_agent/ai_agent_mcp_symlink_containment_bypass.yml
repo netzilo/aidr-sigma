@@ -1,0 +1,142 @@
+title: MCP Filesystem Symlink Containment Escape Artefacts
+id: 7b3f2a41-6c58-4d9e-9a12-0f4d8c1e5b73
+status: experimental
+level: medium
+description: |
+  Targets the observable *artefacts* of a filesystem path-containment bypass against an
+  MCP filesystem/git server (fsguard-mcp class) that validates access by resolving symlinks
+  rather than by string-prefix confinement.
+
+  Detection-surface reality check (answering triage dissent): the engine exposes no
+  RESOLVE_SYMLINK or ACCESS_DENIED edge, no symlink_resolve or file_access event type, and
+  file_read/file_write have no live client producer. The resolution step and the containment
+  decision that are the actual crux of this bug class are therefore NOT observable live, and
+  a live READ_FILE/WRITE_FILE edge cannot be distinguished from a benign one. This rule makes
+  no claim to observe exploitation. It fires only on the two single-event, live-observable
+  precursors that DO reach the engine as tool-call / LLM-tool-call / process-exec content:
+
+    (A) Creation of a symbolic link, junction or bind mount whose target is a credential
+        store or system-control file outside any plausible agent workspace. This is the
+        attacker-planted link that the later resolution step follows.
+    (B) Obfuscated or encoded directory-traversal payloads (percent-encoded, double-encoded,
+        overlong-UTF8, fullwidth-dot, dot-semicolon, quadruple-dot) in tool arguments. These
+        are sanitiser-bypass strings with effectively no legitimate purpose in a file path
+        argument, and they are what a containment probe looks like on the wire.
+
+  Plain relative traversal (../../..) is deliberately NOT matched: monorepo and package-manager
+  workspace linking generate it constantly and the resulting false-positive rate is unacceptable.
+  Report-only by design; this is corroborating evidence for an investigator, not an enforcement
+  decision.
+author: Egemen
+date: "2026-06-11"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://cwe.mitre.org/data/definitions/59.html
+  - https://cwe.mitre.org/data/definitions/22.html
+tags:
+  - attack.defense-evasion
+  - attack.t1083
+  - attack.credential-access
+  - attack.t1552.001
+  - owasp.llm06
+  - owasp.llm02
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+
+  # ── Scope: only the live-observable surfaces that carry the argument text ──
+  sel_scope:
+    event_type:
+      - tool_call
+      - llm_tool_call
+      - execute_process
+
+  # ── (A1) A link/junction/bind-mount is being created ──
+  sel_link_create:
+    content|re:
+      - '\bln\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*s[A-Za-z]*\s'
+      - '(?i)\bmklink\s+/[DJH]\b'
+      - '(?i)\bNew-Item\b[^\n]{0,120}-ItemType\s+(?:SymbolicLink|Junction)'
+      - '(?i)\bos\.symlink\s*\('
+      - '\.symlink_to\s*\('
+      - '(?i)\bfs(?:\.promises)?\.symlink(?:Sync)?\s*\('
+      - '(?i)\bsymlink\s*\(\s*["\x27][^"\x27\n]{1,200}["\x27]'
+      - '(?i)\b(?:create_symlink|make_symlink|create_link|symlink_file|link_file)\b'
+      - '(?i)\bmount\s+(?:-o\s+bind|--bind)\b'
+
+  # ── (A2) ...pointing at a credential store or system-control target ──
+  sel_escape_target:
+    content|re:
+      - '/etc/(?:passwd|shadow|sudoers|master\.passwd|ssh/)'
+      - '/private/etc/(?:passwd|shadow|master\.passwd)'
+      - '/proc/(?:self|[0-9]+)/environ'
+      - '/root/[A-Za-z0-9_.-]'
+      - '/\.ssh/(?:id_[A-Za-z0-9_]+|authorized_keys)'
+      - '/\.aws/credentials'
+      - '/\.kube/config'
+      - '/\.gnupg/'
+      - '/\.docker/config\.json'
+      - '/\.git-credentials'
+      - '/\.netrc'
+      - '/var/run/docker\.sock'
+      - '/etc/kubernetes/'
+      - '(?i)C:\\+(?:Windows\\+System32\\+config|Users\\+[^\\\s"]{1,64}\\+\.ssh)'
+      - '(?i)%USERPROFILE%\\+\.ssh'
+
+  # ── (B) Sanitiser-bypass traversal encodings in an argument ──
+  sel_encoded_traversal:
+    content|re:
+      - '(?i)%2e%2e[/\\%]'
+      - '(?i)%252e%252e'
+      - '(?i)\.\.%(?:2f|5c|00)'
+      - '\.\.;/'
+      - '\.\.\.\./'
+      - '\.\.[\x{ff0f}\x{2215}]'
+      - '[\x{ff0e}]{2}[/\\]'
+      - '(?i)%c0%ae'
+
+  # ── Suppression: non-executing discussion of the technique ──
+  filter_documentation:
+    content|contains:
+      - 'CVE-2'
+      - 'GHSA-'
+      - 'security advisory'
+      - 'OWASP Top 10'
+      - 'penetration test'
+      - 'proof-of-concept exploit'
+
+  filter_help_or_usage:
+    content|re: '(?i)(?:--help\b|\busage:\s|\bman\s+ln\b|mklink\s+/\?|--dry-run\b)'
+
+  # The MCP server''s own containment regression suite asserts these payloads are rejected.
+  filter_test_context:
+    content|re: '(?i)(?:\bexpect\s*\(|\bassert(?:Equals|True|Raises|Throws)?\s*\(|\bpytest\.raises\b|\btoThrow\b|\b(?:it|describe)\s*\(\s*["\x27])'
+
+  condition: >
+    sel_scope
+    and ((sel_link_create and sel_escape_target) or sel_encoded_traversal)
+    and not (filter_documentation or filter_help_or_usage or filter_test_context)
+
+falsepositives:
+  - Dotfile managers (GNU Stow, chezmoi, yadm) symlinking shell/SSH config from a repo into
+    the home directory. Mitigated by matching only key material (id_*) and authorized_keys
+    under .ssh rather than the whole directory, but a bootstrap script that links a key file
+    will still fire.
+  - Container and dev-environment bootstrap scripts that bind-mount or symlink
+    /var/run/docker.sock or /root/.cache into a build workspace. Legitimate in some CI images.
+  - The MCP server''s own path-containment regression tests, which necessarily contain encoded
+    traversal payloads. Suppressed by filter_test_context when standard assertion syntax is present.
+  - Vulnerability write-ups, advisories and WAF-tuning discussions quoting %2e%2e / ....// payloads.
+    Suppressed by filter_documentation.
+  - Kubernetes or cloud onboarding runbooks that symlink ~/.kube/config to a shared profile.
+
+fields:
+  - event_type
+  - tool_name
+  - server
+  - agent_name
+  - command
+  - file_path
+
+action: report
