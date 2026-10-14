@@ -23,6 +23,8 @@ logsource:
   product: ai_agent
   category: agent_events
   source: openclaw
+requires:
+  - tool
 detection:
   # curl POST/PUT with data
   selection_curl_post:

@@ -1,0 +1,43 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  npx:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/local/bin/node
+    name: npx
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  post:
+    session: pid/103:1
+    parent: zsh
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh"}
+  - {kind: spawn, subject: npx, cmdline: "npx sshlg-skills install --all"}
+  - {kind: http_request, subject: npx, url: "https://registry.npmjs.org/sshlg-skills/-/sshlg-skills-1.4.0.tgz", method: GET, request_id: r1, content_type: application/octet-stream, body: "tgz"}
+  - {kind: file_write, subject: npx, path: /Users/dev/.claude/skills/sshlg/SKILL.md}
+  - {kind: file_write, subject: npx, path: /Users/dev/.cursor/skills/sshlg/SKILL.md}
+  - {kind: file_write, subject: npx, path: /Users/dev/.codex/skills/sshlg/hooks/run.sh}
+  - {kind: spawn, subject: post, cmdline: "node /Users/dev/.agent-tools/post-install.js"}
+expect:
+  action: report
+  reason_contains: "3 AI agent platforms (claude-code, codex, cursor)"
+  chain_min: 5

@@ -11,20 +11,18 @@ description: |
   disclosure of API keys or loading of an attacker-chosen config that yields code
   execution.
 
-  The rule is instance-resolved. It triggers only on an outbound http_request whose
-  URL or path carries a traversal sequence, then anchors on meta.caller_pid,
-  resolves the exact process instance with proc_instance(), walks the real spawn
-  chain with proc_lineage(), and expands that lineage into a single session (the
-  lineage instances plus processes they spawned inside the window) via
-  query_events(kind="EXECUTE_PROCESS"). Only reads performed by instances of THAT
-  session, inside the window, are considered for the credential-access stage — no
-  cross-session attribution, no path-keyed graph walk.
+  The rule is session-scoped. It triggers only on an outbound http_request whose
+  URL or path carries a traversal sequence, then anchors on the triggering session,
+  walks its real lineage with lineage(), and expands that lineage into one scope
+  (the lineage sessions plus sessions they spawned inside the window) via
+  events(kind="SPAWNED"). Only reads performed by sessions of THAT scope, inside
+  the window, are considered for the credential-access stage — no cross-session
+  attribution.
 
-  Stage 1 (required anchor, taken from meta because the triggering event races the
-  async event log): traversal sequence in a chain/config-load URL issued by a
-  Python-family runtime.
-  Stage 2 (escalation, from the event log, instance-scoped): the same session read
-  a secret-bearing file within the window.
+  Stage 1 (required anchor, taken from meta): traversal sequence in a
+  chain/config-load URL issued by a Python-family runtime.
+  Stage 2 (escalation, from the event log, session-scoped): the same session tree
+  read a secret-bearing file within the window.
 
   Reports only. This rule never enforces.
 author: Egemen
@@ -59,6 +57,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -88,7 +90,7 @@ script: |
   # ── constants ────────────────────────────────────────────────────────────────
   WINDOW_NS = 300000000000   # 5 minutes - stages must cluster inside this
   DEDUP_NS  = 60000000000    # 1 minute per (session, target) report suppression
-  MAX_PIDS  = 16             # bound the per-instance READ_FILE scans
+  MAX_SESS  = 16             # bound the per-session READ_FILE scans
 
   TRAVERSAL = ["../", "..\\", "%2e%2e", "..%2f", "..%5c",
                "%252e%252e", "....//", "..;/"]
@@ -129,15 +131,26 @@ script: |
       return False
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
           "dir":      "out",
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
 
   # ── relevance gate: meta string checks only, no traversal of anything ────────
   def is_relevant_event():
@@ -151,36 +164,39 @@ script: |
           return "allow"
 
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if cp == 0 or now == 0:
+      if now == 0:
           return "allow"
 
-      # ── anchor on the exact triggering instance ──────────────────────────────
-      inst = proc_instance(cp, now)
+      # ── anchor on the triggering session ─────────────────────────────────────
+      inst = session()
       if inst == None:
-          return "allow"                       # degraded - re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
-      root = lineage[len(lineage) - 1]
+          return "allow"                       # degraded - re-fires once the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = chain_root(lineage_)
 
       url  = meta.get("url", "")
       low  = url.lower()
       host = meta.get("host", "")
       path = meta.get("path", "")
+      scheme = "https"
+      k = url.find("://")
+      if k > 0:
+          scheme = url[:k].lower()
 
       # ── discriminator: chain-load context OR a Python-family caller ──────────
       ctx_hit = has_any(low, CHAIN_CTX)
       py_hit  = False
-      for x in lineage:
-          if looks_python(x.get("actor_path", "")):
+      for x in lineage_:
+          if looks_python(x.get("path", "")):
               py_hit = True
       if not ctx_hit and not py_hit:
           return "allow"
 
-      # ── suppress repeats of the same traversal from the same session ─────────
+      # ── suppress repeats of the same traversal from the same session tree ────
       target = (host + path)[:120]
-      key    = root.get("actor_pid", "0") + ":" + root.get("actor_start", "0") + ":" + target
+      key    = root.get("id", "") + ":" + target
       seen   = store_get("reported")
       if seen == None:
           seen = {}
@@ -188,27 +204,26 @@ script: |
       if prev != 0 and (now - int(prev)) < DEDUP_NS:
           return "allow"
 
-      # ── session scope: lineage instances + what they spawned in the window ───
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=now - WINDOW_NS,
-                           until_ns=now + 1, limit=2000)
+      # ── scope: lineage sessions + what they spawned in the window ────────────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      execs = events(kind="SPAWNED", since_ns=now - WINDOW_NS,
+                     until_ns=now + 1, limit=2000)
       for _ in range(3):                       # 3 generations of descendants
           for e in execs:
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = e.get("actor_start", "0")
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # ── escalation stage: secret file read by a session instance, in window ──
+      # ── escalation stage: secret file read by a scope session, in window ─────
       cred    = []
       scanned = 0
-      for pid in sorted(session):
-          if scanned >= MAX_PIDS:
+      for sid in sorted(scope):
+          if scanned >= MAX_SESS:
               break
           scanned += 1
-          rows = query_events(kind="READ_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid]),
-                              since_ns=now - WINDOW_NS, until_ns=now + 1, limit=400)
+          rows = events(kind="READ_FILE", session=sid,
+                        since_ns=now - WINDOW_NS, until_ns=now + 1, limit=400)
           for r in rows:
               p = r.get("path", "").lower()
               if p != "" and is_sensitive(p):
@@ -218,15 +233,15 @@ script: |
               break
 
       # ── kill chain ───────────────────────────────────────────────────────────
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "").split("/")[-1])
       lin = " -> ".join(names)
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
-          "to":       "https://" + host,
+          "from":     inst["id"],
+          "to":       scheme + "://" + host,
           "kind":     "HTTP_REQUEST",
           "dir":      "out",
           "method":   meta.get("method", ""),
@@ -240,7 +255,8 @@ script: |
       for r in cred:
           chain.append(step(ev_edge(r), stage_id="Credential Access",
                             stage_desc="same-session read of secret-bearing file: " +
-                                       r.get("path", "")))
+                                       r.get("path", ""),
+                            activity={"path": r.get("path", ""), "ts": r.get("ts", "0")}))
 
       if len(cred) > 0:
           reason = ("LangChain load_chain path traversal (CVE-2024-28088) - traversal URL " +

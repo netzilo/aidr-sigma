@@ -1,0 +1,37 @@
+rule: ai_agent_vedang_cli_install_payload_chain.yml
+subjects:
+  cursor:
+    session: pid/500:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/501:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/502:1
+    parent: zsh
+    program: /usr/local/bin/pip3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  curl:
+    session: pid/503:1
+    parent: zsh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh -il"}
+  - {kind: spawn, subject: pip, cmdline: "pip3 install requests"}
+  - {kind: spawn, subject: curl, cmdline: "curl -sS https://api.example.com/health"}
+expect:
+  action: allow

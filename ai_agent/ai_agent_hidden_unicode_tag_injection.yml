@@ -17,7 +17,8 @@ description: |
   byte-level evidence from the live event the engine already populates
   (meta["content"] on tool and LLM contexts, which is where the smuggled payload is
   observable at the moment it enters the model context) and uses the graph only for
-  provenance and attribution: which agent process, which document it had just read
+  provenance and attribution: which agent session (the agent ancestor of the
+  triggering session), which document it or a session it spawned had just read
   (READ_FILE + fs_activity, resolved to the exact path and timestamp), or which
   external skill/HTTP fetch preceded the injection, and which LLM_REQUEST /
   TOOL_RESULT edge carried it into the model. It reports rather than blocks, because
@@ -54,6 +55,13 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - llm
+  - tool
+  - http
+  - skill
 detection:
   sel_event:
     event_type:
@@ -118,7 +126,7 @@ script: |
   def raw_runs(s):
       runs = []
       cur  = []
-      for cp in s.elem_ords():
+      for cp in s.codepoint_ords():
           if cp >= TAG_MIN and cp <= TAG_CANCEL:
               cur.append(cp)
           elif cur:
@@ -162,12 +170,25 @@ script: |
       return [total, hidden]
 
   # ── graph helpers ───────────────────────────────────────────────────────────
+  def edge_ts(e):
+      for k in ["ts", "last_ts", "first_ts"]:
+          v = e.get(k, "")
+          if v != "" and v != "0":
+              return int(v)
+      return 0
+
+  # The agent the payload reached: the agent ancestor of the triggering session,
+  # else the triggering session itself, else any agent session (degraded).
   def find_agent():
+      lineage_ = lineage()
+      if lineage_ and lineage_[-1].get("agent", "0") == "1":
+          return lineage_[-1]
+      inst = session()
+      if inst != None:
+          return inst
       an       = meta.get("agent_name", "")
       fallback = None
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           if fallback == None:
               fallback = p
           pp = p.get("path", "")
@@ -176,19 +197,16 @@ script: |
       return fallback
 
   def file_provenance(aid, lo, hi):
-      procs = [aid]
-      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS")[:8]:
-          procs.append(pe["to"])
+      scope = [aid]
+      for c in children(aid)[:8]:
+          scope.append(c["id"])
       scanned = 0
-      for pid in procs:
-          for e in edges(pid, dir="out", kind="READ_FILE"):
+      for sid in scope:
+          for e in edges(sid, dir="out", kind="READ_FILE"):
               scanned += 1
               if scanned > 12:
                   return None
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              for entry in fs_activity(fs["id"], "READ")[:150]:
+              for entry in fs_activity(session=sid, op="READ")[:150]:
                   ts = int(entry.get("ts", "0"))
                   if lo > 0 and ts < lo:
                       continue
@@ -203,14 +221,14 @@ script: |
 
   def net_provenance(aid, lo):
       for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
-          if lo == 0 or int(e.get("ts", "0")) >= lo:
+          if lo == 0 or edge_ts(e) >= lo:
               s = node(e["to"])
               h = "?"
               if s != None:
                   h = s.get("host", "?")
               return [e, "instruction document loaded from " + h]
       for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
-          if lo == 0 or int(e.get("last_ts", "0")) >= lo:
+          if lo == 0 or edge_ts(e) >= lo:
               u = node(e["to"])
               h = "?"
               if u != None:
@@ -291,13 +309,13 @@ script: |
 
       # de-duplicate: injected text sits in conversation history and would
       # otherwise re-alert on every subsequent LLM request of the session.
-      if already_reported(ct + "|" + meta.get("agent_name", "") + "|" + preview, now):
+      if already_reported(ct + "|" + meta.get("session", meta.get("agent_name", "")) + "|" + preview, now):
           return "allow"
 
       agent = find_agent()
       if agent == None:
           r = "Invisible Unicode Tag payload (" + str(total) + " tag chars) in " + ct + \
-              " content; decodes to: " + preview + " [agent process not resolvable in graph]"
+              " content; decodes to: " + preview + " [agent session not resolvable in graph]"
           print(r)
           return {"action": "report", "reason": r}
 

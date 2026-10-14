@@ -1,0 +1,14 @@
+rule: ai_agent_vllm_audio_upload_memory_exhaustion.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal.example/v1/audio/transcriptions", method: POST, request_id: r1, content_type: multipart/form-data, body: "small clip bytes"}
+expect:
+  action: allow

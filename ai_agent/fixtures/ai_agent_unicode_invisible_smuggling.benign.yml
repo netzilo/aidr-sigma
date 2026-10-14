@@ -1,0 +1,13 @@
+rule: ai_agent_unicode_invisible_smuggling.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: llm_request, subject: claude, provider: anthropic, model: claude-sonnet, request_id: q1, body: "Summarise this ticket for me 🏴󠁧󠁢󠁳󠁣󠁴󠁿 and draft a reply in Türkçe — keep it short."}
+expect:
+  action: allow

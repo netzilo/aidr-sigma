@@ -28,6 +28,8 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - tool
 detection:
   # python -c "..." — command is python, args contains -c flag
   sel_python_cmd:

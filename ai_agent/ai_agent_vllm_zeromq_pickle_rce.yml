@@ -14,11 +14,11 @@ description: |
   command - typically a shell one-liner emitted by __reduce__ via os.system /
   subprocess.Popen.
 
-  Attribution is instance-resolved and strictly single-session:
-    caller_pid -> proc_instance(pid, event_ts) -> proc_lineage -> query_events
-  The vLLM server instance must be present in the TRIGGERING process's own lineage;
-  no cross-session or path-keyed graph attribution is performed. Corroborating
-  post-exploitation spawns are gathered only from instances inside that same session
+  Attribution is session-based and strictly single-tree:
+    triggering session -> lineage() -> SPAWNED rows of that tree
+  The vLLM server session must be present in the TRIGGERING session's own lineage;
+  no cross-tree or path-keyed graph attribution is performed. Corroborating
+  post-exploitation spawns are gathered only from sessions inside that same tree
   and only inside the detection window.
 author: Selhan
 date: "2026-06-12"
@@ -50,10 +50,12 @@ falsepositives:
   - A payload command line that itself contains the string "vllm" could in principle be
     mistaken for the server anchor; the rule rejects any lineage entry whose own command
     line matches a payload signature, so the anchor must be a distinct, non-payload
-    process instance.
+    session.
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -63,7 +65,7 @@ on_timeout: allow
 on_error: allow
 script: |
   # vLLM ZeroMQ / mooncake pickle-deserialization RCE - post-exploitation spawn.
-  # Instance-resolved, single-session attribution. Report only.
+  # Session-based, single-tree attribution. Report only.
 
   WINDOW_NS = 300000000000        # 5 minutes - corroborating stages must cluster
   MAX_ROWS  = 2000
@@ -121,6 +123,16 @@ script: |
           return s[:n] + "..."
       return s
 
+  def exec_cmd():
+      # execute_process content is {"command": ..., "path": ...}; take the command.
+      c = meta.get("content", "")
+      m = re.find(r'"command"\s*:\s*"(?:[^"\\]|\\.)*"', c)
+      if m == None:
+          return c
+      v = m[m.find(":") + 1:].strip()
+      v = v[1:len(v) - 1]
+      return v.replace('\\"', '"').replace("\\\\", "\\")
+
   def classify_high(cmd):
       for sig in HIGH_SIGS:
           if re.find(sig[1], cmd) != None:
@@ -141,68 +153,74 @@ script: |
   def is_relevant_event():
       if meta.get("context_type", "") != "execute_process":
           return False
-      cmd = meta.get("content", "")
+      cmd = exec_cmd()
       if cmd == "":
           return False
       return classify_high(cmd) != ""
 
-  def lineage_cmdline(x):
-      cl = x.get("cmdline", "")
-      if cl != "":
-          return cl
-      rows = query_events(kind="EXECUTE_PROCESS",
-                          actor_pid=int(x.get("actor_pid", "0")),
-                          actor_start=int(x.get("actor_start", "0")),
-                          limit=2)
-      for r in rows:
+  def session_cmdline(x):
+      # A session dict carries no command line; its SPAWNED row does.
+      for r in events(kind="SPAWNED", session=x["id"], limit=2):
           c = r.get("cmdline", "")
           if c != "":
               return c
-      return x.get("actor_path", "")
+      return x.get("path", "")
 
   def ev_edge(e):
-      frm = e.get("parent_path", "")
-      if frm == "":
-          frm = "pid:" + e.get("parent_pid", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + frm,
-          "to":       "process://" + e.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  short(e.get("cmdline", ""), 300),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def session_edge(x, ts):
+      # The spawn of session x itself (parent -> x), stamped with its first_seen.
+      frm = x.get("parent", "")
+      if frm == "":
+          frm = x["id"]
+      return {
+          "from":     frm,
+          "to":       x["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       ts,
+          "first_ts": ts,
+          "last_ts":  ts,
       }
 
   def run():
       if not is_relevant_event():
           return "allow"
 
-      cmd        = meta.get("content", "")
+      cmd        = exec_cmd()
       label      = classify_high(cmd)
       trigger_ts = int(meta.get("event_ts", "0"))
 
-      # ---- anchor on the exact triggering instance --------------------------
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"                      # unattributable / periodic
-      inst = proc_instance(cp, trigger_ts)
+      # ---- anchor on the triggering session --------------------------------
+      inst = session()
       if inst == None:
-          return "allow"                      # degraded - create row not landed yet
-      lineage = proc_lineage(int(inst.get("actor_pid", "0")),
-                             int(inst.get("actor_start", "0")))
-      if not lineage:
+          return "allow"                      # degraded - session not known yet
+      lineage_ = lineage()
+      if not lineage_:
           return "allow"
 
       # ---- REQUIRED anchor stage: a vLLM/mooncake server in THIS lineage ----
       anchor         = None
       anchor_cl      = ""
       anchor_exposed = False
-      for x in lineage:
-          cl = lineage_cmdline(x)
+      for x in lineage_:
+          cl = session_cmdline(x)
           if classify_high(cl) != "":
               continue                        # a payload is never the server anchor
-          p   = x.get("actor_path", "")
+          p   = x.get("path", "")
           hay = cl + " " + p
           vll = re.find(VLLM_RE, hay) != None
           zmq = re.find(ZMQ_RE, cl) != None
@@ -214,45 +232,40 @@ script: |
       if anchor == None:
           return "allow"                      # not a vLLM lineage - not this threat
 
-      anchor_ts = int(anchor.get("ts", "0"))
+      anchor_ts = int(anchor.get("first_seen", "0"))
 
-      # ---- session scope: lineage instances + their descendants -------------
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+      # ---- tree scope: lineage sessions + their descendants -----------------
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
       rows = []
       if trigger_ts > 0:
-          rows = query_events(kind="EXECUTE_PROCESS",
-                              since_ns=trigger_ts - WINDOW_NS,
-                              until_ns=trigger_ts,
-                              limit=MAX_ROWS)
+          rows = events(kind="SPAWNED",
+                        since_ns=trigger_ts - WINDOW_NS,
+                        until_ns=trigger_ts,
+                        limit=MAX_ROWS)
           for i in range(2):                  # two passes: rows are newest-first
               for r in rows:
-                  pp = r.get("parent_pid", "")
-                  if pp == "" or pp not in session:
-                      continue
-                  ps = session[pp]
-                  rs = r.get("parent_start", "")
-                  if ps == "" or ps == "0" or rs == "" or rs == "0" or rs == ps:
-                      session[r.get("actor_pid", "")] = r.get("actor_start", "")
+                  if r.get("parent_session", "") in scope:
+                      scope[r.get("session_id", "")] = True
 
-      # ---- corroborating session activity, ordered after the server start ---
+      # ---- corroborating tree activity, ordered after the server start -----
       evidence = []
       seen     = {}
       for r in rows:
           if len(evidence) >= MAX_EVID:
               break
-          ap = r.get("actor_pid", "")
-          if ap == "" or ap not in session:
+          sid = r.get("session_id", "")
+          if sid == "" or sid not in scope:
               continue
+          if sid == inst["id"]:
+              continue                        # this is the trigger itself
           cl = r.get("cmdline", "")
           if cl == "":
               continue
-          if ap == inst.get("actor_pid", "") and cl == cmd:
-              continue                        # this is the trigger itself
           if anchor_ts > 0 and int(r.get("ts", "0")) < anchor_ts:
-              continue                        # predates the server instance
+              continue                        # predates the server session
           lab = classify_high(cl)
           stg = "Payload Execution"
           if lab == "":
@@ -260,22 +273,22 @@ script: |
               stg = "Post-Exploitation Activity"
           if lab == "":
               continue
-          key = lab + "|" + ap
+          key = lab + "|" + sid
           if key in seen:
               continue
           seen[key] = True
           evidence.append([stg, lab, r])
 
       # ---- kill chain --------------------------------------------------------
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
 
       exposure = "ZMQ/mooncake KV-transfer exposure markers present"
       if not anchor_exposed:
           exposure = "vLLM serving process"
-      chain.append(step(ev_edge(anchor),
+      chain.append(step(session_edge(anchor, str(anchor_ts)),
                         stage_id="Vulnerable Inference Service",
-                        stage_desc=exposure + " (pid " + anchor.get("actor_pid", "?") +
+                        stage_desc=exposure + " (session " + anchor.get("key", "?") +
                                    "): " + short(anchor_cl, 220)))
 
       for i in range(len(evidence) - 1, -1, -1):     # oldest-first
@@ -285,26 +298,15 @@ script: |
                             stage_desc=ev[1] + ": " + short(ev[2].get("cmdline", ""), 220)))
 
       # trigger stage comes from meta - never re-queried from the log
-      self_cl        = lineage_cmdline(lineage[0])
-      caller_is_child = False
-      if self_cl != "" and cmd != "":
-          if self_cl == cmd or cmd in self_cl or self_cl in cmd:
-              caller_is_child = True
-      if caller_is_child:
-          tfrm = inst.get("parent_path", "")
-          if tfrm == "" and len(lineage) > 1:
-              tfrm = lineage[1].get("actor_path", "")
-          tto = inst.get("actor_path", "")
-      else:
-          tfrm = inst.get("actor_path", "")
-          tok  = cmd.strip().split(" ")[0].replace("\"", "").replace("'", "")
-          tto  = tok
-          if tto == "":
-              tto = inst.get("actor_path", "")
+      tfrm = inst.get("parent", "")
+      if tfrm == "" and len(lineage_) > 1:
+          tfrm = lineage_[1]["id"]
+      if tfrm == "":
+          tfrm = inst["id"]
       trig = {
-          "from":     "process://" + tfrm,
-          "to":       "process://" + tto,
-          "kind":     "EXECUTE_PROCESS",
+          "from":     tfrm,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(trigger_ts),
           "first_ts": str(trigger_ts),
           "last_ts":  str(trigger_ts),
@@ -316,8 +318,8 @@ script: |
                                    short(cmd, 220)))
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "").split("/")[len(x.get("actor_path", "").split("/")) - 1])
+      for x in lineage_:
+          names.append(x.get("path", "").split("/")[len(x.get("path", "").split("/")) - 1])
       path_txt = " -> ".join(names)
 
       conf = "suspected"
@@ -326,9 +328,9 @@ script: |
 
       reason = ("vLLM ZeroMQ pickle-deserialization RCE (" + conf + ") - " + label +
                 " executed via " + path_txt +
-                ", descended from vLLM server pid " + anchor.get("actor_pid", "?") +
-                "; " + str(len(evidence)) + " corroborating in-session spawn(s) in the last 5m")
-      if len(lineage) < 2:
+                ", descended from vLLM server session " + anchor.get("key", "?") +
+                "; " + str(len(evidence)) + " corroborating in-tree spawn(s) in the last 5m")
+      if len(lineage_) < 2:
           reason = reason + "; attribution: degraded (short lineage)"
 
       print(reason)

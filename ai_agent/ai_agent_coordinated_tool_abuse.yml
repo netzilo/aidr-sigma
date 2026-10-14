@@ -30,6 +30,8 @@ tags:
 logsource:
   product: ai_agent
   category: tool_input
+requires:
+  - tool
 detection:
   sel_trigger:
     content|re: '.'
@@ -50,6 +52,7 @@ script: |
   WINDOW_HOURS = 24
   THRESHOLD = 40          # calls to one sensitive tool within 24h
   MAX_STORE_FRACTION = 90
+  MAX_ROWS = 1000
 
   def is_sensitive(tool):
       low = tool.lower()
@@ -67,6 +70,21 @@ script: |
           return False
       return (u.get("bytes", 0) * 100) / limit < MAX_STORE_FRACTION
 
+  def agent_root():
+      # the triggering session's topmost ancestor (the agent), or None when unknown
+      s = session()
+      if s == None:
+          return None
+      for i in range(16):
+          p = s.get("parent", "")
+          if p == "":
+              break
+          ps = session(p)
+          if ps == None:
+              break
+          s = ps
+      return s
+
   def run():
       if meta.get("context_type", "") != "tool_input":
           return "allow"
@@ -78,10 +96,12 @@ script: |
       now = int(meta.get("event_ts", "0"))
       if now == 0:
           return "allow"
-      bucket = now / HOUR_NS
+      bucket = now // HOUR_NS
 
-      key = "c:" + meta.get("server_name", "") + "/" + tool
-      state = store_get(key)
+      server = meta.get("server_name", "")
+      tid    = "tool://" + server + "/" + tool
+      key    = "c:" + server + "/" + tool
+      state  = store_get(key)
       if state == None:
           state = {}
 
@@ -100,6 +120,14 @@ script: |
       if quota_ok():
           store_set(key, pruned)
 
+      # The event log is the floor: every TOOL_CALL row to this tool still
+      # retained inside the window, across all sessions. The store carries the
+      # count across restarts and past log retention.
+      logged = len(events(kind="TOOL_CALL", target=tid,
+                          since_ns=now - WINDOW_HOURS * HOUR_NS, until_ns=now, limit=MAX_ROWS))
+      if logged > total:
+          total = logged
+
       if total < THRESHOLD:
           return "allow"
 
@@ -114,13 +142,19 @@ script: |
                 "' within " + str(WINDOW_HOURS) + "h (threshold " + str(THRESHOLD) + ")")
       print(reason)
 
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      # Chain: the triggering session's agent ancestor, anchored on this call.
+      inst = session()
+      if inst != None:
+          chain = new_chain(agent_root()["id"])
+          chain.append(step({"from": inst["id"], "to": tid, "kind": "TOOL_CALL", "dir": "out",
+                             "ts": str(now), "first_ts": str(now), "last_ts": str(now)},
+                            stage_id="Campaign", stage_desc=reason))
+          return {"action": "report", "reason": reason, "chain": chain}
+
+      for p in sessions(agent=True):
           chain = new_chain(p["id"])
           for e in edges(p["id"], dir="out", kind="TOOL_CALL"):
-              t = node(e["to"])
-              if t != None and t.get("name", "") == tool:
+              if e.get("to", "") == tid:
                   chain.append(step(e, stage_id="Campaign", stage_desc=reason))
                   return {"action": "report", "reason": reason, "chain": chain}
 

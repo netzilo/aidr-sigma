@@ -1,0 +1,21 @@
+rule: ai_agent_openclaw_obfuscated_execution.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: claude
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: shell, cmdline: "sh -c 'npm install && npm test'"}
+expect:
+  action: allow

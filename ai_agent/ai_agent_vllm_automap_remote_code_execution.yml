@@ -11,10 +11,10 @@ description: |
   with get_class_from_dynamic_module() without honouring trust_remote_code=False, so the
   backend repository's Python module is fetched and executed inside the vLLM process.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
-  process instance with proc_instance(), climbs to the nearest python/vLLM loader ancestor
-  with proc_lineage(), and evaluates ONLY that one process tree. Stages are read from the
-  instance-resolved event log (query_events) and are strictly ordered and windowed:
+  The rule is session-resolved: it anchors on the triggering session (session()), climbs
+  its lineage() to the nearest python/vLLM loader ancestor, and evaluates ONLY that one
+  spawn tree. Stages are read from the session-keyed event log (events()) and are strictly
+  ordered and windowed:
 
     Stage A (optional, high specificity) - model config.json fetched from repo X
     Stage B (REQUIRED anchor)            - dynamic Python module (.py under /resolve|/raw|
@@ -57,6 +57,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -67,7 +71,7 @@ action: report
 on_timeout: allow
 on_error: allow
 script: |
-  # ── vLLM auto_map remote-code-execution chain (instance-resolved) ───────────
+  # ── vLLM auto_map remote-code-execution chain (session-resolved) ────────────
   WINDOW_NS   = 600000000000     # 10 minutes: config fetch -> module fetch -> payload
   MAX_SESSION = 64               # bound process-tree expansion
 
@@ -119,15 +123,18 @@ script: |
 
   def ev_edge(e):
       t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
+          "dir":      "out",
           "ts":       t,
           "first_ts": t,
           "last_ts":  t,
       }
-
   def run():
       ct = meta.get("context_type", "")
       if ct != "execute_process" and ct != "http_request":
@@ -145,45 +152,45 @@ script: |
               return "allow"
 
       trigger_ts = int(meta.get("event_ts", "0"))
-      cp         = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trigger_ts == 0:
+      cp         = meta.get("session", "")
+      if cp == "" or trigger_ts == 0:
           return "allow"
 
-      # ── instance attribution (never a path-keyed node walk) ───────────────
-      inst = proc_instance(cp, trigger_ts)
+      # ── session attribution (never a path-keyed node walk) ────────────────
+      inst = session(cp)
       if inst == None:
-          return "allow"            # degraded: re-fires once the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"            # degraded: re-fires once the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # session = caller .. nearest python/vLLM loader ancestor (inclusive).
-      # Climbing stops at the loader so we never attribute across sessions.
-      session = {}
-      loader  = None
-      for x in lineage:
-          session[x["actor_pid"]] = True
-          if is_loader(x.get("actor_path", "")):
+      # scope = caller .. nearest python/vLLM loader ancestor (inclusive).
+      # Climbing stops at the loader so we never attribute across runs.
+      scope  = {}
+      loader = None
+      for x in lineage_:
+          scope[x["id"]] = True
+          if is_loader(x.get("path", "")):
               loader = x
               break
       if loader == None:
           return "allow"            # not a Python / vLLM model-loading tree
 
       win_start = trigger_ts - WINDOW_NS
-      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=win_start, limit=2000)
+      exec_rows = events(kind="SPAWNED", since_ns=win_start, limit=2000)
       for i in range(3):
           for e in exec_rows:
-              if len(session) >= MAX_SESSION:
+              if len(scope) >= MAX_SESSION:
                   break
-              if e.get("parent_pid", "") in session:
-                  session[e["actor_pid"]] = True
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # ── HTTP stages, scoped to this session's instances only ──────────────
+      # ── HTTP stages, scoped to this run's sessions only ───────────────────
       py_rows  = []
       cfg_rows = []
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=win_start, until_ns=trigger_ts, limit=200):
+      for sid in scope:
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=win_start, until_ns=trigger_ts, limit=200):
               path = e.get("path", "")
               if is_module_fetch(path):
                   py_rows.append(e)
@@ -193,7 +200,7 @@ script: |
       # the TRIGGERING request comes from meta - never re-queried (async ingest race)
       if ct == "http_request":
           trow = {"ts": str(trigger_ts), "kind": "HTTP_REQUEST",
-                  "actor_pid": str(cp), "actor_path": inst.get("actor_path", ""),
+                  "session_id": inst["id"], "program": inst.get("path", ""),
                   "host": meta.get("host", ""), "path": meta.get("path", ""),
                   "target_id": "https://" + meta.get("host", "")}
           if is_module_fetch(trow["path"]):
@@ -225,19 +232,20 @@ script: |
       # ── corroboration B: payload execution after the module fetch ─────────
       payload = None
       if ct == "execute_process":
-          payload = {"ts": str(trigger_ts), "kind": "EXECUTE_PROCESS",
-                     "actor_pid": str(cp), "actor_path": inst.get("actor_path", ""),
+          payload = {"ts": str(trigger_ts), "kind": "SPAWNED",
+                     "session_id": inst["id"], "parent_session": inst.get("parent", ""),
+                     "program": inst.get("path", ""),
                      "cmdline": payload_cmd,
-                     "target_id": "process://" + inst.get("actor_path", "")}
+                     "target_id": inst["id"]}
       else:
           for e in exec_rows:
-              if e.get("actor_pid", "") not in session:
+              if e.get("session_id", "") not in scope:
                   continue
               ts = int(e.get("ts", "0"))
               if ts < s0_ts or ts > trigger_ts:
                   continue
               if matches_any(PAYLOAD_TOKENS,
-                             e.get("cmdline", "") + " " + e.get("actor_path", "")):
+                             e.get("cmdline", "") + " " + e.get("program", "")):
                   payload = e
                   break
 
@@ -245,8 +253,8 @@ script: |
           return "allow"            # same-repo custom code with no payload: not this CVE
 
       # ── kill chain, rooted at the loader instance ─────────────────────────
-      chain  = new_chain("process://" + loader.get("actor_path", ""))
-      names  = " -> ".join([basename(x.get("actor_path", "")) for x in lineage])
+      chain  = new_chain(loader["id"])
+      names  = " -> ".join([basename(x.get("path", "")) for x in lineage_])
       stages = []
 
       if cross != None:
@@ -264,15 +272,15 @@ script: |
       if payload != None:
           d = payload.get("cmdline", "")
           if d == "":
-              d = payload.get("actor_path", "")
+              d = payload.get("program", "")
           chain.append(step(ev_edge(payload), stage_id="Payload Execution",
                             stage_desc="loader session spawned: " + d))
           stages.append("payload exec " + d)
 
-      # optional: credential access by the loader instance after the fetch
+      # optional: credential access by the loader session after the fetch
       cred = None
-      for e in query_events(kind="READ_FILE", actor_pid=int(loader["actor_pid"]),
-                            since_ns=s0_ts, until_ns=trigger_ts, limit=500):
+      for e in events(kind="READ_FILE", session=loader["id"],
+                      since_ns=s0_ts, until_ns=trigger_ts, limit=500):
           fp = e.get("path", "")
           for s in SENSITIVE:
               if s in fp:
@@ -282,7 +290,8 @@ script: |
               break
       if cred != None:
           chain.append(step(ev_edge(cred), stage_id="Credential Access",
-                            stage_desc="loader read sensitive file: " + cred.get("path", "")))
+                            stage_desc="loader read sensitive file: " + cred.get("path", ""),
+                            activity={"path": cred.get("path", ""), "ts": cred.get("ts", "0")}))
           stages.append("credential read " + cred.get("path", ""))
 
       print("vLLM auto_map remote-code chain via " + names + " - " + "; ".join(stages))

@@ -25,6 +25,8 @@ logsource:
   # Adapted: original used event_type: output_generation (unsupported).
   # llm_response is where model-generated content with exfil patterns appears.
   category: agent_events
+requires:
+  - llm
 detection:
   selection_markdown_exfil:
     event_type: llm_response

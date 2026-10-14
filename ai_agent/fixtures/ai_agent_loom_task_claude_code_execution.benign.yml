@@ -1,0 +1,22 @@
+rule: ai_agent_loom_task_claude_code_execution.yml
+subjects:
+  zsh:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  claude:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/local/bin/claude
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: zsh}
+  - {kind: file_read, subject: zsh, path: /Users/dev/proj/tasks.md}
+  - {kind: spawn, subject: claude, cmdline: "claude -p fix the failing tests"}
+expect:
+  action: allow

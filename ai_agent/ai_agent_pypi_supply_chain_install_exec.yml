@@ -10,11 +10,10 @@ description: |
   network or exec primitives, a scripting host, or a persistence mechanism —
   i.e. arbitrary code running with the privileges of the installing process.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
-  exact process instance with proc_instance(), walks the true spawn chain with
-  proc_lineage(), and expands the session only to descendants of that lineage via
-  query_events(kind="EXECUTE_PROCESS"). Nothing is attributed across sessions and
-  no path-keyed graph node walk is used, so the verdict is deterministic.
+  The rule is session-resolved: it anchors on the triggering session, walks its
+  true lineage, and expands the scope only to sessions spawned by that lineage
+  (SPAWNED rows). Nothing is attributed across sessions and no path-keyed graph
+  node walk is used, so the verdict is deterministic.
 
   An HTTP_REQUEST performed inside the window by a NON-installer process of the
   same session (i.e. the spawned downloader, not pip talking to its index) is
@@ -53,6 +52,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -123,87 +125,92 @@ script: |
           return "persistence mechanism invoked during package install"
       return ""
 
+  def cmd_of(content):
+      # execute_process content is {"command": ..., "path": ...}; fall back to the raw text
+      m = re.find(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+      if m == None:
+          return content
+      inner = m[m.find(":") + 1:].strip()
+      inner = inner[1:len(inner) - 1]
+      return inner.replace('\\"', '"').replace("\\\\", "\\")
+
+  def spawn_row(sess):
+      # the session's own SPAWNED row (keyed by the child), or the graph edge as a row
+      for r in events(kind="SPAWNED", session=sess["id"], limit=1):
+          return r
+      cl = ""
+      t  = sess.get("first_seen", "0")
+      for e in edges(sess["id"], dir="in", kind="SPAWNED"):
+          cl = e.get("cmdline", "")
+          t  = e.get("ts", t)
+      return {"kind": "SPAWNED", "ts": t, "session_id": sess["id"],
+              "parent_session": sess.get("parent", ""), "target_id": sess["id"],
+              "program": sess.get("path", ""), "cmdline": cl}
+
   def ev_edge(e):
-      frm = e.get("parent_path", "")
-      if frm == "":
-          frm = e.get("actor_path", "")
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "process://" + e.get("actor_path", "")
-      ts = e.get("ts", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + frm,
-          "to":       tgt,
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "ts":       ts,
-          "first_ts": ts,
-          "last_ts":  ts,
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def run():
       # ── 1. relevance gate — pure string checks on meta, no graph/log calls ──
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd_now = meta.get("content", "")
+      cmd_now = cmd_of(meta.get("content", ""))
       trig_install   = is_install(cmd_now)
       trig_exec_desc = suspicious_child(cmd_now)
       if not trig_install and trig_exec_desc == "":
           return "allow"
 
-      # ── 2. anchor on the exact triggering instance ─────────────────────────
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
+      # ── 2. anchor on the exact triggering session ──────────────────────────
       now_ts = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, now_ts)
+      inst = session()
       if inst == None:
           return "allow"                       # degraded — re-fires when logged
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
       # ── 3. session scope: this lineage only (never cross-session) ──────────
-      session = {}
-      for x in lineage:
-          pid = x.get("actor_pid", "")
-          if pid != "":
-              session[pid] = x.get("actor_start", "0")
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+
+      # the trigger as a row (its own SPAWNED row races ingest - never re-looked-up)
+      trig_row = {
+          "kind":           "SPAWNED",
+          "ts":             str(now_ts),
+          "session_id":     inst["id"],
+          "parent_session": inst.get("parent", ""),
+          "target_id":      inst["id"],
+          "program":        inst.get("path", ""),
+          "cmdline":        cmd_now,
+      }
 
       # ── 4. REQUIRED anchor stage: a python package install in this session ─
       anchor = None
-      for x in lineage:
-          if is_install(x.get("cmdline", "")):
-              anchor = x
-              break
-      if anchor == None:
-          for x in lineage:
-              rows0 = query_events(kind="EXECUTE_PROCESS",
-                                   actor_pid=int(x.get("actor_pid", "0")),
-                                   actor_start=int(x.get("actor_start", "0")),
-                                   limit=10)
-              for r in rows0:
-                  if is_install(r.get("cmdline", "")):
-                      anchor = r
-                      break
-              if anchor != None:
+      if trig_install:
+          anchor = trig_row
+      else:
+          for x in lineage_:
+              r = spawn_row(x)
+              if is_install(r.get("cmdline", "")):
+                  anchor = r
                   break
-      if anchor == None and trig_install:
-          anchor = {
-              "kind":        "EXECUTE_PROCESS",
-              "ts":          str(now_ts),
-              "actor_pid":   inst.get("actor_pid", ""),
-              "actor_start": inst.get("actor_start", "0"),
-              "actor_path":  inst.get("actor_path", ""),
-              "parent_path": inst.get("parent_path", ""),
-              "cmdline":     cmd_now,
-              "target_id":   "process://" + inst.get("actor_path", ""),
-          }
       if anchor == None:
           return "allow"                       # no install context — not our threat
 
       anchor_ts = int(anchor.get("ts", "0"))
-      if anchor_ts == 0:
-          anchor_ts = int(anchor.get("actor_start", "0"))
       if anchor_ts == 0:
           return "allow"
       if now_ts > 0 and (now_ts - anchor_ts) > WINDOW_NS:
@@ -213,33 +220,24 @@ script: |
           until = now_ts + 1
 
       # descendants of the lineage, bounded to the install window
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=anchor_ts,
-                          until_ns=until, limit=3000)
+      rows = events(kind="SPAWNED", since_ns=anchor_ts, until_ns=until, limit=3000)
       for i in range(3):
           for r in rows:
-              ap = r.get("actor_pid", "")
+              ap = r.get("session_id", "")
               if ap == "":
                   continue
-              if r.get("parent_pid", "") in session and ap not in session:
-                  session[ap] = r.get("actor_start", "0")
+              if r.get("parent_session", "") in scope and ap not in scope:
+                  scope[ap] = True
 
       # ── 5. REQUIRED stage: install-time arbitrary code execution ───────────
       exec_ev   = None
       exec_desc = ""
       if trig_exec_desc != "":
-          # trigger stage comes from meta — never re-looked-up (async ingest race)
-          exec_ev = {
-              "kind":        "EXECUTE_PROCESS",
-              "ts":          str(now_ts),
-              "actor_path":  inst.get("actor_path", ""),
-              "parent_path": inst.get("parent_path", ""),
-              "cmdline":     cmd_now,
-              "target_id":   "process://" + inst.get("actor_path", ""),
-          }
+          exec_ev   = trig_row
           exec_desc = trig_exec_desc
       else:
           for r in rows:
-              if r.get("actor_pid", "") not in session:
+              if r.get("session_id", "") not in scope:
                   continue
               d = suspicious_child(r.get("cmdline", ""))
               if d == "":
@@ -257,19 +255,16 @@ script: |
       if exec_ev == None and pkg == "":
           return "allow"                       # plain install — nothing to say
 
-      # ── 6. escalation stage: egress by a NON-installer process of the session
+      # ── 6. escalation stage: egress by a NON-installer session of the scope ─
       http_ev = None
       probed  = 0
-      for p in session:
+      for sid in scope:
           if probed >= 12:
               break
-          if p == "":
-              continue
           probed = probed + 1
-          for r in query_events(kind="HTTP_REQUEST", actor_pid=int(p),
-                                actor_start=int(session[p]), since_ns=anchor_ts,
-                                until_ns=until, limit=10):
-              if is_installer_proc(r.get("actor_path", "")):
+          for r in events(kind="HTTP_REQUEST", session=sid, since_ns=anchor_ts,
+                          until_ns=until, limit=10):
+              if is_installer_proc(r.get("program", "")):
                   continue                      # the package manager's own index traffic
               http_ev = r
               break
@@ -277,8 +272,7 @@ script: |
               break
 
       # ── 7. kill chain, rooted at the session owner ─────────────────────────
-      root_path = lineage[-1].get("actor_path", inst.get("actor_path", ""))
-      chain = new_chain("process://" + root_path)
+      chain = new_chain(lineage_[-1]["id"])
       chain.append(step(ev_edge(anchor), stage_id="Package Install",
                         stage_desc="python package install: " + trim(anchor.get("cmdline", ""), 220)))
       stages = ["package install"]
@@ -292,15 +286,15 @@ script: |
           chain.append(step(ev_edge(http_ev), stage_id="Install-Time Egress",
                             stage_desc="HTTP " + http_ev.get("method", "?") + " to " +
                                        http_ev.get("host", "?") + " by " +
-                                       http_ev.get("actor_path", "?")))
+                                       http_ev.get("program", "?")))
           stages.append("egress to " + http_ev.get("host", "?"))
 
       names = []
-      for x in lineage:
-          seg = x.get("actor_path", "").split("/")
+      for x in lineage_:
+          seg = x.get("path", "").split("/")
           names.append(seg[-1])
       attrib = " -> ".join(names)
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           attrib = attrib + " (attribution: degraded)"
 
       print("PyPI supply-chain signal | " + ", ".join(stages) + " | lineage: " + attrib)

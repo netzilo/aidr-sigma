@@ -24,11 +24,10 @@ description: |
                         additionally require a session-scoped, ordered, windowed
                         staging stage (sensitive-store read or artifact write).
 
-  Attribution is instance-resolved: the rule anchors on meta["caller_pid"],
-  resolves the exact (pid, start) instance via proc_instance(), walks the true
-  spawn chain with proc_lineage(), expands to sibling instances spawned by that
-  lineage only, and queries the event log scoped to those pids inside a 10 minute
-  window. No path-keyed graph walk is used, so two identical sends in different
+  Attribution is session-resolved: the rule anchors on the triggering session
+  (session()), walks the true spawn chain with lineage(), expands to the sessions
+  spawned by that lineage only, and queries the event log scoped to those
+  sessions inside a 10 minute window. No path-keyed graph walk is used, so two identical sends in different
   sessions can never be stitched into one chain.
 author: Haibo
 date: "2026-06-11"
@@ -63,6 +62,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -167,15 +170,19 @@ script: |
       return "https"
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def sort_hits(hits):
       out = []
       for h in hits:
@@ -188,28 +195,27 @@ script: |
       return out
 
   # ------------------------------------------- session-scoped corroboration
-  def find_staging(session, t0, t1):
+  def find_staging(scope, t0, t1):
       hits = []
       n = 0
-      for pid in session:
+      for sid in scope:
           if n >= MAX_PIDS:
               break
           n += 1
-          if pid == "":
+          if sid == "":
               continue
-          p = int(pid)
-          # READ_FILE is high volume — always scoped by actor_pid + window + limit.
-          for e in query_events(kind="READ_FILE", actor_pid=p, since_ns=t0,
-                                until_ns=t1, limit=300):
+          # READ_FILE is high volume — always scoped by session + window + limit.
+          for e in events(kind="READ_FILE", session=sid, since_ns=t0,
+                          until_ns=t1, limit=300):
               fp = e.get("path", "").lower()
               if fp != "" and is_sensitive_path(fp):
                   hits.append(["Context Staging",
-                               "sensitive store read by session instance: " + e.get("path", ""),
+                               "sensitive store read by session: " + e.get("path", ""),
                                e])
                   break
           for k in ["WRITE_FILE", "CREATE_FILE"]:
-              for e in query_events(kind=k, actor_pid=p, since_ns=t0,
-                                    until_ns=t1, limit=200):
+              for e in events(kind=k, session=sid, since_ns=t0,
+                              until_ns=t1, limit=200):
                   fp = e.get("path", "").lower()
                   if fp != "" and is_staging_path(fp):
                       hits.append(["Artifact Staging",
@@ -245,42 +251,42 @@ script: |
       if cred == "" and ctx == "" and not blob:
           return "allow"
 
-      # 3. instance-resolved attribution — never a path-keyed graph walk
+      # 3. session-resolved attribution — never a path-keyed graph walk
       event_ts = int(meta.get("event_ts", "0"))
-      cp       = int(meta.get("caller_pid", "0"))
-      if cp == 0 or event_ts == 0:
+      cp       = meta.get("session", "")
+      if cp == "" or event_ts == 0:
           return "allow"
 
-      inst = proc_instance(cp, event_ts)
+      inst = session(cp)
       if inst == None:
-          # degraded — create row not yet logged; never guess an owner
+          # degraded — session not known yet; never guess an owner
           print("disguised analytics payload to " + host + path + " (attribution degraded)")
           return {
               "action": "report",
               "reason": "Non-telemetry payload sent to telemetry-shaped endpoint " +
-                        host + path + " — process instance unresolved, attribution degraded",
+                        host + path + " — session unresolved, attribution degraded",
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
+          lineage_ = [inst]
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lin = " -> ".join(names)
 
-      # 4. strict single-session scope: lineage + instances it spawned, in window
+      # 4. strict single-run scope: lineage + sessions it spawned, in window
       t0 = event_ts - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = True
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=t0, until_ns=event_ts,
-                            limit=2000):
-          if e.get("parent_pid", "") in session:
-              session[e.get("actor_pid", "")] = True
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
+      for e in events(kind="SPAWNED", since_ns=t0, until_ns=event_ts,
+                      limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
 
-      hits = find_staging(session, t0, event_ts)
+      hits = find_staging(scope, t0, event_ts)
 
       # 5. tiering
       tier = ""
@@ -296,16 +302,18 @@ script: |
           # legitimate tracing/crash SDK looks like — not enough on its own.
           return "allow"
 
-      # 6. kill chain — rooted at the session owner, evidence from event rows
-      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      # 6. kill chain — rooted at the lineage root, evidence from event rows
+      chain = new_chain(lineage_[len(lineage_) - 1]["id"])
       for h in hits:
-          chain.append(step(ev_edge(h[2]), stage_id=h[0], stage_desc=h[1]))
+          chain.append(step(ev_edge(h[2]), stage_id=h[0], stage_desc=h[1],
+                            activity={"path": h[2].get("path", ""), "ts": h[2].get("ts", "0")}))
 
       # the triggering send is taken from meta, never re-queried from the log
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       scheme_of(url) + "://" + meta.get("host", ""),
           "kind":     "HTTP_REQUEST",
+          "dir":      "out",
           "ts":       str(event_ts),
           "first_ts": str(event_ts),
           "last_ts":  str(event_ts),

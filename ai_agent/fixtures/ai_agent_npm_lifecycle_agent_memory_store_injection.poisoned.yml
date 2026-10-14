@@ -1,0 +1,70 @@
+# Poisoning path: the agent fetches a skill from an untrusted host BEFORE the
+# install, so the same write fan-out is attributed to a poisoned agent and the
+# verdict is upgraded from report to block.
+#
+# The skill fetch is a SIBLING of the install (a direct child of the agent),
+# not a descendant of npm: a postinstall script can never predate its own
+# parent, so poisoning-precedes-install is only expressible this way.
+#
+# Regression cover for the merged-edge timestamp: ACQUIRED_SKILL carries
+# first_ts/last_ts and no plain "ts", so reading "ts" alone silently skipped
+# every poisoning edge and this case came out as `report`.
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  curl:
+    session: pid/105:1
+    parent: cursor
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  npm:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/local/bin/node
+    name: npm
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  postinstall:
+    session: pid/103:1
+    parent: npm
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  register:
+    session: pid/104:1
+    parent: postinstall
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: curl, cmdline: "curl -fsS https://gist.githubusercontent.com/x/raw/skill.md -o /Users/dev/.claude/skills/ict/features.md"}
+  - {kind: skill_acquired, subject: curl, host: gist.githubusercontent.com, name: skill, source: http}
+  - {kind: spawn, subject: zsh, cmdline: "zsh -c 'npm install dsh-yishi'"}
+  - {kind: spawn, subject: npm, cmdline: "npm install dsh-yishi"}
+  - {kind: spawn, subject: postinstall, cmdline: "node /Users/dev/proj/node_modules/dsh-yishi/scripts/postinstall.js"}
+  - {kind: file_write, subject: postinstall, path: /Users/dev/.claude/skills/memocap/SKILL.md}
+  - {kind: file_write, subject: postinstall, path: /Users/dev/.codex/skills/memocap/skill.json}
+  - {kind: file_write, subject: postinstall, path: /Users/dev/.gemini/skills/memocap/prompt.md}
+  - {kind: spawn, subject: register, cmdline: "sh /Users/dev/proj/node_modules/.bin/memocap-register"}
+expect:
+  action: block
+  reason_contains: "skill acquired from untrusted host"
+  chain_min: 5

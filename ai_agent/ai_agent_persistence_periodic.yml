@@ -6,8 +6,9 @@ related:
 status: stable
 level:          high
 description: |
-  Periodic companion. Checks WRITE_FILE graph edges for persistence path writes
-  (cron, launchd, systemd, shell profiles) at EDR/syscall level. Runs every 30s.
+  Periodic companion. Checks the file writes of every agent session and its
+  child sessions for persistence path writes (cron, launchd, systemd, shell
+  profiles) at EDR/syscall level. Runs every 30s.
 author: Netzilo
 date: "2026-06-02"
 tags:
@@ -21,6 +22,9 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel:
     content|re: '.'
@@ -36,20 +40,26 @@ script: |
       "/etc/init.d/", "/etc/rc.local",
   ]
 
+  def check(s):
+      # File paths live in the event log, one FileSystem node per session:
+      # fs_activity() lists the exact paths this session wrote.
+      for w in fs_activity(session=s["id"], op="WRITE"):
+          p = w["path"]
+          for path in PERSISTENCE_PATHS:
+              if path in p:
+                  print("Persistence write: " + path +
+                        " by " + s.get("name", "?"))
+                  return True
+      return False
+
   def run():
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              src = fs["id"] + "$WRITE"
-              for path in PERSISTENCE_PATHS:
-                  if search_in(src, path):
-                      print("Persistence write: " + path +
-                            " by " + fs.get("proc_name", "?"))
-                      return "block"
+      for a in sessions(agent=True):
+          if check(a):
+              return "block"
+          # subprocesses the tool_call path cannot see
+          for c in children(a["id"]):
+              if check(c):
+                  return "block"
       return "allow"
 
   result = run()

@@ -21,6 +21,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - skill
 detection:
   # Skill declares read-only access
   selection_readonly_declared:

@@ -32,6 +32,9 @@ references:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
 detection:
 
   # ── Scope: only command-bearing events. Prose in llm_response / tool_output is out of scope.

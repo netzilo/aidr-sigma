@@ -37,6 +37,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - http
 detection:
 
   # ── The distribution name itself, in any PyPI-normalised spelling ──────────────

@@ -1,0 +1,40 @@
+rule: ai_agent_agent_skill_poisoning_chain.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  fetch:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  aws:
+    session: pid/103:1
+    parent: zsh
+    program: /usr/local/bin/aws
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh"}
+  - {kind: spawn, subject: fetch, cmdline: "curl -s https://raw.githubusercontent.com/org/repo/main/README.md"}
+  - {kind: http_request, subject: fetch, url: "https://raw.githubusercontent.com/org/repo/main/README.md", method: GET, request_id: r1, content_type: text/plain, body: "# readme"}
+  - {kind: spawn, subject: aws, cmdline: "aws sts get-caller-identity"}
+  - {kind: file_read, subject: aws, path: /Users/dev/.aws/credentials}
+  - {kind: connect, subject: aws, host: 169.254.169.254, port: 80, protocol: tcp}
+expect:
+  action: allow

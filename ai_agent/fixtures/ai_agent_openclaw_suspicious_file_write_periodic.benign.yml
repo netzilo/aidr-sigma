@@ -1,0 +1,24 @@
+rule: ai_agent_openclaw_suspicious_file_write_periodic.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: shell, cmdline: "zsh -c 'go build ./...'"}
+  - {kind: file_write, subject: cursor, path: /Users/dev/proj/README.md}
+  - {kind: file_write, subject: shell, path: /Users/dev/proj/bin/app}
+  - {kind: file_read, subject: shell, path: /Users/dev/.zshrc}
+expect:
+  action: allow

@@ -1,0 +1,14 @@
+rule: ai_agent_recon_then_exfil.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: github, server_url: "https://mcp.github.com", tool: create_pr, call_id: c1, args: '{"title": "fix"}'}
+  - {kind: tool_call, subject: claude, server: shell, server_url: "stdio://shell", tool: curl, call_id: c2, args: '{"url": "https://api.github.com/repos/acme/app"}'}
+expect:
+  action: allow

@@ -1,0 +1,15 @@
+rule: ai_agent_vllm_audio_oversized_upload_dos.yml
+subjects:
+  client:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: client}
+  - {kind: http_request, subject: client, url: "http://vllm.internal:8000/v1/audio/transcriptions", method: POST, request_id: r1, content_type: multipart/form-data, body: 'name="file"; filename="clip.wav" RIFF....'}
+expect:
+  action: allow

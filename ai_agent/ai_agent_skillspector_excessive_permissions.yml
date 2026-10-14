@@ -17,6 +17,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - skill
 detection:
   selection_wildcard_permissions:
     event_type:

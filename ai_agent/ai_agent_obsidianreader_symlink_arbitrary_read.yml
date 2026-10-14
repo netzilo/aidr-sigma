@@ -9,16 +9,15 @@ description: |
   vault root.
 
   There is no SYMLINK_RESOLVED edge and no live file_read event producer in this
-  engine, so the rule reconstructs the behaviour from the instance-resolved event
-  log instead: the exact process instance that is ingesting a markdown vault
-  (identified either by a read under a ".obsidian" marker directory or by bulk
-  ".md" reads sharing one parent directory) subsequently reads a credential or
-  secret file that lies OUTSIDE that vault root, within the same ingestion run.
+  engine, so the rule reconstructs the behaviour from the session-keyed event
+  log instead: the session that is ingesting a markdown vault (identified either
+  by a read under a ".obsidian" marker directory or by bulk ".md" reads sharing
+  one parent directory) subsequently reads a credential or secret file that lies
+  OUTSIDE that vault root, within the same ingestion run.
 
-  Attribution is anchored on meta["caller_pid"] -> proc_instance() ->
-  proc_lineage(), and every file query is scoped to one (pid, start) instance of
-  that one session. Nothing is ever attributed across sessions or across PID
-  reuse. Report only.
+  Attribution is anchored on the triggering session and its lineage(), and
+  every file query is scoped to one session of that lineage. Nothing is ever
+  attributed across sessions. Report only.
 author: Evgen
 date: "2026-03-04"
 references:
@@ -57,6 +56,10 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_events:
     event_type:
@@ -83,7 +86,7 @@ on_error:   allow
 script: |
   # ── Constants ───────────────────────────────────────────────────────────────
   WINDOW_NS     = 300000000000   # 5 minutes — one vault ingestion run
-  MAX_READS     = 600            # per-instance cap: READ_FILE is high volume
+  MAX_READS     = 600            # per-session cap: READ_FILE is high volume
   MIN_MD_IN_DIR = 3              # bulk-markdown heuristic for the vault root
   MAX_SEC_STEPS = 3
 
@@ -125,14 +128,18 @@ script: |
           return False
       return p == root or p.startswith(root + "/")
 
-  def ev_edge(e, target):
+  def ev_edge(e):
+      # READ_FILE rows go from the reading session to its FileSystem node; the
+      # exact path is attached to the step as `activity`.
+      t = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       target,
+          "from":     e.get("session_id", ""),
+          "to":       e.get("target_id", ""),
           "kind":     e.get("kind", "READ_FILE"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   # ── Relevance gate: cheap string checks on meta only ───────────────────────
@@ -154,38 +161,36 @@ script: |
           return "allow"
 
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if trig_ts <= 0 or cp == 0:
+      if trig_ts <= 0 or meta.get("session", "") == "":
           return "allow"
 
-      # ── Anchor on the exact triggering instance ─────────────────────────────
-      inst = proc_instance(cp, trig_ts)
+      # ── Anchor on the triggering session ────────────────────────────────────
+      inst = session()
       if inst == None:
-          return "allow"                    # create row not landed — degraded, re-fires
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"                    # session not registered — degraded, re-fires
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       since = trig_ts - WINDOW_NS
 
-      # ── Session scope: caller lineage + children spawned in this window ─────
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "0")
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                            until_ns=trig_ts, limit=2000):
-          pp = e.get("parent_pid", "")
-          ap = e.get("actor_pid", "")
-          if pp != "" and pp in session and ap not in session:
-              session[ap] = e.get("actor_start", "0")
+      # ── Scope: the lineage + sessions it spawned in this window ─────────────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=since,
+                      until_ns=trig_ts, limit=2000):
+          pp = e.get("parent_session", "")
+          ap = e.get("session_id", "")
+          if pp != "" and pp in scope and ap not in scope:
+              scope[ap] = True
 
-      # ── Instance-scoped file reads (never a broad READ_FILE scan) ───────────
+      # ── Session-scoped file reads (never a broad READ_FILE scan) ────────────
       reads = []
-      for pid in session:
-          for e in query_events(kind="READ_FILE", actor_pid=int(pid),
-                                actor_start=int(session[pid]),
-                                since_ns=since, until_ns=trig_ts,
-                                limit=MAX_READS):
+      for sid in scope:
+          for e in events(kind="READ_FILE", session=sid,
+                          since_ns=since, until_ns=trig_ts,
+                          limit=MAX_READS):
               p = e.get("path", "")
               if p != "":
                   reads.append([int(e.get("ts", "0")), p, e])
@@ -259,9 +264,8 @@ script: |
       if cred_ev == None:
           return "allow"
 
-      # ── Idempotence: one report per (instance, out-of-vault target) ─────────
-      key  = (cred_ev.get("actor_pid", "?") + ":" +
-              cred_ev.get("actor_start", "?") + ":" + cred_path)
+      # ── Idempotence: one report per (session, out-of-vault target) ──────────
+      key  = cred_ev.get("session_id", "?") + ":" + cred_path
       seen = store_get("reported") or {}
       if key in seen:
           return "allow"
@@ -271,31 +275,35 @@ script: |
           seen[key] = str(trig_ts)
           store_set("reported", seen)
 
-      # ── Kill chain, rooted at the session owner ─────────────────────────────
+      # ── Kill chain, rooted at the lineage root ──────────────────────────────
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       who = " -> ".join(names)
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           who = who + " (attribution degraded)"
 
-      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
-      chain.append(step(ev_edge(vault_ev, vault_root),
+      chain = new_chain(lineage_[len(lineage_) - 1]["id"])
+      chain.append(step(ev_edge(vault_ev),
                         stage_id="Vault Ingestion",
                         stage_desc="markdown vault ingested by " +
-                                   vault_ev.get("actor_path", "?") +
-                                   " — vault root: " + vault_root))
-      chain.append(step(ev_edge(cred_ev, cred_path),
+                                   vault_ev.get("program", "?") +
+                                   " — vault root: " + vault_root,
+                        activity={"path": vault_ev.get("path", vault_root),
+                                  "ts": vault_ev.get("ts", "0")}))
+      chain.append(step(ev_edge(cred_ev),
                         stage_id="Symlink Traversal / Arbitrary Read",
                         stage_desc="secret read OUTSIDE the vault root during " +
-                                   "ingestion: " + cred_path))
+                                   "ingestion: " + cred_path,
+                        activity={"path": cred_path, "ts": cred_ev.get("ts", "0")}))
       added = 0
       for s in sec:
           if added >= MAX_SEC_STEPS:
               break
-          chain.append(step(ev_edge(s[1], s[0]),
+          chain.append(step(ev_edge(s[1]),
                             stage_id="Collection",
-                            stage_desc="additional out-of-vault read: " + s[0]))
+                            stage_desc="additional out-of-vault read: " + s[0],
+                            activity={"path": s[0], "ts": s[1].get("ts", "0")}))
           added = added + 1
 
       reason = ("ObsidianReader-style path/symlink traversal — vault ingestion at " +

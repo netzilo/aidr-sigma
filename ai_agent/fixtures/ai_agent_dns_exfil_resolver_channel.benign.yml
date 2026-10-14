@@ -1,0 +1,29 @@
+rule: ai_agent_dns_exfil_resolver_channel.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  dig:
+    session: pid/103:1
+    parent: zsh
+    program: /usr/bin/dig
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh -c 'cat ~/.aws/credentials | base64 -w0'"}
+  - {kind: spawn, subject: dig, cmdline: "dig +short api.example.com"}
+expect:
+  action: allow

@@ -4,7 +4,7 @@ status: experimental
 level: medium
 description: |
   Detects the observable precursor of vLLM's Outlines grammar-cache disk-exhaustion DoS:
-  a single process instance driving a high-cardinality burst of structured-output
+  a single session driving a high-cardinality burst of structured-output
   (guided_json / guided_regex / guided_grammar / json_schema) HTTP requests where almost
   every request carries a DIFFERENT schema.
 
@@ -17,16 +17,18 @@ description: |
   a new unbounded cache entry. Legitimate bursty structured-output traffic reuses a small
   set of schemas (low unique/total ratio); the exploit requires a near-1:1 unique-to-total
   ratio by construction. The rule therefore fires on the ratio, inside a 60s window,
-  scoped to one instance-resolved session — and reports only, because the disk-space
+  scoped to one session lineage — and reports only, because the disk-space
   consequence is unverifiable from this telemetry.
 
   Schema identity is computed by extracting only the guided-decoding value from the JSON
   body (balanced-brace / quoted-value slice), normalising whitespace, and hashing it, so a
   varying prompt or varying request id never inflates the uniqueness count.
 
-  Attribution is instance-resolved: caller_pid -> proc_instance(pid, event_ts) ->
-  proc_lineage, with the per-session counter keyed on the root instance (pid, start_ns).
-  PID reuse cannot merge two sessions and no counter is ever shared across sessions.
+  Attribution is session-scoped: the triggering session, its lineage and what they
+  spawned. The cardinality is derived on each evaluation from that scope's logged
+  requests in the window and their indexed bodies — no per-request counter is kept —
+  and one report per root session is emitted per 10 minutes. The body retrieval is
+  bounded to the best-ranked 1024 indexed structured-output bodies.
 author: Haibo
 date: "2026-06-11"
 modified: "2026-06-11"
@@ -43,6 +45,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -70,26 +75,31 @@ falsepositives:
     description, making otherwise identical schemas hash uniquely. Whitespace is normalised
     before hashing, but injected identifiers are not stripped.
   - Multi-tenant gateways where many distinct tenants' schemas are proxied through one agent
-    process instance, so unrelated tenant diversity accumulates on one session counter.
+    session, so unrelated tenant diversity accumulates on one session's cardinality.
 action: execute
 on_timeout: allow
 on_error: allow
 script: |
   # ── Tunables (this rule's own window — never baked into storage) ─────────────
-  WINDOW_NS     = 60000000000     # 60s schema-cardinality accumulation window
+  WINDOW_NS     = 60000000000     # 60s schema-cardinality window
   REFRACTORY_NS = 600000000000    # 10 min per-session report suppression
   LOOKBACK_NS   = 240000000000    # 4 min sibling-spawn lookback
   MIN_REQUESTS  = 25              # structured-output requests in window
   MIN_UNIQUE    = 20              # distinct schema fingerprints in window
   MIN_RATIO_PCT = 80              # unique/total percent — the cache-miss discriminator
-  MAX_FP        = 512             # bounded fingerprint set per session
-  MAX_SESSIONS  = 16              # bounded store footprint
+  MAX_BODIES    = 1024            # bounded body retrieval per evaluation
+  MAX_SESSIONS  = 16              # bounded store footprint (refractory keys)
+  ROW_LIMIT     = 400             # HTTP_REQUEST rows per session in the window
 
   MARKERS = ["guided_json", "guided_regex", "guided_grammar", "guided_choice",
              "guided_decoding_backend", "structured_outputs", "json_schema"]
 
   SCHEMA_KEYS = ["guided_json", "guided_regex", "guided_grammar", "guided_choice",
                  "json_schema", "structured_outputs"]
+
+  # Indexed request bodies are retrieved by content search; the labels of the
+  # session's own log rows (content_id) select which hits count.
+  BODY_QUERY = "guided_json OR guided_regex OR guided_grammar OR guided_choice OR json_schema OR structured_outputs"
 
   def to_int(v):
       if v == None:
@@ -193,28 +203,28 @@ script: |
       return False
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "method":   e.get("method", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
-  def prune_sessions():
+  def prune_refractory():
       ks = store_keys()
       if len(ks) <= MAX_SESSIONS:
           return
       oldest_k = ""
       oldest_t = 0
       for k in ks:
-          v = store_get(k)
-          if v == None:
-              store_delete(k)
-              continue
-          t = to_int(v.get("w", 0))
+          t = to_int(store_get(k))
           if oldest_k == "" or t < oldest_t:
               oldest_k = k
               oldest_t = t
@@ -226,100 +236,113 @@ script: |
           return "allow"
 
       now  = to_int(meta.get("event_ts", "0"))
-      cp   = to_int(meta.get("caller_pid", "0"))
       body = meta.get("content", "")
+      url  = meta.get("url", "")
       host = meta.get("host", "")
       path = meta.get("path", "")
       if host == "":
-          host = meta.get("url", "")
-      if cp == 0 or now == 0:
+          host = url
+      if now == 0:
           return "allow"
 
-      # ── Instance-resolved attribution ───────────────────────────────────────
-      inst = proc_instance(cp, now)
+      # ── Session-scoped attribution ───────────────────────────────────────────
+      inst = session()
       if inst == None:
           return "allow"          # degraded — never guess; re-fires on the next request
-      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
-                             to_int(inst.get("actor_start", "0")))
-      if not lineage:
-          lineage = [inst]
-      root  = lineage[len(lineage) - 1]
-      rpid  = str(root.get("actor_pid", "0"))
-      rstrt = str(root.get("actor_start", "0"))
-      skey  = "s:" + rpid + ":" + rstrt        # session key = root INSTANCE, reuse-proof
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = lineage_[len(lineage_) - 1]
 
       fp = schema_fingerprint(body)
       if fp == "":
           return "allow"                        # marker present but no extractable schema
 
-      # ── Per-session, windowed schema-cardinality accumulation ───────────────
-      st  = store_get(skey)
-      rep = 0
-      if st != None:
-          rep = to_int(st.get("rep", 0))
-      if st == None or (now - to_int(st.get("w", 0))) > WINDOW_NS:
-          st = {"w": now, "n": 0, "fp": {}, "rep": rep}
+      since = now - WINDOW_NS
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
+      for e in events(kind="SPAWNED", since_ns=now - LOOKBACK_NS, until_ns=now, limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
 
-      wstart = to_int(st.get("w", now))
-      fps    = st.get("fp", {})
-      total  = to_int(st.get("n", 0)) + 1
-      if fp not in fps and len(fps) < MAX_FP:
-          fps[fp] = 1
-      uniq = len(fps)
-      st["n"]  = total
-      st["fp"] = fps
-
-      hot = total >= MIN_REQUESTS and uniq >= MIN_UNIQUE and (uniq * 100) >= (total * MIN_RATIO_PCT)
-      quiet = (now - rep) < REFRACTORY_NS
-
-      if not hot or quiet:
-          if total >= MAX_FP:
-              st = {"w": now, "n": 0, "fp": {}, "rep": rep}
-          prune_sessions()
-          if store_usage()["free"] > 65536:
-              store_set(skey, st)
-          return "allow"
-
-      # ── Corroborate from the on-disk event log, strictly session-scoped ──────
-      session = {}
-      for x in lineage:
-          session[str(x.get("actor_pid", "0"))] = str(x.get("actor_start", "0"))
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - LOOKBACK_NS,
-                            until_ns=now, limit=2000):
-          if str(e.get("parent_pid", "")) in session:
-              session[str(e.get("actor_pid", ""))] = str(e.get("actor_start", ""))
-
+      # ── Floor: enough requests to this host from the scope in the window ─────
+      # Newest first; the log is the only state — nothing is counted across runs.
       rows = []
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=to_int(pid),
-                                actor_start=to_int(session[pid]),
-                                since_ns=wstart, until_ns=now, limit=200):
+      for sid in scope:
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=since, until_ns=now, limit=ROW_LIMIT):
               if host != "" and e.get("host", "") != "" and e.get("host", "") != host:
                   continue
               rows.append(e)
+      if len(rows) < MIN_REQUESTS:
+          return "allow"
+
+      # ── Refractory: one report per root session per window ───────────────────
+      rkey = "rep:" + root.get("id", "")
+      rep  = store_get(rkey)
+      if rep != None and (now - to_int(rep)) < REFRACTORY_NS:
+          return "allow"
+
+      # ── Schema cardinality from the indexed bodies of those very rows ────────
+      wanted   = {}
+      trig_cid = ""
+      for e in rows:
+          cid = e.get("content_id", "")
+          if cid == "":
+              continue
+          wanted[cid] = True
+          if e.get("session_id", "") == inst["id"] and e.get("ts", "") == str(now):
+              trig_cid = cid
+      fps     = {}
+      matched = {}
+      total   = 0
+      for hit in search(BODY_QUERY, MAX_BODIES):
+          src = hit.get("source", "")
+          if src not in wanted or src in matched:
+              continue
+          matched[src] = True
+          total += 1
+          f = schema_fingerprint(hit.get("text", ""))
+          if f != "":
+              fps[f] = True
+      if trig_cid == "" or trig_cid not in matched:
+          total += 1                            # the triggering body, not yet indexed
+          fps[fp] = True
+      uniq = len(fps)
+
+      hot = total >= MIN_REQUESTS and uniq >= MIN_UNIQUE and (uniq * 100) >= (total * MIN_RATIO_PCT)
+      if not hot:
+          return "allow"
+
+      prune_refractory()
+      if store_usage()["free"] > 4096:
+          store_set(rkey, str(now))
 
       # ── Kill chain: prior stages from the log, trigger stage from meta ───────
-      chain = new_chain("process://" + root.get("actor_path", ""))
-      if rows:
-          e0 = rows[len(rows) - 1]
-          chain.append(step(ev_edge(e0), stage_id="Grammar Cache Seeding",
-              stage_desc="earliest logged structured-output request in window to " +
-                         e0.get("host", host) + e0.get("path", "")))
-          if len(rows) > 2:
-              em = rows[len(rows) // 2]
-              chain.append(step(ev_edge(em), stage_id="Unique Schema Burst",
-                  stage_desc=str(len(rows)) + " session-scoped requests corroborated in log; " +
-                             str(uniq) + " distinct guided-decoding schemas of " +
-                             str(total) + " observed (cache-miss ratio " +
-                             str((uniq * 100) // total) + "%)"))
+      chain = new_chain(root["id"])
+      e0 = rows[len(rows) - 1]
+      chain.append(step(ev_edge(e0), stage_id="Grammar Cache Seeding",
+          stage_desc="earliest logged structured-output request in window to " +
+                     e0.get("host", host) + e0.get("path", "")))
+      if len(rows) > 2:
+          em = rows[len(rows) // 2]
+          chain.append(step(ev_edge(em), stage_id="Unique Schema Burst",
+              stage_desc=str(len(rows)) + " session-scoped requests in the log; " +
+                         str(uniq) + " distinct guided-decoding schemas of " +
+                         str(total) + " structured-output bodies (cache-miss ratio " +
+                         str((uniq * 100) // total) + "%)"))
 
       backend = ""
       if "guided_decoding_backend" in body and "outlines" in body:
           backend = " (per-request guided_decoding_backend=outlines override present)"
 
+      scheme = "https"
+      if url.find("://") > 0:
+          scheme = url[:url.find("://")]
       tedge = {
-          "from":     "process://" + inst.get("actor_path", ""),
-          "to":       "https://" + host,
+          "from":     inst["id"],
+          "to":       scheme + "://" + host,
           "kind":     "HTTP_REQUEST",
           "ts":       str(now),
           "first_ts": str(now),
@@ -330,8 +353,8 @@ script: |
           stage_desc="triggering request: unique schema " + fp + " to " + host + path + backend))
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       who = " -> ".join(names)
 
       reason = ("Possible vLLM Outlines grammar-cache exhaustion: " + str(uniq) +
@@ -342,11 +365,6 @@ script: |
                 "grammar; disk consumption itself is NOT observable in this telemetry, " +
                 "so this is a precursor report, not a confirmed DoS.")
       print(reason)
-
-      st = {"w": now, "n": 0, "fp": {}, "rep": now}
-      prune_sessions()
-      if store_usage()["free"] > 65536:
-          store_set(skey, st)
 
       return {"action": "report", "reason": reason, "chain": chain}
 

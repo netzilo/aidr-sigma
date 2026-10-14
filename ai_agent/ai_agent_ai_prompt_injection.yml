@@ -27,6 +27,9 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - llm
+  - tool
 detection:
   # Broad keyword trigger — scanner decides if these constitute real injection or benign content
   selection_keywords:

@@ -16,9 +16,9 @@ description: |
   post-anchor stage process, or an agent-skill document loaded right after install).
 
   Only signals the engine actually produces are used: the trigger is execute_process
-  (command line), and corroboration is drawn from the behaviour graph via
-  EXECUTE_PROCESS, CONNECTS, HTTP_REQUEST, READ_FILE, WRITE_FILE and ACQUIRED_SKILL
-  edges plus fs_activity() for resolved file paths and per-file timestamps. No
+  (command line), and corroboration is drawn from the agent session's SPAWNED,
+  CONNECTS, HTTP_REQUEST, READ_FILE, WRITE_FILE and ACQUIRED_SKILL edges plus
+  fs_activity() for resolved file paths and per-file timestamps. No
   package_install / network_connection event types and no INSTALLED_PACKAGE /
   EXECUTE_MALICIOUS_CODE / EXFILTRATE_DATA edges are referenced — those do not exist.
 author: Egemen
@@ -58,6 +58,12 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
+  - connect
+  - skill
 detection:
   sel_exec:
     event_type: execute_process
@@ -77,7 +83,7 @@ script: |
   # ── tuning ────────────────────────────────────────────────────────────────
   WINDOW_NS = 900000000000        # 15 min: anchor -> payload burst
   MAX_DEPTH = 5                   # process-tree depth walked below the agent
-  MAX_EDGES = 400                 # cap on EXECUTE_PROCESS edges inspected
+  MAX_EDGES = 400                 # cap on SPAWNED edges inspected
   MAX_PROBE = 8                   # stage processes probed for file/net evidence
 
   PKG = r"(?i)sec[-_.]research"
@@ -170,15 +176,13 @@ script: |
       for _ in range(MAX_DEPTH):
           nxt = []
           for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              for e in edges(pid, dir="out", kind="SPAWNED"):
                   child = e["to"]
                   cmd = e.get("cmdline", "")
                   if cmd == "":
-                      p = node(child)
+                      p = node(child)        # the child session: path/name only
                       if p != None:
-                          cmd = p.get("cmdline", "")
-                          if cmd == "":
-                              cmd = p.get("path", "")
+                          cmd = p.get("path", "")
                   out.append({"edge": e, "node": child, "cmd": cmd,
                               "ts": to_int(e.get("ts", "0"))})
                   if len(out) >= MAX_EDGES:
@@ -202,9 +206,7 @@ script: |
           return "allow"
       event_ts = to_int(meta.get("event_ts", "0"))
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           spawns = spawn_edges(aid)
           if len(spawns) == 0:

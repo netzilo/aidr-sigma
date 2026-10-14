@@ -10,9 +10,10 @@ description: |
   Upstream sigma-ai expresses this with `event_type: tool_sequence`,
   `parallel_operations`, `agent_creation` and `authentication`, none of which any
   producer emits, so the rule is entirely dead there. Netzilo reconstructs the
-  sequence from the behaviour graph: EXECUTE_PROCESS gives the spawn, CONNECTS and
-  HTTP_REQUEST give the egress, and READ_FILE gives the credential access — all
-  with timestamps, so ordering and windowing are real rather than assumed.
+  sequence from the behaviour graph: SPAWNED gives the spawn (agent session →
+  child session), CONNECTS and HTTP_REQUEST give the egress, and READ_FILE gives
+  the credential access — all with timestamps, so ordering and windowing are real
+  rather than assumed.
 
   `authentication` has no Netzilo equivalent and is not covered: there is no
   producer for auth outcomes, so credential *reuse* is inferred from a credential
@@ -37,6 +38,12 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
+  - http
+  - connect
 detection:
   sel_trigger:
     event_type:
@@ -87,13 +94,11 @@ script: |
 
       event_ts = int(meta.get("event_ts", "0"))
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
 
           # Stage 1 — a spawned process whose command line is a remote-exec verb.
-          for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for pe in edges(aid, dir="out", kind="SPAWNED"):
               cmd = pe.get("cmdline", "")
               verb = has_remote_exec(cmd)
               if verb == None:
@@ -156,9 +161,9 @@ script: |
 
   result = run()
 falsepositives:
-  - Developers using ssh or kubectl exec to reach internal infrastructure as part
-    of the task they asked the agent to do — this is the dominant false positive
-    and the reason the verdict is report
-  - Deployment and configuration-management runs that ssh to a fleet
-  - Backup jobs using rsync between internal hosts
+- Developers using ssh or kubectl exec to reach internal infrastructure as part
+  of the task they asked the agent to do — this is the dominant false positive
+  and the reason the verdict is report
+- Deployment and configuration-management runs that ssh to a fleet
+- Backup jobs using rsync between internal hosts
 level: medium

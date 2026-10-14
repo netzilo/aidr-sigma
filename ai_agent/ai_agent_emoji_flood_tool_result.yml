@@ -18,8 +18,8 @@ description: |
   the receiving agent to answer the question that actually decides severity: does this
   agent currently hold the capability surface an injection would want? It anchors the
   kill chain on the TOOL_RESULT edge that delivered the flood and corroborates with
-  ACQUIRED_SKILL edges pointing at public hosts and with EXECUTE_PROCESS -> CONNECTS
-  subprocess egress inside a 10-minute window. Reports only when the flood is paired
+  ACQUIRED_SKILL edges pointing at public hosts and with SPAWNED -> CONNECTS
+  child-session egress inside a 10-minute window. Reports only when the flood is paired
   with injection directives, with graph corroboration, or when the payload is
   overwhelmingly emoji by volume.
 
@@ -56,6 +56,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - connect
+  - skill
 detection:
   sel_tool_result:
     event_type: tool_response
@@ -213,12 +218,14 @@ script: |
       return True
 
   def find_agent():
+      # the triggering session's agent ancestor; a graph walk only when degraded
+      lineage_ = lineage()
+      if lineage_:
+          return lineage_[-1]
       want = meta.get("agent_name", "")
       best = None
       best_ts = -1
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           if want != "" and p.get("path", "") == want:
               return p
           ls = as_int(p.get("last_seen", ""))
@@ -281,7 +288,7 @@ script: |
 
       # egress capability: subprocess of this agent reached a public host
       found = False
-      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for pe in edges(aid, dir="out", kind="SPAWNED"):
           if found:
               break
           child = node(pe["to"])

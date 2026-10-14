@@ -12,10 +12,11 @@ description: |
 
   The vulnerability is that the redirect target is not re-validated against the SSRF
   allowlist, so a public fetch is converted into an internal fetch. That conversion is a
-  *sequence*, not a payload, so this rule walks the behaviour graph:
-    Process -HTTP_REQUEST-> URL(public)   (the scrape)
-    URL(public) -HTTP_RESPONSE-> Process  (last_status 301/302/303/307/308)
-    Process -HTTP_REQUEST-> URL(internal) (the bypassed destination, = current event)
+  *sequence*, not a payload, so this rule walks the behaviour graph from the
+  triggering session (and its parent session, for a helper process):
+    Session -HTTP_REQUEST-> URL(public)   (the scrape)
+    URL(public) -HTTP_RESPONSE-> Session  (last_status 301/302/303/307/308)
+    Session -HTTP_REQUEST-> URL(internal) (the bypassed destination, = current event)
 
   Reports only. No host, domain or path is added to any trust list; "internal" is
   determined structurally (address family / ZTNA classification / label shape).
@@ -48,6 +49,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_trigger:
     event_type: http_request
@@ -137,23 +141,21 @@ script: |
 
   def candidate_procs(turl):
       base = {}
+      cp = meta.get("session", "")
+      if cp != "":
+          base[cp] = True
       if turl != None:
           for e in edges(turl["id"], dir="in", kind="HTTP_REQUEST"):
               f = e.get("from", "")
               if f != "":
                   base[f] = True
-      an = meta.get("agent_name", "")
-      if an != "":
-          for p in graph(type="Process"):
-              if p.get("path", "") == an:
-                  base[p["id"]] = True
       out = {}
-      for pid in base:
-          out[pid] = True
-          # the redirect may have been followed by the agent parent of a helper proc
-          for e in edges(pid, dir="in", kind="EXECUTE_PROCESS"):
+      for sid in base:
+          out[sid] = True
+          # the redirect may have been followed by the agent parent of a helper session
+          for e in edges(sid, dir="in", kind="SPAWNED"):
               f = e.get("from", "")
-              if f != "" and f.startswith("process://"):
+              if f != "":
                   out[f] = True
       return out
 
@@ -209,18 +211,18 @@ script: |
       }
 
   def lineage_label():
-      cp = to_int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return ""
-      inst = proc_instance(cp, to_int(meta.get("event_ts", "0")))
+      inst = session(cp)
       if inst == None:
           return ""
-      lin = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      lin = lineage(inst["id"])
       if not lin:
           return ""
       names = []
       for x in lin:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+          names.append(x.get("path", "?").split("/")[-1])
       return " -> ".join(names)
 
   def dedupe(pub, tgt, trig):

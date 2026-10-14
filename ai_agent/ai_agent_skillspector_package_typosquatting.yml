@@ -18,6 +18,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Known typosquat variations of popular packages (Levenshtein distance 1-2 from originals)
   selection_pypi_typosquats:

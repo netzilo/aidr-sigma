@@ -30,6 +30,12 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
+  - http
+  - connect
 detection:
   sel_trigger:
     event_type:
@@ -44,6 +50,7 @@ on_error: allow
 on_timeout: allow
 script: |
   WINDOW_NS = 120000000000    # 2 minutes from the poisoned output to the action
+  MAX_ROWS  = 500
 
   # Instruction-shaped text. Each phrasing only makes sense if the text is
   # addressing the model rather than describing something to a human.
@@ -73,32 +80,73 @@ script: |
           return True
       return False
 
+  def res_edge(e):
+      # TOOL_RESULT runs tool -> session
+      t = e.get("ts", "0")
+      return {"from": e.get("target_id", ""), "to": e.get("session_id", ""),
+              "kind": "TOOL_RESULT", "dir": "in", "ts": t, "first_ts": t, "last_ts": t}
+
+  def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {"from": frm, "to": e.get("target_id", ""), "kind": e.get("kind", ""),
+              "dir": "out", "ts": t, "first_ts": t, "last_ts": t}
+
+  def where_of(e):
+      k = e.get("kind", "")
+      if k == "HTTP_REQUEST" or k == "CONNECTS":
+          return e.get("host", "?")
+      if k == "SPAWNED":
+          return e.get("cmdline", "") or e.get("program", "?")
+      if k == "READ_FILE":
+          return e.get("path", "?")
+      return e.get("target_id", "?")
+
   def run():
       if not is_relevant_event():
           return "allow"
 
       event_ts = int(meta.get("event_ts", "0"))
-      marker = find_injection(meta.get("content", ""))
+      marker   = find_injection(meta.get("content", ""))
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      # Attribution: the triggering session's agent ancestor; every agent
+      # session only when the trigger carries no session (degraded).
+      agents = []
+      lineage_ = lineage()
+      if lineage_:
+          agents = [lineage_[-1]]
+      else:
+          agents = sessions(agent=True)
+
+      for agent in agents:
           aid = agent["id"]
+          lo  = 0
+          if event_ts > WINDOW_NS:
+              lo = event_ts - WINDOW_NS
 
-          # Anchor on TOOL_RESULT edges and ask the FTS index whether that
-          # specific result body carried injection text. search_in() scopes the
-          # query to one indexed document, so an unrelated document elsewhere in
-          # the session cannot satisfy it.
-          for te in edges(aid, dir="out", kind="TOOL_RESULT"):
-              tool = node(te["to"])
+          # the agent's sessions: itself plus whatever it spawned in the window
+          scope = {aid: True}
+          for e in events(kind="SPAWNED", since_ns=lo, limit=MAX_ROWS):
+              if e.get("parent_session", "") in scope:
+                  scope[e["session_id"]] = True
+
+          # Anchor on TOOL_RESULT rows and ask the FTS index whether that specific
+          # result body carried injection text. search_in() scopes the query to
+          # one indexed document, so an unrelated document elsewhere in the
+          # session cannot satisfy it.
+          for te in events(kind="TOOL_RESULT", session=aid, since_ns=lo, limit=MAX_ROWS):
+              tool = node(te.get("target_id", ""))
               if tool == None:
                   continue
               hit = ""
-              tid = tool.get("id", "")
-              for n in INJECTION:
-                  if search_in(tid, '"' + n + '"'):
-                      hit = n
-                      break
+              cid = te.get("content_id", "")
+              if cid != "":
+                  for n in INJECTION:
+                      if search_in(cid, '"' + n + '"'):
+                          hit = n
+                          break
               if hit == "" and marker != "":
                   # The triggering event is the poisoned output itself, and it may
                   # not be indexed yet.
@@ -114,28 +162,31 @@ script: |
                   continue
 
               chain = new_chain(aid)
-              chain.append(step(te, stage_id="Injection",
+              chain.append(step(res_edge(te), stage_id="Injection",
                                 stage_desc="tool '" + tool.get("name", "?") +
                                            "' returned instruction text: '" + hit + "'"))
 
-              # Compliance half.
-              for kind in ["HTTP_REQUEST", "CONNECTS", "EXECUTE_PROCESS", "READ_FILE"]:
-                  for ae in edges(aid, dir="out", kind=kind):
-                      ats = int(ae.get("ts", ae.get("first_ts", "0")))
-                      if ats <= s0 or (ats - s0) > WINDOW_NS:
-                          continue
-                      t2 = node(ae["to"])
-                      where = "?"
-                      if t2 != None:
-                          where = t2.get("host", t2.get("proc_name", t2.get("id", "?")))
-                      chain.append(step(ae, stage_id="Compliance",
-                                        stage_desc=kind + " -> " + where +
-                                                   " within 2m of the injected output"))
-                      reason = ("Tool output injection acted on: '" + hit +
-                                "' from tool '" + tool.get("name", "?") +
-                                "' then " + kind + " -> " + where)
-                      print(reason)
-                      return {"action": "report", "reason": reason, "chain": chain}
+              # Compliance half: an action by the agent (or a child) after the output.
+              acts = []
+              for kind in ["HTTP_REQUEST", "CONNECTS", "READ_FILE"]:
+                  for sid in scope:
+                      for ae in events(kind=kind, session=sid, since_ns=s0 + 1,
+                                       until_ns=s0 + WINDOW_NS, limit=MAX_ROWS):
+                          acts.append(ae)
+              for ae in events(kind="SPAWNED", since_ns=s0 + 1, until_ns=s0 + WINDOW_NS, limit=MAX_ROWS):
+                  if ae.get("parent_session", "") in scope:
+                      acts.append(ae)
+              for ae in acts:
+                  kind  = ae.get("kind", "")
+                  where = where_of(ae)
+                  chain.append(step(ev_edge(ae), stage_id="Compliance",
+                                    stage_desc=kind + " -> " + where +
+                                               " within 2m of the injected output"))
+                  reason = ("Tool output injection acted on: '" + hit +
+                            "' from tool '" + tool.get("name", "?") +
+                            "' then " + kind + " -> " + where)
+                  print(reason)
+                  return {"action": "report", "reason": reason, "chain": chain}
 
       return "allow"
 

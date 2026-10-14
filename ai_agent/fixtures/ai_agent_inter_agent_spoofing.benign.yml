@@ -1,0 +1,14 @@
+rule: ai_agent_inter_agent_spoofing.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: http_request, subject: claude, url: "https://hooks.slack.com/services/T000/B000/XXXX", method: POST, request_id: r1, content_type: application/json, body: '{"text": "Build 123 passed on main"}'}
+expect:
+  action: allow

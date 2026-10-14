@@ -22,7 +22,7 @@ description: |
     C  Loopback URL whose Host header carries an external DNS name - the rebinding
        Host/target mismatch.
 
-  Corroboration (graph): a process in the same window already speaks plain HTTP to a
+  Corroboration (graph): a session in the same tree and window already speaks plain HTTP to a
   loopback endpoint, i.e. the local AgentAPI control plane genuinely exists. Anchor A
   is discarded without it, so a plain public API that merely exposes /messages does
   not fire the rule.
@@ -63,6 +63,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -192,19 +195,31 @@ script: |
       return best
 
   def actor_label(event_ts, fallback):
-      cp = to_int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return fallback
-      inst = proc_instance(cp, event_ts)
-      if inst == None:
-          return fallback
-      lin = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      lin = lineage()
       if not lin:
           return fallback
       names = []
       for x in lin:
-          names.append(x["actor_path"].split("/")[-1])
+          names.append(x["path"].split("/")[-1])
       return " -> ".join(names)
+
+  def tree_sessions():
+      # The triggering session's lineage plus everything those sessions spawned
+      # (a sibling loopback client lives there). Unknown session: every session.
+      out  = []
+      seen = {}
+      for x in lineage():
+          if x["id"] not in seen:
+              seen[x["id"]] = True
+              out.append(x)
+      for x in list(out):
+          for c in children(x["id"]):
+              if c["id"] not in seen:
+                  seen[c["id"]] = True
+                  out.append(c)
+      if len(out) == 0:
+          return sessions()
+      return out
 
   def run():
       # ── 1. relevance gate: pure string checks on meta, no graph work ─────────
@@ -265,7 +280,7 @@ script: |
       pub_by_pid   = {}
       pids         = []
 
-      for p in graph(type="Process"):
+      for p in tree_sessions():
           aid = p["id"]
           for e in edges(aid, dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
@@ -290,7 +305,8 @@ script: |
                   c = edge_count(e)
                   if c > poll_by_pid.get(aid, 0):
                       poll_by_pid[aid] = c
-              if (not is_loopback(uh)) and uh != thost and u.get("is_ztna_host", "1") == "0":
+              # is_ztna_host is set asynchronously by the enricher; missing = public.
+              if (not is_loopback(uh)) and uh != thost and u.get("is_ztna_host", "0") != "1":
                   if aid not in pub_by_pid:
                       pub_by_pid[aid] = e
 

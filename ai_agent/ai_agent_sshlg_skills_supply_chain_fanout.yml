@@ -13,9 +13,9 @@ description: |
   mechanism worth a signal is the blast radius: a single install writes executable
   and config artifacts into several independent agent trust boundaries at once.
 
-  Anchoring, in order, all inside ONE process session:
-    1. caller_pid -> proc_instance() -> proc_lineage() establishes the session.
-    2. REQUIRED anchor stage: an EXECUTE_PROCESS in that session whose command line
+  Anchoring, in order, all inside ONE session lineage:
+    1. The triggering session and its lineage() establish the scope.
+    2. REQUIRED anchor stage: a SPAWNED row in that scope whose command line
        or executable path references the sshlg / sshlg-skills package. Generic npm,
        node, yarn or pnpm activity is NOT an anchor and returns allow immediately —
        this is what keeps the rule from becoming "npm ran" noise.
@@ -26,10 +26,9 @@ description: |
        platform directories.
 
   All stages are ordered (ts >= anchor ts), windowed (15 minutes), and scoped to
-  session process instances resolved by (pid, start) — never attributed across
-  sessions and never resolved by walking path-keyed Process nodes. The triggering
-  event is taken from meta (race-free); only prior stages are read from the
-  instance-resolved event log.
+  the sessions of that lineage (plus the sessions they spawned in-window) — never
+  attributed across sessions. The triggering event is taken from meta
+  (race-free); only prior stages are read from the session-keyed event log.
 author: Tanya
 date: "2026-06-11"
 references:
@@ -57,6 +56,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -150,14 +153,28 @@ script: |
       return ""
 
   def ev_edge(e):
+      # A SPAWNED row is keyed by the child: from = spawner, to = child.
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  def spawn_row(sid):
+      # A session dict carries only the program path; its command line is on
+      # the SPAWNED row keyed by that session.
+      rows = events(kind="SPAWNED", session=sid, limit=1)
+      if rows:
+          return rows[0]
+      return None
 
   def is_relevant_event():
       ct = meta.get("context_type", "")
@@ -180,75 +197,75 @@ script: |
       if not is_relevant_event():
           return "allow"
 
-      cp  = int(meta.get("caller_pid", "0"))
       now = int(meta.get("event_ts", "0"))
-      if cp == 0 or now == 0:
+      if meta.get("session", "") == "" or now == 0:
           return "allow"
 
-      inst = proc_instance(cp, now)
+      inst = session()
       if inst == None:
-          return "allow"                      # degraded — re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"                      # degraded — re-fires when the session lands
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      since     = now - WINDOW_NS
-      ct        = meta.get("context_type", "")
-      root_path = lineage[len(lineage) - 1].get("actor_path", inst.get("actor_path", ""))
+      since   = now - WINDOW_NS
+      ct      = meta.get("context_type", "")
+      root_id = lineage_[len(lineage_) - 1]["id"]
 
-      # Session = this lineage only. Never any other session.
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
+      # Scope = this lineage only (plus what it spawned, below). Never any other session.
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
 
-      # ── Stage 1 (REQUIRED): the sshlg-skills invocation in THIS session ───────
+      # ── Stage 1 (REQUIRED): the sshlg-skills invocation in THIS scope ─────────
       # Trigger stage comes from meta (race-free); ancestors come from the lineage.
       anchor = None
       if ct == "execute_process" and pkg_ref(meta.get("content", "")):
           anchor = {
-              "ts":          str(now),
-              "kind":        "EXECUTE_PROCESS",
-              "actor_pid":   inst.get("actor_pid", ""),
-              "actor_start": inst.get("actor_start", "0"),
-              "actor_path":  inst.get("actor_path", ""),
-              "target_id":   "process://" + inst.get("actor_path", ""),
-              "cmdline":     meta.get("content", ""),
+              "ts":             str(now),
+              "kind":           "SPAWNED",
+              "session_id":     inst["id"],
+              "parent_session": inst.get("parent", ""),
+              "program":        inst.get("path", ""),
+              "target_id":      inst["id"],
+              "cmdline":        meta.get("content", ""),
           }
-      if anchor == None:
-          for x in lineage:
-              if pkg_ref(x.get("cmdline", "") + " " + x.get("actor_path", "")):
-                  anchor = x
-                  break
 
+      # An ancestor that invoked the package earlier is the better anchor (s0):
+      # keep the EARLIEST package invocation in the lineage.
       lineage_is_node = False
-      for x in lineage:
-          if runner_ref(x.get("cmdline", "") + " " + x.get("actor_path", "")):
+      for x in lineage_:
+          r = spawn_row(x["id"])
+          blob = (r.get("cmdline", "") if r != None else "") + " " + x.get("path", "")
+          if pkg_ref(blob) and r != None:
+              if anchor == None or int(r.get("ts", "0")) < int(anchor.get("ts", "0")):
+                  anchor = r
+          if runner_ref(blob):
               lineage_is_node = True
 
       execs = []
       if anchor == None and not lineage_is_node:
           return "allow"                      # not a node-toolchain session at all
 
-      # One bounded EXECUTE_PROCESS pass: expand to session descendants and, if the
+      # One bounded SPAWNED pass: expand to scope descendants and, if the
       # anchor was not on the direct lineage, look for it on a sibling branch.
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now,
-                           limit=4000)
+      execs = events(kind="SPAWNED", since_ns=since, until_ns=now, limit=4000)
       for i in range(4):
           added = 0
           for e in execs:
-              ap = e.get("actor_pid", "")
-              pp = e.get("parent_pid", "")
-              if pp in session and ap not in session and len(session) < MAX_SESSION_PIDS:
-                  session[ap] = e.get("actor_start", "0")
+              ap = e.get("session_id", "")
+              pp = e.get("parent_session", "")
+              if pp in scope and ap not in scope and len(scope) < MAX_SESSION_PIDS:
+                  scope[ap] = True
                   added = added + 1
           if added == 0:
               break
 
       if anchor == None:
           for e in execs:
-              if e.get("actor_pid", "") not in session:
+              if e.get("session_id", "") not in scope:
                   continue
-              if not pkg_ref(e.get("cmdline", "") + " " + e.get("actor_path", "")):
+              if not pkg_ref(e.get("cmdline", "") + " " + e.get("program", "")):
                   continue
               if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
                   anchor = e
@@ -262,15 +279,14 @@ script: |
       if now - s0 > WINDOW_NS:
           return "allow"                      # stale install, outside this window
 
-      pids = sorted(session.keys())
+      sids = sorted(scope.keys())
 
       # ── Stage 3 (REQUIRED): fanout into >= 2 agent platform directories ───────
       platforms = {}
       artifacts = {}
-      for pid in pids:
-          st   = int(session[pid])
-          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid), actor_start=st,
-                              since_ns=s0, until_ns=now, limit=500)
+      for sid in sids:
+          rows = events(kind="WRITE_FILE", session=sid,
+                        since_ns=s0, until_ns=now, limit=500)
           for w in rows:
               p = w.get("path", "")
               if p == "":
@@ -289,22 +305,22 @@ script: |
       if len(platforms) < MIN_PLATFORMS:
           return "allow"                      # single-platform install — not the signature
 
-      # ── Stage 2 (optional): payload fetch by this session after the anchor ────
+      # ── Stage 2 (optional): payload fetch by this scope after the anchor ──────
       fetch = None
       if ct == "http_request" and meta.get("host", "") != "":
           fetch = {
               "ts":         str(now),
               "kind":       "HTTP_REQUEST",
-              "actor_pid":  inst.get("actor_pid", ""),
-              "actor_path": inst.get("actor_path", ""),
+              "session_id": inst["id"],
+              "program":    inst.get("path", ""),
               "target_id":  "https://" + meta.get("host", ""),
               "host":       meta.get("host", ""),
               "path":       meta.get("path", ""),
           }
       if fetch == None:
-          for pid in pids:
-              rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                  since_ns=s0, until_ns=now, limit=100)
+          for sid in sids:
+              rows = events(kind="HTTP_REQUEST", session=sid,
+                            since_ns=s0, until_ns=now, limit=100)
               for r in rows:
                   if r.get("host", "") != "":
                       fetch = r
@@ -312,20 +328,20 @@ script: |
               if fetch != None:
                   break
 
-      # ── Kill chain, rooted at this session's owning instance ─────────────────
-      chain = new_chain("process://" + root_path)
+      # ── Kill chain, rooted at this lineage's root session ─────────────────────
+      chain = new_chain(root_id)
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lin = " -> ".join(names)
 
-      cmd = anchor.get("cmdline", anchor.get("actor_path", "?"))
+      cmd = anchor.get("cmdline", anchor.get("program", "?"))
       if len(cmd) > 180:
           cmd = cmd[:180]
       chain.append(step(ev_edge(anchor), stage_id="Supply Chain Entry",
                         stage_desc="sshlg-skills package invoked: " + cmd +
-                                   "  [session: " + lin + "]"))
+                                   "  [lineage: " + lin + "]"))
 
       if fetch != None:
           chain.append(step(ev_edge(fetch), stage_id="Skill Payload Fetch",
@@ -344,10 +360,10 @@ script: |
       reason = ("sshlg-skills install session wrote skill artifacts into " +
                 str(len(platforms)) + " AI agent platforms (" + ", ".join(plist) +
                 ") within " + str((now - s0) / 1000000000) + "s of the package " +
-                "invocation; owning session: " + lin)
+                "invocation; owning lineage: " + lin)
       if len(artifacts) > 0:
           reason = reason + "; behaviour-changing artifacts touched (config/hook/script)"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           reason = reason + "; attribution degraded (short lineage)"
       if fetch == None:
           reason = reason + "; no outbound fetch observed in window"

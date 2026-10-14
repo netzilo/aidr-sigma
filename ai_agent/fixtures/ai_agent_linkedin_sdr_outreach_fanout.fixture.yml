@@ -1,0 +1,30 @@
+subjects:
+  heylead:
+    session: pid/100:1
+    program: /usr/local/bin/heylead-mcp
+    agent: true
+    actors: [{id: u1, name: SDR Bot, email: sdr@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: heylead}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/search/dash/clusters?q=all&keywords=cto", method: GET, request_id: e1}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/identity/profiles/jane-doe", method: GET, request_id: e2}
+  - {kind: http_request, subject: heylead, url: "https://leads.example.com/api/list?campaign=q3", method: GET, request_id: t1}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1000/events", method: POST, request_id: o0, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1001/events", method: POST, request_id: o1, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1002/events", method: POST, request_id: o2, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1003/events", method: POST, request_id: o3, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1004/events", method: POST, request_id: o4, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1005/events", method: POST, request_id: o5, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1006/events", method: POST, request_id: o6, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1007/events", method: POST, request_id: o7, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1008/events", method: POST, request_id: o8, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1009/events", method: POST, request_id: o9, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1010/events", method: POST, request_id: o10, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1011/events", method: POST, request_id: o11, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+expect:
+  action: report
+  reason_contains: "12 write requests to messaging/invitation endpoints"
+  output_contains: ["also egressed to non-LinkedIn host: leads.example.com"]
+  chain_min: 3

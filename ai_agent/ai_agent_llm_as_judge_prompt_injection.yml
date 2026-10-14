@@ -19,6 +19,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
 detection:
   sel_trigger:
     event_type:

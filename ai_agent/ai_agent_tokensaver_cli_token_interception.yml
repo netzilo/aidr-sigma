@@ -37,6 +37,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
 
   # ── Scope: single outbound HTTP request only ───────────────────────────────

@@ -1,0 +1,24 @@
+rule: ai_agent_openclaw_cve_2026_44113_44112_sandbox_escape.yml
+subjects:
+  openclaw:
+    session: pid/100:1
+    program: /opt/openclaw/bin/openclaw
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: openclaw
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: openclaw}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'wc -l /openclaw/sandbox/mounts/work/data.csv'"}
+  - {kind: file_read, subject: sh, path: /openclaw/sandbox/mounts/work/data.csv}
+  - {kind: file_write, subject: sh, path: /openclaw/sandbox/mounts/work/out.txt}
+  - {kind: tool_call, subject: openclaw, server: openclaw, server_url: "http://127.0.0.1:7000", tool: read_file, call_id: c1, args: '{"path": "/openclaw/sandbox/mounts/work/notes.txt"}'}
+expect:
+  action: allow

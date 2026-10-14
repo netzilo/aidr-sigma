@@ -43,6 +43,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
 
   # ── Surface 1: the exploit request itself ────────────────────────────────────

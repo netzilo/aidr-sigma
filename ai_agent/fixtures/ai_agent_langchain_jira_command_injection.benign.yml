@@ -1,0 +1,22 @@
+rule: ai_agent_langchain_jira_command_injection.yml
+subjects:
+  python:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: spawn, subject: python, cmdline: "python3 langchain_jira_agent.py"}
+  - {kind: http_request, subject: python, url: "https://api.github.com/repos/acme/app/issues", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: spawn, subject: sh, cmdline: "sh -c \"curl https://pypi.org/simple/ -o /tmp/index.html\""}
+expect:
+  action: allow

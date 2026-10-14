@@ -1,0 +1,28 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 ingest.py --vault /Users/dev/vault"}
+  - {kind: file_read, subject: python, path: /Users/dev/vault/.obsidian/app.json}
+  - {kind: file_read, subject: python, path: /Users/dev/vault/notes/a.md}
+  - {kind: file_read, subject: python, path: /Users/dev/vault/notes/b.md}
+  - {kind: file_read, subject: python, path: /Users/dev/.ssh/id_rsa}
+  - {kind: file_read, subject: python, path: /Users/dev/.bash_history}
+  - {kind: tool_call, subject: cursor, server: filesystem, server_url: "stdio://filesystem", tool: read_file, call_id: c1, args: '{"path": "/Users/dev/vault/notes/index.md", "reader": "ObsidianReader"}'}
+expect:
+  action: report
+  reason_contains: "out-of-vault secret read /Users/dev/.ssh/id_rsa"
+  chain_min: 3

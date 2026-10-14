@@ -1,0 +1,32 @@
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c0, args: '{"path": "/p/0"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c1, args: '{"path": "/p/1"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c2, args: '{"path": "/p/2"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c3, args: '{"path": "/p/3"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c4, args: '{"path": "/p/4"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c5, args: '{"path": "/p/5"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c6, args: '{"path": "/p/6"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c7, args: '{"path": "/p/7"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c8, args: '{"path": "/p/8"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c9, args: '{"path": "/p/9"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c10, args: '{"path": "/p/10"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c11, args: '{"path": "/p/11"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c12, args: '{"path": "/p/12"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c13, args: '{"path": "/p/13"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c14, args: '{"path": "/p/14"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c15, args: '{"path": "/p/15"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c16, args: '{"path": "/p/16"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c17, args: '{"path": "/p/17"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c18, args: '{"path": "/p/18"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c19, args: '{"path": "/p/19"}'}
+expect:
+  action: report
+  output_contains: ["Session velocity anomaly: 20 tool calls (threshold=20)"]

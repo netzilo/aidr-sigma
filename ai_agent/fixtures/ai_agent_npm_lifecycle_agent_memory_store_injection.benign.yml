@@ -1,0 +1,48 @@
+rule: ai_agent_npm_lifecycle_agent_memory_store_injection.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  npm:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/local/bin/node
+    name: npm
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  postinstall:
+    session: pid/103:1
+    parent: npm
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  eslint:
+    session: pid/104:1
+    parent: npm
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh -c 'npm install eslint'"}
+  - {kind: spawn, subject: npm, cmdline: "npm install eslint"}
+  - {kind: spawn, subject: postinstall, cmdline: "node /Users/dev/proj/node_modules/esbuild/install.js"}
+  - {kind: file_write, subject: postinstall, path: /Users/dev/proj/node_modules/esbuild/bin/esbuild}
+  - {kind: file_write, subject: postinstall, path: /Users/dev/proj/node_modules/.cache/esbuild.lock}
+  - {kind: spawn, subject: eslint, cmdline: "node /Users/dev/proj/node_modules/.bin/eslint --init"}
+expect:
+  action: allow

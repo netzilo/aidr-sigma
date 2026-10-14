@@ -1,0 +1,25 @@
+rule: ai_agent_persistence_periodic.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    name: claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: claude
+    program: /bin/bash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: shell, cmdline: "bash -c 'npm test'"}
+  - {kind: file_write, subject: claude, path: /Users/dev/proj/src/main.ts}
+  - {kind: file_write, subject: shell, path: /Users/dev/proj/coverage/lcov.info}
+  - {kind: file_read, subject: shell, path: /Users/dev/.bashrc}
+expect:
+  action: allow

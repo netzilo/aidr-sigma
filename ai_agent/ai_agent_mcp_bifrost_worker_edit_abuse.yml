@@ -20,9 +20,9 @@ description: |
   independent evidence class (another surface class, secret material, or a wide write
   blast radius) inside a 15 minute window. A single expected manifest edit never fires.
 
-  File events have no live rule producer, so the file layer is reached by traversing
-  WRITE_FILE edges in the behaviour graph on the next execute_process event of the same
-  session; a reported finding is fingerprinted in the rule store so it is not re-reported
+  File events have no live rule producer, so the file layer is reached by reading each
+  session's file writes with fs_activity() on the next execute_process event of the same
+  run; a reported finding is fingerprinted in the rule store so it is not re-reported
   on every subsequent spawn.
 author: Tanya
 date: "2026-03-14"
@@ -58,6 +58,9 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -195,11 +198,17 @@ script: |
 
   def ev_edge(frm, to, kind, ts):
       return {
-          "from": frm, "to": to, "kind": kind,
+          "from": frm, "to": to, "kind": kind, "dir": "out",
           "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
       }
 
+  def write_edge(sid, ts):
+      # WRITE_FILE steps resolve to the exact file through activity=.
+      return ev_edge(sid, "filesystem://" + sid, "WRITE_FILE", ts)
+
   def pick_edge(wedges, ts):
+      if not wedges:
+          return None
       for e in wedges:
           f = int(e.get("first_ts", "0"))
           l = int(e.get("last_ts", "0"))
@@ -207,11 +216,11 @@ script: |
               return e
       return wedges[0]
 
-  # ── Cheap graph probe: does mcp-bifrost exist in this peer's session at all? ──
+  # ── Cheap graph probe: does mcp-bifrost exist on this peer at all? ────────────
   def bifrost_present(cmd):
       if re.find(BIFROST_RE, cmd) != None:
           return True
-      for p in graph(type="Process"):
+      for p in programs():
           s = p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")
           if re.find(BIFROST_RE, s) != None:
               return True
@@ -235,31 +244,33 @@ script: |
       if not bifrost_present(cmd):
           return "allow"
 
-      # 3. Anchor on the exact triggering instance and resolve its session.
-      cp      = int(meta.get("caller_pid", "0"))
-      inst    = None
-      lineage = []
-      if cp != 0:
-          inst = proc_instance(cp, now_ts)
+      # 3. Anchor on the triggering session and resolve its run.
+      cp       = meta.get("session", "")
+      inst     = None
+      lineage_ = []
+      if cp != "":
+          inst = session(cp)
           if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+              lineage_ = lineage(inst["id"])
 
-      session_pids  = {}
-      session_paths = {}
-      for x in lineage:
-          session_pids[x.get("actor_pid", "")]           = True
-          session_paths[x.get("actor_path", "").lower()] = True
+      lo    = now_ts - WINDOW_NS
+      hi    = now_ts + GRACE_NS
+      scope = {}            # session id -> program path
+      cmds  = {}            # session id -> spawn command line
+      for x in lineage_:
+          scope[x["id"]] = x.get("path", "")
 
-      # Sibling / descendant expansion (two hops) from the exec event log.
-      if len(session_pids) > 0:
+      # Descendant expansion (two hops) from the SPAWNED rows of the window.
+      if len(scope) > 0:
+          rows = events(kind="SPAWNED", since_ns=lo, limit=4000)
+          for e in rows:
+              cmds[e.get("session_id", "")] = e.get("cmdline", "")
           for _round in range(2):
-              for e in query_events(kind="EXECUTE_PROCESS",
-                                    since_ns=now_ts - WINDOW_NS, limit=4000):
-                  if e.get("parent_pid", "") in session_pids:
-                      session_pids[e.get("actor_pid", "")]           = True
-                      session_paths[e.get("actor_path", "").lower()] = True
+              for e in rows:
+                  if e.get("parent_session", "") in scope:
+                      scope[e.get("session_id", "")] = e.get("program", "")
 
-      # 4. Provenance: is mcp-bifrost inside THIS session (strong) or only
+      # 4. Provenance: is mcp-bifrost inside THIS run (strong) or only
       #    present on the peer (weak — raises the evidence bar).
       prov   = ""
       strong = False
@@ -267,52 +278,53 @@ script: |
           prov   = "delegation cmdline"
           strong = True
       if not strong:
-          for x in lineage:
-              s = x.get("actor_path", "") + " " + x.get("cmdline", "")
+          for x in lineage_:
+              c = cmds.get(x["id"], None)
+              if c == None:
+                  r = events(kind="SPAWNED", session=x["id"], limit=1)
+                  c = r[0].get("cmdline", "") if r else ""
+              s = x.get("path", "") + " " + c
               if re.find(BIFROST_RE, s) != None:
-                  prov   = "ancestor " + x.get("actor_path", "?")
+                  prov   = "ancestor " + x.get("path", "?")
                   strong = True
                   break
       if not strong:
-          for p in graph(type="Process"):
-              if p.get("pid", "") in session_pids:
-                  s = p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")
-                  if re.find(BIFROST_RE, s) != None:
-                      prov   = "session process " + p.get("path", "?")
-                      strong = True
-                      break
+          for sid in scope:
+              s = scope[sid] + " " + cmds.get(sid, "")
+              if re.find(BIFROST_RE, s) != None:
+                  prov   = "session process " + scope[sid]
+                  strong = True
+                  break
       if prov == "":
           prov = "mcp-bifrost present on peer (attribution degraded)"
 
-      # Degraded lineage: restrict writers to bifrost's own executables only.
-      if len(session_paths) == 0:
-          for p in graph(type="Process"):
-              s = (p.get("path", "") + " " + p.get("cmdline", "") + " " + p.get("name", "")).lower()
+      # Degraded lineage: restrict writers to bifrost's own sessions only.
+      if len(scope) == 0:
+          for p in sessions(since_ns=lo):
+              s = (p.get("path", "") + " " + p.get("name", "")).lower()
               if re.find(BIFROST_RE, s) != None:
-                  session_paths[p.get("path", "").lower()] = True
+                  scope[p["id"]] = p.get("path", "")
           strong = False
-      if len(session_paths) == 0:
+      if len(scope) == 0:
           return "allow"
 
-      # 5. Evidence: WRITE_FILE edges of session-owned writers, in-window.
-      lo      = now_ts - WINDOW_NS
-      hi      = now_ts + GRACE_NS
+      # 5. Evidence: file writes of run-owned sessions, in-window. File events
+      #    have no live producer; fs_activity() reads them per session.
       classes = {}
       volume  = 0
 
-      for fs in graph(type="FileSystem"):
-          wpath = fs.get("proc_path", "").lower()
-          if wpath == "":
-              continue
-          in_session = wpath in session_paths
+      for sid in scope:
+          wpath = scope[sid].lower()
+          in_session = cp != "" and inst != None
           if not in_session and re.find(BIFROST_RE, wpath) != None:
               in_session = True
           if not in_session:
               continue
-          wedges = edges(fs["id"], dir="in", kind="WRITE_FILE")
-          if not wedges:
+          acts = fs_activity(sid, "WRITE")
+          if not acts:
               continue
-          for a in fs_activity(fs["id"], "WRITE"):
+          wedges = edges(sid, dir="out", kind="WRITE_FILE")
+          for a in acts:
               ts = int(a.get("ts", "0"))
               if ts < lo or ts > hi:
                   continue
@@ -327,12 +339,16 @@ script: |
                   continue
               prev = classes.get(c, None)
               if prev == None or ts < int(prev["ts"]):
+                  edge = pick_edge(wedges, ts)
+                  if edge == None:
+                      edge = write_edge(sid, ts)
                   classes[c] = {
                       "path":   p,
                       "ts":     ts,
                       "act":    a,
-                      "edge":   pick_edge(wedges, ts),
-                      "writer": fs.get("proc_name", fs.get("proc_path", "?")),
+                      "sid":    sid,
+                      "edge":   edge,
+                      "writer": wpath.split("/")[-1] if wpath != "" else "?",
                   }
 
       # 6. Verdict: a required surface class plus one more independent class.
@@ -371,24 +387,24 @@ script: |
       if store_usage()["free"] > 8192:
           store_set("reported", fresh)
 
-      # 8. Kill chain.
+      # 8. Kill chain, rooted at the agent session of the lineage (else its root).
       root = ""
-      for p in graph(type="Process"):
-          if p.get("agent", "0") == "1" and p.get("pid", "") in session_pids:
-              root = p["id"]
+      for x in lineage_:
+          if x.get("agent", "0") == "1":
+              root = x["id"]
               break
-      if root == "" and len(lineage) > 0:
-          root = "process://" + lineage[len(lineage) - 1].get("actor_path", "")
+      if root == "" and len(lineage_) > 0:
+          root = lineage_[len(lineage_) - 1]["id"]
       if root == "":
-          root = "process://" + meta.get("agent_name", "mcp-bifrost")
+          root = prim["sid"]
 
-      chain    = new_chain(root)
-      spawn_to = "process://"
+      chain = new_chain(root)
       if inst != None:
-          spawn_to = spawn_to + inst.get("actor_path", "?")
+          worker = ev_edge(inst.get("parent", ""), inst["id"], "SPAWNED", now_ts)
+          worker["callid"] = meta.get("callid", "")
       else:
-          spawn_to = spawn_to + meta.get("agent_name", "?")
-      chain.append(step(ev_edge(root, spawn_to, "EXECUTE_PROCESS", now_ts),
+          worker = ev_edge(root, prim["sid"], "SPAWNED", now_ts)
+      chain.append(step(worker,
                         stage_id="Delegated Edit Worker",
                         stage_desc="mcp-bifrost edit/apply worker spawned (" + prov +
                                    "): " + cmd[:200]))

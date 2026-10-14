@@ -12,12 +12,11 @@ description: |
         /private/tmp, ~/.cache) ahead of $PATH inside a shell startup file
         (.bashrc, .bash_profile, .zshrc, .profile, /etc/profile.d/*).
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the
-  exact process instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), scopes corroborating WRITE_FILE rows to that one session via
-  query_events(), and emits a kill chain built from the triggering tool call plus
-  the instance-scoped write rows. No cross-session attribution is performed and
-  no graph-wide agent scan is used.
+  Attribution is session-scoped: the rule anchors on the triggering session,
+  walks its lineage to the root, scopes corroborating WRITE_FILE rows to that
+  lineage and the sessions it spawned, and emits a kill chain built from the
+  triggering tool call plus those write rows. No cross-session attribution is
+  performed and no graph-wide agent scan is used.
 author: Selhan
 date: "2026-06-12"
 references:
@@ -48,6 +47,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_events:
     event_type:
@@ -68,7 +71,7 @@ on_error:   allow
 script: |
   # ── Constants ───────────────────────────────────────────────────────────────
   WINDOW_NS = 300000000000          # 5 min — session clustering window
-  MAX_SESSION_PIDS = 64             # bound the per-session query fan-out
+  MAX_SESSION_IDS = 64              # bound the per-session query fan-out
 
   WRITE_TOOLS = [
       r"\bwrite\b", r"\bwrite_file\b", r"\bwritefile\b", r"\bwrite_to_file\b",
@@ -153,13 +156,18 @@ script: |
       return ""
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "WRITE_FILE"),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def short(p):
@@ -218,11 +226,10 @@ script: |
           tool_label = "file-edit tool"
 
       ets = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
+      sid = meta.get("session", "")
 
-      trig_from = "process://" + meta.get("agent_name", "unknown")
       trig = {
-          "from":     trig_from,
+          "from":     sid,
           "to":       "tool://" + meta.get("server_name", "local") + "/" + tool_label,
           "kind":     "TOOL_CALL",
           "ts":       str(ets),
@@ -230,53 +237,40 @@ script: |
           "last_ts":  str(ets),
       }
 
-      # 4. ANCHOR on the exact triggering instance.
-      inst = None
-      if cp != 0:
-          inst = proc_instance(cp, ets)
+      # 4. ANCHOR on the triggering session.
+      inst = session()
       if inst == None:
-          # Degraded: we can see the directive but not the instance yet.
-          chain = new_chain(trig_from)
-          chain.append(step(trig, stage_id="Persistence Directive",
-                            stage_desc=label + " via " + tool_label + " — target: " + hit_path))
-          print("persistence directive, attribution degraded (caller_pid=" + str(cp) + ")")
+          # Degraded: we can see the directive but not the session yet.
+          print("persistence directive, attribution degraded (session=" + sid + ")")
           return {
               "action": "report",
               "reason": "Persistence backdoor directive (" + label + ", target: " + hit_path +
-                        ") — attribution degraded, process instance not yet in the event log",
-              "chain":  chain,
+                        ") — attribution degraded, session not yet in the event log",
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if lineage == None or len(lineage) == 0:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
+          lineage_ = [inst]
 
-      trig["from"] = "process://" + lineage[0]["actor_path"]
-      root_path = lineage[len(lineage) - 1]["actor_path"]
-      names = " -> ".join([short(x["actor_path"]) for x in lineage])
+      root  = lineage_[len(lineage_) - 1]
+      names = " -> ".join([short(x["path"]) for x in lineage_])
 
-      # 5. SESSION SCOPE — lineage instances plus their children. Never wider.
+      # 5. SESSION SCOPE — the lineage plus what it spawned. Never wider.
       since = 0
       if ets > WINDOW_NS:
           since = ets - WINDOW_NS
 
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x["actor_start"]
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-          if e.get("parent_pid", "") in session:
-              if len(session) < MAX_SESSION_PIDS:
-                  session[e["actor_pid"]] = e.get("actor_start", "0")
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+          if e.get("parent_session", "") in scope and len(scope) < MAX_SESSION_IDS:
+              scope[e["session_id"]] = True
 
-      # 6. CORROBORATION — WRITE_FILE rows scoped per-instance and windowed.
+      # 6. CORROBORATION — WRITE_FILE rows scoped per session and windowed.
       writes = []
-      scanned = 0
-      for pid in session:
-          if scanned >= MAX_SESSION_PIDS:
-              break
-          scanned = scanned + 1
-          for w in query_events(kind="WRITE_FILE", actor_pid=int(pid),
-                                since_ns=since, limit=200):
+      for sid2 in scope:
+          for w in events(kind="WRITE_FILE", session=sid2, since_ns=since, limit=200):
               wp = w.get("path", "")
               if wp == "":
                   continue
@@ -288,15 +282,14 @@ script: |
               break
 
       # 7. VERDICT — always report, always with a kill chain.
-      chain = new_chain("process://" + root_path)
+      chain = new_chain(root["id"])
       chain.append(step(trig, stage_id="Persistence Directive",
                         stage_desc=label + " via " + tool_label + " — target: " + hit_path))
 
       for w in writes[:4]:
           chain.append(step(ev_edge(w), stage_id="Persistence Write",
-                            stage_desc="session instance " + short(w.get("actor_path", "?")) +
-                                       " (pid " + w.get("actor_pid", "?") + ") wrote " +
-                                       w.get("path", "?")))
+                            stage_desc="session " + short(w.get("program", "?")) +
+                                       " wrote " + w.get("path", "?")))
 
       corr = " (no filesystem write observed yet in this session)"
       if len(writes) > 0:

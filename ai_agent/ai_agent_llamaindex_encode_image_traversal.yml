@@ -8,13 +8,12 @@ description: |
   image_path parameter lets an attacker make the agent process read arbitrary
   files on the host.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"] of the event
-  that carries the traversal payload, resolves the exact process instance with
-  proc_instance(), walks proc_lineage() to the owning session, then queries the
-  instance-scoped event log (query_events kind=READ_FILE) for a corroborating
-  arbitrary-file read performed by that same session inside a 5-minute window.
-  Attribution never crosses sessions: only the caller's lineage and processes
-  spawned by that lineage are queried.
+  The rule is session-scoped: it anchors on the session that carried the
+  traversal payload, walks lineage() to the owning session root, then queries
+  the event log (kind=READ_FILE) for a corroborating arbitrary-file read
+  performed by that same session tree inside a 5-minute window. Attribution
+  never crosses sessions: only the caller's lineage and sessions spawned by
+  that lineage are queried.
 
   Anchor stage (required): an image-bearing parameter whose value contains a
   traversal sequence (../ , ..\ , %2e%2e%2f) or an absolute path into a
@@ -55,6 +54,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - llm
+  - tool
 detection:
   sel_event:
     event_type:
@@ -170,26 +174,26 @@ script: |
   def short(path):
       return path.split("/")[-1]
 
-  def trigger_edge(actor_path, ts):
+  def trigger_edge(sess_id, ts):
       tn = meta.get("tool_name", "")
       if tn != "":
           sv = meta.get("server_name", "")
           if sv == "":
               sv = "local"
-          return {"from": "process://" + actor_path, "to": "tool://" + sv + "/" + tn,
-                  "kind": "TOOL_CALL", "ts": str(ts),
+          return {"from": sess_id, "to": "tool://" + sv + "/" + tn,
+                  "kind": "TOOL_CALL", "dir": "out", "ts": str(ts),
                   "first_ts": str(ts), "last_ts": str(ts)}
-      return {"from": "process://" + actor_path,
+      return {"from": sess_id,
               "to": "llm://" + meta.get("provider", "?") + "/" + meta.get("model", "?"),
-              "kind": "LLM_REQUEST", "ts": str(ts),
+              "kind": "LLM_REQUEST", "dir": "out", "ts": str(ts),
               "first_ts": str(ts), "last_ts": str(ts)}
 
   def read_edge(ev):
       tgt = ev.get("path", "")
       if tgt == "":
           tgt = ev.get("target_id", "")
-      return {"from": "process://" + ev.get("actor_path", ""), "to": tgt,
-              "kind": "READ_FILE", "ts": ev.get("ts", "0"),
+      return {"from": ev.get("session_id", ""), "to": tgt,
+              "kind": "READ_FILE", "dir": "out", "ts": ev.get("ts", "0"),
               "first_ts": ev.get("ts", "0"), "last_ts": ev.get("ts", "0")}
 
   def run():
@@ -230,7 +234,7 @@ script: |
       if not sensitive_payload and depth < 2:
           return "allow"
 
-      # ── 3. instance-resolved attribution (caller anchored) ─────────────
+      # ── 3. session-scoped attribution (triggering session anchored) ────
       ev_ts = to_int(meta.get("event_ts", "0"))
       since = 0
       until = 0
@@ -239,45 +243,42 @@ script: |
           if since < 0:
               since = 0
           until = ev_ts + SLACK_NS
-      cp = to_int(meta.get("caller_pid", "0"))
-      inst = None
-      if cp != 0:
-          inst = proc_instance(cp, ev_ts)
+      cp = meta.get("session", "")
+      inst = session()
 
       if inst == None:
           # degraded attribution — only surface the unambiguous payload
           if not sensitive_payload or ct not in PARAM_CTX:
               return "allow"
-          ap = meta.get("agent_name", "")
-          if ap == "":
-              ap = "unknown"
-          ch = new_chain("process://" + ap)
-          ch.append(step(trigger_edge(ap, ev_ts), stage_id="Traversal Payload",
-                         stage_desc="image parameter carries traversal to sensitive path: " + example))
           msg = ("llama_index encode_image path traversal ATTEMPT — payload " +
-                 example + " (attribution degraded: no process instance for pid " + str(cp) + ")")
+                 example + " (attribution degraded: session " + cp + " unknown)")
           print(msg)
+          if cp == "":
+              return {"action": "report", "reason": msg}
+          ch = new_chain(cp)
+          ch.append(step(trigger_edge(cp, ev_ts), stage_id="Traversal Payload",
+                         stage_desc="image parameter carries traversal to sensitive path: " + example))
           return {"action": "report", "reason": msg, "chain": ch}
 
-      lineage = proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
-      if lineage == None or len(lineage) == 0:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if lineage_ == None or len(lineage_) == 0:
+          lineage_ = [inst]
 
-      # ── 4. session scope: caller lineage + children of that lineage ────
+      # ── 4. session scope: caller lineage + sessions spawned by it ──────
       sess = {}
       order = []
-      sess[str(inst["actor_pid"])] = str(inst["actor_start"])
-      order.append(str(inst["actor_pid"]))
-      for x in lineage:
-          k = str(x.get("actor_pid", ""))
+      sess[inst["id"]] = True
+      order.append(inst["id"])
+      for x in lineage_:
+          k = x.get("id", "")
           if k != "" and k not in sess:
-              sess[k] = str(x.get("actor_start", "0"))
+              sess[k] = True
               order.append(k)
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=until, limit=2000):
-          pp = e.get("parent_pid", "")
-          k = str(e.get("actor_pid", ""))
+      for e in events(kind="SPAWNED", since_ns=since, until_ns=until, limit=2000):
+          pp = e.get("parent_session", "")
+          k = e.get("session_id", "")
           if pp in sess and k != "" and k not in sess:
-              sess[k] = str(e.get("actor_start", "0"))
+              sess[k] = True
               order.append(k)
 
       # ── 5. corroboration: READ_FILE by a session instance, scoped ──────
@@ -289,9 +290,8 @@ script: |
           if n >= MAX_PIDS:
               break
           n = n + 1
-          rows = query_events(kind="READ_FILE", actor_pid=to_int(k),
-                              actor_start=to_int(sess[k]), since_ns=since,
-                              until_ns=until, limit=400)
+          rows = events(kind="READ_FILE", session=k, since_ns=since,
+                        until_ns=until, limit=400)
           for r in rows:
               p = r.get("path", "")
               if p == "":
@@ -317,20 +317,20 @@ script: |
               return "allow"          # prose mention, no read — stay silent
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "?")))
+      for x in lineage_:
+          names.append(short(x.get("path", "?")))
       lin = " -> ".join(names)
 
-      root = lineage[-1].get("actor_path", inst.get("actor_path", ""))
-      ch = new_chain("process://" + root)
-      ch.append(step(trigger_edge(inst.get("actor_path", ""), ev_ts),
+      root = lineage_[-1]["id"]
+      ch = new_chain(root)
+      ch.append(step(trigger_edge(inst["id"], ev_ts),
                      stage_id="Traversal Payload",
                      stage_desc="image parameter reaching encode_image carries traversal/absolute path: " + example))
       verdict = "ATTEMPT"
       if hit != None:
           verdict = "CONFIRMED"
           ch.append(step(read_edge(hit), stage_id="Arbitrary File Read",
-                         stage_desc=short(hit.get("actor_path", "?")) + " read " +
+                         stage_desc=short(hit.get("program", "?")) + " read " +
                                     hit.get("path", "?") + " (" + hit_why +
                                     ") within " + str(WINDOW_NS // 1000000000) +
                                     "s of the payload, same session"))

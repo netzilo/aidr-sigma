@@ -1,0 +1,25 @@
+rule: ai_agent_recursive_agent_loop_budget_exhaustion.yml
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c0, args: '{"path": "/Users/dev/proj/file0.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c1, args: '{"path": "/Users/dev/proj/file1.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c2, args: '{"path": "/Users/dev/proj/file2.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c3, args: '{"path": "/Users/dev/proj/file3.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c4, args: '{"path": "/Users/dev/proj/file4.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c5, args: '{"path": "/Users/dev/proj/file5.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c6, args: '{"path": "/Users/dev/proj/file6.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c7, args: '{"path": "/Users/dev/proj/file7.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c8, args: '{"path": "/Users/dev/proj/file8.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c9, args: '{"path": "/Users/dev/proj/file9.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c10, args: '{"path": "/Users/dev/proj/file10.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c11, args: '{"path": "/Users/dev/proj/file11.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c12, args: '{"path": "/Users/dev/proj/file12.md"}'}
+expect:
+  action: allow

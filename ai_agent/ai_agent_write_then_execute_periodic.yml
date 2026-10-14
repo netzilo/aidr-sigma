@@ -20,6 +20,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec_from_tmp:
     event_type: execute_process
@@ -31,11 +34,27 @@ detection:
 action: execute
 on_error: allow
 script: |
-  TMP_DIRS = ["/tmp/", "/var/tmp/", "/dev/shm/"]
+  TMP_DIRS    = ["/tmp/", "/var/tmp/", "/dev/shm/"]
   SCRIPT_EXTS = [".sh", ".py", ".js", ".rb", ".pl", ".php"]
+  MAX_SCOPE   = 32
+
+  def tmp_script(p):
+      lp = p.lower()
+      in_tmp = False
+      for d in TMP_DIRS:
+          if d in lp:
+              in_tmp = True
+      if not in_tmp:
+          return False
+      for ext in SCRIPT_EXTS:
+          if lp.endswith(ext):
+              return True
+      return False
 
   def run():
-      cmd = meta.get("command", "")
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      cmd = meta.get("content", "")
       # Confirm the executed command references a temp path with script extension
       found_tmp = False
       for d in TMP_DIRS:
@@ -53,20 +72,53 @@ script: |
       if not found_ext:
           return "allow"
 
-      # Verify agent previously wrote a script to a temp dir (write-then-execute pattern)
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
+      # The spawned child is the triggering session; its lineage is the agent
+      # chain. A write made through a helper shell the agent spawned earlier is
+      # attributed to that child session, so siblings are in scope too.
+      inst = session()
+      if inst == None:
+          return "allow"
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      scope = []
+      for x in lineage_:
+          scope.append(x)
+      for x in lineage_:
+          for c in children(x["id"]):
+              if len(scope) >= MAX_SCOPE:
+                  break
+              scope.append(c)
+
+      # Verify a session in scope previously wrote a script to a temp dir
+      # (write-then-execute pattern).
+      for s in scope:
+          for w in fs_activity(session=s["id"], op="WRITE"):
+              if not tmp_script(w["path"]):
                   continue
-              src = fs["id"] + "$WRITE"
-              for d in TMP_DIRS:
-                  if search_in(src, d):
-                      print("Write-then-execute: agent wrote script to " + d +
-                            " then spawned: " + cmd)
-                      return "block"
+              root  = lineage_[len(lineage_) - 1]
+              ets   = meta.get("event_ts", "0")
+              chain = new_chain(root["id"])
+              chain.append(step({"from": s["id"], "to": "filesystem://" + s["id"],
+                                 "kind": "WRITE_FILE", "ts": w["ts"],
+                                 "first_ts": w["ts"], "last_ts": w["ts"]},
+                                stage_id="Script Staged",
+                                stage_desc="wrote " + w["path"] + " to a temp directory",
+                                activity=w))
+              spawner = inst.get("parent", "")
+              if spawner == "":
+                  spawner = root["id"]
+              chain.append(step({"from": spawner, "to": inst["id"], "kind": "SPAWNED",
+                                 "ts": ets, "first_ts": ets, "last_ts": ets, "cmdline": cmd},
+                                stage_id="Script Executed",
+                                stage_desc="spawned from temp directory: " + cmd))
+              print("Write-then-execute: agent wrote script " + w["path"] +
+                    " then spawned: " + cmd)
+              return {
+                  "action": "block",
+                  "reason": "Script written to " + w["path"] + " by the agent session, then executed: " + cmd,
+                  "chain":  chain,
+              }
       return "allow"
 
   result = run()

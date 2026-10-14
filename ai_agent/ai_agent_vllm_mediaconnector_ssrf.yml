@@ -8,16 +8,17 @@ description: |
   media URL coerces the server into issuing outbound HTTP requests to internal,
   loopback, link-local or cluster-internal addresses.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"] of the triggering
-  http_request, resolves the exact process instance with proc_instance(), walks the
-  spawn chain with proc_lineage(), and scopes every corroborating query_events()
-  lookup to that one session (lineage plus its children). It never attributes across
-  sessions and never walks path-keyed graph nodes.
+  The rule is session-scoped: it anchors on the session of the triggering
+  http_request, walks the spawn chain with lineage(), and scopes every
+  corroborating events() lookup to that one session tree (lineage plus the
+  sessions it spawned). It never attributes across sessions and never walks
+  path-keyed graph nodes.
 
   Required anchor: the acting session is an inference-server context (vllm /
   api_server / mediaconnector in an actor path or cmdline) AND the triggering request
   targets an internal address taken directly from meta (never re-queried, to avoid the
-  async-ingest race).
+  async-ingest race). The inference-server context is read from the session's program
+  path/name or from the program node's recorded command lines.
 
   Corroboration (score >= 2 required): internal fan-out across >= 3 distinct internal
   endpoints in the window (+2), a sensitive management/metadata target such as the
@@ -53,6 +54,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -144,20 +148,19 @@ script: |
       return False
 
   def ev_edge(e):
-      to = e.get("target_id", "")
-      if to == "":
-          hh = e.get("host", "")
-          if hh != "":
-              to = "https://" + hh + e.get("path", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       to,
+          "from":     frm,
+          "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def run():
       # 1. RELEVANCE GATE — pure string checks on meta only.
       if meta.get("context_type", "") != "http_request":
@@ -168,65 +171,56 @@ script: |
       if not is_internal(host):
           return "allow"
 
-      # 2. ANCHOR on the exact triggering instance.
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
+      # 2. ANCHOR on the triggering session.
       trigger_ts = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, trigger_ts)
+      inst = session()
       if inst == None:
           return "allow"          # degraded attribution — never guess
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
       # 3. REQUIRED ANCHOR — the acting session is an inference-server context.
       server_row = None
-      for x in lineage:
-          if inference_ctx(x.get("actor_path", "")):
+      for x in lineage_:
+          if inference_ctx(x.get("path", "")) or inference_ctx(x.get("name", "")):
               server_row = x
               break
-          if inference_ctx(x.get("cmdline", "")):
-              server_row = x
-              break
-          if inference_ctx(x.get("parent_path", "")):
+          prog = node(x.get("program", ""))
+          if prog != None and inference_ctx(prog.get("cmdlines", "")):
               server_row = x
               break
       if server_row == None:
           if not inference_ctx(meta.get("agent_name", "")):
               return "allow"
-          server_row = lineage[0]
+          server_row = lineage_[0]
 
-      # 4. SESSION SCOPE — lineage plus children spawned by lineage members.
+      # 4. SESSION SCOPE — lineage plus sessions spawned by lineage members.
       since = trigger_ts - WINDOW_NS
       if since < 0:
           since = 0
-      pids   = []
-      starts = {}
-      for x in lineage:
-          p = x.get("actor_pid", "")
-          if p != "" and p not in starts:
-              starts[p] = x.get("actor_start", "")
-              pids.append(p)
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-          pp = e.get("parent_pid", "")
-          ap = e.get("actor_pid", "")
-          if pp in starts and ap not in starts and len(pids) < MAX_PIDS:
-              starts[ap] = e.get("actor_start", "")
-              pids.append(ap)
+      sids  = []
+      scope = {}
+      for x in lineage_:
+          p = x.get("id", "")
+          if p != "" and p not in scope:
+              scope[p] = True
+              sids.append(p)
+      for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+          pp = e.get("parent_session", "")
+          ap = e.get("session_id", "")
+          if pp in scope and ap not in scope and len(sids) < MAX_PIDS:
+              scope[ap] = True
+              sids.append(ap)
 
-      # 5. PRIOR STAGES — scoped by instance, windowed, ordered before the trigger.
+      # 5. PRIOR STAGES — scoped by session, windowed, ordered before the trigger.
       targets   = {}
       order     = []
       precursor = None
-      for p in pids:
-          st = starts.get(p, "")
-          rows = query_events(kind="HTTP_REQUEST",
-                              actor_pid=int(p),
-                              actor_start=int(st) if st != "" else 0,
-                              since_ns=since,
-                              until_ns=trigger_ts,
-                              limit=MAX_ROWS)
+      for p in sids:
+          rows = events(kind="HTTP_REQUEST", session=p,
+                        since_ns=since, until_ns=trigger_ts,
+                        limit=MAX_ROWS)
           for r in rows:
               h = r.get("host", "")
               if h == "":
@@ -263,10 +257,19 @@ script: |
           return "allow"
 
       # 7. KILL CHAIN — rooted at the session owner, evidence from event rows.
-      names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      names = " -> ".join([x.get("path", "").split("/")[-1] for x in lineage_])
+      chain = new_chain(lineage_[-1]["id"])
 
-      chain.append(step(ev_edge(server_row),
+      server_edge = {
+          "from":     server_row.get("parent", server_row["id"]),
+          "to":       server_row["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       server_row.get("first_seen", "0"),
+          "first_ts": server_row.get("first_seen", "0"),
+          "last_ts":  server_row.get("first_seen", "0"),
+      }
+      chain.append(step(server_edge,
                         stage_id="Inference Server Context",
                         stage_desc="vLLM/MediaConnector serving process in session: " + names))
 
@@ -288,9 +291,10 @@ script: |
           shown = shown + 1
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       url,
           "kind":     "HTTP_REQUEST",
+          "dir":      "out",
           "ts":       str(trigger_ts),
           "first_ts": str(trigger_ts),
           "last_ts":  str(trigger_ts),
@@ -302,7 +306,7 @@ script: |
       chain.append(step(trig, stage_id="SSRF Internal Request", stage_desc=desc))
 
       reason = ("vLLM MediaConnector SSRF — " + str(total) +
-                " internal endpoint(s) in " + str(WINDOW_NS / 1000000000) +
+                " internal endpoint(s) in " + str(WINDOW_NS // 1000000000) +
                 "s by " + names + "; trigger " + url +
                 "; score=" + str(score))
       print(reason)

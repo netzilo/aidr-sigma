@@ -38,6 +38,12 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - http
+  - connect
+  - skill
 detection:
   # Broad pre-filter — the script decides. Kept to the contexts that can either
   # establish the taint (skill_acquired) or be the action half.
@@ -91,15 +97,22 @@ script: |
               return marker
       return ""
 
+  def candidates():
+      # The acting tree: the triggering session and its ancestors (the agent
+      # that loaded the skill is one of them). Without a session, every agent.
+      lin = lineage()
+      if lin:
+          return lin
+      return sessions(agent=True)
+
   def run():
       if not is_relevant_event():
           return "allow"
 
       event_ts = int(meta.get("event_ts", "0"))
+      tree = candidates()
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in tree:
           aid = agent["id"]
 
           for se in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
@@ -115,7 +128,8 @@ script: |
               if marker == "":
                   continue
 
-              s0 = int(se.get("ts", "0"))
+              # ACQUIRED_SKILL is a merged edge: it carries first_ts/last_ts, not ts.
+              s0 = int(se.get("first_ts", se.get("last_ts", se.get("ts", "0"))))
               if s0 == 0:
                   continue
               # Look-back guard: if the load is older than the window relative to
@@ -129,30 +143,33 @@ script: |
                                            skill.get("host", "?") +
                                            " containing '" + marker + "'"))
 
-              # Action half: anything the agent did after the load, inside the window.
-              for kind in ["HTTP_REQUEST", "CONNECTS", "EXECUTE_PROCESS"]:
-                  for ae in edges(aid, dir="out", kind=kind):
-                      ats = int(ae.get("ts", ae.get("first_ts", "0")))
-                      if ats <= s0 or (ats - s0) > WINDOW_NS:
-                          continue
-                      target = node(ae["to"])
-                      where = "?"
-                      if target != None:
-                          where = target.get("host", target.get("name", target.get("id", "?")))
-                      chain.append(step(ae, stage_id="Action After Injection",
-                                        stage_desc=kind + " to " + where +
-                                                   " within 5m of the poisoned load"))
-                      reason = ("Indirect injection chain: '" + marker +
-                                "' loaded from " + skill.get("host", "?") +
-                                " then " + kind + " to " + where)
-                      print(reason)
-                      return {"action": "report", "reason": reason, "chain": chain}
+              # Action half: anything the tree did after the load, inside the
+              # window. Activity edges hang off the session that acted, which may
+              # be the acquirer itself or a session it spawned (in the lineage).
+              for actor in tree:
+                  for kind in ["HTTP_REQUEST", "CONNECTS", "SPAWNED"]:
+                      for ae in edges(actor["id"], dir="out", kind=kind):
+                          ats = int(ae.get("ts", ae.get("first_ts", "0")))
+                          if ats <= s0 or (ats - s0) > WINDOW_NS:
+                              continue
+                          target = node(ae["to"])
+                          where = "?"
+                          if target != None:
+                              where = target.get("host", target.get("name", target.get("id", "?")))
+                          chain.append(step(ae, stage_id="Action After Injection",
+                                            stage_desc=kind + " to " + where +
+                                                       " within 5m of the poisoned load"))
+                          reason = ("Indirect injection chain: '" + marker +
+                                    "' loaded from " + skill.get("host", "?") +
+                                    " then " + kind + " to " + where)
+                          print(reason)
+                          return {"action": "report", "reason": reason, "chain": chain}
 
       return "allow"
 
   result = run()
 falsepositives:
-  - 'Security research: reading an article about prompt injection and then making a network request is exactly this shape — scope by host, or promote only after measuring in report mode'
-  - Documentation of the agent's own system prompt fetched from an internal wiki served from a non-ZTNA host
-  - A skill document that legitimately instructs the model to always cite sources, followed by ordinary tool use
+- 'Security research: reading an article about prompt injection and then making a network request is exactly this shape — scope by host, or promote only after measuring in report mode'
+- Documentation of the agent's own system prompt fetched from an internal wiki served from a non-ZTNA host
+- A skill document that legitimately instructs the model to always cite sources, followed by ordinary tool use
 level: high

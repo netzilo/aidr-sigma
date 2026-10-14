@@ -4,7 +4,8 @@ status: stable
 description: >
   Detects CVE-2026-44113/44112: TOCTOU race condition allowing reads (44113) or writes
   (44112) outside the OpenClaw sandbox mount root. Checks both direct tool-based file
-  access and subprocess (sh) file access via the behavior graph.
+  access and subprocess (sh) file access via the file activity of the sessions
+  spawned by an agent session.
 author: Netzilo
 date: "2026-04-01"
 references:
@@ -25,6 +26,10 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   # Fire on any tool_call or tool_response — script decides via graph traversal
   sel_trigger:
@@ -45,13 +50,8 @@ script: |
   #
   # Path B (graph-based, subprocess):
   #   The TOCTOU exploit is performed by the sh subprocess spawned via CVE-44115.
-  #   sh does not go through MCP tools — its file ops appear as READ_FILE/WRITE_FILE
-  #   edges on the Process node in the behavior graph.
-
-  # FileSystem nodes do NOT store individual file paths — they are aggregated
-  # per process executable path. To detect which files were accessed, use
-  # search_in(fs["id"] + "$READ" / "$WRITE", pattern) against the indexed content.
-  # fs["id"] format: "filesystem:///bin/sh"
+  #   sh does not go through MCP tools — its file accesses are READ_FILE/WRITE_FILE
+  #   rows of that child session in the event log, read back with fs_activity().
 
   SENSITIVE_PATTERNS = [
       "/etc/passwd", "/etc/shadow", "/etc/sudoers",
@@ -63,40 +63,29 @@ script: |
       "/proc/self/environ", "/proc/1/environ",
   ]
 
-  def check_file_edges(actor_id):
-      # CVE-2026-44113: sensitive file read via any operation outside MCP tools.
-      # search_in checks the indexed content for that process's READ_FILE events.
-      for e in edges(actor_id, dir="out", kind="READ_FILE"):
-          fs = node(e["to"])
-          if fs == None:
-              continue
-          source = fs["id"] + "$READ"
-          for pattern in SENSITIVE_PATTERNS:
-              if search_in(source, pattern):
-                  print("CVE-2026-44113: sensitive READ — actor=" + actor_id + " pattern=" + pattern)
-                  return "block"
-
-      # CVE-2026-44112: any file write outside the sandbox by a subprocess.
-      for e in edges(actor_id, dir="out", kind="WRITE_FILE"):
-          fs = node(e["to"])
-          if fs == None:
-              continue
-          source = fs["id"] + "$WRITE"
-          for pattern in SENSITIVE_PATTERNS:
-              if search_in(source, pattern):
-                  print("CVE-2026-44112: sensitive WRITE — actor=" + actor_id + " pattern=" + pattern)
-                  return "block"
-
-      return "allow"
-
   SANDBOX_ROOT = "/openclaw/sandbox/mounts/"
 
   def path_is_sensitive(path):
-      # Plain substring match — path is a real string from JSON, not a source label.
+      # Plain substring match — path is a real string from the event log / JSON.
       for pattern in SENSITIVE_PATTERNS:
           if pattern in path:
               return True
       return False
+
+  def check_file_access(sess_id):
+      # CVE-2026-44113: sensitive file read via any operation outside MCP tools.
+      for r in fs_activity(session=sess_id, op="READ"):
+          if path_is_sensitive(r["path"]):
+              print("CVE-2026-44113: sensitive READ — session=" + sess_id + " path=" + r["path"])
+              return "block"
+
+      # CVE-2026-44112: sensitive file write outside the sandbox by a subprocess.
+      for w in fs_activity(session=sess_id, op="WRITE"):
+          if path_is_sensitive(w["path"]):
+              print("CVE-2026-44112: sensitive WRITE — session=" + sess_id + " path=" + w["path"])
+              return "block"
+
+      return "allow"
 
   def run():
       # Path A: parse path from tool call JSON arguments (meta.content is available).
@@ -119,17 +108,13 @@ script: |
                       print("CVE-2026-44113: tool read outside sandbox — path: " + path)
                       return "block"
 
-      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
+      # Path B: every agent session and the subprocess sessions it spawned.
+      for a in sessions(agent=True):
           aid = a["id"]
-          verdict = check_file_edges(aid)
-          if verdict == "block":
+          if check_file_access(aid) == "block":
               return "block"
-          for ee in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
-              verdict = check_file_edges(ee["to"])
-              if verdict == "block":
+          for c in children(aid):
+              if check_file_access(c["id"]) == "block":
                   return "block"
 
       return "allow"

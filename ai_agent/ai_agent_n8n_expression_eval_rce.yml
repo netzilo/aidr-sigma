@@ -11,8 +11,8 @@ description: |
   interpreter or network tool that the expression sandbox should never be able to
   reach, and that child then does something an expression is not supposed to do.
 
-  The script anchors on the n8n runtime process in the behaviour graph, walks its
-  EXECUTE_PROCESS descendants up to three levels, and only reports when a
+  The script anchors on the n8n runtime session in the behaviour graph, walks its
+  SPAWNED descendants up to three levels, and only reports when a
   suspicious spawn is corroborated by at least one of:
     * a JavaScript sandbox-escape / dynamic-code idiom in the command line
       (child_process, constructor.constructor, process.mainModule.require,
@@ -21,9 +21,8 @@ description: |
       engine marks as non-ZTNA),
     * a credential-file read by the spawned child (resolved with fs_activity).
 
-  Attribution is taken from the instance-resolved event log
-  (caller_pid -> proc_instance -> proc_lineage); the triggering command line is
-  read from meta and never re-queried from the log.
+  Attribution comes from the triggering session's lineage(); the triggering
+  command line is read from meta and never re-queried from the log.
 
   No ATLAS technique and no OWASP LLM/ASI identifier maps cleanly to this
   server-side code-injection class, so none is asserted; the OWASP A03:2021 and
@@ -61,6 +60,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -70,9 +74,9 @@ on_timeout: allow
 on_error:   allow
 script: |
   # n8n workflow-expression sandbox escape -> OS command execution.
-  # Sequence: n8n runtime --(EXECUTE_PROCESS)--> interpreter/net tool,
+  # Sequence: n8n runtime session --(SPAWNED)--> interpreter/net tool,
   #           corroborated by a dynamic-code idiom, public egress, or a
-  #           credential-file read performed by that spawned child.
+  #           credential-file read performed by that spawned child session.
 
   WINDOW_NS    = 300000000000      # 5 minutes
   MAX_DEPTH    = 3
@@ -130,6 +134,8 @@ script: |
       return match_any(N8N_MARKERS, blob)
 
   def proc_blob(p, cmdline):
+      # p is a session / program node dict: path + name (+ the program's
+      # recorded command lines, when present) + the SPAWNED edge's cmdline.
       if p == None:
           return lc(cmdline)
       return lc(p.get("path", "") + " " + p.get("name", "") + " " +
@@ -153,7 +159,7 @@ script: |
       return d <= WINDOW_NS
 
   def synth(frm, to, kind, ts):
-      return {"from": frm, "to": to, "kind": kind, "ts": str(ts),
+      return {"from": frm, "to": to, "kind": kind, "dir": "out", "ts": str(ts),
               "first_ts": str(ts), "last_ts": str(ts)}
 
   # ---- relevance gate: pure string checks on meta, no traversal ----------
@@ -165,34 +171,37 @@ script: |
           return False
       return suspicious_blob(cmd)
 
-  # ---- attribution from the instance-resolved event log ------------------
-  def lineage_of_caller(now):
-      cp = to_int(meta.get("caller_pid", "0"))
-      if cp == 0:
+  # ---- attribution: the triggering session and its lineage ---------------
+  def lineage_of_caller():
+      if meta.get("session", "") == "":
           return []
-      inst = proc_instance(cp, now)
+      inst = session()
       if inst == None:
           return []
-      return proc_lineage(to_int(inst["actor_pid"]), to_int(inst["actor_start"]))
+      return lineage(inst["id"])
 
   def lineage_has_n8n(lin):
       for x in lin:
-          if is_n8n_blob(lc(x.get("actor_path", "") + " " + x.get("cmdline", ""))):
+          if is_n8n_blob(lc(x.get("path", "") + " " + x.get("name", ""))):
               return True
       return False
 
   def lineage_str(lin):
       names = []
       for x in lin:
-          names.append(basename(x.get("actor_path", "")))
+          names.append(basename(x.get("path", "")))
       return " <- ".join(names)
 
   # ---- graph traversal helpers -------------------------------------------
   def find_n8n_procs():
+      # n8n runtimes = sessions of a Program whose path/name/command lines name
+      # n8n. programs() is small; sessions(program=) is an exact filter.
       out = []
-      for p in graph(type="Process"):
-          if is_n8n_blob(proc_blob(p, "")):
-              out.append(p)
+      for prog in programs():
+          if not is_n8n_blob(proc_blob(prog, prog.get("cmdlines", ""))):
+              continue
+          for s in sessions(program=prog["id"]):
+              out.append(s)
       return out
 
   def spawn_edges(root_id):
@@ -201,8 +210,8 @@ script: |
       out      = []
       for _ in range(MAX_DEPTH):
           nxt = []
-          for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+          for sid in frontier:
+              for e in edges(sid, dir="out", kind="SPAWNED"):
                   out.append(e)
                   cid = e["to"]
                   if cid in seen:
@@ -245,10 +254,12 @@ script: |
       now    = to_int(meta.get("event_ts", "0"))
       cmd    = meta.get("content", "")
       cmd_lc = lc(cmd)
+      tsid   = meta.get("session", "")
 
-      lin            = lineage_of_caller(now)
+      lin            = lineage_of_caller()
       lineage_anchor = lineage_has_n8n(lin)
       trigger_idiom  = contains_any(ESCAPE_IDIOMS, cmd_lc)
+      tparent        = lin[1]["id"] if len(lin) > 1 else ""
 
       hosts = find_n8n_procs()
       if not hosts and not lineage_anchor:
@@ -307,7 +318,9 @@ script: |
           stages.append("spawn:" + cname)
 
           # Trigger stage comes from meta, never re-queried from the log.
-          chain.append(step(synth(aid, "process://" + cname, "EXECUTE_PROCESS", now),
+          trig_from = tparent if tparent != "" else aid
+          trig_to   = tsid if tsid != "" else cid
+          chain.append(step(synth(trig_from, trig_to, "SPAWNED", now),
                             stage_id="Dynamic Code Execution",
                             stage_desc="triggering command line: " + cmd[:200]))
           stages.append("exec:" + cmd[:60])
@@ -337,18 +350,13 @@ script: |
               "chain":  chain,
           }
 
-      # No n8n Process node in the graph, but the event log proves the exec was
+      # No n8n program in the graph, but the lineage proves the exec was
       # parented by n8n and carries a dynamic-code escape idiom.
-      if lineage_anchor and trigger_idiom:
-          root_path = "n8n"
-          if lin:
-              root_path = lin[len(lin) - 1].get("actor_path", "n8n")
-          caller = "?"
-          if lin:
-              caller = basename(lin[0].get("actor_path", "?"))
-          chain = new_chain("process://" + root_path)
-          chain.append(step(synth("process://" + root_path, "process://" + caller,
-                                  "EXECUTE_PROCESS", now),
+      if lineage_anchor and trigger_idiom and lin:
+          root_id = lin[len(lin) - 1]["id"]
+          chain = new_chain(root_id)
+          chain.append(step(synth(tparent if tparent != "" else root_id, lin[0]["id"],
+                                  "SPAWNED", now),
                             stage_id="Dynamic Code Execution",
                             stage_desc="n8n-parented exec carrying code-evaluation escape idiom: " +
                                        cmd[:200]))

@@ -6,10 +6,10 @@ related:
 status: stable
 level:          high
 description: |
-  Periodic companion to the real-time rule. Checks WRITE_FILE edges in the AIDR
-  behaviour graph every 30 seconds for sensitive path writes that arrived via EDR
-  (syscall level) rather than through the hook or MITM proxy.
-  Covers writes by subprocesses that the tool_call path cannot see.
+  Periodic companion to the real-time rule. Checks the file writes of every
+  agent session (and its child sessions) every 30 seconds for sensitive path
+  writes that arrived via EDR (syscall level) rather than through the hook or
+  MITM proxy. Covers writes by subprocesses that the tool_call path cannot see.
 references:
   - https://attack.mitre.org/techniques/T1546/
   - https://attack.mitre.org/techniques/T1053/
@@ -26,6 +26,9 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel:
     content|re: '.'
@@ -41,21 +44,27 @@ script: |
       "authorized_keys",
   ]
 
+  def check(s, agent_name):
+      # File paths live in the event log, one FileSystem node per session:
+      # fs_activity() lists the exact paths this session wrote.
+      for w in fs_activity(session=s["id"], op="WRITE"):
+          p = w["path"]
+          for path in SENSITIVE:
+              if path in p:
+                  print("Suspicious write — path: " + path +
+                        " process: " + s.get("name", "?") +
+                        " agent: " + agent_name)
+                  return True
+      return False
+
   def run():
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              src = fs["id"] + "$WRITE"
-              for path in SENSITIVE:
-                  if search_in(src, path):
-                      print("Suspicious write — path: " + path +
-                            " process: " + fs.get("proc_name", "?") +
-                            " agent: " + a.get("name", "?"))
-                      return "block"
+      for a in sessions(agent=True):
+          if check(a, a.get("name", "?")):
+              return "block"
+          # subprocesses the tool_call path cannot see
+          for c in children(a["id"]):
+              if check(c, a.get("name", "?")):
+                  return "block"
       return "allow"
 
   result = run()

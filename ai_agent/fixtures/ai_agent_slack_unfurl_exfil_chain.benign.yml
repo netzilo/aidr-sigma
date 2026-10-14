@@ -1,0 +1,15 @@
+rule: ai_agent_slack_unfurl_exfil_chain.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://notes.example/q3-report", method: GET, request_id: r1, content_type: text/html, body: ""}
+  - {kind: http_request, subject: agent, url: "https://slack.com/api/chat.postMessage", method: POST, request_id: r2, content_type: application/json, body: '{"channel": "C01", "text": "Deployed build 4211 to prod, see https://github.com/acme/app/pull/12 for the changelog"}'}
+expect:
+  action: allow

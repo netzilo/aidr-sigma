@@ -42,6 +42,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
 
   # ── Branch 1: proxied HTTP request, traversal token in the full URL ──────────

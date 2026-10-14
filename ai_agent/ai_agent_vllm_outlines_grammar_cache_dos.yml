@@ -11,12 +11,12 @@ description: |
   with per-request unique schemas therefore grows the cache without bound until the
   filesystem fills, denying service to every tenant of that server.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
-  process instance via proc_instance(), walks proc_lineage() to the session root, and
-  counts unique schema fingerprints ONLY within that one session. It never attributes
-  requests across sessions or across reused PIDs. Prior HTTP_REQUEST rows and any
-  local grammar-cache WRITE_FILE rows are pulled from the instance-resolved event log
-  and emitted as a kill chain.
+  Attribution is session-keyed: the rule anchors on the triggering session and counts
+  unique schema fingerprints ONLY over that session's own HTTP_REQUEST rows inside the
+  window, joining each row to its indexed request body through the row's content id.
+  It never attributes requests across sessions. The earliest schema request of the
+  burst and any local grammar-cache WRITE_FILE rows of the session tree are pulled
+  from the event log and emitted as a kill chain.
 
   Discriminator (the anchor that makes this non-benign): near-100% schema uniqueness.
   Normal structured-output workloads reuse a small set of schemas thousands of times;
@@ -49,6 +49,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_http_post:
     event_type: http_request
@@ -71,13 +75,16 @@ script: |
   WINDOW_NS   = 300000000000   # 5 minutes of session history
   COOLDOWN_NS = 600000000000   # 10 minutes between reports for the same session
   UNIQUE_MIN  = 25             # volume floor: distinct schemas in the window
-  MAX_TRACKED = 300            # cap fingerprints kept per session (store hygiene)
   BLOB_MAX    = 1024           # bytes of schema text fingerprinted
   BODY_MAX    = 65536          # cap body scanning cost
-  MAX_PIDS    = 8              # cap session pids scanned for cache writes
+  MAX_ROWS    = 1000           # cap HTTP_REQUEST rows read for the session
+  MAX_SEARCH  = 1000           # cap indexed bodies pulled from the content index
+  MAX_PIDS    = 8              # cap sessions scanned for cache writes
 
   MARKERS = ["guided_json", "guided_grammar", "guided_regex", "guided_choice",
              "guided_decoding", "structured_outputs", "json_schema"]
+  # Content-index query for schema-bearing request bodies (any marker).
+  SEARCH_QUERY = '"guided_json" OR "guided_grammar" OR "guided_regex" OR "guided_choice" OR "guided_decoding" OR "structured_outputs" OR "json_schema"'
   CACHE_HINTS = ["outlines", "grammar", "/cache/", "xgrammar"]
 
   # ---- pure helpers (no graph / no log calls) ----------------------------------
@@ -105,16 +112,19 @@ script: |
       return "%x" % h
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "count":    "1",
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def base(p):
       parts = p.split("/")
       return parts[len(parts) - 1]
@@ -146,93 +156,85 @@ script: |
           return "allow"                      # POST carries no decoding schema
 
       ets = safe_int(meta.get("event_ts", "0"))
-      cp  = safe_int(meta.get("caller_pid", "0"))
-      if cp == 0 or ets == 0:
+      cp  = meta.get("session", "")
+      if cp == "" or ets == 0:
           return "allow"
 
-      # ---- anchor on the exact triggering instance ----------------------------
-      inst = proc_instance(cp, ets)
+      # ---- anchor on the triggering session -----------------------------------
+      inst = session(cp)
       if inst == None:
           return "allow"                      # degraded attribution - never guess
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
-      root = lineage[len(lineage) - 1]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = lineage_[len(lineage_) - 1]
 
-      # session identity = the ROOT INSTANCE (pid + start) -> reuse proof,
-      # and strictly one session: no cross-session counting is possible.
-      skey = "s:" + root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+      # ---- unique-schema accounting, derived from THIS session's own rows -----
+      # Every HTTP_REQUEST row of the session in the window names its indexed
+      # body (content_id); the content index returns the bodies of every
+      # schema-bearing request, which are joined back to those rows. The
+      # triggering request is taken from meta because its body may not be
+      # indexed yet.
+      cid_self = meta.get("callid", "")
+      by_label = {}
+      for r in events(kind="HTTP_REQUEST", session=inst["id"],
+                      since_ns=ets - WINDOW_NS, until_ns=ets, limit=MAX_ROWS):
+          if cid_self != "" and r.get("callid", "") == cid_self:
+              continue                        # the trigger itself (counted from meta)
+          label = r.get("content_id", "")
+          if label != "":
+              by_label[label] = r
 
-      # session pid set = lineage + processes spawned by lineage inside the window
-      sess = {}
-      for x in lineage:
-          sess[x.get("actor_pid", "0")] = x.get("actor_start", "0")
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS, limit=2000):
-          if e.get("parent_pid", "") in sess:
-              sess[e.get("actor_pid", "0")] = e.get("actor_start", "0")
-
-      # ---- per-session unique-schema accounting (rule-private store) ----------
-      st = store_get(skey)
-      if st == None:
-          st = {"first_ts": str(ets), "total": 0, "schemas": {}, "last_report": "0"}
-      if ets - safe_int(st.get("first_ts", "0")) > WINDOW_NS:
-          st = {"first_ts": str(ets), "total": 0, "schemas": {},
-                "last_report": st.get("last_report", "0")}
-
-      st["total"] = int(st.get("total", 0)) + 1
-      schemas = st.get("schemas", {})
-      f = fingerprint(blob)
-      if f not in schemas:
-          if len(schemas) < MAX_TRACKED:
-              schemas[f] = str(ets)
-      st["schemas"] = schemas
-
-      # store hygiene: drop stale sessions before writing, never overflow the cap
-      u = store_usage()
-      if u["free"] < 131072:
-          for k in store_keys():
-              if k == skey:
+      schemas = {}
+      schemas[fingerprint(blob)] = str(ets)
+      total = 1
+      prior = None
+      if by_label:
+          for hit in search(SEARCH_QUERY, MAX_SEARCH):
+              r = by_label.get(hit.get("source", ""), None)
+              if r == None:
                   continue
-              v = store_get(k)
-              if v == None:
-                  store_delete(k)
-              elif ets - safe_int(v.get("first_ts", "0")) > WINDOW_NS * 4:
-                  store_delete(k)
-      if store_usage()["free"] < 16384:
-          store_reset()
-      store_set(skey, st)
+              text = hit.get("text", "")
+              if len(text) > BODY_MAX:
+                  text = text[:BODY_MAX]
+              b = schema_blob(text)
+              if b == "":
+                  continue
+              total = total + 1
+              f = fingerprint(b)
+              if f not in schemas:
+                  schemas[f] = r.get("ts", "0")
+              if prior == None or safe_int(r.get("ts", "0")) < safe_int(prior.get("ts", "0")):
+                  prior = r
 
-      uniq  = len(schemas)
-      total = int(st.get("total", 0))
+      uniq = len(schemas)
       if uniq < UNIQUE_MIN:
           return "allow"                      # below the volume floor
       if uniq * 10 < total * 9:
           return "allow"                      # schemas are reused - normal workload
-      last_rep = safe_int(st.get("last_report", "0"))
+
+      # ---- report cooldown per session root (the only state this rule keeps) --
+      skey = "s:" + root.get("id", "")
+      last_rep = safe_int(store_get(skey))
       if last_rep > 0 and ets - last_rep < COOLDOWN_NS:
           return "allow"                      # already reported this session recently
 
-      # ---- evidence: earliest prior schema request by THIS instance -----------
-      prior = None
-      for r in query_events(kind="HTTP_REQUEST",
-                            actor_pid=int(inst["actor_pid"]),
-                            actor_start=int(inst["actor_start"]),
-                            since_ns=ets - WINDOW_NS, limit=200):
-          if prior == None:
-              prior = r
-          elif safe_int(r.get("ts", "0")) < safe_int(prior.get("ts", "0")):
-              prior = r
+      # session scope = lineage + sessions spawned by the lineage inside the window
+      sess = {}
+      for x in lineage_:
+          sess[x.get("id", "")] = True
+      for e in events(kind="SPAWNED", since_ns=ets - WINDOW_NS, limit=2000):
+          if e.get("parent_session", "") in sess:
+              sess[e.get("session_id", "")] = True
 
-      # ---- evidence: local grammar-cache writes by any session instance -------
+      # ---- evidence: local grammar-cache writes by any session in scope -------
       cache_ev = None
       seen = 0
-      for pid in sess:
+      for sid in sess:
           if seen >= MAX_PIDS:
               break
           seen = seen + 1
-          rows = query_events(kind="WRITE_FILE",
-                              actor_pid=safe_int(pid),
-                              actor_start=safe_int(sess[pid]),
+          rows = events(kind="WRITE_FILE", session=sid,
                               since_ns=ets - WINDOW_NS, limit=300)
           for r in rows:
               p = r.get("path", "").lower()
@@ -248,10 +250,7 @@ script: |
               break
 
       # ---- kill chain ---------------------------------------------------------
-      root_path = root.get("actor_path", "")
-      if root_path == "":
-          root_path = inst.get("actor_path", "")
-      chain = new_chain("process://" + root_path)
+      chain = new_chain(root["id"])
 
       if prior != None:
           chain.append(step(ev_edge(prior),
@@ -266,7 +265,7 @@ script: |
 
       host = meta.get("host", "")
       trigger = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       "https://" + host,
           "kind":     "HTTP_REQUEST",
           "method":   meta.get("method", ""),
@@ -275,19 +274,22 @@ script: |
           "last_ts":  str(ets),
           "count":    "1",
       }
-      span = (ets - safe_int(st.get("first_ts", "0"))) // 1000000000
+      first_ts = ets
+      if prior != None:
+          first_ts = safe_int(prior.get("ts", "0"))
+      span = (ets - first_ts) // 1000000000
       chain.append(step(trigger,
           stage_id="Unbounded Schema Cache",
           stage_desc=str(uniq) + " unique decoding schemas in " + str(total) +
                      " requests over " + str(span) + "s to " + host + meta.get("path", "")))
 
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "?")))
+      for x in lineage_:
+          names.append(base(x.get("path", "?")))
       who = " -> ".join(names)
 
-      st["last_report"] = str(ets)
-      store_set(skey, st)
+      if store_usage()["free"] > 8192:
+          store_set(skey, str(ets))
 
       corro = "no local cache write observed"
       if cache_ev != None:

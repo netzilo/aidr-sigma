@@ -22,11 +22,11 @@ description: |
        (reverse-shell, base64 decode, chmod +x, curl/wget/nc/socat, pipe-to-shell,
        __import__ / os.system, crontab, authorized_keys).
 
-  Attribution is anchored on meta.caller_pid -> proc_instance() -> proc_lineage(); every
-  corroborating query is scoped to that one interpreter instance (pid + start_ns) and to
-  the window between its start and the triggering spawn. Nothing is attributed across
-  sessions or across reused PIDs. The triggering spawn is read from meta (never re-queried
-  from the async event log).
+  Attribution is session-keyed: the triggering spawn's session -> lineage() -> the
+  nearest Python-family ancestor session; every corroborating query is scoped to that one
+  interpreter session and to the window between its first_seen and the triggering spawn.
+  Nothing is attributed across sessions. The triggering spawn is read from meta (never
+  re-queried from the async event log).
 author: Selhan
 date: "2026-06-11"
 modified: "2026-06-11"
@@ -56,6 +56,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -115,40 +118,34 @@ script: |
               return True
       return False
 
-  def spawn_target(cmd):
-      m = re.find(r"/[A-Za-z0-9._+-]+(/[A-Za-z0-9._+-]+)+", cmd)
-      if m != None:
-          return "process://" + m
-      toks = cmd.split(" ")
-      t = toks[0]
-      if t == "":
-          t = "spawned"
-      return "process://" + t
+  # The SPAWNED row that created a session (its cmdline), or None.
+  def spawn_row(sid):
+      rows = events(kind="SPAWNED", session=sid, limit=1)
+      if rows:
+          return rows[0]
+      return None
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  e.get("cmdline", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
-  # Instance-scoped module-load evidence. fs_activity is path-targeted (cheap);
-  # the per-entry ts is used to keep the evidence inside THIS interpreter's life.
-  def module_read(py_path, py_pid, py_start, until_ts, token):
-      for ent in fs_activity("filesystem://" + py_path, "READ", token):
+  # Session-scoped module-load evidence: READ_FILE rows of THIS interpreter
+  # session only; the per-entry ts keeps the evidence inside its lifetime.
+  def module_read(py_id, py_start, until_ts, token):
+      for ent in fs_activity(session=py_id, op="READ", pattern=token):
           ts = int(ent.get("ts", "0"))
           if ts >= py_start and ts <= until_ts:
               return {"path": ent.get("path", ""), "ts": str(ts)}
-      rows = query_events(kind="READ_FILE", actor_pid=py_pid, actor_start=py_start,
-                          since_ns=py_start, until_ns=until_ts, limit=5000)
-      for r in rows:
-          p = r.get("path", "")
-          if token in p:
-              return {"path": p, "ts": r.get("ts", "0")}
       return None
 
   def run():
@@ -164,39 +161,37 @@ script: |
           return "allow"
 
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trig_ts == 0:
+      cp      = meta.get("session", "")
+      if cp == "" or trig_ts == 0:
           return "allow"
 
-      # ── 2. Anchor on the exact triggering instance ──────────────────────────
-      inst = proc_instance(cp, trig_ts)
+      # ── 2. Anchor on the triggering session (the spawned command) ───────────
+      inst = session(cp)
       if inst == None:
           return "allow"                       # degraded - never guess attribution
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # ── 3. Session scope: the nearest Python-family ancestor (<=4 hops) ─────
       py    = None
       depth = 0
-      for x in lineage:
+      for x in lineage_:
           if depth > 4:
               break
-          if is_py_host(x.get("actor_path", "")):
+          if is_py_host(x.get("path", "")):
               py = x
               break
           depth = depth + 1
       if py == None:
           return "allow"
 
-      py_path  = py.get("actor_path", "")
-      py_pid   = int(py.get("actor_pid", "0"))
-      py_start = int(py.get("actor_start", "0"))
-      if py_pid == 0:
-          return "allow"
+      py_path  = py.get("path", "")
+      py_id    = py["id"]
+      py_start = int(py.get("first_seen", "0"))
 
-      # ── 4. Per-instance de-duplication (payloads can spawn in a loop) ───────
-      key  = str(py_pid) + ":" + str(py_start)
+      # ── 4. Per-session de-duplication (payloads can spawn in a loop) ────────
+      key  = py_id
       seen = store_get("reported") or {}
       last = 0
       if key in seen:
@@ -204,63 +199,73 @@ script: |
       if last > 0 and (trig_ts - last) < SUPPRESS_NS:
           return "allow"
 
-      # ── 5. REQUIRED anchor: numexpr loaded by THIS interpreter instance ─────
-      nx = module_read(py_path, py_pid, py_start, trig_ts, "numexpr")
+      # ── 5. REQUIRED anchor: numexpr loaded by THIS interpreter session ──────
+      nx = module_read(py_id, py_start, trig_ts, "numexpr")
       if nx == None:
           return "allow"                       # no vulnerable code path in-process
-      lc = module_read(py_path, py_pid, py_start, trig_ts, "langchain")
+      lc = module_read(py_id, py_start, trig_ts, "langchain")
 
       # ── 6. Corroboration: other commands this interpreter spawned recently ──
       sib = None
-      rows = query_events(kind="EXECUTE_PROCESS", actor_pid=py_pid,
-                          actor_start=py_start,
-                          since_ns=trig_ts - SPAWN_WINDOW_NS,
-                          until_ns=trig_ts, limit=100)
-      if rows:
-          sib = rows[0]
+      for r in events(kind="SPAWNED", since_ns=trig_ts - SPAWN_WINDOW_NS,
+                      until_ns=trig_ts, limit=500):
+          if r.get("parent_session", "") != py_id:
+              continue
+          if r.get("session_id", "") == inst["id"]:
+              continue                         # the triggering spawn itself
+          sib = r
+          break
 
-      # ── 7. Kill chain rooted at the session owner ───────────────────────────
-      root  = lineage[len(lineage) - 1].get("actor_path", py_path)
-      chain = new_chain("process://" + root)
+      # ── 7. Kill chain rooted at the session root ────────────────────────────
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
 
-      py_edge = {
-          "from":     "process://" + py.get("parent_path", root),
-          "to":       "process://" + py_path,
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       str(py_start),
-          "first_ts": str(py_start),
-          "last_ts":  str(py_start),
-          "cmdline":  py.get("cmdline", ""),
-      }
-      chain.append(step(py_edge, stage_id="Vulnerable Host Process",
-                        stage_desc="LangChain-capable interpreter instance " +
-                                   basename(py_path) + " pid=" + str(py_pid)))
+      py_row = spawn_row(py_id)
+      if py.get("parent", "") != "":
+          py_cmd = ""
+          if py_row != None:
+              py_cmd = py_row.get("cmdline", "")
+          py_edge = {
+              "from":     py["parent"],
+              "to":       py_id,
+              "kind":     "SPAWNED",
+              "ts":       str(py_start),
+              "first_ts": str(py_start),
+              "last_ts":  str(py_start),
+              "cmdline":  py_cmd,
+          }
+          chain.append(step(py_edge, stage_id="Vulnerable Host Process",
+                            stage_desc="LangChain-capable interpreter session " +
+                                       basename(py_path) + " " + py_id))
 
       if lc != None:
-          lc_edge = {"from": "process://" + py_path,
-                     "to": "filesystem://" + py_path, "kind": "READ_FILE",
+          lc_edge = {"from": py_id,
+                     "to": "filesystem://" + py_id, "kind": "READ_FILE",
                      "ts": lc["ts"], "first_ts": lc["ts"], "last_ts": lc["ts"]}
           chain.append(step(lc_edge, stage_id="LangChain Loaded",
                             stage_desc="langchain module read in-session: " + lc["path"],
                             activity=lc))
 
-      nx_edge = {"from": "process://" + py_path,
-                 "to": "filesystem://" + py_path, "kind": "READ_FILE",
+      nx_edge = {"from": py_id,
+                 "to": "filesystem://" + py_id, "kind": "READ_FILE",
                  "ts": nx["ts"], "first_ts": nx["ts"], "last_ts": nx["ts"]}
       chain.append(step(nx_edge, stage_id="Vulnerable Dependency",
                         stage_desc="numexpr (CVE-2023-36258 evaluate sink) loaded by this " +
-                                   "instance: " + nx["path"],
+                                   "session: " + nx["path"],
                         activity=nx))
 
       if sib != None:
           chain.append(step(ev_edge(sib), stage_id="Interpreter Command Spawn",
-                            stage_desc="prior command spawned by same instance: " +
+                            stage_desc="prior command spawned by same session: " +
                                        sib.get("cmdline", sib.get("target_id", "?"))[:160]))
 
+      trig_from = inst.get("parent", "")
+      if trig_from == "":
+          trig_from = py_id
       trig_edge = {
-          "from":     "process://" + inst.get("actor_path", py_path),
-          "to":       spawn_target(cmd),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     trig_from,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(trig_ts),
           "first_ts": str(trig_ts),
           "last_ts":  str(trig_ts),
@@ -281,9 +286,9 @@ script: |
       if store_usage()["free"] > 65536:
           store_set("reported", pruned)
 
-      names = " -> ".join([basename(x.get("actor_path", "")) for x in lineage])
+      names = " -> ".join([basename(x.get("path", "")) for x in lineage_])
       degraded = ""
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           degraded = " (attribution: degraded - lineage truncated)"
       print("CVE-2023-36258 candidate: " + names + " | numexpr=" + nx["path"] +
             " | cmd=" + cmd[:200] + degraded)
@@ -291,7 +296,7 @@ script: |
       return {
           "action": "report",
           "reason": "Possible LangChain numexpr.evaluate RCE (CVE-2023-36258): " +
-                    "interpreter instance " + basename(py_path) + " pid=" + str(py_pid) +
+                    "interpreter session " + basename(py_path) + " " + py_id +
                     " with numexpr loaded in-process spawned shell command '" +
                     cmd[:160] + "' via " + names + degraded,
           "chain":  chain,

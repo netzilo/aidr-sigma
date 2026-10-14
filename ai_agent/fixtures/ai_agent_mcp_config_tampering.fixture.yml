@@ -1,0 +1,33 @@
+subjects:
+  cursor:
+    session: pid/600:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/601:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  tee:
+    session: pid/602:1
+    parent: zsh
+    program: /usr/bin/tee
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh -c 'printf %s \"$CFG\" | tee /Users/dev/.cursor/mcp.json'"}
+  - {kind: spawn, subject: tee, cmdline: "tee /Users/dev/.cursor/mcp.json"}
+  - {kind: file_write, subject: tee, path: /Users/dev/.cursor/mcp.json}
+trigger: 2
+expect:
+  action: report
+  reason_contains: "written by spawned utility tee"
+  output_contains: ["by session tee -> zsh -> cursor"]
+  chain_min: 2

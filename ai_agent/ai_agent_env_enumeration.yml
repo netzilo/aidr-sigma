@@ -21,6 +21,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # env/printenv piped to grep for secret-related keywords
   selection_env_grep:

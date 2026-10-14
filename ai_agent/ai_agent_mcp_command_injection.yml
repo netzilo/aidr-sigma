@@ -22,6 +22,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Adapted: original used tool_input and tool_source fields not present in LogEntry.
   # Matches shell metacharacters anywhere in tool call body (content field).

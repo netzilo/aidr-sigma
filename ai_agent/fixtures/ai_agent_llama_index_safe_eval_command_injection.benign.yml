@@ -1,0 +1,20 @@
+rule: ai_agent_llama_index_safe_eval_command_injection.yml
+subjects:
+  node:
+    session: pid/100:1
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  cmd:
+    session: pid/101:1
+    parent: node
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: node}
+  - {kind: spawn, subject: cmd, cmdline: "sh -c 'whoami'"}
+expect:
+  action: allow

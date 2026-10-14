@@ -1,0 +1,41 @@
+subjects:
+  roo:
+    session: pid/100:1
+    program: /Applications/Visual Studio Code.app/Contents/MacOS/Electron
+    name: Code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: roo
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  node:
+    session: pid/102:1
+    parent: shell
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  bash:
+    session: pid/103:1
+    parent: shell
+    program: /bin/bash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: roo}
+  - {kind: spawn, subject: shell, cmdline: "zsh -c 'node write.js'"}
+  - {kind: spawn, subject: node, cmdline: "node write.js"}
+  - {kind: file_write, subject: node, path: /Users/dev/proj/proj.code-workspace}
+  - {kind: file_write, subject: node, path: /Users/dev/proj/.vscode/tasks.json}
+  - {kind: spawn, subject: bash, cmdline: "bash -c 'cat /Users/dev/proj/proj.code-workspace'"}
+expect:
+  action: report
+  reason_contains: "corroborated"
+  chain_min: 3

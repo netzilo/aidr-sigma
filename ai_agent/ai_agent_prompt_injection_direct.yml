@@ -28,6 +28,8 @@ logsource:
   # llm_request covers the user prompt; agent_events also fires on tool call content.
 
   category: agent_events
+requires:
+  - llm
 detection:
   selection_jailbreak_keywords:
     event_type: llm_request

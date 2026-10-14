@@ -38,8 +38,8 @@ import yaml
 #   OnHTTPRequest                    -> scanner_filter.go:478
 #   OnConnect                        -> scanner_filter.go:570
 #   OnSemanticEvent                  -> scanner_filter.go:608  (WASM classifier types)
-#   ScanExecuteProcess               -> staticscanner/edr.go:37
-#   periodicScheduler                -> staticscanner/periodic_scheduler.go
+#   ScanExecuteProcess               -> intake/scan/edr.go
+#   periodicScheduler                -> intake/scan/periodic_scheduler.go
 LIVE_CATEGORIES = {
     "agent_events": "catch-all (ContextAny)",
     "all": "catch-all (ContextAny)",
@@ -186,7 +186,6 @@ TOOL_ARG_FIELDS = {"command", "process.command_line", "file_path", "url.full", "
 SCRIPT_ONLY_FIELDS = {
     "port": "connects destination port — available only as meta['port'] in an action: execute script",
     "protocol": "connects transport — available only as meta['protocol'] in an action: execute script",
-    "caller_pid": "available only as meta['caller_pid'] in an action: execute script",
     "callid": "available only as meta['callid'] in an action: execute script",
     "server_url": "available only as meta['server_url'] in an action: execute script",
     "url": "LogEntry spells the full URL 'url.full'; meta spells it 'url'",
@@ -218,6 +217,69 @@ SEMANTIC_PAYLOAD_FIELDS = {
     "llm_tool_result": {"tool_name", "call_id", "output", "host", "url"},
     "llm_reasoning": {"host", "url", "source", "provider", "model"},
 }
+
+# ── Ground truth: capabilities and the script API ────────────────────────────
+#
+# Provenance: aidr/observation.go Cap* constants and kindRegistry. A rule's
+# `requires:` lists the capabilities a host must produce; the loader
+# (intake/scan/yaml_adapter.go partitionRules) skips the rule on a host that
+# lacks one, so the gateway never loads a process-lineage rule and never
+# silently runs it against an empty graph.
+KNOWN_CAPABILITIES = {
+    "session", "process_exec", "file_activity", "llm", "tool", "http", "connect", "skill",
+}
+
+# What a script uses → the capability it needs. Edge kinds from kindRegistry;
+# builtins from aidr/script_events.go.
+SCRIPT_CAPABILITY_HINTS = [
+    (re.compile(r"\bSPAWNED\b|\bchildren\("), "process_exec"),
+    (re.compile(r"\b(READ|WRITE|CREATE|DELETE|RENAME)_FILE\b|\bfs_activity\("), "file_activity"),
+    (re.compile(r"\bLLM_(REQUEST|RESPONSE)\b"), "llm"),
+    (re.compile(r"\bTOOL_(CALL|RESULT)\b"), "tool"),
+    (re.compile(r"\bHTTP_(REQUEST|RESPONSE)\b"), "http"),
+    (re.compile(r"\bCONNECTS\b"), "connect"),
+    (re.compile(r"\bACQUIRED_SKILL\b"), "skill"),
+]
+CATEGORY_CAPABILITY = {
+    "execute_process": "process_exec",
+    "file_read": "file_activity", "file_write": "file_activity", "file_create": "file_activity",
+    "file_delete": "file_activity", "file_rename": "file_activity", "file_op": "file_activity",
+    "llm_request": "llm", "llm_response": "llm",
+    "tool_request": "tool", "tool_input": "tool", "tool_response": "tool", "tool_output": "tool",
+    "tool_description": "tool", "gateway_description": "tool", "prompt_request": "tool",
+    "prompt_response": "tool", "sampling_request": "tool", "sampling_response": "tool",
+    "llm_tool_call": "tool", "llm_tool_result": "tool",
+    "http_request": "http", "http_response": "http",
+    "connects": "connect",
+    "skill_acquired": "skill",
+}
+
+# Builtins, row keys and node ids of the process-keyed engine that the
+# session-keyed engine (aidr/script_events.go) no longer provides. Each is a
+# dead rule: the script fails at the first call and falls to on_error.
+REMOVED_SCRIPT_IDIOMS = [
+    (re.compile(r"\bproc_instance\("), "removed-builtin",
+     "proc_instance() is gone — session() returns the triggering session (session(id) any other)"),
+    (re.compile(r"\bproc_lineage\("), "removed-builtin",
+     "proc_lineage() is gone — lineage() / lineage(session_id) returns self → parent → … → root"),
+    (re.compile(r"\bquery_events\("), "removed-builtin",
+     "query_events() is gone — events(kind=, session=, owner=, program=, target=, since_ns=, until_ns=, limit=)"),
+    (re.compile(r"(?<![\w.\"'/-])netzilo\s*(?:\[|\.(?:get|groups|peer|device|user)\b)"), "removed-builtin",
+     "the netzilo dict is gone — use subject['actor'] / subject['device'] / subject['owner']"),
+    (re.compile(r"[\"']caller_pid[\"']"), "removed-meta-key",
+     "meta has no caller_pid — meta['session'] is the triggering session id; the subject dict carries the rest"),
+    (re.compile(r"[\"'](actor_pid|actor_path|actor_start|parent_pid|parent_path|parent_start)[\"']"), "removed-row-key",
+     "actor_*/parent_* keys are gone — event rows carry session_id / program / parent_session; "
+     "session dicts carry id / path / parent"),
+    (re.compile(r"\bEXECUTE_PROCESS\b"), "removed-edge-kind",
+     "EXECUTE_PROCESS is now SPAWNED (parent session → child session)"),
+    (re.compile(r"process://"), "removed-node-id",
+     "process:// nodes are gone — sessions are session://<kind>/<key>, programs program://<path>"),
+    (re.compile(r"graph\(type=\"(Process|Peer|Guest)\"\)"), "removed-node-type",
+     "no Process/Peer/Guest nodes — use sessions(agent=True) / sessions() / programs()"),
+    (re.compile(r"\$(WRITE|READ|EXEC)\b"), "removed-fts-label",
+     "file activity is no longer in the FTS index — fs_activity(session=, op=\"WRITE\") returns the paths"),
+]
 
 # ── Ground truth: modifiers and actions ──────────────────────────────────────
 #
@@ -621,6 +683,20 @@ def check_rule(path: Path, doc: dict, duplicates: list[str], out: list[Finding])
                         f"scalar was single-quoted the escape is NOT interpreted and will never "
                         f"match the real character — use a double-quoted scalar: {pat!r}")
 
+    # ── requires ────────────────────────────────────────────────────────────
+    requires_raw = doc.get("requires")
+    requires: set[str] = set()
+    if requires_raw is not None:
+        if not isinstance(requires_raw, list):
+            add("error", "invalid-requires", "requires: must be a list of capabilities")
+        else:
+            for cap in requires_raw:
+                cap = str(cap)
+                if cap not in KNOWN_CAPABILITIES:
+                    add("error", "unknown-capability",
+                        f"requires: {cap!r} is not a capability ({sorted(KNOWN_CAPABILITIES)})")
+                requires.add(cap)
+
     # ── action ──────────────────────────────────────────────────────────────
     action = str(doc.get("action", "") or "").lower()
     if action and action not in KNOWN_ACTIONS:
@@ -680,9 +756,63 @@ def check_rule(path: Path, doc: dict, duplicates: list[str], out: list[Finding])
                     add("error", "script-unreturnable-action",
                         f"script returns action {ret!r}; scripts may only return "
                         f"{sorted(SCRIPT_RETURNABLE)}")
+            for rx, code, msg in REMOVED_SCRIPT_IDIOMS:
+                if rx.search(body):
+                    add("error", code, msg)
+            for m in re.finditer(r"^(falsepositives|level|status|tags|references|author|date|modified|requires|logsource|detection):", body, re.M):
+                add("error", "yaml-key-in-script",
+                    f"top-level key {m.group(1)!r} is indented inside script: | — the Starlark source ends "
+                    f"in YAML text and never parses (the rule always takes on_error). Dedent it")
+            for m in re.finditer(r"\{\s*(\d+)\s*,\s*(\d+)\s*\}", body):
+                if int(m.group(2)) > 1000 or int(m.group(1)) > 1000:
+                    add("error", "re2-repeat-bound",
+                        f"repeat bound {m.group(0)} exceeds RE2's limit of 1000 — re.compile fails at runtime")
+            if re.search(r"meta\.get\(\"session_\"|\bsession_\s*=[^=]|\bsession_[\[.(]", body):
+                add("error", "mangled-session-key",
+                    "`session_` is a codemod artifact: meta['session'] is the key, events(session=...) the kwarg")
+            if re.search(r"\blen\(\s*chain\s*\)", body):
+                add("error", "chain-len",
+                    "a chain has no len(); test it for truth (`if chain:`) or count the steps you appended")
+            lines = body.splitlines()
+            for i, line in enumerate(lines):
+                m = re.match(r"^\s*(session|lineage|children|sessions|programs|events)\s*=[^=]", line)
+                if not m:
+                    continue
+                # a `session=...` keyword on a continuation line of a call is not an assignment
+                prev = next((l for l in reversed(lines[:i]) if l.strip()), "")
+                if prev.rstrip().endswith(("(", ",")) or line.rstrip().endswith(","):
+                    continue
+                add("error", "shadows-builtin",
+                    f"assigning to {m.group(1)!r} shadows the {m.group(1)}() builtin for the whole "
+                    f"function (Starlark locals are function-scoped) — rename the variable")
+            if re.search(r"new_chain\([^)]*(_path|\"process://)", body):
+                add("error", "chain-root-not-session",
+                    "new_chain() takes a session id (lineage()[-1]['id'], session()['id']), "
+                    "not a program path")
+
     elif script:
         add("warn", "script-without-execute",
             "script: is present but action is not 'execute' — the script is ignored")
+
+    # ── capabilities the rule needs vs. what it declares ────────────────────
+    needed: set[str] = set()
+    for cat in categories:
+        if cat in CATEGORY_CAPABILITY:
+            needed.add(CATEGORY_CAPABILITY[cat])
+    for et in event_types:
+        if et in CATEGORY_CAPABILITY:
+            needed.add(CATEGORY_CAPABILITY[et])
+    if script:
+        for rx, cap in SCRIPT_CAPABILITY_HINTS:
+            if rx.search(str(script)):
+                needed.add(cap)
+    if needed and requires_raw is None:
+        add("warn", "missing-requires",
+            f"rule needs {sorted(needed)} but declares no requires: — a host that lacks one "
+            f"(the gateway has no processes or files) would run it against an empty graph")
+    elif needed - requires:
+        add("warn", "requires-incomplete",
+            f"script/contexts need {sorted(needed - requires)} not listed in requires: {sorted(requires)}")
 
     if "periodic" in categories:
         if action != "execute":
@@ -727,7 +857,7 @@ def main() -> int:
     for raw in args.paths:
         p = Path(raw)
         if p.is_dir():
-            files.extend(sorted(p.rglob("*.yml")))
+            files.extend(f for f in sorted(p.rglob("*.yml")) if "fixtures" not in f.parts)
         elif p.exists():
             files.append(p)
         else:

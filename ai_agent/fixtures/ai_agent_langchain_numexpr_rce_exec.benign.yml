@@ -1,0 +1,29 @@
+rule: ai_agent_langchain_numexpr_rce_exec.yml
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: shell
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  child:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: python, cmdline: "python3.11 etl.py"}
+  - {kind: file_read, subject: python, path: /usr/local/lib/python3.11/site-packages/pandas/__init__.py}
+  - {kind: spawn, subject: child, cmdline: "sh -c 'curl -sS https://data.example.com/daily.csv -o /data/daily.csv'"}
+expect:
+  action: allow

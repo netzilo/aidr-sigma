@@ -1,0 +1,24 @@
+subjects:
+  bash:
+    session: pid/1000:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops, email: ops@example.com}]
+    device: srv-1
+    source: probe
+  node:
+    session: pid/1001:1
+    parent: bash
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: node, cmdline: "node /opt/mcphub/dist/index.js --port 3000"}
+  - {kind: http_request, subject: node, url: "http://localhost:3000/api/servers", method: POST, request_id: r0, content_type: application/json, body: '{"name":"evil","config":{"baseUrl":"http://169.254.169.254/latest/meta-data/"}}'}
+  - {kind: http_request, subject: node, url: "http://169.254.169.254/latest/meta-data/iam/security-credentials/", method: GET, request_id: r1}
+expect:
+  action: report
+  reason_contains: "outbound request to cloud metadata endpoint 169.254.169.254"
+  output_contains: ["MCPHub/MCPRouter process context (mcphub)", "prior session request to MCPHub router/config endpoint /api/servers"]
+  chain_min: 2

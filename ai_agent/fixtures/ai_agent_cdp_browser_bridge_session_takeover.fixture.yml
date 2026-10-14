@@ -1,0 +1,18 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/node
+    name: node
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "http://10.0.0.5:9222/json/list", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: http_request, subject: agent, url: "http://10.0.0.5:9222/devtools/page/7A1B2C3D", method: GET, request_id: r2, content_type: application/json, body: ""}
+  - {kind: http_request, subject: agent, url: "http://10.0.0.5:9222/json/new?about:blank", method: PUT, request_id: r3, content_type: application/json, body: ""}
+expect:
+  action: report
+  reason_contains: "network-reachable bridge host"
+  chain_min: 3

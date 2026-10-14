@@ -3,7 +3,7 @@ id: 7f3c1e2a-9b64-4d18-8c5f-2a71d0e4b93c
 status: experimental
 level: medium
 description: |
-  Detects a single, instance-resolved process session driving the Google Play
+  Detects a single session tree driving the Google Play
   Developer API across multiple privileged domains in a short window, anchored on a
   rare high-impact write (account users/grants mutation, monetization/price/refund
   mutation, or an HTTP DELETE of a Play resource).
@@ -20,9 +20,9 @@ description: |
   mere privilege, and is report-only precisely because the server's own confirmation
   gate and legitimate CI automation make blocking unjustifiable.
 
-  Attribution is instance-resolved: caller_pid -> proc_instance -> proc_lineage, with
-  sibling expansion limited to processes spawned by pids already in that lineage and
-  to events inside the trigger's own window. No cross-session attribution is possible.
+  Attribution is session-scoped: triggering session -> lineage(), with sibling
+  expansion limited to sessions spawned by members of that lineage and to events
+  inside the trigger's own window. No cross-session attribution is possible.
   The triggering request is read from meta (never re-queried) to avoid the async
   ingest race; only prior corroborating stages come from the event log.
 
@@ -60,6 +60,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_play_write:
     event_type: http_request
@@ -82,7 +85,7 @@ script: |
   # ── Tunables (this rule's own window — never persisted) ──────────────────
   WINDOW_NS   = 600000000000      # 10 minutes = one operator / CI session
   MAX_PIDS    = 64                # bound session expansion
-  PER_PID_CAP = 300               # bound per-instance log reads
+  PER_PID_CAP = 300               # bound per-session log reads
   BURST_MUT   = 12                # writes in-window that alone justify a report
   BURST_DEL   = 3                 # destructive deletes that alone justify a report
   MAX_STEPS   = 6                 # kill-chain evidence cap
@@ -176,16 +179,19 @@ script: |
       return out
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "method":   e.get("method", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ── Relevance gate: pure string checks on meta, no traversal ─────────────
   def is_relevant_event():
       if meta.get("context_type", "") != "http_request":
@@ -208,37 +214,36 @@ script: |
           return "allow"          # ordinary release write — no anchor, no report
 
       trigger_ts = int(meta.get("event_ts", "0"))
-      cp         = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trigger_ts == 0:
+      if trigger_ts == 0:
           return "allow"
 
-      # ── Instance resolution: never a path-keyed node walk ────────────────
-      inst = proc_instance(cp, trigger_ts)
+      # ── Session resolution: never a path-keyed node walk ─────────────────
+      inst = session()
       if inst == None:
-          print("play-console anchor seen but attribution degraded (pid " +
-                str(cp) + ") — deferring to the next event")
+          print("play-console anchor seen but attribution degraded (session " +
+                meta.get("session", "?") + ") — deferring to the next event")
           return "allow"
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       win_start = trigger_ts - WINDOW_NS
 
-      # ── Session scope: lineage + processes spawned by lineage, in-window ─
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x["actor_start"]
-      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
-                            until_ns=trigger_ts, limit=2000)
+      # ── Session scope: lineage + sessions spawned by lineage, in-window ──
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      spawns = events(kind="SPAWNED", since_ns=win_start,
+                      until_ns=trigger_ts, limit=2000)
       for depth in range(3):
           for e in spawns:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp in session and ap != "" and ap not in session:
-                  if len(session) < MAX_PIDS:
-                      session[ap] = e.get("actor_start", "0")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp in scope and ap != "" and ap not in scope:
+                  if len(scope) < MAX_PIDS:
+                      scope[ap] = True
 
-      # ── Corroborating stages: prior in-window Play traffic by THIS session ─
+      # ── Corroborating stages: prior in-window Play traffic by THIS tree ──
       cid       = meta.get("callid", "")
       cats      = {}
       other     = {}
@@ -249,10 +254,10 @@ script: |
       if method == "DELETE":
           del_count = 1
 
-      for pid in session:
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              since_ns=win_start, until_ns=trigger_ts,
-                              limit=PER_PID_CAP)
+      for sid in scope:
+          rows = events(kind="HTTP_REQUEST", session=sid,
+                        since_ns=win_start, until_ns=trigger_ts,
+                        limit=PER_PID_CAP)
           for e in rows:
               if cid != "" and e.get("callid", "") == cid:
                   continue                      # the trigger itself — counted already
@@ -299,13 +304,13 @@ script: |
       if not fire:
           return "allow"
 
-      # ── Kill chain, rooted at the session owner ──────────────────────────
+      # ── Kill chain, rooted at the session owner ───────────────────────────
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lineage_str = " -> ".join(names)
 
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain = new_chain(lineage_[-1]["id"])
       for e in sort_by_ts(evidence):
           eh = e.get("host", "").lower()
           ep = e.get("path", "").lower()
@@ -315,9 +320,10 @@ script: |
                             stage_desc=em + " " + eh + ep))
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       "https://" + host,
           "kind":     "HTTP_REQUEST",
+          "dir":      "out",
           "method":   method,
           "ts":       str(trigger_ts),
           "first_ts": str(trigger_ts),
@@ -328,7 +334,7 @@ script: |
                         stage_desc=method + " " + host + path + " by " + lineage_str))
 
       degraded = ""
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           degraded = " (lineage degraded — root not ingested)"
 
       reason = "Play Console privileged API sweep — " + why + \

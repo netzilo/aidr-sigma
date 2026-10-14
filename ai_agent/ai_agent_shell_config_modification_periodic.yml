@@ -6,8 +6,9 @@ related:
 status: stable
 level:          high
 description: |
-  Periodic companion. Checks WRITE_FILE graph edges for shell profile and
-  authorized_keys writes at EDR/syscall level. Runs every 30s.
+  Periodic companion. Checks the file writes of every active agent session
+  for shell profile and authorized_keys writes at EDR/syscall level. Runs
+  every 30s.
 author: Netzilo
 date: "2026-06-02"
 tags:
@@ -20,6 +21,8 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - file_activity
 detection:
   sel:
     content|re: '.'
@@ -33,18 +36,12 @@ script: |
   ]
 
   def run():
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
-              src = fs["id"] + "$WRITE"
+      for a in sessions(agent=True, active=True):
+          for w in fs_activity(session=a["id"], op="WRITE"):
               for path in SHELL_PATHS:
-                  if search_in(src, path):
+                  if path in w["path"]:
                       print("Shell config write: " + path +
-                            " by " + fs.get("proc_name", "?"))
+                            " by " + a.get("name", "?") + " (" + w["path"] + ")")
                       return "block"
       return "allow"
 

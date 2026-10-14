@@ -5,7 +5,7 @@ level: high
 description: |
   Detects an AI agent session that launches surf-cli (or any Chrome DevTools
   Protocol control channel via --remote-debugging-port/--remote-debugging-pipe)
-  and then, inside the SAME process session, either
+  and then, inside the SAME session tree, either
 
     (a) reads browser credential material (Cookies / Login Data / Local State /
         Web Data / logins.json / key4.db) with a NON-browser process, or
@@ -19,11 +19,10 @@ description: |
   is normal; the automation harness reading the profile secret store, or
   shipping a captured artifact off-box, is the threat.
 
-  The rule is instance-resolved: it anchors on meta.caller_pid, resolves the
-  exact process instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), expands to that session's descendants via the event log, and
-  queries only that session's events. It never attributes across sessions and
-  never walks path-keyed graph nodes.
+  The rule is session-resolved: it anchors on the triggering session, walks its
+  lineage to the owning session tree, expands to that tree's descendants via the
+  event log, and queries only those sessions' events. It never attributes across
+  session trees and never walks program-keyed graph nodes.
 author: Evgen
 date: "2026-06-11"
 modified: "2026-06-11"
@@ -60,6 +59,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_exec_surf:
     event_type: execute_process
@@ -71,7 +74,7 @@ action: execute
 on_timeout: allow
 on_error:   allow
 script: |
-  # ── surf-cli / CDP browser-automation misuse — instance-resolved ───────────
+  # ── surf-cli / CDP browser-automation misuse — session-resolved ────────────
   WINDOW_NS = 900000000000      # 15 min: anchor and evidence must cluster
   EXEC_ROWS = 4000
   FILE_ROWS = 2000
@@ -150,16 +153,23 @@ script: |
       return False
 
   def ev_edge(e):
-      ts = e.get("ts", "0")
-      return {"from": "process://" + e.get("actor_path", ""),
-              "to": e.get("target_id", ""),
-              "kind": e.get("kind", ""),
-              "ts": ts, "first_ts": ts, "last_ts": ts,
-              "count": "1", "risk_context": ""}
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
 
-  def synth_edge(kind, actor_path, to_id, ts):
-      return {"from": "process://" + actor_path,
-              "to": to_id, "kind": kind,
+  def synth_edge(kind, sess_id, to_id, ts):
+      return {"from": sess_id,
+              "to": to_id, "kind": kind, "dir": "out",
               "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
               "count": "1", "risk_context": ""}
 
@@ -168,38 +178,36 @@ script: |
           return "allow"
 
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trig_ts == 0:
+      if trig_ts == 0:
           return "allow"
 
-      inst = proc_instance(cp, trig_ts)
+      inst = session()
       if inst == None:
-          return "allow"          # degraded — re-fires when the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"          # degraded — re-fires when the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # ── session scope: this lineage plus everything it spawned in-window ───
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = [x.get("actor_start", "0"),
-                                             x.get("actor_path", "")]
-      execs = query_events(kind="EXECUTE_PROCESS",
-                           since_ns=trig_ts - WINDOW_NS, until_ns=trig_ts,
-                           limit=EXEC_ROWS)
+      # ── session scope: this lineage plus everything it spawned in-window ────
+      tree = {}                   # session id -> program path
+      for x in lineage_:
+          tree[x.get("id", "")] = x.get("path", "")
+      execs = events(kind="SPAWNED",
+                     since_ns=trig_ts - WINDOW_NS, until_ns=trig_ts,
+                     limit=EXEC_ROWS)
       for i in range(3):          # bounded transitive closure over one fetch
           for e in execs:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp in session and ap not in session:
-                  session[ap] = [e.get("actor_start", "0"), e.get("actor_path", "")]
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp in tree and ap not in tree:
+                  tree[ap] = e.get("program", "")
 
-      # ── REQUIRED anchor: surf-cli / CDP control launched in THIS session ───
+      # ── REQUIRED anchor: surf-cli / CDP control launched in THIS tree ───────
       anchor = None
       for e in execs:
-          if e.get("actor_pid", "") not in session:
+          if e.get("session_id", "") not in tree:
               continue
-          cmd = e.get("cmdline", "") + " " + e.get("actor_path", "")
+          cmd = e.get("cmdline", "") + " " + e.get("program", "")
           if matches_any(ANCHOR_PATTERNS, cmd):
               if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
                   anchor = e
@@ -209,17 +217,16 @@ script: |
       if s0 == 0 or s0 > trig_ts or (trig_ts - s0) > WINDOW_NS:
           return "allow"
 
-      root  = lineage[-1]
-      dedup = "surf:" + root.get("actor_pid", "0") + ":" + \
-              root.get("actor_start", "0") + ":" + anchor.get("ts", "0")
+      root  = lineage_[-1]
+      dedup = "surf:" + root.get("id", "") + ":" + anchor.get("ts", "0")
       if store_get(dedup) != None:
           return "allow"          # this automation session already reported
 
       # ── non-browser workers of this session (the automation harness) ──────
       workers = []
-      for pid in session:
-          if not is_browser_bin(session[pid][1]):
-              workers.append(pid)
+      for sid in tree:
+          if not is_browser_bin(tree[sid]):
+              workers.append(sid)
 
       cred_edge    = None
       cred_desc    = ""
@@ -230,28 +237,26 @@ script: |
       egress_edge  = None
       egress_desc  = ""
 
-      # Stage: browser secret-store read by a non-browser session instance.
-      for pid in workers:
+      # Stage: browser secret-store read by a non-browser session.
+      for sid in workers:
           if cred_edge != None:
               break
-          rows = query_events(kind="READ_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid][0]),
-                              since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
+          rows = events(kind="READ_FILE", session=sid,
+                        since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
           for r in rows:
               fp = r.get("path", "")
               if contains_any(SECRET_FILES, fp.lower()):
                   cred_edge = ev_edge(r)
                   cred_desc = "browser secret store read by " + \
-                              session[pid][1].split("/")[-1] + ": " + fp
+                              tree[sid].split("/")[-1] + ": " + fp
                   break
 
-      # Stage: captured browser artifact written by a non-browser instance.
-      for pid in workers:
+      # Stage: captured browser artifact written by a non-browser session.
+      for sid in workers:
           if capture_edge != None:
               break
-          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid][0]),
-                              since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
+          rows = events(kind="WRITE_FILE", session=sid,
+                        since_ns=s0, until_ns=trig_ts, limit=FILE_ROWS)
           for r in rows:
               fp = r.get("path", "")
               if contains_any(CAPTURE_FILES, fp.lower()):
@@ -260,10 +265,9 @@ script: |
                   break
 
       # Stage: CDP control traffic and outbound egress by session workers.
-      for pid in workers:
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              actor_start=int(session[pid][0]),
-                              since_ns=s0, until_ns=trig_ts, limit=HTTP_ROWS)
+      for sid in workers:
+          rows = events(kind="HTTP_REQUEST", session=sid,
+                        since_ns=s0, until_ns=trig_ts, limit=HTTP_ROWS)
           for r in rows:
               if cdp_edge == None and matches_any(CDP_PATHS, r.get("path", "")):
                   cdp_edge = ev_edge(r)
@@ -276,16 +280,16 @@ script: |
 
       # The TRIGGERING event comes from meta, never from a log lookup.
       ct          = meta.get("context_type", "")
-      caller_path = inst.get("actor_path", "")
+      caller_path = inst.get("path", "")
       if ct == "http_request" and not is_browser_bin(caller_path):
           thost = meta.get("host", "")
           tpath = meta.get("path", "")
           if cdp_edge == None and matches_any(CDP_PATHS, tpath):
-              cdp_edge = synth_edge("HTTP_REQUEST", caller_path,
+              cdp_edge = synth_edge("HTTP_REQUEST", inst["id"],
                                     "https://" + thost, trig_ts)
               cdp_desc = "DevTools control channel: " + thost + tpath
           if egress_edge == None and not is_internal_host(thost):
-              egress_edge = synth_edge("HTTP_REQUEST", caller_path,
+              egress_edge = synth_edge("HTTP_REQUEST", inst["id"],
                                        "https://" + thost, trig_ts)
               egress_desc = "outbound " + meta.get("method", "") + " to " + thost
 
@@ -295,10 +299,10 @@ script: |
           return "allow"
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
 
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
       chain.append(step(ev_edge(anchor), stage_id="Browser Automation Launch",
                         stage_desc="CDP/surf-cli control launched: " +
                                    anchor.get("cmdline", "")[:200]))

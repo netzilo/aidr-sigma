@@ -1,0 +1,31 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/102:1
+    parent: cursor
+    program: /usr/bin/pip
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 setup.py egg_info"}
+  - {kind: spawn, subject: pip, cmdline: "pip install minia-telegram"}
+expect:
+  action: report
+  reason_contains: "minia-telegram"
+  output_contains: ["build-hook-execution", "agent-driven"]
+  chain_min: 2

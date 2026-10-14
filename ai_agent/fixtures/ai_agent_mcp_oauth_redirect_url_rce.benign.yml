@@ -1,0 +1,23 @@
+rule: ai_agent_mcp_oauth_redirect_url_rce.yml
+subjects:
+  cherry:
+    session: pid/100:1
+    program: /Applications/Cherry Studio.app/Contents/MacOS/Cherry Studio
+    name: Cherry Studio
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: cherry
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cherry}
+  - {kind: http_request, subject: cherry, url: "https://api.anthropic.com/v1/messages", method: POST, request_id: r1, content_type: application/json, body: "{}"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -s https://api.github.com/repos/acme/proj/releases/latest'"}
+expect:
+  action: allow

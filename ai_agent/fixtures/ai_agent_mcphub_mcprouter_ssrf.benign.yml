@@ -1,0 +1,21 @@
+rule: ai_agent_mcphub_mcprouter_ssrf.yml
+subjects:
+  bash:
+    session: pid/1000:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+  node:
+    session: pid/1001:1
+    parent: bash
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: node, cmdline: "node server.js"}
+  - {kind: http_request, subject: node, url: "https://api.example.com/v1/register", method: POST, request_id: r1, content_type: application/json, body: '{"name":"docs","baseUrl":"https://docs.example.com/mcp"}'}
+expect:
+  action: allow

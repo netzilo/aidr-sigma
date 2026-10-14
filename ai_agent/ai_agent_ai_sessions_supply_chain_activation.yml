@@ -12,7 +12,8 @@ description: |
   does NOT fire on the installation or execution of the package, which is what a generic
   "unpinned dependency install" rule already covers and which is indistinguishable from
   any benign dependency. It fires only when the package's code is activated INSIDE a
-  monitored agent's process tree AND at least two independent follow-on behaviours occur
+  monitored agent's session tree (the lineage root of the triggering session) AND at
+  least two independent follow-on behaviours occur
   in the same 15-minute window, ordered after that activation:
 
     * external instruction content (ACQUIRED_SKILL) ingested from a public-origin host
@@ -44,14 +45,18 @@ falsepositives:
     benign intent. Investigate the destination rather than assuming compromise.
   - CI or devcontainer bootstrap that installs ai-sessions and then runs a test suite
     which downloads fixtures from several public hosts inside the same window.
-  - Process nodes are keyed by executable path, so HTTP requests made by an unrelated
-    invocation of the same interpreter (python, node) can be attributed to the same node
-    and inflate the egress host count.
+  - Sessions spawned by the agent inside the window but unrelated to the package (a
+    second interpreter the agent started for other work) are part of the same tree and
+    can inflate the egress host count.
   - A developer running the bridge interactively under an agent-launched shell, where the
     harness name appears in the command line as normal usage.
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - skill
 detection:
   sel_pkg_exec:
     event_type: execute_process
@@ -94,6 +99,13 @@ script: |
       # default "1" = treat unknown as internal (narrower, fewer FPs)
       return n != None and n.get("is_ztna_host", "1") == "0"
 
+  def edge_ts(e):
+      for k in ["ts", "last_ts", "first_ts"]:
+          v = e.get(k, "")
+          if v != "" and v != "0":
+              return int(v)
+      return 0
+
   def ident_of(pe):
       p = node(pe["to"])
       if p == None:
@@ -118,10 +130,10 @@ script: |
   def same_edge(a, b):
       return a.get("ts", "") == b.get("ts", "") and a.get("to", "") == b.get("to", "")
 
-  # ── bounded, windowed process tree (depth 2) ──────────────────────────────────
+  # ── bounded, windowed session tree (depth 2) ──────────────────────────────────
   def collect_tree(aid, lo, hi):
       kids = []
-      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for pe in edges(aid, dir="out", kind="SPAWNED"):
           ts = int(pe.get("ts", "0"))
           if ts >= lo and ts <= hi:
               kids.append(pe)
@@ -129,11 +141,19 @@ script: |
       for pe in kids:
           tree.append(pe)
       for pe in kids:
-          for ge in edges(pe["to"], dir="out", kind="EXECUTE_PROCESS"):
+          for ge in edges(pe["to"], dir="out", kind="SPAWNED"):
               ts = int(ge.get("ts", "0"))
               if ts >= lo and ts <= hi:
                   tree.append(ge)
       return tree
+
+  # The agent whose tree the package ran in: the lineage root of the triggering
+  # session when it is an agent, otherwise every agent session (degraded).
+  def candidate_agents():
+      lineage_ = lineage()
+      if lineage_ and lineage_[-1].get("agent", "0") == "1":
+          return [lineage_[-1]]
+      return sessions(agent=True)
 
   def run():
       if not is_relevant_event():
@@ -145,9 +165,7 @@ script: |
       lo = anchor_ts - WINDOW_NS
       hi = anchor_ts + WINDOW_NS
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in candidate_agents():
           aid  = agent["id"]
           tree = collect_tree(aid, lo, hi)
           if len(tree) == 0:
@@ -165,7 +183,7 @@ script: |
 
           chain  = new_chain(aid)
           chain.append(step(tie, stage_id="Package Activation",
-                            stage_desc="ai-sessions package code ran inside agent process tree: " + short(tie)))
+                            stage_desc="ai-sessions package code ran inside agent session tree: " + short(tie)))
           corrob = []
 
           # C1 — external instruction content ingested after activation
@@ -173,7 +191,7 @@ script: |
               s = node(se["to"])
               if not is_public(s):
                   continue
-              ts = int(se.get("ts", "0"))
+              ts = edge_ts(se)
               if ts < tie_ts or ts > hi:
                   continue
               chain.append(step(se, stage_id="Bridge Ingest",
@@ -195,14 +213,14 @@ script: |
                   u = node(he["to"])
                   if not is_public(u):
                       continue
-                  if int(he.get("last_ts", "0")) < tie_ts:
+                  if edge_ts(he) < tie_ts:
                       continue
                   hosts[u.get("host", "?")] = he
           if len(hosts) > 0:
               shown = 0
               for h in hosts:
                   chain.append(step(hosts[h], stage_id="Post-Activation Egress",
-                                    stage_desc="non-installer process in agent tree reached public host " + h))
+                                    stage_desc="non-installer session in agent tree reached public host " + h))
                   shown = shown + 1
                   if shown >= 3:
                       break
@@ -243,7 +261,7 @@ script: |
           if store_usage()["free"] > 8192:
               store_set("reported", seen)
 
-          reason = "ai-sessions activated in agent process tree with follow-on behaviour: " + "; ".join(corrob)
+          reason = "ai-sessions activated in agent session tree with follow-on behaviour: " + "; ".join(corrob)
           print(reason)
           return {"action": "report", "reason": reason, "chain": chain}
 

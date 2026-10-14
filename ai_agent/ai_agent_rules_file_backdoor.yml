@@ -42,6 +42,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # The agent writing an instruction file, seen as the tool argument.
   sel_instruction_path_arg:

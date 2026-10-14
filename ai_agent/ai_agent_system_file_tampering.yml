@@ -22,6 +22,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Bash redirect commands
   sel_bash_etc:

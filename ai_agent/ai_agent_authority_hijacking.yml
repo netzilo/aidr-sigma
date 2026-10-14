@@ -35,6 +35,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   # ── The prompt surface (framework hook → llm_request) ─────────────────────
   sel_prompt_authority:

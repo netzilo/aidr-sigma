@@ -1,7 +1,7 @@
 title: Agent Skill Poisoning Chain Correlator
 id: netzilo-agent-skill-poison-chain-001
 status: stable
-description: "Detects an agent skill-poisoning kill chain within a single agent session using instance-resolved provenance. The REQUIRED initial-access anchor is a skill acquisition by the AGENT itself OR by any process in the agent's subtree (a subprocess the agent spawned) — covering both an in-process fetch (skill attributed to the agent node) and a shell fetch (skill attributed to a descendant). The skill must be externally sourced (public origin); an internally sourced skill does not anchor the chain. Anchored on the triggering connection's caller_pid, the rule resolves the agent in that connection's lineage, then confirms an ORDERED sequence: external skill acquired (poisoning) -> credential access -> exfiltration to a private peer or cloud-metadata endpoint. Poisoning + Credential Access + Lateral Movement = block."
+description: "Detects an agent skill-poisoning kill chain within a single agent session using instance-resolved provenance. The REQUIRED initial-access anchor is a skill acquisition by the AGENT itself OR by any process in the agent's subtree (a subprocess the agent spawned) — covering both an in-process fetch (skill attributed to the agent node) and a shell fetch (skill attributed to a descendant). The skill must be externally sourced (public origin); an internally sourced skill does not anchor the chain. Anchored on the triggering connection's session, the rule resolves the agent session in that connection's lineage, then confirms a same-session sequence: external skill acquired (poisoning) -> credential access -> exfiltration to a private peer or cloud-metadata endpoint. Poisoning + Credential Access + Lateral Movement = block."
 author: Netzilo
 date: "2026-06-11"
 modified: "2026-06-11"
@@ -35,6 +35,11 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - file_activity
+  - connect
+  - skill
 detection:
   sel_trigger:
     event_type:
@@ -57,9 +62,9 @@ script: |
   #   Lateral Movement  = the triggering connect to a private/metadata endpoint.
   #
   # Skills live only in the behaviour graph, so the poisoning stage reads
-  # ACQUIRED_SKILL edges off process nodes (the agent node + descendant nodes),
-  # TIME-GATED to the session window to bound the path-keyed lookup. Execution/
-  # exfil stages use the on-disk event-provenance log.
+  # ACQUIRED_SKILL edges off session nodes (the agent session + the sessions
+  # it spawned), TIME-GATED to the session window. Credential-access stages use
+  # the event log scoped to those same session ids.
   # ─────────────────────────────────────────────────────────────────────────────
 
   CLOUD_METADATA = ["169.254.169.254", "100.100.100.200"]
@@ -95,85 +100,67 @@ script: |
       return False
 
   def ev_edge(e):
-      to = e.get("target_id", "")
-      orig = ""
-      kind = e.get("kind", "")
-      is_file = (kind == "READ_FILE" or kind == "WRITE_FILE" or kind == "CREATE_FILE" or
-                 kind == "DELETE_FILE" or kind == "RENAME_FILE")
-      path = e.get("path", "")
-      if is_file and path != "":
-          orig = to
-          to = path
-      d = {
-          "from": "process://" + e.get("actor_path", ""),
-          "to": to,
-          "kind": e.get("kind", ""),
-          "ts": e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts": e.get("ts", "0"),
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-      cid = e.get("callid", "")
-      if cid != "":
-          d["callid"] = cid
-      if orig != "":
-          d["_orig_to"] = orig
-      return d
-
   def run():
       # ── relevance: only a connect to a private / cloud-metadata endpoint ──────
       host = meta.get("host", "")
       if not is_ztna_host(host):
           return "allow"
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return "allow"
       event_ts = int(meta.get("event_ts", "0"))
       connect_ts = event_ts
 
-      inst = proc_instance(cp, event_ts)
+      inst = session(cp)
       if inst == None:
           return "allow"
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       sess_lo = connect_ts - WINDOW_NS
       sess_hi = connect_ts + WINDOW_NS
-      all_exec = query_events(kind="EXECUTE_PROCESS", limit=5000)
+      all_exec = events(kind="SPAWNED", limit=5000)
 
-      # ── identify the agent(s) in this connect's lineage ───────────────────────
-      agent_pids = {}
-      agent_paths = {}        # process node path -> True (seed for skill probe)
-      agent_root_path = ""
-      for x in lineage:
+      # ── identify the agent session(s) in this connect's lineage ─────────────
+      agent_ids = {}
+      agent_root = ""          # the agent session closest to the lineage root
+      for x in lineage_:
           if x.get("agent", "0") == "1":
-              agent_pids[x["actor_pid"]] = True
-              p = x.get("actor_path", "")
-              if p != "":
-                  agent_paths[p] = True
-              agent_root_path = p
-      if not agent_pids:
+              agent_ids[x["id"]] = True
+              agent_root = x["id"]
+      if not agent_ids:
           return "allow"       # no agent in lineage → not an agent-driven chain
 
       # ── agent subtree: the agent plus every descendant spawned in-window.
       #    "agent OR any subprocess of the agent" — the poisoning probe set. ──────
       subtree = {}
-      for p in agent_pids:
+      for p in agent_ids:
           subtree[p] = True
       for _ in range(8):
           grew = False
           for e in all_exec:
-              pp = e.get("parent_pid", "")
-              ap = e["actor_pid"]
+              pp = e.get("parent_session", "")
+              ap = e["session_id"]
               if pp == "" or pp not in subtree or ap in subtree:
                   continue
               t = int(e.get("ts", "0"))
               if t < sess_lo or t > sess_hi:
                   continue
               subtree[ap] = True
-              path = e.get("actor_path", "")
-              if path != "":
-                  agent_paths[path] = True
               grew = True
           if not grew:
               break
@@ -185,14 +172,14 @@ script: |
       #    around the connect, not strict skill-before-exfil ordering.
       skill_edge = None
       skill_node = None
-      for path in agent_paths:
-          for e in edges("process://" + path, dir="out", kind="ACQUIRED_SKILL"):
+      for sid in subtree:
+          for e in edges(sid, dir="out", kind="ACQUIRED_SKILL"):
               sn = node(e.get("to", ""))
               if sn == None:
                   continue
               if sn.get("is_ztna_host", "0") != "0":
                   continue          # internal/private-origin skill — not poisoning
-              t = int(e.get("ts", "0"))
+              t = int(e.get("last_ts", e.get("first_ts", e.get("ts", "0"))))
               if t < sess_lo or t > sess_hi:
                   continue
               skill_edge = e
@@ -201,7 +188,7 @@ script: |
           return "allow"
 
       stages = ["Poisoning:skill:" + skill_node.get("name", "")]
-      chain = new_chain("process://" + agent_root_path)
+      chain = new_chain(agent_root)
       chain.append(step(skill_edge, stage_id="Poisoning",
           stage_desc="agent/subprocess acquired external skill: " + skill_node.get("name", "") +
                      " (host=" + skill_node.get("host", "") + ", source=" + skill_node.get("source", "") + ")"))
@@ -213,7 +200,7 @@ script: |
       #    heuristics. Symmetric window; no ordering constraint vs the skill.
       cred_hit = False
       for pid in subtree:
-          for e in query_events(kind="READ_FILE", actor_pid=int(pid), limit=400):
+          for e in events(kind="READ_FILE", session=pid, limit=400):
               t = int(e.get("ts", "0"))
               if t < sess_lo or t > sess_hi:
                   continue
@@ -228,7 +215,7 @@ script: |
               break
       if not cred_hit:
           for pid in subtree:
-              for e in query_events(kind="WRITE_FILE", actor_pid=int(pid), limit=400):
+              for e in events(kind="WRITE_FILE", session=pid, limit=400):
                   t = int(e.get("ts", "0"))
                   if t < sess_lo or t > sess_hi:
                       continue
@@ -245,10 +232,12 @@ script: |
           return "allow"          # credential access is required by this chain
 
       # ── Stage 2 (REQUIRED): Lateral Movement — the triggering connect ─────────
+      proto = meta.get("protocol", "")
+      if proto == "":
+          proto = "tcp"
       connect_ev = {
-          "kind": "CONNECTS", "actor_pid": str(cp),
-          "actor_path": inst.get("actor_path", ""),
-          "target_id": "host://tcp:" + host + ":" + meta.get("port", ""),
+          "kind": "CONNECTS", "session_id": inst["id"],
+          "target_id": "host://" + proto + ":" + host + ":" + meta.get("port", ""),
           "ts": str(connect_ts), "host": host,
           "callid": meta.get("callid", ""),
       }
@@ -259,7 +248,7 @@ script: |
 
       # ── verdict: Poisoning + Credential Access + Lateral Movement = 3 stages ──
       if len(stages) >= 3:
-          names = " -> ".join([x.get("actor_path", "").split("/")[-1] for x in lineage])
+          names = " -> ".join([x.get("path", "").split("/")[-1] for x in lineage_])
           print("Agent Skill Poisoning Chain CONFIRMED (" + str(len(stages)) + " stages) via " +
                 names + ": " + ", ".join(stages))
           # Mark the agent/host integrity as BREACHED (level 0). The block stops

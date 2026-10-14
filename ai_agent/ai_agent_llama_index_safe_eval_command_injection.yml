@@ -8,11 +8,11 @@ description: |
   payload that contains no '_' characters while still reaching os.system / os.popen.
 
   The only observable the engine emits for this threat is execute_process, so the rule is
-  instance-resolved rather than content-only: it anchors on meta["caller_pid"], resolves
-  the exact process instance with proc_instance(), walks proc_lineage() to prove the
-  spawning process really is a near-ancestor Python interpreter (the llama_index host),
-  and then scopes every corroborating query_events() lookup to that one session's PIDs.
-  No cross-session attribution is possible.
+  session-resolved rather than content-only: it anchors on the triggering spawn's session,
+  walks lineage() to prove a near ancestor really is a Python interpreter session (the
+  llama_index host), and then scopes every corroborating events() lookup to the session
+  ids of that lineage and the sessions they spawned. No cross-session attribution is
+  possible.
 
   Required anchor: a Python-family interpreter within MAX_LINEAGE_DEPTH ancestors spawns
   a command line containing an OS primitive or an eval/obfuscation construct. The anchor
@@ -48,6 +48,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -126,17 +129,17 @@ script: |
   def cmd_of(e):
       c = e.get("cmdline", "")
       if c == "":
-          c = e.get("actor_path", "")
+          c = e.get("program", "")
       return c
 
   def exec_edge(e):
-      src = e.get("parent_path", "")
+      src = e.get("parent_session", "")
       if src == "":
-          src = e.get("actor_path", "")
+          src = e.get("session_id", "")
       return {
-          "from":     "process://" + src,
-          "to":       "process://" + e.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     src,
+          "to":       e.get("session_id", ""),
+          "kind":     "SPAWNED",
           "ts":       e.get("ts", "0"),
           "first_ts": e.get("ts", "0"),
           "last_ts":  e.get("ts", "0"),
@@ -145,7 +148,7 @@ script: |
 
   def conn_edge(e):
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     e.get("session_id", ""),
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", "CONNECTS"),
           "ts":       e.get("ts", "0"),
@@ -172,30 +175,31 @@ script: |
 
       cmd     = meta.get("content", "")
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if trig_ts <= 0 or cp == 0:
+      cp      = meta.get("session", "")
+      if trig_ts <= 0 or cp == "":
           return "allow"
 
-      # ── anchor on the exact triggering instance (never a path-keyed walk) ──
-      inst = proc_instance(cp, trig_ts)
+      # ── anchor on the triggering session: the spawned OS command ──────────
+      inst = session(cp)
       if inst == None:
           return "allow"                      # degraded attribution - never guess
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # ── REQUIRED: a python-family LLM host is a NEAR ancestor ─────────────
-      depth = len(lineage)
-      if depth > MAX_LINEAGE_DEPTH:
-          depth = MAX_LINEAGE_DEPTH
+      #    lineage_[0] is the spawned command itself; ancestors start at 1.
+      depth = len(lineage_)
+      if depth > MAX_LINEAGE_DEPTH + 1:
+          depth = MAX_LINEAGE_DEPTH + 1
       py_idx = -1
-      for i in range(depth):
-          if any_re(PY_HOST, lineage[i].get("actor_path", "")):
+      for i in range(1, depth):
+          if any_re(PY_HOST, lineage_[i].get("path", "")):
               py_idx = i
               break
       if py_idx < 0:
           return "allow"                      # not an eval-sandbox host
-      py = lineage[py_idx]
+      py = lineage_[py_idx]
 
       prim   = any_re(OS_PRIM, cmd)
       obf    = any_re(OBF, cmd)
@@ -210,18 +214,21 @@ script: |
           score = 2
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       lin_s = " <- ".join(names)
 
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
 
       # Trigger stage comes from meta - the log is async and may not have it yet.
+      trig_from = inst.get("parent", "")
+      if trig_from == "":
+          trig_from = py["id"]
       trig_edge = {
-          "from":     "process://" + py.get("actor_path", ""),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     trig_from,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(trig_ts),
           "first_ts": str(trig_ts),
           "last_ts":  str(trig_ts),
@@ -230,8 +237,8 @@ script: |
       chain.append(step(
           trig_edge,
           stage_id="Eval Escape",
-          stage_desc="python host " + short(py.get("actor_path", "")) +
-                     " (pid " + py.get("actor_pid", "?") + ") spawned OS command: " + cmd[:200]))
+          stage_desc="python host " + short(py.get("path", "")) +
+                     " (" + py.get("id", "?") + ") spawned OS command: " + cmd[:200]))
 
       if no_us:
           chain.append(step(
@@ -240,26 +247,28 @@ script: |
               stage_desc="eval construct carries ZERO underscore characters - " +
                          "matches the llama_index safe_eval underscore-filter bypass"))
 
-      # ── session scope: lineage PIDs plus their descendants in the window ──
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = True
+      # ── session scope: lineage session ids plus their descendants in the window
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
       since = trig_ts - WINDOW_NS
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=trig_ts, limit=2000)
+      execs = events(kind="SPAWNED", since_ns=since, until_ns=trig_ts, limit=2000)
       for _pass in range(2):
           for e in execs:
-              if len(session) >= MAX_SESSION_PIDS:
+              if len(scope) >= MAX_SESSION_PIDS:
                   break
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = True
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # ── corroborator 1: burst of further OS commands from the same session ─
+      # ── corroborator 1: burst of further OS commands from the same session tree
       cid   = meta.get("callid", "")
       burst = []
       for e in execs:
           if cid != "" and e.get("callid", "") == cid:
               continue
-          if e.get("actor_pid", "") not in session and e.get("parent_pid", "") not in session:
+          if e.get("session_id", "") == inst["id"]:
+              continue                        # the triggering spawn itself
+          if e.get("session_id", "") not in scope and e.get("parent_session", "") not in scope:
               continue
           c = cmd_of(e)
           if any_re(OS_PRIM, c) or any_re(OBF, c):
@@ -276,18 +285,19 @@ script: |
                   stage_id="Command Burst",
                   stage_desc="same-session OS command #" + str(n) + ": " + cmd_of(e)[:160]))
 
-      # ── corroborator 2: outbound connect by a session PID (callback/exfil) ─
+      # ── corroborator 2: outbound connect by a session in scope (callback/exfil)
       egress = None
       seen   = 0
-      for pid in session:
+      for sid in scope:
           if seen >= MAX_EGRESS_PIDS or egress != None:
               break
-          if pid == "":
+          if sid == "":
               continue
           seen = seen + 1
-          for r in query_events(kind="CONNECTS", actor_pid=int(pid),
+          for r in events(kind="CONNECTS", session=sid,
                                 since_ns=since, until_ns=trig_ts, limit=20):
-              if r.get("is_ztna_host", "0") == "1":
+              hn = node(r.get("target_id", ""))
+              if hn != None and hn.get("is_ztna_host", "0") == "1":
                   continue
               egress = r
               break
@@ -296,13 +306,13 @@ script: |
           chain.append(step(
               conn_edge(egress),
               stage_id="Post-Exploitation Egress",
-              stage_desc="session process " + short(egress.get("actor_path", "?")) +
+              stage_desc="session process " + short(egress.get("program", "?")) +
                          " connected out to " + egress.get("host", egress.get("target_id", "?"))))
 
       if score < 2:
           return "allow"
 
-      reason = ("LLM eval escape - " + short(py.get("actor_path", "?")) +
+      reason = ("LLM eval escape - " + short(py.get("path", "?")) +
                 " spawned OS command via lineage [" + lin_s + "]; score=" + str(score) +
                 "; cmd=" + cmd[:200])
       if no_us:

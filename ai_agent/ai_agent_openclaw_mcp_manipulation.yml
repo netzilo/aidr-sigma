@@ -37,6 +37,9 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - file_activity
+  - skill
 detection:
   sel:
     content|re: '.'
@@ -80,9 +83,7 @@ script: |
               break
 
   def run():
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           chain = new_chain(aid)
           hits = []
@@ -116,8 +117,8 @@ script: |
 
   result = run()
 falsepositives:
-  - A developer installing or upgrading an MCP server by hand while the agent is
-    the monitored ancestor of their shell
-  - Package managers writing plugin manifests during an ordinary npm/pip install
-  - Editor extensions rewriting their own settings files
-  - Repository checkout materialising a committed .mcp.json
+- A developer installing or upgrading an MCP server by hand while the agent is
+  the monitored ancestor of their shell
+- Package managers writing plugin manifests during an ordinary npm/pip install
+- Editor extensions rewriting their own settings files
+- Repository checkout materialising a committed .mcp.json

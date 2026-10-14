@@ -58,6 +58,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -123,18 +125,25 @@ script: |
       }
 
   # ---------------------------------------------------------------------------
-  # Graph traversal - HTTP_REQUEST edges from monitored agent processes to URL
-  # nodes. HTTP_REQUEST is the only edge kind this campaign is observable on.
+  # Graph traversal - HTTP_REQUEST edges from the triggering session's lineage
+  # (the agent and what it runs) to URL nodes. HTTP_REQUEST is the only edge
+  # kind this campaign is observable on.
   # ---------------------------------------------------------------------------
   def find_agent_edge(h):
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="HTTP_REQUEST"):
+      for s in lineage():
+          for e in edges(s["id"], dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
               if u != None and u.get("host", "") == h:
-                  return [a["id"], e]
+                  return [s["id"], e]
       return [None, None]
+
+  def agent_root():
+      # The session everything is attributed to: the root of the triggering
+      # session's lineage (the agent), else the triggering session itself.
+      lin = lineage()
+      if lin:
+          return lin[len(lin) - 1]["id"]
+      return meta.get("session", "")
 
   def url_node_for(h):
       for u in graph(type="URL"):
@@ -167,7 +176,7 @@ script: |
       aid  = pair[0]
       ev   = pair[1]
       if aid == None:
-          aid = "process://" + agent
+          aid = agent
       if ev == None:
           ev = synth_edge(aid, host, now)
 
@@ -219,7 +228,7 @@ script: |
       if aid == None:
           aid = p2[0]
       if aid == None:
-          aid = "process://" + agent
+          aid = agent
       e1 = p1[1]
       if e1 == None:
           e1 = synth_edge(aid, rec.get("host", ""), t0)
@@ -261,9 +270,9 @@ script: |
       if now == 0:
           return "allow"
 
-      agent = meta.get("agent_name", "")
+      agent = agent_root()
       if agent == "":
-          agent = "unresolved-agent"
+          return "allow"                     # no session to attribute to
 
       is_index = host_is_index(host) or path_is_index(path)
 

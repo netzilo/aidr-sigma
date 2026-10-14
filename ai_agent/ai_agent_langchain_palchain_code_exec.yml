@@ -8,13 +8,12 @@ description: |
   handed to Python `exec()` inside PALChain and becomes attacker-controlled code.
 
   The only observable the engine emits for this threat is `execute_process`, so the
-  rule is instance-resolved: it anchors on `meta["caller_pid"]` of the spawn event,
-  resolves the exact process instance with `proc_instance()`, walks the true spawn
-  chain with `proc_lineage()`, and reads *prior* stages from the event log with
-  `query_events(kind="EXECUTE_PROCESS")` scoped strictly to that one session
-  (lineage PIDs plus processes spawned by those PIDs). Nothing is ever attributed
-  across sessions, and the triggering event itself is taken from `meta` (never
-  re-looked-up in the asynchronously-populated log).
+  rule is session-keyed: the triggering session is the spawned interpreter, its
+  `lineage()` is the true spawn chain, and *prior* stages are read from the event
+  log with `events(kind="SPAWNED")` scoped strictly to that lineage plus the
+  sessions it spawned in-window. Nothing is ever attributed across sessions, and
+  the triggering event itself is taken from `meta` (never re-looked-up in the
+  log).
 
   Two mutually exclusive anchors, both high specificity:
     A. Inline interpreter code execution — the spawned command line names a Python
@@ -55,6 +54,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -79,11 +80,13 @@ on_timeout: allow
 on_error: allow
 script: |
   # LangChain PALChain (CVE-2023-36258) arbitrary code execution.
-  # Instance-resolved: caller_pid -> proc_instance -> proc_lineage -> query_events.
-  # Session-scoped only. Trigger data comes from meta, prior stages from the log.
+  # Session-keyed: the triggering session IS the spawned interpreter; its
+  # lineage() is the true spawn chain; prior stages come from the event log,
+  # scoped to that one lineage and the sessions it spawned in-window.
+  # Trigger data comes from meta, prior stages from the log.
 
   WINDOW_NS = 300000000000   # 5 minutes - stage clustering window
-  EXEC_ROWS = 600            # single EXECUTE_PROCESS log pass (newest-first)
+  EXEC_ROWS = 600            # single SPAWNED log pass (newest-first)
   MAX_PRIOR = 40             # candidate prior rows examined
 
   INTERP_RE = r"(?i)\b(?:python[0-9.]*|pypy[0-9.]*)\b"
@@ -146,22 +149,32 @@ script: |
       return s
 
   def ev_edge(e):
-      frm = e.get("parent_path", "")
-      if frm != "":
-          frm = "process://" + frm
-      else:
-          frm = "process://pid:" + e.get("parent_pid", "0")
-      to = e.get("target_id", "")
-      if to == "":
-          to = "process://" + e.get("actor_path", "")
+      # A SPAWNED row is keyed by the child: from = spawner, to = child.
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
           "from":     frm,
-          "to":       to,
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  e.get("cmdline", ""),
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def sess_edge(x):
+      # SPAWNED edge for a session dict (parent -> session, at first_seen).
+      t = x.get("first_seen", "0")
+      return {
+          "from":     x.get("parent", ""),
+          "to":       x.get("id", ""),
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def run():
@@ -181,61 +194,65 @@ script: |
       if not anchor_a and payload == None:
           return "allow"
 
-      # 2. instance attribution - never a path-keyed graph walk
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      # 2. session attribution - the triggering session is the spawned process
+      if meta.get("session", "") == "":
           return "allow"
       ets = int(meta.get("event_ts", "0"))
       if ets == 0:
           return "allow"
-      inst = proc_instance(cp, ets)
+      inst = session()
       if inst == None:
-          return "allow"                      # degraded - re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
+          return "allow"                      # degraded - re-fires when the session lands
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
           return "allow"
 
-      # 3. session scope: lineage instances + processes they spawned in-window
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "")
+      # 3. scope: lineage sessions + sessions they spawned in-window
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
 
       since = ets - WINDOW_NS
       if since < 0:
           since = 0
-      exec_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                               until_ns=ets, limit=EXEC_ROWS)
+      exec_rows = events(kind="SPAWNED", since_ns=since,
+                         until_ns=ets, limit=EXEC_ROWS)
       for i in range(2):                      # two passes: rows are newest-first
           for e in exec_rows:
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = e.get("actor_start", "")
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
+      # the interpreter host is an ANCESTOR of the trigger (never the trigger itself)
       py_host = None
-      for x in lineage:
-          if is_python_path(x.get("actor_path", "")):
+      py_host_edge = None
+      for x in lineage_[1:]:
+          if is_python_path(x.get("path", "")):
               py_host = x
+              py_host_edge = sess_edge(x)
               break
       if py_host == None:
           for e in exec_rows:
-              if e.get("actor_pid", "") in session:
-                  if is_python_path(e.get("actor_path", "")):
+              sid = e.get("session_id", "")
+              if sid in scope and sid != inst["id"]:
+                  if is_python_path(e.get("program", "")):
                       py_host = e
+                      py_host_edge = ev_edge(e)
                       break
 
-      # anchor B requires a Python interpreter host in THIS session
+      # anchor B requires a Python interpreter host in THIS scope
       if not anchor_a and py_host == None:
           return "allow"
 
-      # 4. kill chain, rooted at the session owner
-      root  = lineage[-1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # 4. kill chain, rooted at the lineage root (the agent)
+      root  = lineage_[-1]
+      chain = new_chain(root["id"])
       stages = []
 
       if py_host != None:
-          chain.append(step(ev_edge(py_host), stage_id="Interpreter Host",
-                            stage_desc="python interpreter in session: " +
-                                       py_host.get("actor_path", "?") +
-                                       " (pid " + py_host.get("actor_pid", "?") + ")"))
+          chain.append(step(py_host_edge, stage_id="Interpreter Host",
+                            stage_desc="python interpreter in scope: " +
+                                       py_host.get("path", py_host.get("program", "?")) +
+                                       " (session " + py_host.get("id", py_host.get("session_id", "?")) + ")"))
           stages.append("python host")
 
       seen  = {}
@@ -245,10 +262,11 @@ script: |
           if count >= MAX_PRIOR:
               break
           e = exec_rows[total - 1 - i]        # oldest-first, chronological chain
-          if e.get("actor_pid", "") not in session:
-              continue
+          sid = e.get("session_id", "")
+          if sid not in scope or sid == inst["id"]:
+              continue                        # the trigger stage is taken from meta
           c = e.get("cmdline", "")
-          if c == "" or c == cmd:
+          if c == "":
               continue
           ts = int(e.get("ts", "0"))
           if ts < since or ts > ets:
@@ -260,18 +278,16 @@ script: |
               if re.find(pair[1], c) != None:
                   seen[pair[0]] = True
                   chain.append(step(ev_edge(e), stage_id=pair[0],
-                                    stage_desc=e.get("actor_path", "?") +
+                                    stage_desc=e.get("program", "?") +
                                                " ran: " + short(c, 200)))
                   stages.append(pair[0])
 
       # 5. trigger stage - taken from meta, never re-queried from the log
-      tgt = re.find(r"/[A-Za-z0-9._+/-]{2,160}", cmd)
-      if tgt == None:
-          tgt = "spawned-process"
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
-          "to":       "process://" + tgt,
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", ""),
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(ets),
           "first_ts": str(ets),
           "last_ts":  str(ets),
@@ -288,11 +304,11 @@ script: |
                         stage_desc=desc + " | cmd: " + short(cmd, 200)))
 
       names = []
-      for x in lineage:
-          p = x.get("actor_path", "")
+      for x in lineage_:
+          p = x.get("path", "")
           names.append(p.split("/")[-1])
       attribution = "resolved"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           attribution = "degraded"
 
       reason = ("PALChain-style arbitrary code execution (CVE-2023-36258 pattern): " +

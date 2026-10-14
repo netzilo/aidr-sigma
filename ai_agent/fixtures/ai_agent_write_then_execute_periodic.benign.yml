@@ -1,0 +1,23 @@
+rule: ai_agent_write_then_execute_periodic.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_write, subject: cursor, path: /Users/dev/proj/scripts/run.sh}
+  - {kind: file_write, subject: cursor, path: /tmp/build.log}
+  - {kind: spawn, subject: sh, cmdline: "sh /tmp/installer-cache/setup.sh"}
+expect:
+  action: allow

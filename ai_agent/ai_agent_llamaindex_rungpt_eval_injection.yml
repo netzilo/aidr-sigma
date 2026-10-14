@@ -21,11 +21,10 @@ description: |
              socket().connect(), powershell -enc, or direct read of ssh/aws/kube secrets).
     Stage 3 (enrichment): the spawned instance dialled out.
 
-  Attribution is instance-exact: the rule anchors on meta["caller_pid"], resolves the
-  process instance with proc_instance() and the true spawn chain with proc_lineage(),
-  then traverses the behaviour graph (graph()/node()/edges()) for the model-traffic
-  anchor. Nothing is inferred from a path-keyed node walk, so the verdict is
-  deterministic for the same input.
+  Attribution is session-exact: the rule anchors on the triggering session, walks its
+  true lineage with lineage(), and looks for the model-traffic anchor only on those
+  session nodes and their event rows. Nothing is inferred from a path-keyed node walk,
+  so the verdict is deterministic for the same input.
 author: Tanya
 date: "2026-03-05"
 modified: "2026-03-05"
@@ -58,6 +57,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - llm
+  - http
+  - connect
 detection:
   sel_exec_payload:
     event_type: execute_process
@@ -116,6 +120,15 @@ script: |
               return pat
       return ""
 
+  def cmd_of(content):
+      # execute_process content is {"command": ..., "path": ...}; fall back to the raw text
+      m = re.find(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+      if m == None:
+          return content
+      inner = m[m.find(":") + 1:].strip()
+      inner = inner[1:len(inner) - 1]
+      return inner.replace('\\"', '"').replace("\\\\", "\\")
+
   def edge_ts(e):
       for k in ["last_ts", "ts", "first_ts"]:
           v = e.get(k, "")
@@ -130,18 +143,23 @@ script: |
       return parts[len(parts) - 1]
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def peer_label(e):
       p = node(e.get("to", ""))
-      if p == None or p.get("_type", "") == "Process":
+      if p == None or p.get("_type", "") == "Session":
           p = node(e.get("from", ""))
       if p == None:
           return "?"
@@ -151,7 +169,7 @@ script: |
       # 1 ── relevance gate: pure string work on meta, no graph / no event log.
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = cmd_of(meta.get("content", ""))
       if cmd == "":
           return "allow"
       pat = payload_hit(cmd)
@@ -159,52 +177,40 @@ script: |
           return "allow"
 
       trigger_ts = int(meta.get("event_ts", "0"))
-      cp         = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trigger_ts == 0:
+      if trigger_ts == 0:
           return "allow"
 
-      # 2 ── instance-exact attribution (never a path-keyed node walk).
-      inst = proc_instance(cp, trigger_ts)
+      # 2 ── session-exact attribution (never a path-keyed node walk).
+      inst = session()
       if inst == None:
-          return "allow"           # degraded — re-fires when the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
+          return "allow"           # degraded — re-fires when the session lands
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
           return "allow"
 
       # 3 ── required: a Python interpreter close above the spawned command.
       py    = None
       depth = 0
-      for x in lineage:
+      for x in lineage_:
           if depth > 3:
               break
-          if is_python(x.get("actor_path", "")):
+          if is_python(x.get("path", "")):
               py = x
               break
           depth = depth + 1
       if py == None:
           return "allow"
 
-      lineage_paths = {}
-      lineage_pids  = []
-      for x in lineage:
-          lineage_paths[x.get("actor_path", "")] = True
-          lineage_pids.append(x)
-
       # 4 ── required anchor A: model traffic on the graph for this lineage.
       anchor_edge = None
       anchor_ev   = None
       anchor_ts   = 0
       anchor_desc = ""
-      root_id     = "process://" + py.get("actor_path", "")
+      root_id     = py["id"]
 
-      for n in graph(type="Process"):
-          npath = n.get("path", "")
-          if npath not in lineage_paths:
-              continue
-          if npath == py.get("actor_path", ""):
-              root_id = n["id"]
+      for x in lineage_:
           for kd in ["LLM_RESPONSE", "LLM_REQUEST"]:
-              for e in edges(n["id"], dir="both", kind=kd):
+              for e in edges(x["id"], dir="both", kind=kd):
                   ets = edge_ts(e)
                   if ets <= 0 or ets > trigger_ts + SKEW_NS:
                       continue
@@ -219,13 +225,11 @@ script: |
       #        Only inference-shaped paths qualify as model output — ordinary
       #        outbound HTTP (package indexes, telemetry) is not evidence.
       if anchor_edge == None:
-          for x in lineage_pids:
-              rows = query_events(kind="HTTP_REQUEST",
-                                  actor_pid=int(x.get("actor_pid", "0")),
-                                  actor_start=int(x.get("actor_start", "0")),
-                                  since_ns=trigger_ts - WINDOW_NS,
-                                  until_ns=trigger_ts + SKEW_NS,
-                                  limit=200)
+          for x in lineage_:
+              rows = events(kind="HTTP_REQUEST", session=x["id"],
+                            since_ns=trigger_ts - WINDOW_NS,
+                            until_ns=trigger_ts + SKEW_NS,
+                            limit=200)
               for e in rows:
                   if re.find(INFER_RE, e.get("path", "")) == None:
                       continue
@@ -239,9 +243,8 @@ script: |
       if anchor_edge == None and anchor_ev == None:
           return "allow"           # no untrusted model output preceded the exec
 
-      # 5 ── dedup: same instance + same payload inside DEDUP_NS reports once.
-      key    = str(inst.get("actor_pid", "")) + "|" + \
-               str(inst.get("actor_start", "")) + "|" + cmd[:120]
+      # 5 ── dedup: same session + same payload inside DEDUP_NS reports once.
+      key    = inst["id"] + "|" + cmd[:120]
       seen   = store_get("reported") or {}
       pruned = {}
       for k in seen:
@@ -250,29 +253,30 @@ script: |
       if key in pruned:
           return "allow"
 
-      # 6 ── kill chain, rooted at the Python host process.
+      # 6 ── kill chain, rooted at the Python host session.
       chain = new_chain(root_id)
       gap   = str((trigger_ts - anchor_ts) // 1000000000)
       if anchor_edge != None:
           chain.append(step(anchor_edge,
                             stage_id="Untrusted Model Output",
                             stage_desc="inference exchange (" + anchor_desc +
-                                       ") by " + base(py.get("actor_path", "")) +
+                                       ") by " + base(py.get("path", "")) +
                                        " " + gap + "s before the exec"))
       else:
           chain.append(step(ev_edge(anchor_ev),
                             stage_id="Untrusted Model Output",
                             stage_desc="inference endpoint fetched (" + anchor_desc +
-                                       ") by " + base(py.get("actor_path", "")) +
+                                       ") by " + base(py.get("path", "")) +
                                        " " + gap + "s before the exec"))
 
-      parent_path = py.get("actor_path", "")
-      if len(lineage) > 1:
-          parent_path = lineage[1].get("actor_path", parent_path)
+      # The trigger stage comes from meta (its own SPAWNED row races ingest).
+      parent_id = py["id"]
+      if len(lineage_) > 1:
+          parent_id = lineage_[1]["id"]
       exec_edge = {
-          "from":     "process://" + parent_path,
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     parent_id,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(trigger_ts),
           "first_ts": str(trigger_ts),
           "last_ts":  str(trigger_ts),
@@ -280,17 +284,15 @@ script: |
       }
       chain.append(step(exec_edge,
                         stage_id="Eval Injection to Command Execution",
-                        stage_desc=base(py.get("actor_path", "")) + " spawned " +
-                                   base(inst.get("actor_path", "")) +
+                        stage_desc=base(py.get("path", "")) + " spawned " +
+                                   base(inst.get("path", "")) +
                                    " matching payload shape " + pat + ": " + cmd[:200]))
 
-      # 7 ── optional enrichment: did the spawned instance dial out?
+      # 7 ── optional enrichment: did the spawned session dial out?
       egress = ""
-      for e in query_events(kind="CONNECTS",
-                           actor_pid=int(inst.get("actor_pid", "0")),
-                           actor_start=int(inst.get("actor_start", "0")),
-                           since_ns=trigger_ts - WINDOW_NS,
-                           limit=20):
+      for e in events(kind="CONNECTS", session=inst["id"],
+                      since_ns=trigger_ts - WINDOW_NS,
+                      limit=20):
           h = e.get("host", "")
           if h != "":
               egress = h + ":" + e.get("port", "")
@@ -300,10 +302,10 @@ script: |
               break
 
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(base(x.get("path", "")))
       reason = "Possible eval-injection command execution (RunGptLLM class, CWE-95): " + \
-               "inference response to " + base(py.get("actor_path", "")) + " followed " + \
+               "inference response to " + base(py.get("path", "")) + " followed " + \
                gap + "s later by " + " <- ".join(names) + " running: " + cmd[:200]
       if egress != "":
           reason = reason + " | egress " + egress

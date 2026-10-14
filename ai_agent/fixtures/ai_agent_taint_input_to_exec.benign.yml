@@ -1,0 +1,22 @@
+rule: ai_agent_taint_input_to_exec.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  git:
+    session: pid/101:1
+    parent: claude
+    program: /usr/bin/git
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: http_request, subject: claude, url: "https://api.github.com/repos/acme/proj", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: spawn, subject: git, cmdline: "git status --short"}
+expect:
+  action: allow

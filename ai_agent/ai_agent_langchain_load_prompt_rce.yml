@@ -21,13 +21,12 @@ description: |
                                 spawns a shell, a network utility, an
                                 encoder/loader, or a `python -c` payload.
 
-  The rule is anchored on `meta["caller_pid"]`, resolves the exact process
-  instance with `proc_instance()`, walks the real spawn chain with
-  `proc_lineage()`, and reads only prior, instance-scoped rows out of the
-  event log with `query_events()`. The triggering exec is taken from `meta`
-  (never re-queried) because the log is populated asynchronously. Attribution
-  never crosses a session: every stage must belong to the caller's lineage or
-  to a child spawned by that lineage inside the window.
+  The rule is anchored on the triggering session (the spawned child), walks
+  its real lineage with `lineage()`, and reads only prior, session-scoped rows
+  out of the event log with `events()`. The triggering exec is taken from
+  `meta`. Attribution never crosses a session tree: every stage must belong to
+  the caller's lineage or to a session spawned by that lineage inside the
+  window.
 
   Maps to OWASP A08:2023 - Software and Data Integrity Failures (untrusted
   deserialization of a prompt artifact). Report-only: the ordered pair is
@@ -59,6 +58,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -67,9 +69,9 @@ action: execute
 on_timeout: allow
 on_error:   allow
 script: |
-  # ─── LangChain load_prompt deserialization RCE — instance-resolved ─────────
-  # Anchor: caller_pid -> proc_instance -> proc_lineage -> query_events.
-  # Trigger stage comes from meta (async ingest race); prior stage from the log.
+  # ─── LangChain load_prompt deserialization RCE — session-scoped ────────────
+  # Anchor: the triggering session -> lineage() -> events(). The trigger stage
+  # comes from meta; the prior (read) stage from the event log.
 
   WINDOW_NS = 300000000000        # 5 minutes — this rule's own window
 
@@ -113,6 +115,42 @@ script: |
           return "?"
       return path.split("/")[-1]
 
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
+
   def is_python_proc(path):
       if path == "":
           return False
@@ -140,24 +178,30 @@ script: |
               return True
       return False
 
-  def ev_edge(e):
-      tgt = e.get("path", "")
-      if tgt == "":
-          tgt = e.get("target_id", "")
+  def file_edge(e):
+      t = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tgt,
+          "from":     e.get("session_id", ""),
+          "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
 
   # ─── relevance gate — pure string checks on meta, no graph / log calls ─────
   def is_relevant_event():
       if meta.get("context_type", "") != "execute_process":
           return False
-      cmd = meta.get("content", "")
+      cmd = spawn_cmd(meta.get("content", ""))
       if cmd == "":
           return False
       if has_any(cmd, CHILD_PATTERNS):
@@ -170,47 +214,44 @@ script: |
       if not is_relevant_event():
           return "allow"
 
-      cmd   = meta.get("content", "")
+      cmd   = spawn_cmd(meta.get("content", ""))
       ev_ts = int(meta.get("event_ts", "0"))
-      cp    = int(meta.get("caller_pid", "0"))
-      if cp == 0 or ev_ts == 0:
+      if ev_ts == 0:
           return "allow"
 
-      # ── anchor on the exact triggering instance ───────────────────────────
-      inst = proc_instance(cp, ev_ts)
+      # ── anchor on the triggering session (the spawned child) ──────────────
+      inst = session()
       if inst == None:
           return "allow"                     # degraded — never guess an owner
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # The LangChain host must be in this caller's own spawn chain.
+      # The LangChain host must be in this caller's own lineage.
       py = None
-      for x in lineage:
-          if is_python_proc(x.get("actor_path", "")):
+      for x in lineage_:
+          if is_python_proc(x.get("path", "")):
               py = x
               break
       if py == None:
           return "allow"
 
-      # ── session scope: lineage pids + children they spawned in-window ─────
-      since   = ev_ts - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = True
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                            until_ns=ev_ts, limit=2000):
-          if e.get("parent_pid", "") in session:
-              session[e.get("actor_pid", "")] = True
+      # ── scope: lineage sessions + sessions they spawned in-window ─────────
+      since = ev_ts - WINDOW_NS
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=since,
+                      until_ns=ev_ts, limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
 
       # ── REQUIRED anchor stage: prompt spec read, ordered before the exec ──
-      # READ_FILE is high volume — always scoped by actor_pid and windowed.
+      # READ_FILE is high volume — always scoped by session and windowed.
       read_ev = None
-      for pid in session:
-          if pid == "" or pid == "0":
-              continue
-          for e in query_events(kind="READ_FILE", actor_pid=int(pid),
-                                since_ns=since, until_ns=ev_ts, limit=300):
+      for sid in scope:
+          for e in events(kind="READ_FILE", session=sid,
+                          since_ns=since, until_ns=ev_ts, limit=300):
               if is_prompt_spec(e.get("path", "")):
                   if int(e.get("ts", "0")) <= ev_ts:
                       read_ev = e
@@ -220,22 +261,25 @@ script: |
       if read_ev == None:
           return "allow"                     # anchor absent — not this threat
 
-      # ── verdict + kill chain, rooted at the session owner ─────────────────
-      owner = lineage[-1]
-      root  = owner.get("actor_path", py.get("actor_path", ""))
-      chain = new_chain("process://" + root)
+      # ── verdict + kill chain, rooted at the agent ancestor / lineage root ──
+      root  = chain_root(lineage_)
+      chain = new_chain(root["id"])
 
       chain.append(step(
-          ev_edge(read_ev),
+          file_edge(read_ev),
           stage_id="Untrusted Prompt Spec Load",
-          stage_desc=short(read_ev.get("actor_path", "")) +
+          stage_desc=short(read_ev.get("program", "")) +
                      " read prompt/chain specification: " + read_ev.get("path", ""),
+          activity={"path": read_ev.get("path", ""), "ts": read_ev.get("ts", "0")},
       ))
 
+      parent_id = inst.get("parent", "")
+      if parent_id == "":
+          parent_id = py["id"]
       trig_edge = {
-          "from":     "process://" + py.get("actor_path", ""),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     parent_id,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(ev_ts),
           "first_ts": str(ev_ts),
           "last_ts":  str(ev_ts),
@@ -250,8 +294,8 @@ script: |
       ))
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       path_str = " -> ".join(names)
       conf = "gadget markers in child cmdline" if gadget else "no gadget markers"
       delta = (ev_ts - int(read_ev.get("ts", "0"))) / 1000000000
@@ -262,9 +306,9 @@ script: |
       return {
           "action": "report",
           "reason": "Possible LangChain load_prompt deserialization RCE - " +
-                    short(py.get("actor_path", "")) + " read untrusted prompt spec " +
+                    short(py.get("path", "")) + " read untrusted prompt spec " +
                     read_ev.get("path", "") + " then spawned '" + cmd[:120] +
-                    "' " + str(delta) + "s later (" + conf + "); session: " + path_str,
+                    "' " + str(delta) + "s later (" + conf + "); lineage: " + path_str,
           "chain":  chain,
       }
 

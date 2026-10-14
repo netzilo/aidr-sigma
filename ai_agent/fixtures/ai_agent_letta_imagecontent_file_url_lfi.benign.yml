@@ -1,0 +1,14 @@
+rule: ai_agent_letta_imagecontent_file_url_lfi.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://letta.example/v1/agents/a1/messages", method: POST, request_id: r1, content_type: application/json, body: '{"messages":[{"role":"user","content":"the build log says: could not open file:///tmp/build.log"}]}'}
+expect:
+  action: allow

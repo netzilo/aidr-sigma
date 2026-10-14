@@ -51,6 +51,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
+  - http
 detection:
   sel_agent_activity:
     event_type:
@@ -146,7 +151,7 @@ script: |
       return True
 
   def agent_anchor(fallback):
-      for p in graph(type="Process"):
+      for p in sessions():
           if p.get("agent", "0") == "1":
               return p["id"]
       return fallback

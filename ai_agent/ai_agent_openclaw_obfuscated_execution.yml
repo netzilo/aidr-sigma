@@ -63,6 +63,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -73,7 +78,7 @@ on_error:   allow
 script: |
   # ─────────────────────────────────────────────────────────────────────────
   # OpenClaw - obfuscated dangerous execution under an AI agent (AML.T0048)
-  # Graph-driven: EXECUTE_PROCESS subtree walk from every monitored agent,
+  # Graph-driven: SPAWNED subtree walk from every monitored agent,
   # then CONNECTS / HTTP_REQUEST / *_FILE edges for consequence.
   # ─────────────────────────────────────────────────────────────────────────
 
@@ -200,7 +205,7 @@ script: |
           return c
       return n.get("path", "")
 
-  # Bounded BFS over the agent's EXECUTE_PROCESS subtree.
+  # Bounded BFS over the agent's SPAWNED subtree.
   def subtree(aid):
       seen = {aid: 0}
       frontier = [aid]
@@ -208,7 +213,7 @@ script: |
       for d in range(MAX_DEPTH):
           nxt = []
           for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              for e in edges(pid, dir="out", kind="SPAWNED"):
                   if len(out) >= MAX_EDGES:
                       return out
                   out.append(e)
@@ -233,7 +238,7 @@ script: |
   def corroborate(child_id, t0, chain):
       tmax = t0 + WINDOW_NS
 
-      for e in edges(child_id, dir="out", kind="EXECUTE_PROCESS"):
+      for e in edges(child_id, dir="out", kind="SPAWNED"):
           t = int(e.get("ts", "0"))
           if t >= t0 and t <= tmax:
               chain.append(step(e, stage_id="Execution Fan-out",
@@ -299,18 +304,18 @@ script: |
       return False
 
   def caller_desc():
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return ""
-      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      inst = session(cp)
       if inst == None:
           return ""
-      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      lin = lineage(inst["id"])
       if not lin:
           return ""
       names = []
       for x in lin:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+          names.append(x.get("path", "?").split("/")[-1])
       return " [caller lineage: " + " -> ".join(names) + "]"
 
   def run():
@@ -319,9 +324,7 @@ script: |
 
       now = int(meta.get("event_ts", "0"))
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           sub = subtree(aid)
           if not sub:

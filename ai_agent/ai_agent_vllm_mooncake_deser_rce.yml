@@ -17,10 +17,9 @@ description: |
   makes it attributable and specific in three ways, which is exactly what the skeptic says
   a bare process spawn cannot do:
 
-    1. ATTRIBUTION - the spawn must be attributable, via proc_instance/proc_lineage on
-       meta["caller_pid"] (or, when the event log is degraded, via an upward walk of
-       EXECUTE_PROCESS edges in the behaviour graph), to a process whose invocation SHAPE
-       is a vLLM/Mooncake server: "vllm serve", "-m vllm.entrypoints...", mooncake_master,
+    1. ATTRIBUTION - the spawned session's lineage (lineage()) must contain an ANCESTOR
+       session whose program path or command line has the invocation SHAPE of a
+       vLLM/Mooncake server: "vllm serve", "-m vllm.entrypoints...", mooncake_master,
        MooncakeConnector, kv_transfer_config, MOONCAKE_CONFIG, VLLM_*= env launch. A mere
        mention of the string "vllm" in a developer command line does not qualify.
     2. SPECIFICITY - the child command must be an execution primitive a healthy inference
@@ -28,10 +27,10 @@ description: |
        piped to an interpreter, netcat/socat exec, authorized_keys or cron persistence,
        execution staged out of a world-writable directory, or an inline interpreter
        carrying a socket shell / pickle.loads gadget / os.system.
-    3. CORROBORATION - graph traversal of the spawned child's own edges (CONNECTS,
-       HTTP_REQUEST, CREATE_FILE/WRITE_FILE resolved with fs_activity) inside a 5 minute
-       window of the trigger. Weaker (tier B) primitives are reported ONLY when they are
-       accompanied by a write into a persistence/staging location.
+    3. CORROBORATION - the spawned session's own activity edges (CONNECTS, HTTP_REQUEST,
+       CREATE_FILE/WRITE_FILE resolved with fs_activity) inside a 5 minute window of the
+       trigger. Weaker (tier B) primitives are reported ONLY when they are accompanied by
+       a write into a persistence/staging location.
 
   Because the causal link to the network payload is inferred, not observed, the verdict is
   report - never block. The kill chain carries the server launch context, the spawn, and
@@ -65,12 +64,14 @@ falsepositives:
     are tier B and are suppressed unless a persistence/staging write is also present.
   - Legitimate operator debugging inside the model server container (nc, socat, bash -i during
     an incident). Expect these during on-call sessions; correlate with change tickets.
-  - Process nodes in the graph are keyed by executable path, so CONNECTS/WRITE_FILE edges on a
-    shared binary such as /usr/bin/curl may belong to another invocation. Mitigated by
-    requiring every corroborating edge timestamp to fall inside the 5 minute trigger window.
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -87,7 +88,6 @@ script: |
 
   WINDOW_NS     = 300000000000     # 5 minutes - corroboration clustering window
   DEDUPE_NS     = 120000000000     # 2 minutes - suppress duplicate reports
-  MAX_PROC_SCAN = 400              # bound on graph(type="Process") iteration
 
   # Invocation-shaped markers of a real vLLM / Mooncake server process.
   SERVER_MARKERS = [
@@ -168,6 +168,42 @@ script: |
           d = -d
       return d <= WINDOW_NS
 
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
+
   def marker_of(text):
       if text == "":
           return ""
@@ -204,97 +240,78 @@ script: |
           return ["B", "inline interpreter spawning a subprocess"]
       return ["", ""]
 
-  def lineage_attribution(ts):
-      cp = to_int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return None
-      inst = proc_instance(cp, ts)
-      if inst == None:
-          return None
-      lin = proc_lineage(to_int(inst.get("actor_pid", "0")), to_int(inst.get("actor_start", "0")))
+  def sess_spawn(x):
+      # The session's own SPAWNED row (keyed by the child), or None.
+      for r in events(kind="SPAWNED", session=x["id"], limit=1):
+          return r
+      return None
+
+  def sess_cmdline(x):
+      r = sess_spawn(x)
+      if r != None and r.get("cmdline", "") != "":
+          return r.get("cmdline", "")
+      p = node(x.get("program", ""))
+      if p != None:
+          return p.get("cmdlines", "")
+      return ""
+
+  def row_edge(r):
+      t = r.get("ts", "0")
+      frm = r.get("session_id", "")
+      if r.get("kind", "") == "SPAWNED":
+          frm = r.get("parent_session", "")
+      return {"from": frm, "to": r.get("target_id", ""), "kind": r.get("kind", ""),
+              "dir": "out", "ts": t, "first_ts": t, "last_ts": t,
+              "cmdline": r.get("cmdline", "")}
+
+  def sess_edge(x):
+      # How this session came to exist: its SPAWNED row from the parent, or the
+      # INSTANCE_OF edge to its program when it is a root session.
+      r = sess_spawn(x)
+      if r != None:
+          return row_edge(r)
+      t = x.get("first_seen", "0")
+      if x.get("parent", "") != "":
+          return {"from": x["parent"], "to": x["id"], "kind": "SPAWNED", "dir": "out",
+                  "ts": t, "first_ts": t, "last_ts": t}
+      return {"from": x["id"], "to": x.get("program", ""), "kind": "INSTANCE_OF", "dir": "out",
+              "ts": t, "first_ts": t, "last_ts": t}
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
+
+  def lineage_attribution(inst):
+      # Walk the triggering session's ancestry looking for the server marker on
+      # a session's program path or command line. The spawned primitive itself
+      # (lineage[0]) never supplies the marker: the marker must be an ANCESTOR.
+      lin = lineage(inst["id"])
       if lin == None or len(lin) == 0:
           return None
       names  = []
       marker = ""
       mc     = False
-      for x in lin:
-          blob = x.get("actor_path", "") + " " + x.get("cmdline", "") + " " + x.get("parent_path", "")
-          ap = x.get("actor_path", "")
+      server = None
+      for i in range(len(lin)):
+          x = lin[i]
+          ap = x.get("path", "")
           if ap != "":
               names.append(ap.split("/")[-1])
+          if i == 0:
+              continue
+          blob = ap + " " + sess_cmdline(x)
           if marker == "":
               m = marker_of(blob)
               if m != "":
                   marker = m
+                  server = x
           if is_mooncake(blob):
               mc = True
-      root = "process://" + lin[len(lin) - 1].get("actor_path", "")
-      return {"names": " <- ".join(names), "marker": marker, "mooncake": mc, "root": root}
-
-  def resolve_spawn(cmd):
-      # best-effort location of the graph EXECUTE_PROCESS edge for this spawn
-      best_parent = None
-      best_edge   = None
-      best_child  = None
-      best_len    = 0
-      n = 0
-      for p in graph(type="Process"):
-          n = n + 1
-          if n > MAX_PROC_SCAN:
-              break
-          for e in edges(p["id"], dir="out", kind="EXECUTE_PROCESS"):
-              ecl = e.get("cmdline", "")
-              if len(ecl) < 8:
-                  continue
-              probe = ecl
-              if len(probe) > 80:
-                  probe = probe[:80]
-              if probe in cmd:
-                  if len(probe) > best_len:
-                      best_len    = len(probe)
-                      best_parent = p
-                      best_edge   = e
-                      best_child  = node(e["to"])
-      return [best_parent, best_edge, best_child]
-
-  def resolve_child_by_path(cmd):
-      best = None
-      bl   = 0
-      n    = 0
-      for p in graph(type="Process"):
-          n = n + 1
-          if n > MAX_PROC_SCAN:
-              break
-          pth = p.get("path", "")
-          if len(pth) < 6:
-              continue
-          if pth in cmd and len(pth) > bl:
-              bl   = len(pth)
-              best = p
-      return best
-
-  def graph_ancestor_marker(startnode):
-      cur  = startnode
-      seen = {}
-      for i in range(6):
-          if cur == None:
-              break
-          cid = cur.get("id", "")
-          if cid == "" or cid in seen:
-              break
-          seen[cid] = True
-          blob = cur.get("path", "") + " " + cur.get("name", "") + " " + cur.get("cmdline", "")
-          m = marker_of(blob)
-          if m != "":
-              return [m, cur]
-          nxt = None
-          for e in edges(cid, dir="in", kind="EXECUTE_PROCESS"):
-              p = node(e["from"])
-              if p != None and p.get("_type", "") == "Process":
-                  nxt = p
-                  break
-          cur = nxt
-      return ["", None]
+      return {"names": " <- ".join(names), "marker": marker, "mooncake": mc,
+              "server": server, "root": chain_root(lin)["id"]}
 
   def already_reported(key, ts):
       recent = store_get("recent")
@@ -315,7 +332,7 @@ script: |
       # ---- 1. relevance gate: pure string work on meta, no graph/log calls ----
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = spawn_cmd(meta.get("content", ""))
       if len(cmd) < 6:
           return "allow"
       ts = to_int(meta.get("event_ts", "0"))
@@ -340,63 +357,36 @@ script: |
       if tier == "":
           return "allow"
 
-      # ---- 3. attribution: event log first, behaviour graph as fallback ----
-      marker   = ""
-      mooncake = False
-      names    = ""
-      root     = ""
-      att = lineage_attribution(ts)
-      if att != None:
-          marker   = att["marker"]
-          mooncake = att["mooncake"]
-          names    = att["names"]
-          root     = att["root"]
-
-      spawn     = resolve_spawn(cmd)
-      parent    = spawn[0]
-      exec_edge = spawn[1]
-      child     = spawn[2]
-      if child == None:
-          child = resolve_child_by_path(cmd)
-
-      if marker == "" and parent != None:
-          ga = graph_ancestor_marker(parent)
-          if ga[0] != "":
-              marker = ga[0]
-              vn     = ga[1]
-              if root == "":
-                  root = vn["id"]
-              if names == "":
-                  names = vn.get("name", vn.get("path", "?"))
-              if is_mooncake(vn.get("path", "") + " " + vn.get("cmdline", "")):
-                  mooncake = True
-
-      if marker == "":
+      # ---- 3. attribution: the spawned primitive is the triggering session ----
+      inst = session()
+      if inst == None:
+          return "allow"   # unknown session: nothing to attribute to
+      att = lineage_attribution(inst)
+      if att == None or att["marker"] == "":
           return "allow"   # not attributable to a vLLM/Mooncake server lineage
-
-      if root == "":
-          if parent != None:
-              root = parent["id"]
-          else:
-              root = "process://" + meta.get("agent_name", "unknown")
+      marker   = att["marker"]
+      mooncake = att["mooncake"]
+      names    = att["names"]
+      root     = att["root"]
+      server   = att["server"]
 
       # ---- 4. kill chain + graph corroboration ----
       chain  = new_chain(root)
       stages = []
 
-      if parent != None:
-          for e in edges(parent["id"], dir="in", kind="EXECUTE_PROCESS"):
-              chain.append(step(e, stage_id="Inference Server Context",
-                                stage_desc="vLLM/Mooncake server process launched: " +
-                                           trunc(e.get("cmdline", parent.get("path", "?")), 160)))
-              break
+      chain.append(step(sess_edge(server), stage_id="Inference Server Context",
+                        stage_desc="vLLM/Mooncake server process launched: " +
+                                   trunc(sess_cmdline(server) or server.get("path", "?"), 160)))
 
-      trig = exec_edge
+      trig = None
+      own = sess_spawn(inst)
+      if own != None:
+          trig = row_edge(own)
       if trig == None:
-          child_id = "process://unknown"
-          if child != None:
-              child_id = child["id"]
-          trig = {"from": root, "to": child_id, "kind": "EXECUTE_PROCESS",
+          parent_id = inst.get("parent", "")
+          if parent_id == "":
+              parent_id = root
+          trig = {"from": parent_id, "to": inst["id"], "kind": "SPAWNED",
                   "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
                   "cmdline": trunc(cmd, 300)}
       chain.append(step(trig, stage_id="Post-Deserialization Execution",
@@ -404,61 +394,57 @@ script: |
       stages.append(what)
 
       has_write = False
-      if child != None:
-          cid = child["id"]
+      cid = inst["id"]
 
-          for e in edges(cid, dir="out", kind="CONNECTS"):
-              h = node(e["to"])
-              if h == None or h.get("is_ztna_host", "0") == "1":
-                  continue
-              if not within(e.get("last_ts", e.get("first_ts", "")), ts):
-                  continue
-              chain.append(step(e, stage_id="C2 / Exfil Egress",
-                                stage_desc="spawned process connected to public endpoint " +
-                                           h.get("host", "?") + ":" + h.get("port", "?")))
-              stages.append("public egress " + h.get("host", "?"))
+      for e in edges(cid, dir="out", kind="CONNECTS"):
+          h = node(e["to"])
+          if h == None or h.get("is_ztna_host", "0") == "1":
+              continue
+          if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+              continue
+          chain.append(step(e, stage_id="C2 / Exfil Egress",
+                            stage_desc="spawned process connected to public endpoint " +
+                                       h.get("host", "?") + ":" + h.get("port", "?")))
+          stages.append("public egress " + h.get("host", "?"))
+          break
+
+      for e in edges(cid, dir="out", kind="HTTP_REQUEST"):
+          u = node(e["to"])
+          if u == None or u.get("is_ztna_host", "0") == "1":
+              continue
+          if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+              continue
+          chain.append(step(e, stage_id="Payload Retrieval",
+                            stage_desc="spawned process issued HTTP " + e.get("method", "") +
+                                       " to " + u.get("host", "?")))
+          stages.append("http fetch " + u.get("host", "?"))
+          break
+
+      for k in ["CREATE_FILE", "WRITE_FILE"]:
+          if has_write:
               break
-
-          for e in edges(cid, dir="out", kind="HTTP_REQUEST"):
-              u = node(e["to"])
-              if u == None or u.get("is_ztna_host", "0") == "1":
-                  continue
-              if not within(e.get("last_ts", e.get("first_ts", "")), ts):
-                  continue
-              chain.append(step(e, stage_id="Payload Retrieval",
-                                stage_desc="spawned process issued HTTP " + e.get("method", "") +
-                                           " to " + u.get("host", "?")))
-              stages.append("http fetch " + u.get("host", "?"))
-              break
-
-          for k in ["CREATE_FILE", "WRITE_FILE"]:
+          op = "CREATE"
+          if k == "WRITE_FILE":
+              op = "WRITE"
+          for e in edges(cid, dir="out", kind=k):
               if has_write:
                   break
-              op = "CREATE"
-              if k == "WRITE_FILE":
-                  op = "WRITE"
-              for e in edges(cid, dir="out", kind=k):
-                  if has_write:
-                      break
-                  if not within(e.get("last_ts", e.get("first_ts", "")), ts):
-                      continue
-                  fs = node(e["to"])
-                  if fs == None:
-                      continue
-                  for dp in DROP_PATTERNS:
-                      acts = fs_activity(fs["id"], op, dp[0])
-                      pick = None
-                      for a in acts:
-                          if within(a.get("ts", ""), ts):
-                              pick = a
-                              break
-                      if pick != None:
-                          chain.append(step(e, stage_id="Dropper / Persistence",
-                                            stage_desc="spawned process wrote " + dp[1] + ": " +
-                                                       pick["path"], activity=pick))
-                          stages.append("write " + pick["path"])
-                          has_write = True
+              if not within(e.get("last_ts", e.get("first_ts", "")), ts):
+                  continue
+              for dp in DROP_PATTERNS:
+                  acts = fs_activity(session=cid, op=op, pattern=dp[0])
+                  pick = None
+                  for a in acts:
+                      if within(a.get("ts", ""), ts):
+                          pick = a
                           break
+                  if pick != None:
+                      chain.append(step(e, stage_id="Dropper / Persistence",
+                                        stage_desc="spawned process wrote " + dp[1] + ": " +
+                                                   pick["path"], activity=pick))
+                      stages.append("write " + pick["path"])
+                      has_write = True
+                      break
 
       # ---- 5. verdict ----
       if tier == "B" and not has_write:
@@ -477,19 +463,15 @@ script: |
       if mooncake:
           transport = "vLLM+Mooncake KV transport"
 
-      lineage_txt = names
-      if lineage_txt == "":
-          lineage_txt = "lineage degraded (graph-attributed)"
-
       print("vLLM/Mooncake post-deser exec [" + sev + "] marker=" + trunc(marker, 60) +
-            " lineage=" + trunc(lineage_txt, 120) + " stages=" + "; ".join(stages))
+            " lineage=" + trunc(names, 120) + " stages=" + "; ".join(stages))
 
       return {
           "action": "report",
           "reason": "[" + sev + "] " + transport + " server lineage spawned an execution " +
                     "primitive - consistent with unsafe deserialization RCE over the " +
                     "exposed ZMQ/TCP KV-cache interface (CWE-502). Server marker: " +
-                    trunc(marker, 80) + ". Lineage: " + trunc(lineage_txt, 140) +
+                    trunc(marker, 80) + ". Lineage: " + trunc(names, 140) +
                     ". Evidence: " + "; ".join(stages) +
                     ". NOTE: the deserialization event itself is not observable by this " +
                     "engine - this is downstream inference, verify the Mooncake listener " +

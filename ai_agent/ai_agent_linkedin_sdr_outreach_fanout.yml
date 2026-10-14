@@ -17,14 +17,14 @@ description: |
              LinkedIn API surface (recipient-list construction).
     Stage 2 (required anchor)       - >= 12 WRITE (POST/PUT/PATCH) requests to LinkedIn
              messaging or invitation endpoints inside a 15-minute window, all attributed
-             to ONE process session (caller instance + its lineage/siblings), starting
-             AFTER the enumeration stage.
+             to ONE session scope (the triggering session, its lineage and what they
+             spawned), starting AFTER the enumeration stage.
     Stage 3 (escalation only)       - the same session also egressed to a non-LinkedIn
              public host in the window (lead-list source / reply capture / exfil surface).
 
-  A human using the LinkedIn web UI produces this volume from a browser process, not from
-  a monitored agent process lineage, and never with the enumeration-then-burst ordering
-  driven by one automation instance. That is the discriminator - unattended fan-out, not
+  A human using the LinkedIn web UI produces this volume from a browser session, not from
+  a monitored agent session lineage, and never with the enumeration-then-burst ordering
+  driven by one automation session. That is the discriminator - unattended fan-out, not
   "phishing".
 
   Because sanctioned SDR campaigns look identical on the wire, the verdict is report only:
@@ -57,6 +57,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -143,38 +146,36 @@ script: |
       return match_any(OUTREACH_PATHS, meta.get("path", ""))
 
   def ev_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "https://" + e.get("host", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tgt,
-          "kind":     "HTTP_REQUEST",
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
-          "method":   e.get("method", ""),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
-  def build_session(lineage):
+  def build_session(lineage_):
       pids = {}
-      for x in lineage:
-          pids[x.get("actor_pid", "")] = True
-      rows = query_events(kind="EXECUTE_PROCESS", limit=4000)
+      for x in lineage_:
+          pids[x.get("id", "")] = True
+      rows = events(kind="SPAWNED", limit=4000)
       # two expansion passes: children and grandchildren of the session
       for _ in range(2):
           for e in rows:
               if len(pids) >= MAX_SESSION_PIDS:
                   return pids
-              if e.get("parent_pid", "") in pids:
-                  pids[e.get("actor_pid", "")] = True
+              if e.get("parent_session", "") in pids:
+                  pids[e.get("session_id", "")] = True
       return pids
 
   def find_agent_node(spaths, agent_name):
       fallback = None
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           pp = p.get("path", "")
           if pp != "" and pp in spaths:
               return p
@@ -214,28 +215,25 @@ script: |
       if last != None and (now - int(last)) < DEDUPE_NS:
           return "allow"
 
-      # ---- anchor on the exact triggering instance ---------------------------
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
-      inst = proc_instance(cp, now)
+      # ---- anchor on the triggering session ----------------------------------
+      inst = session()
       if inst == None:
           return "allow"                      # degraded attribution - never guess
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
-      pids   = build_session(lineage)
+      pids   = build_session(lineage_)
       spaths = {}
-      for x in lineage:
-          spaths[x.get("actor_path", "")] = True
+      for x in lineage_:
+          spaths[x.get("path", "")] = True
 
       # ---- session-scoped, windowed stage collection -------------------------
       outreach = []
       enum     = []
       third    = {}
       for pid in pids:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
+          for e in events(kind="HTTP_REQUEST", session=pid,
                                 since_ns=since, until_ns=now, limit=500):
               h = e.get("host", "")
               if h == "":
@@ -267,14 +265,13 @@ script: |
 
       # ---- attribution + kill chain -----------------------------------------
       agent     = find_agent_node(spaths, meta.get("agent_name", ""))
-      root      = lineage[len(lineage) - 1]
-      root_path = root.get("actor_path", "")
-      anchor    = agent["id"] if agent != None else ("process://" + root_path)
+      root      = lineage_[len(lineage_) - 1]
+      anchor    = agent["id"] if agent != None else root["id"]
       chain     = new_chain(anchor)
 
       names = []
-      for x in lineage:
-          names.append(base_name(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(base_name(x.get("path", "")))
       lineage_str = " -> ".join(names)
 
       e_row = pick_earliest(enum)
@@ -291,7 +288,7 @@ script: |
                                        " distinct endpoints, burst started at " + o_row.get("path", "")))
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       "https://" + meta.get("host", ""),
           "kind":     "HTTP_REQUEST",
           "ts":       str(now),

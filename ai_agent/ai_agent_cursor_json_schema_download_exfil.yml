@@ -42,6 +42,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
 
   # ── Gate: an unattended editor schema fetch is always a GET ──────────────────

@@ -55,6 +55,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   sel_scope:
     event_type: tool_call

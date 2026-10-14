@@ -14,17 +14,17 @@ description: |
   injection of tool-discovery directives directly. It reconstructs the aggregator's
   observable side effects from edge kinds that DO exist:
 
-    (anchor, REQUIRED) the agent spawned a process whose command line / image names an
-                       MCP combiner, aggregator, hub, proxy, router or *-mcp-adapter
-                       package  ->  EXECUTE_PROCESS edge, 'cmdline' property
+    (anchor, REQUIRED) the agent session spawned a session whose command line / program
+                       names an MCP combiner, aggregator, hub, proxy, router or
+                       *-mcp-adapter package  ->  SPAWNED edge, 'cmdline' property
     (stage A) that process fans out to >= 2 distinct upstream endpoints, which is what a
               shared aggregation server does and what a single MCP server does not
-              ->  CONNECTS / HTTP_REQUEST edges from the aggregator process node
+              ->  CONNECTS / HTTP_REQUEST edges from the aggregator session
     (stage B) the agent's TOOL_CALL surface concentrates behind one server name that is
               either aggregator-named or exposes >= 5 distinct tool names
               ->  TOOL_CALL edges + Tool.server / Tool.name
     (stage C) a second spawn installs or launches the companion adapter / npx-fetches an
-              MCP package  ->  EXECUTE_PROCESS edge
+              MCP package  ->  SPAWNED edge
     (stage D) the agent acquired instruction content over MCP inside the same window
               ->  ACQUIRED_SKILL edge with Skill.source == "mcp"
 
@@ -67,6 +67,12 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - http
+  - connect
+  - skill
 detection:
   sel_connect:
     event_type: connects
@@ -116,21 +122,24 @@ script: |
           return False
       if meta.get("protocol", "") == "udp":
           return False            # MCP transports are TCP; UDP is DNS/mDNS noise
-      if meta.get("caller_pid", "0") == "0":
-          return False
       return True
+
+  # The agent sessions to examine: the agent ancestor of the triggering
+  # session (the aggregator process connecting out), else every agent session
+  # when the connect cannot be attributed.
+  def candidate_agents():
+      inst = session()
+      if inst != None:
+          for x in lineage(inst["id"]):
+              if x.get("agent", "0") == "1":
+                  return [x]
+      return sessions(agent=True, active=True)
 
   # Attribution only - annotates the finding, never widens or narrows what is allowed.
   def lineage_paths():
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return []
-      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
-      if inst == None:
-          return []
       out = []
-      for x in proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"])):
-          out.append(x.get("actor_path", ""))
+      for x in lineage():
+          out.append(x.get("path", ""))
       return out
 
   def agg_hit(e):
@@ -145,14 +154,14 @@ script: |
   # Aggregators are frequently one hop below the agent (agent -> node -> package).
   def find_aggregator(aid):
       seen = 0
-      for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for pe in edges(aid, dir="out", kind="SPAWNED"):
           if seen > MAX_CANDS:
               return None
           seen += 1
           h = agg_hit(pe)
           if h != None:
               return h
-          for ge in edges(pe["to"], dir="out", kind="EXECUTE_PROCESS"):
+          for ge in edges(pe["to"], dir="out", kind="SPAWNED"):
               if seen > MAX_CANDS:
                   return None
               seen += 1
@@ -220,9 +229,7 @@ script: |
       lin  = lineage_paths()
       seen = store_get("reported") or {}
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in candidate_agents():
           aid = agent["id"]
 
           # ── Anchor (REQUIRED): agent spawned an MCP aggregator/adapter ───────
@@ -271,7 +278,7 @@ script: |
 
           # ── Stage C: companion adapter / npx-fetched MCP package ────────────
           scan = 0
-          for pe in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for pe in edges(aid, dir="out", kind="SPAWNED"):
               if scan > MAX_CANDS:
                   break
               scan += 1
@@ -304,7 +311,7 @@ script: |
 
           # ── Triggering connection (from meta - never re-queried) ────────────
           trig = {
-              "from": aid,
+              "from": meta.get("session", aid),
               "to": "host://" + meta.get("protocol", "tcp") + ":" + meta.get("host", "") + ":" + meta.get("port", ""),
               "kind": "CONNECTS",
               "ts": str(now),
@@ -314,7 +321,7 @@ script: |
           chain.append(step(trig,
                             stage_id="Shared Server Connect",
                             stage_desc="connection to " + meta.get("host", "?") + ":" + meta.get("port", "?") +
-                                       " from pid " + meta.get("caller_pid", "?")))
+                                       " from session " + meta.get("session", "")))
 
           # ── Suppress repeats for the same aggregator signature ──────────────
           sig  = aid + "|" + ss[0] + "|" + str(len(ups))

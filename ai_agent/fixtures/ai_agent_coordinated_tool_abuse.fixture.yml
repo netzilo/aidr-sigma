@@ -1,0 +1,53 @@
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c0, args: '{"cmd": "cat /etc/hosts0"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c1, args: '{"cmd": "cat /etc/hosts1"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c2, args: '{"cmd": "cat /etc/hosts2"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c3, args: '{"cmd": "cat /etc/hosts3"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c4, args: '{"cmd": "cat /etc/hosts4"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c5, args: '{"cmd": "cat /etc/hosts5"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c6, args: '{"cmd": "cat /etc/hosts6"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c7, args: '{"cmd": "cat /etc/hosts7"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c8, args: '{"cmd": "cat /etc/hosts8"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c9, args: '{"cmd": "cat /etc/hosts9"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c10, args: '{"cmd": "cat /etc/hosts10"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c11, args: '{"cmd": "cat /etc/hosts11"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c12, args: '{"cmd": "cat /etc/hosts12"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c13, args: '{"cmd": "cat /etc/hosts13"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c14, args: '{"cmd": "cat /etc/hosts14"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c15, args: '{"cmd": "cat /etc/hosts15"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c16, args: '{"cmd": "cat /etc/hosts16"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c17, args: '{"cmd": "cat /etc/hosts17"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c18, args: '{"cmd": "cat /etc/hosts18"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c19, args: '{"cmd": "cat /etc/hosts19"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c20, args: '{"cmd": "cat /etc/hosts20"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c21, args: '{"cmd": "cat /etc/hosts21"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c22, args: '{"cmd": "cat /etc/hosts22"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c23, args: '{"cmd": "cat /etc/hosts23"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c24, args: '{"cmd": "cat /etc/hosts24"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c25, args: '{"cmd": "cat /etc/hosts25"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c26, args: '{"cmd": "cat /etc/hosts26"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c27, args: '{"cmd": "cat /etc/hosts27"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c28, args: '{"cmd": "cat /etc/hosts28"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c29, args: '{"cmd": "cat /etc/hosts29"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c30, args: '{"cmd": "cat /etc/hosts30"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c31, args: '{"cmd": "cat /etc/hosts31"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c32, args: '{"cmd": "cat /etc/hosts32"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c33, args: '{"cmd": "cat /etc/hosts33"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c34, args: '{"cmd": "cat /etc/hosts34"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c35, args: '{"cmd": "cat /etc/hosts35"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c36, args: '{"cmd": "cat /etc/hosts36"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c37, args: '{"cmd": "cat /etc/hosts37"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c38, args: '{"cmd": "cat /etc/hosts38"}'}
+  - {kind: tool_call, subject: claude, server: ops, server_url: "https://mcp.ops.example", tool: exec_shell, call_id: c39, args: '{"cmd": "cat /etc/hosts39"}'}
+expect:
+  action: report
+  reason_contains: "Coordinated tool abuse: 40 calls to sensitive tool 'exec_shell' on server 'ops' within 24h (threshold 40)"
+  chain_min: 1

@@ -16,22 +16,21 @@ description: |
   noise and would be indistinguishable from ordinary activity.
 
   WHAT THIS RULE THEREFORE DOES: it refuses to fire on a bare process spawn. It
-  requires BOTH of the following, instance-resolved and scoped to a single
-  process session:
-    1. ANCHOR (required, high specificity) - the triggering process's own
-       lineage, resolved through proc_instance -> proc_lineage, contains an
-       ancestor whose executable path or command line identifies the vulnerable
-       component (modelsbyom / LLM-As-Chatbot / deep-diver). Without that
-       ancestor the script returns allow and the rule is invisible.
+  requires BOTH of the following, scoped to the triggering session's lineage:
+    1. ANCHOR (required, high specificity) - the spawned session's own lineage
+       (lineage()) contains an ancestor session whose program path or command
+       line identifies the vulnerable component (modelsbyom / LLM-As-Chatbot /
+       deep-diver). Without that ancestor the script returns allow and the rule
+       is invisible.
     2. EXECUTION PRIMITIVE WITH PAYLOAD - the spawned command is a shell,
        interpreter, downloader or netcat-class tool carrying an inline-payload,
        pipe-to-shell, download, decode or reverse-shell argument. The component's
        own startup line is explicitly excluded.
 
   Corroborating stages (further payload spawns by the same component subtree, and
-  non-ZTNA egress by session PIDs) are gathered only from within the rule's own
-  10-minute window and only for PIDs that descend from the anchor - never across
-  sessions and never from a global scan.
+  non-ZTNA egress by sessions in that subtree) are gathered only from within the
+  rule's own 10-minute window and only for sessions that descend from the anchor -
+  never across sessions and never from a global scan.
 
   Because the causal link to a remote unauthenticated request is unobservable,
   the verdict is `report` with a full kill chain, not an enforcement action. This
@@ -62,6 +61,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -117,8 +119,59 @@ script: |
               return True
       return False
 
-  def is_component(ev):
-      blob = (ev.get("actor_path", "") + " " + ev.get("cmdline", "")).lower()
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
+
+  def sess_spawn(x):
+      # The session's own SPAWNED row (keyed by the child), or None.
+      for r in events(kind="SPAWNED", session=x["id"], limit=1):
+          return r
+      return None
+
+  def sess_cmdline(x):
+      r = sess_spawn(x)
+      if r != None and r.get("cmdline", "") != "":
+          return r.get("cmdline", "")
+      p = node(x.get("program", ""))
+      if p != None:
+          return p.get("cmdlines", "")
+      return ""
+
+  def is_component(x):
+      blob = (x.get("path", "") + " " + sess_cmdline(x)).lower()
       for m in COMPONENT:
           if m in blob:
               return True
@@ -134,21 +187,38 @@ script: |
       return parts[len(parts) - 1]
 
   def ev_edge(e):
-      ts = e.get("ts", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("parent_path", "?"),
-          "to":       "process://" + e.get("actor_path", "?"),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       ts,
-          "first_ts": ts,
-          "last_ts":  ts,
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
           "cmdline":  e.get("cmdline", ""),
       }
+
+  def sess_edge(x):
+      # How this session came to exist: its SPAWNED row from the parent, or the
+      # INSTANCE_OF edge to its program when it is a root session.
+      r = sess_spawn(x)
+      if r != None:
+          return ev_edge(r)
+      t = x.get("first_seen", "0")
+      if x.get("parent", "") != "":
+          return {"from": x["parent"], "to": x["id"], "kind": "SPAWNED", "dir": "out",
+                  "ts": t, "first_ts": t, "last_ts": t}
+      return {"from": x["id"], "to": x.get("program", ""), "kind": "INSTANCE_OF", "dir": "out",
+              "ts": t, "first_ts": t, "last_ts": t}
 
   def conn_edge(e):
       ts = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", "?"),
+          "from":     e.get("session_id", ""),
           "to":       e.get("target_id", ""),
           "kind":     "CONNECTS",
           "ts":       ts,
@@ -160,7 +230,7 @@ script: |
       # ── 1. relevance gate: pure string checks on meta, no graph / log calls ──
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = spawn_cmd(meta.get("content", ""))
       if cmd == "":
           return "allow"
       cmd_l = cmd.lower()
@@ -169,36 +239,32 @@ script: |
       if not matches_any(PAYLOAD, cmd):
           return "allow"
 
-      cp_str = meta.get("caller_pid", "0")
-      cp = int(cp_str)
-      if cp == 0:
-          return "allow"
       event_ts = int(meta.get("event_ts", "0"))
       since = 0
       if event_ts > WINDOW_NS:
           since = event_ts - WINDOW_NS
 
-      # ── 2. anchor on the exact triggering instance ──────────────────────────
-      inst = proc_instance(cp, event_ts)
+      # ── 2. anchor on the triggering session (the spawned primitive) ─────────
+      inst = session()
       if inst == None:
-          # degraded: the create row has not landed yet. Never guess an owner -
-          # the next event from this instance re-fires with full attribution.
+          # degraded: the session is unknown. Never guess an owner - the next
+          # event from this session re-fires with full attribution.
           return "allow"
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # ── 3. REQUIRED anchor stage: vulnerable component in this lineage ──────
       anchor_idx = -1
-      for i in range(len(lineage)):
-          if is_component(lineage[i]):
+      for i in range(len(lineage_)):
+          if is_component(lineage_[i]):
               anchor_idx = i
               break
       if anchor_idx < 0:
           # Generic shell spawn with no LLM-As-Chatbot ancestry - exactly the
           # noise the triage dissent warned about. Stay silent.
           return "allow"
-      anchor = lineage[anchor_idx]
+      anchor = lineage_[anchor_idx]
 
       # The component's own startup line is not an exploitation artefact.
       cmd_is_component = False
@@ -208,39 +274,42 @@ script: |
       if anchor_idx == 0 and cmd_is_component:
           return "allow"
 
-      # ── 4. session scope: the anchor instance and the path down to the caller
-      #     Root the session at the COMPONENT, never at the lineage root (which
-      #     may be a login shell or init and would pull in unrelated processes).
-      session = {}
+      # ── 4. scope: the component session and the path down to the caller, plus
+      #     what they spawned in-window. Rooted at the COMPONENT, never at the
+      #     lineage root (which may be a login shell or init and would pull in
+      #     unrelated sessions).
+      scope = {}
       for i in range(anchor_idx + 1):
-          session[lineage[i]["actor_pid"]] = lineage[i].get("actor_start", "0")
+          scope[lineage_[i]["id"]] = True
 
-      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000)
+      spawn_rows = events(kind="SPAWNED", since_ns=since, limit=2000)
       # two bounded passes to pick up grandchildren of the component subtree
       for _pass in range(2):
           for e in spawn_rows:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp != "" and ap != "" and pp in session and ap not in session:
-                  session[ap] = e.get("actor_start", "0")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp != "" and ap != "" and pp in scope and ap not in scope:
+                  scope[ap] = True
 
       # ── 5. build the kill chain ─────────────────────────────────────────────
-      chain = new_chain("process://" + anchor.get("actor_path", "?"))
+      chain = new_chain(anchor["id"])
       chain.append(step(
-          ev_edge(anchor),
+          sess_edge(anchor),
           stage_id="Vulnerable Component",
           stage_desc="deep-diver LLM-As-Chatbot / modelsbyom component instance: " +
-                     anchor.get("actor_path", "?") + " pid=" + anchor.get("actor_pid", "?") +
-                     " cmd=" + short(anchor.get("cmdline", ""), 140),
+                     anchor.get("path", "?") + " session=" + anchor.get("id", "?") +
+                     " cmd=" + short(sess_cmdline(anchor), 140),
       ))
 
-      parent_path = inst.get("parent_path", "")
-      if parent_path == "" and len(lineage) > 1:
-          parent_path = lineage[1].get("actor_path", "")
+      parent_id = inst.get("parent", "")
+      if parent_id == "" and len(lineage_) > 1:
+          parent_id = lineage_[1]["id"]
+      if parent_id == "":
+          parent_id = anchor["id"]
       trigger = {
-          "from":     "process://" + parent_path,
-          "to":       "process://" + inst.get("actor_path", "?"),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     parent_id,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(event_ts),
           "first_ts": str(event_ts),
           "last_ts":  str(event_ts),
@@ -249,18 +318,19 @@ script: |
       chain.append(step(
           trigger,
           stage_id="Code Execution",
-          stage_desc="component descendant (pid " + cp_str + ") spawned execution primitive with payload argument: " +
+          stage_desc="component descendant (" + base(inst.get("path", "?")) +
+                     ") spawned execution primitive with payload argument: " +
                      short(cmd, 200),
       ))
 
       stages = 2
 
-      # ── 6. optional corroboration, window- and session-scoped only ──────────
+      # ── 6. optional corroboration, window- and scope-scoped only ────────────
       follow = None
       for e in spawn_rows:
-          if e.get("actor_pid", "") == cp_str:
+          if e.get("session_id", "") == inst["id"]:
               continue
-          if e.get("parent_pid", "") not in session:
+          if e.get("parent_session", "") not in scope:
               continue
           c = e.get("cmdline", "")
           if c == "":
@@ -279,15 +349,16 @@ script: |
 
       egress = None
       scanned = 0
-      for pid in session:
+      for sid in scope:
           if scanned >= 25:
               break
           scanned = scanned + 1
-          for r in query_events(kind="CONNECTS", actor_pid=int(pid), since_ns=since, limit=20):
-              if r.get("is_ztna_host", "0") == "1":
-                  continue
+          for r in events(kind="CONNECTS", session=sid, since_ns=since, limit=20):
               h = r.get("host", "")
               if h == "":
+                  continue
+              hn = node(r.get("target_id", ""))
+              if hn != None and hn.get("is_ztna_host", "0") == "1":
                   continue
               egress = r
               break
@@ -303,8 +374,8 @@ script: |
           ))
 
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "?")))
+      for x in lineage_:
+          names.append(base(x.get("path", "?")))
       lin = " -> ".join(names)
       print("CVE-2024-55241 post-exploitation candidate | lineage: " + lin +
             " | stages=" + str(stages) + " | cmd=" + short(cmd, 200))

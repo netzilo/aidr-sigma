@@ -43,6 +43,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
 detection:
 
   # Scope: model output only. FITD is observable in what the model says, not in the prompt.

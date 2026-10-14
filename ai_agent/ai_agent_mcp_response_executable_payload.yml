@@ -37,6 +37,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   scope_event:
     event_type: tool_response

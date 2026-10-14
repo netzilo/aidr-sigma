@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "honeycomb",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["-m", "http.server", "7891", "--directory", "prototypes/honeycomb"],
+      "port": 7891
+    }
+  ]
+}

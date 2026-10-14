@@ -5,14 +5,13 @@ level: high
 description: |
   Detects injection payloads (shell metacharacter break-out, SQL injection,
   encoded path traversal, server-side template injection) inside the ARGUMENTS an
-  AI agent sends to a tool backend, and correlates them - within one process
-  session only - with a subsequently spawned command line that carries the same
+  AI agent sends to a tool backend, and correlates them - within one session
+  lineage only - with a subsequently spawned command line that carries the same
   injection shape.
 
-  Attribution is instance-resolved: the rule anchors on meta["caller_pid"],
-  resolves the exact process instance with proc_instance(), walks the real spawn
-  chain with proc_lineage(), and enriches evidence with query_events(). Session
-  memory is keyed on the (pid, start_ns) instance identity of the lineage root,
+  Attribution is session-resolved: the rule anchors on the triggering session
+  (session()), walks the real spawn chain with lineage(), and enriches evidence
+  with events(). Session memory is keyed on the session id of the lineage root,
   so a tool call in one session can never be stitched to a process spawn in
   another.
 
@@ -57,12 +56,15 @@ falsepositives:
     sensitive target (etc/passwd, .ssh, .aws, .env, proc/self, system32).
   - Front-end templating work using {{ }} or ${ }. Mitigated by requiring an SSTI
     gadget accessor (__class__, __globals__, lipsum, jndi:, T(, getRuntime).
-  - When the spawning event has not yet been written to the event log,
-    proc_instance() returns None and the rule reports with an explicit
-    'attribution degraded' marker and no kill chain.
+  - When the triggering session is not yet known to the engine, session()
+    returns None and the rule reports with an explicit 'attribution degraded'
+    marker and no kill chain.
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
 detection:
   sel_tool_args:
     event_type: tool_call
@@ -180,23 +182,27 @@ script: |
           n += 1
       return out
 
-  def save(sessions, seen):
+  def save(mem, seen):
       u = store_usage()
       if u["free"] < 16384:
           store_reset()
-      store_set("state", {"sessions": sessions, "seen": seen})
+      store_set("state", {"sessions": mem, "seen": seen})
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
-  def tool_edge(proc_path, server, tool, ts):
+  def tool_edge(sid, server, tool, ts):
       sv = server
       if sv == "":
           sv = "local"
@@ -204,22 +210,25 @@ script: |
       if tn == "":
           tn = "unknown"
       return {
-          "from":     "process://" + proc_path,
+          "from":     sid,
           "to":       "tool://" + sv + "/" + tn,
           "kind":     "TOOL_CALL",
+          "dir":      "out",
           "ts":       str(ts),
           "first_ts": str(ts),
           "last_ts":  str(ts),
       }
 
-  def exec_edge(parent_path, child_path, ts):
+  def exec_edge(parent_sid, child_sid, ts):
       return {
-          "from":     "process://" + parent_path,
-          "to":       "process://" + child_path,
-          "kind":     "EXECUTE_PROCESS",
+          "from":     parent_sid,
+          "to":       child_sid,
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(ts),
           "first_ts": str(ts),
           "last_ts":  str(ts),
+          "callid":   meta.get("callid", ""),
       }
 
   def squash(s):
@@ -249,71 +258,67 @@ script: |
                   "reason": "Parameter injection indicator (" + kind +
                             ") observed but event carries no timestamp - attribution degraded: " + frag}
 
-      # 2. anchor on the exact triggering instance
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      # 2. anchor on the triggering session
+      cp = meta.get("session", "")
+      if cp == "":
           return "allow"
-      inst = proc_instance(cp, event_ts)
+      inst = session(cp)
       if inst == None:
-          # create row not yet visible - never guess an owner
+          # session not known yet - never guess an owner
           if ct != "tool_input":
               return "allow"
           return {"action": "report",
                   "reason": "SUSPECTED parameter injection (" + kind + ") in arguments to tool '" +
-                            tname + "' - instance attribution degraded (pid " + str(cp) + "): " + frag}
+                            tname + "' - session attribution degraded (" + cp + "): " + frag}
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
-      root = lineage[len(lineage) - 1]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = lineage_[len(lineage_) - 1]
 
-      # 3. session scope = this lineage only. Candidate keys are every instance on
+      # 3. session scope = this lineage only. Candidate keys are every session on
       #    OUR OWN spawn chain, so a lookup can never cross sessions.
       cand = []
-      for x in lineage:
-          cand.append(x.get("actor_pid", "") + ":" + x.get("actor_start", ""))
+      for x in lineage_:
+          cand.append(x["id"])
       session_key = cand[len(cand) - 1]
-      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
-      root_id = "process://" + root.get("actor_path", "")
+      names = " -> ".join([x.get("path", "?").split("/")[-1] for x in lineage_])
+      root_id = root["id"]
 
       # 4. load session memory
-      st       = store_get("state") or {}
-      sessions = prune(st.get("sessions", {}), event_ts)
-      seen     = prune(st.get("seen", {}), event_ts)
+      st   = store_get("state") or {}
+      mem  = prune(st.get("sessions", {}), event_ts)
+      seen = prune(st.get("seen", {}), event_ts)
 
       # path A: injection observed in TOOL ARGUMENTS
       if ct == "tool_input":
           dkey = session_key + "|" + kind + "|" + frag
           dup  = seen.get(dkey, None)
           seen[dkey] = {"ts": str(event_ts)}
-          sessions[session_key] = {
+          mem[session_key] = {
               "ts":     str(event_ts),
               "kind":   kind,
               "frag":   frag,
-              "pid":    inst.get("actor_pid", ""),
-              "start":  inst.get("actor_start", ""),
-              "path":   inst.get("actor_path", ""),
+              "sid":    inst["id"],
+              "path":   inst.get("path", ""),
               "tool":   tname,
               "server": meta.get("server_name", ""),
           }
-          save(sessions, seen)
+          save(mem, seen)
 
           if dup != None and event_ts - int(dup.get("ts", "0")) <= WINDOW_NS:
               return "allow"     # identical payload already reported for this session
 
           chain = new_chain(root_id)
-          # query_events: the caller instance's own create row (real evidence)
-          anchor = query_events(kind="EXECUTE_PROCESS",
-                                actor_pid=int(inst["actor_pid"]),
-                                actor_start=int(inst["actor_start"]),
-                                limit=1)
+          # the caller session's own SPAWNED row (real evidence)
+          anchor = events(kind="SPAWNED", session=inst["id"], limit=1)
           if anchor:
               chain.append(step(ev_edge(anchor[0]),
                                 stage_id="Session Anchor",
-                                stage_desc="tool caller instance " + inst.get("actor_path", "?") +
-                                           " (pid " + inst.get("actor_pid", "?") + ") spawned as: " +
+                                stage_desc="tool caller session " + inst.get("path", "?") +
+                                           " (" + inst["id"] + ") spawned as: " +
                                            clip(anchor[0].get("cmdline", ""), 160)))
-          chain.append(step(tool_edge(inst.get("actor_path", ""),
+          chain.append(step(tool_edge(inst["id"],
                                       meta.get("server_name", ""), tname, event_ts),
                             stage_id="Parameter Injection",
                             stage_desc=kind + " payload in arguments of tool '" + tname + "': " + frag))
@@ -329,7 +334,7 @@ script: |
       # session already showed an injection-shaped tool argument, in-window.
       prior = None
       for k in cand:
-          p = sessions.get(k, None)
+          p = mem.get(k, None)
           if p == None:
               continue
           pts = int(p.get("ts", "0"))
@@ -357,28 +362,26 @@ script: |
       ckey = session_key + "|confirmed|" + core
       cdup = seen.get(ckey, None)
       seen[ckey] = {"ts": str(event_ts)}
-      save(sessions, seen)
+      save(mem, seen)
       if cdup != None and event_ts - int(cdup.get("ts", "0")) <= WINDOW_NS:
           return "allow"
 
       chain = new_chain(root_id)
-      ppid   = int(prior.get("pid", "0"))
-      pstart = int(prior.get("start", "0"))
-      if ppid > 0 and pstart > 0:
-          panchor = query_events(kind="EXECUTE_PROCESS", actor_pid=ppid,
-                                 actor_start=pstart, limit=1)
+      psid = prior.get("sid", "")
+      if psid != "":
+          panchor = events(kind="SPAWNED", session=psid, limit=1)
           if panchor:
               chain.append(step(ev_edge(panchor[0]),
                                 stage_id="Session Anchor",
-                                stage_desc="tool caller instance " + prior.get("path", "?") +
-                                           " (pid " + prior.get("pid", "?") + ")"))
-      chain.append(step(tool_edge(prior.get("path", ""), prior.get("server", ""),
+                                stage_desc="tool caller session " + prior.get("path", "?") +
+                                           " (" + psid + ")"))
+      chain.append(step(tool_edge(psid, prior.get("server", ""),
                                   prior.get("tool", ""), int(prior.get("ts", "0"))),
                         stage_id="Parameter Injection",
                         stage_desc=prior.get("kind", "injection") + " payload in arguments of tool '" +
                                    prior.get("tool", "?") + "': " + pfrag))
-      chain.append(step(exec_edge(inst.get("actor_path", ""),
-                                  inst.get("actor_path", ""), event_ts),
+      chain.append(step(exec_edge(inst.get("parent", ""),
+                                  inst["id"], event_ts),
                         stage_id="Injected Execution",
                         stage_desc="same payload observed in spawned command line (" + kind + "): " +
                                    clip(content, 200)))

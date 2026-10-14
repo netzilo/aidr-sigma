@@ -41,6 +41,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
 
   # ── Which events can carry this content at all ──────────────────────────────

@@ -1,0 +1,23 @@
+rule: ai_agent_llamaindex_pickle_deserialization_rce.yml
+subjects:
+  python:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  git:
+    session: pid/101:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: python}
+  - {kind: file_read, subject: python, path: /Users/dev/proj/data/features.pkl}
+  - {kind: spawn, subject: git, cmdline: "sh -c 'git status --porcelain'"}
+expect:
+  action: allow

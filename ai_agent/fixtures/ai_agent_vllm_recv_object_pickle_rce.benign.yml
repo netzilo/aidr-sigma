@@ -1,0 +1,28 @@
+rule: ai_agent_vllm_recv_object_pickle_rce.yml
+subjects:
+  bash:
+    session: pid/99:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops, email: ops@example.com, groups: [ml]}]
+    device: gpu-1
+    source: probe
+  train:
+    session: pid/100:1
+    parent: bash
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: train
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: train, cmdline: "python3.11 train.py --epochs 3"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -sf http://localhost:8000/health'"}
+expect:
+  action: allow

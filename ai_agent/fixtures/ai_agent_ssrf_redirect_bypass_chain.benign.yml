@@ -1,0 +1,16 @@
+rule: ai_agent_ssrf_redirect_bypass_chain.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://docs.example.com/page", method: GET, request_id: r1}
+  - {kind: http_response, subject: agent, url: "https://docs.example.com/page", request_id: r1, status: 200, content_type: text/html, body: "<p>hello</p>"}
+  - {kind: http_request, subject: agent, url: "http://127.0.0.1:11434/api/generate", method: POST, request_id: r2, content_type: application/json, body: '{"model":"llama3","prompt":"hi"}'}
+expect:
+  action: allow

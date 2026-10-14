@@ -62,6 +62,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_numexpr_surface:
     event_type: execute_process

@@ -21,10 +21,10 @@ description: |
   required: (1) a prior acquisition command that fetched the package, and (2) an
   outbound HTTP request to an inference completion path made by a session process.
 
-  Attribution is instance-resolved: the rule anchors on meta.caller_pid, resolves the
-  exact (pid, start) instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), and expands the session only to descendants of that lineage. It
-  never walks path-keyed graph nodes and never stitches evidence across sessions.
+  Attribution is session-scoped: the rule anchors on the triggering session (the
+  spawned process), walks its real parent chain with lineage(), and expands the
+  scope only to sessions spawned by that lineage. It never stitches evidence
+  across sessions.
 author: Haibo
 date: "2026-06-11"
 references:
@@ -55,6 +55,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -92,9 +95,10 @@ script: |
 
   def exec_edge(e):
       return {
-          "from":     "process://" + e.get("parent_path", ""),
-          "to":       "process://" + e.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     e.get("parent_session", ""),
+          "to":       e.get("session_id", ""),
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       e.get("ts", "0"),
           "first_ts": e.get("ts", "0"),
           "last_ts":  e.get("ts", "0"),
@@ -103,9 +107,10 @@ script: |
 
   def http_edge(e):
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     e.get("session_id", ""),
           "to":       e.get("target_id", ""),
           "kind":     "HTTP_REQUEST",
+          "dir":      "out",
           "ts":       e.get("ts", "0"),
           "first_ts": e.get("ts", "0"),
           "last_ts":  e.get("ts", "0"),
@@ -116,9 +121,10 @@ script: |
   # asynchronously and the event that just fired this rule may not be readable yet.
   def trigger_edge(inst, ts, cmd):
       return {
-          "from":     "process://" + inst.get("parent_path", ""),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", ""),
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(ts),
           "first_ts": str(ts),
           "last_ts":  str(ts),
@@ -153,35 +159,30 @@ script: |
 
       snippet = cmd[:200]
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
 
-      # ── 2. anchor on the exact triggering instance ──────────────────────────
-      if cp == 0:
-          return {"action": "report",
-                  "reason": "basemode " + lbl + " observed; attribution degraded (no caller pid) | cmd: " + snippet}
-      inst = proc_instance(cp, now)
+      # ── 2. anchor on the triggering session (the spawned process) ───────────
+      inst = session()
       if inst == None:
           return {"action": "report",
-                  "reason": "basemode " + lbl + " observed; attribution degraded (instance not yet in event log) | cmd: " + snippet}
+                  "reason": "basemode " + lbl + " observed; attribution degraded (session unknown) | cmd: " + snippet}
 
-      lineage = proc_lineage(int(inst.get("actor_pid", "0")), int(inst.get("actor_start", "0")))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
-      # ── 3. scope to ONE session: caller lineage (bounded, stopping below the
-      #      OS session leader) plus descendants of those pids inside the window ─
+      # ── 3. scope to ONE session tree: caller lineage (bounded, stopping below
+      #      the OS session leader) plus sessions it spawned inside the window ──
       trimmed = []
-      for x in lineage[:8]:
-          if base(x.get("actor_path", "")) in SESSION_TOP:
+      for x in lineage_[:8]:
+          if base(x.get("path", "")) in SESSION_TOP:
               break
           trimmed.append(x)
       if not trimmed:
           trimmed = [inst]
       root = trimmed[len(trimmed) - 1]
 
-      # ── 4. per-instance dedupe, keyed inside this session root ──────────────
-      key = root.get("actor_pid", "?") + "/" + root.get("actor_start", "0")
-      key = key + "/" + inst.get("actor_pid", "?") + "/" + inst.get("actor_start", "0")
+      # ── 4. per-session dedupe, keyed inside this tree root ───────────────────
+      key = root["id"] + "/" + inst["id"]
       seen = store_get("seen")
       if seen == None:
           seen = {}
@@ -192,22 +193,20 @@ script: |
       if since < 0:
           since = 0
 
-      session = {}
+      scope = {}
       for x in trimmed:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "0")
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=now, limit=4000)
+          scope[x["id"]] = True
+      execs = events(kind="SPAWNED", since_ns=since, until_ns=now, limit=4000)
       for i in range(3):
           for e in execs:
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = e.get("actor_start", "0")
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # ── 5. optional corroborating stage A: earlier acquisition in-session ────
+      # ── 5. optional corroborating stage A: earlier acquisition in-scope ──────
       acq_ev = None
       for e in execs:
-          if e.get("actor_pid", "") not in session:
-              continue
-          if (e.get("actor_pid", "") == inst.get("actor_pid", "") and
-              e.get("actor_start", "") == inst.get("actor_start", "")):
+          sid = e.get("session_id", "")
+          if sid not in scope or sid == inst["id"]:
               continue
           c = e.get("cmdline", "")
           if not has(EXACT_RE, c) and not has(VAR_RE, c):
@@ -215,15 +214,15 @@ script: |
           if (has(INSTALLER_RE, c) and has(VERB_RE, c)) or has(URL_RE, c):
               acq_ev = e   # newest-first: last assignment is the earliest event
 
-      # ── 6. optional corroborating stage B: inference egress by this session ──
+      # ── 6. optional corroborating stage B: inference egress by this tree ─────
       infer_ev = None
       probed = 0
-      for pid in session:
+      for sid in scope:
           if probed >= 25 or infer_ev != None:
               break
           probed = probed + 1
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=since, until_ns=now, limit=40):
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=since, until_ns=now, limit=40):
               p = e.get("path", "")
               for hint in INFER_PATHS:
                   if hint in p:
@@ -232,8 +231,8 @@ script: |
               if infer_ev != None:
                   break
 
-      # ── 7. kill chain, rooted at the session owner ───────────────────────────
-      chain  = new_chain("process://" + root.get("actor_path", ""))
+      # ── 7. kill chain, rooted at the session tree owner ──────────────────────
+      chain  = new_chain(root["id"])
       stages = []
       if acq_ev != None:
           chain.append(step(exec_edge(acq_ev),
@@ -242,7 +241,7 @@ script: |
           stages.append("acquired")
       chain.append(step(trigger_edge(inst, now, cmd),
                         stage_id="Guardrail Bypass Tooling",
-                        stage_desc="basemode " + lbl + " by " + base(inst.get("actor_path", "")) + ": " + snippet))
+                        stage_desc="basemode " + lbl + " by " + base(inst.get("path", "")) + ": " + snippet))
       stages.append(lbl)
       if infer_ev != None:
           chain.append(step(http_edge(infer_ev),
@@ -259,7 +258,7 @@ script: |
 
       names = []
       for x in trimmed:
-          names.append(base(x.get("actor_path", "")))
+          names.append(base(x.get("path", "")))
       reason = ("basemode raw-continuation tooling in session [" + " -> ".join(names) +
                 "] - stages: " + ", ".join(stages) +
                 " | note: tooling footprint only, payload-level continuation is not observable" +

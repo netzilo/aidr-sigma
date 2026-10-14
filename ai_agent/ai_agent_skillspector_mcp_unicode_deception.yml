@@ -23,6 +23,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - skill
 detection:
   # Cyrillic lookalikes — а е о р с у і А В Е К М Н О Р С Т Х
   selection_cyrillic:

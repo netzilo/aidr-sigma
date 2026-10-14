@@ -38,9 +38,9 @@ description: |
   a prior interpreter run by the same session inside the window (the
   ModuleNotFoundError loop) and repeated ad-hoc installs by the session.
 
-  Attribution is instance-resolved: anchored on meta['caller_pid'], resolved through
-  proc_instance -> proc_lineage, expanded to sibling instances spawned by the same
-  session, and every prior stage is scoped to that session and window. No
+  Attribution is session-based: the installing process is the triggering session,
+  its lineage() gives the owning agent session, and every prior stage is scoped to
+  that session tree (lineage plus sessions it spawned inside the window). No
   cross-session attribution is possible.
 
   Action is report only. A hallucinated dependency is a slopsquatting exposure to
@@ -77,6 +77,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - llm
 detection:
   sel_exec:
     event_type: execute_process
@@ -128,6 +131,16 @@ script: |
   # ------------------------------------------------------------- pure helpers
   def clip(s, n):
       return s[:n] + "..." if len(s) > n else s
+
+  def exec_cmd():
+      # execute_process content is {"command": ..., "path": ...}; take the command.
+      c = meta.get("content", "")
+      m = re.find(r'"command"\s*:\s*"(?:[^"\\]|\\.)*"', c)
+      if m == None:
+          return c
+      v = m[m.find(":") + 1:].strip()
+      v = v[1:len(v) - 1]
+      return v.replace('\\"', '"').replace("\\\\", "\\")
 
   def normalize(c):
       out = c
@@ -194,17 +207,18 @@ script: |
       return False
 
   def ev_edge(e):
-      pp = e.get("parent_path", "")
-      if pp == "":
-          pp = e.get("actor_path", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "from":     "process://" + pp,
-          "to":       "process://" + e.get("actor_path", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  e.get("cmdline", ""),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   # ------------------------------------------- generation link (FTS + graph)
@@ -223,12 +237,14 @@ script: |
 
   def model_emitted(pkg, trig_ts):
       # [edge_or_None, source_label] -- source_label "" means: no model emission.
+      # Package names carry '-' and '.', so query them as an FTS phrase.
+      q = '"' + pkg + '"'
       degraded_src = ""
-      for h in search(pkg, topK=20):
+      for h in search(q, topK=20):
           src = h.get("source", "")
           if not src.startswith("llmres://"):
               continue                       # a user prompt is not a fabrication
-          if not search_in(src, pkg):
+          if not search_in(src, q):
               continue
           e = llm_edge_for(src)
           if e == None:
@@ -280,7 +296,7 @@ script: |
       # 1. relevance gate -- pure string checks on meta, no graph/log/network
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = exec_cmd()
       if cmd == "":
           return "allow"
       if re.find(r"(?i)\b(?:pip[0-9]*|pipx|uv|poetry|npm|pnpm|yarn|bun|gem|cargo)\b", cmd) == None:
@@ -291,46 +307,43 @@ script: |
       if eco == "" or len(names) == 0:
           return "allow"                     # manifest install / alt index / no name
 
-      # 2. anchor on the triggering instance
+      # 2. anchor on the triggering session (the installing process)
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
-      inst = proc_instance(cp, trig_ts)
+      inst = session()
       if inst == None:
           return "allow"                     # degraded attribution -- never guess
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
+      lineage_ = lineage()
+      if len(lineage_) == 0:
           return "allow"
 
-      # 3. scope strictly to this session (lineage + its descendants in window)
+      # 3. scope strictly to this session tree (lineage + descendants in window)
       since = 0
       if trig_ts > WINDOW_NS:
           since = trig_ts - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = True
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000)
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      rows = events(kind="SPAWNED", since_ns=since, until_ns=trig_ts, limit=2000)
       for i in range(2):
           for e in rows:
-              if e.get("parent_pid", "") in session:
-                  session[e["actor_pid"]] = True
+              if e.get("parent_session", "") in scope:
+                  scope[e["session_id"]] = True
 
-      # 4. optional corroborators, session-scoped and ordered before the trigger
+      # 4. optional corroborators, scoped to the tree and ordered before the trigger
       interp_ev   = None
       other_inst  = 0
       for e in rows:
-          if e.get("actor_pid", "") not in session:
+          sid = e.get("session_id", "")
+          if sid not in scope:
               continue
-          if e.get("actor_pid", "") == inst.get("actor_pid", ""):
-              if e.get("actor_start", "") == inst.get("actor_start", ""):
-                  continue                   # the trigger's own exec row
+          if sid == inst["id"]:
+              continue                       # the trigger's own spawn row
           ts = int(e.get("ts", "0"))
           if ts <= 0 or ts > trig_ts:
               continue
           cl = e.get("cmdline", "")
           if cl == "":
-              cl = e.get("actor_path", "")
+              cl = e.get("program", "")
           pi = parse_install(cl)
           if pi[0] != "" and len(pi[1]) > 0:
               other_inst += 1
@@ -340,13 +353,13 @@ script: |
 
       # 5. per-name evaluation: generation link, then registry non-existence
       reported = store_get("reported") or {}
-      parent_path = inst.get("actor_path", "")
-      if len(lineage) > 1:
-          parent_path = lineage[1].get("actor_path", parent_path)
+      parent_id = inst["id"]
+      if len(lineage_) > 1:
+          parent_id = lineage_[1]["id"]
       trig_edge = {
-          "kind":     "EXECUTE_PROCESS",
-          "from":     "process://" + parent_path,
-          "to":       "process://" + inst.get("actor_path", ""),
+          "kind":     "SPAWNED",
+          "from":     parent_id,
+          "to":       inst["id"],
           "ts":       str(trig_ts),
           "first_ts": str(trig_ts),
           "last_ts":  str(trig_ts),
@@ -365,11 +378,11 @@ script: |
               continue                       # exists, or lookup unavailable
 
           names_path = []
-          for x in lineage:
-              names_path.append(x.get("actor_path", "").split("/")[-1])
+          for x in lineage_:
+              names_path.append(x.get("path", "").split("/")[-1])
           who = " -> ".join(names_path)
 
-          chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+          chain = new_chain(lineage_[len(lineage_) - 1]["id"])
           if me[0] != None:
               chain.append(step(me[0],
                   stage_id="Fabricated Dependency Emitted",
@@ -379,7 +392,7 @@ script: |
               chain.append(step(ev_edge(interp_ev),
                   stage_id="Generated Code Executed",
                   stage_desc="session ran interpreter before install: " +
-                             clip(interp_ev.get("cmdline", interp_ev.get("actor_path", "")), 200)))
+                             clip(interp_ev.get("cmdline", interp_ev.get("program", "")), 200)))
           chain.append(step(trig_edge,
               stage_id="Hallucinated Dependency Install",
               stage_desc="ad-hoc install of '" + pkg + "' -- absent from the " +

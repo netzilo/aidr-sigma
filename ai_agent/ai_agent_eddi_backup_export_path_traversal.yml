@@ -33,6 +33,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
 
   # ── Endpoint anchor — the request must target the EDDI backup export API ──

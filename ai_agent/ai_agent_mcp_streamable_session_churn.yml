@@ -43,6 +43,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - connect
 detection:
   sel_connects:
     event_type: connects
@@ -119,7 +123,7 @@ script: |
       total = 0
       best  = None
       bproc = None
-      for p in graph(type="Process"):
+      for p in sessions():
           if paths != None and p.get("path", "") not in paths:
               continue
           for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
@@ -186,15 +190,15 @@ script: |
           return "allow"
 
       # ---- attribution: instance-resolved owner of the triggering connect ------
-      cp      = int(meta.get("caller_pid", "0"))
-      lineage = []
-      if cp > 0:
-          inst = proc_instance(cp, now)
+      cp      = meta.get("session", "")
+      lineage_ = []
+      if cp != "":
+          inst = session(cp)
           if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+              lineage_ = lineage(inst["id"])
       paths = {}
-      for x in lineage:
-          ap = x.get("actor_path", "")
+      for x in lineage_:
+          ap = x.get("path", "")
           if ap != "":
               paths[ap] = True
 
@@ -262,10 +266,10 @@ script: |
       if span_s < 1:
           span_s = 1
       names = ""
-      if lineage:
+      if lineage_:
           parts = []
-          for x in lineage:
-              parts.append(x.get("actor_path", "?").split("/")[-1])
+          for x in lineage_:
+              parts.append(x.get("path", "?").split("/")[-1])
           names = " -> ".join(parts)
       else:
           names = proc.get("name", "?")

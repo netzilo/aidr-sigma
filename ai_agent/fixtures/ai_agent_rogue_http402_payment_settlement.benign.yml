@@ -1,0 +1,16 @@
+rule: ai_agent_rogue_http402_payment_settlement.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3
+    name: shopping-agent
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://api.weather-data.example/v1/forecast?city=berlin", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: http_request, subject: agent, url: "https://facilitator.x402.example/settle", method: POST, request_id: r2, content_type: application/json, body: '{"x402Version": 1, "paymentPayload": {"scheme": "exact", "payTo": "0xabc"}}'}
+expect:
+  action: allow

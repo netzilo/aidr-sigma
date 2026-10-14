@@ -5,13 +5,12 @@ level: high
 description: |
   Detects exploitation of the OS command injection flaw in the LLama-Index CLI
   (v0.12.20) --files argument, where the caller-supplied value is passed straight
-  to os.system(). The rule is instance-resolved: it anchors on meta["caller_pid"],
-  resolves the exact process instance with proc_instance(), walks the real spawn
-  chain with proc_lineage(), and expands that lineage into a single session using
-  EXECUTE_PROCESS rows from the event log. Only that one session is ever
-  attributed - no cross-session stitching.
+  to os.system(). The rule is session-resolved: it anchors on the triggering
+  session (session()), walks the real spawn chain with lineage(), and expands that
+  lineage into a single run using SPAWNED rows from the event log. Only that one
+  run is ever attributed - no cross-session stitching.
 
-  Required anchor stage: an EXECUTE_PROCESS command line that names the
+  Required anchor stage: a SPAWNED command line that names the
   llama-index CLI AND carries a shell metacharacter inside the --files value
   itself (the value is truncated at the next " --" so metacharacters belonging to
   other flags do not count). A shell metacharacter surviving into argv of the CLI
@@ -65,6 +64,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -82,7 +83,7 @@ action: report
 on_timeout: allow
 on_error:   allow
 script: |
-  # ── llama-index CLI --files OS command injection — instance-resolved ────────
+  # ── llama-index CLI --files OS command injection — session-resolved ─────────
   WINDOW_NS = 300000000000        # 5 minutes: one session slice, no stitching
   MAX_ROWS  = 2000
 
@@ -174,45 +175,39 @@ script: |
               return True
       return False
 
-  def lineage_hint(lineage):
-      for x in lineage:
-          p = x.get("actor_path", "").lower()
+  def lineage_hint(lineage_):
+      for x in lineage_:
+          p = x.get("path", "").lower()
           for h in HOST_HINTS:
               if h in p:
                   return True
       return False
 
-  def ikey(pid, start):
-      return str(pid) + "/" + str(start)
-
   def ev_edge(e):
-      frm = e.get("parent_path", "")
-      if frm == "":
-          frm = e.get("actor_path", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "kind":     "EXECUTE_PROCESS",
-          "from":     "process://" + frm,
-          "to":       "process://" + e.get("actor_path", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  trunc(e.get("cmdline", ""), 400),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
-  def trig_event(inst, lineage, cmd, ts):
-      ppath = ""
-      if len(lineage) > 1:
-          ppath = lineage[1].get("actor_path", "")
+  def trig_event(inst, cmd, ts):
+      # The triggering spawn, built from meta: a SPAWNED row is keyed by the
+      # child session, with the spawner as parent_session.
       return {
-          "kind":         "EXECUTE_PROCESS",
-          "ts":           str(ts),
-          "actor_pid":    str(inst.get("actor_pid", "")),
-          "actor_start":  str(inst.get("actor_start", "")),
-          "actor_path":   inst.get("actor_path", ""),
-          "parent_pid":   str(inst.get("parent_pid", "")),
-          "parent_start": str(inst.get("parent_start", "")),
-          "parent_path":  ppath,
-          "cmdline":      cmd,
+          "kind":           "SPAWNED",
+          "ts":             str(ts),
+          "session_id":     inst["id"],
+          "parent_session": inst.get("parent", ""),
+          "target_id":      inst["id"],
+          "program":        inst.get("path", ""),
+          "cmdline":        cmd,
       }
 
   def run():
@@ -226,20 +221,19 @@ script: |
           if not has_dash_c(cmd):
               return "allow"
 
-      # ── 2. anchor on the exact triggering instance ─────────────────────────
-      cp     = to_int(meta.get("caller_pid", "0"))
+      # ── 2. anchor on the triggering session ────────────────────────────────
+      cp     = meta.get("session", "")
       ts_now = to_int(meta.get("event_ts", "0"))
-      if cp == 0 or ts_now == 0:
+      if cp == "" or ts_now == 0:
           return "allow"
-      inst = proc_instance(cp, ts_now)
+      inst = session(cp)
       if inst == None:
-          return "allow"          # degraded: create row not landed — re-fires later
-      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
-                            to_int(inst.get("actor_start", "0")))
-      if not lineage:
-          lineage = [inst]
+          return "allow"          # degraded: session not known yet — re-fires later
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
-      caller_path = inst.get("actor_path", "")
+      caller_path = inst.get("path", "")
       trig_hit    = find_injection(cmd)
       trig_shell  = is_shell_c(caller_path, cmd)
       trig_tool   = is_payload_tool(caller_path)
@@ -247,31 +241,31 @@ script: |
       # secondary gate — keeps the log scan off unrelated shell spawns
       if trig_hit == "" and not (trig_shell or trig_tool):
           return "allow"
-      if trig_hit == "" and not lineage_hint(lineage):
+      if trig_hit == "" and not lineage_hint(lineage_):
           return "allow"
 
       since = ts_now - WINDOW_NS
       if since < 0:
           since = 0
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                          until_ns=ts_now + 1, limit=MAX_ROWS)
+      rows = events(kind="SPAWNED", since_ns=since,
+                    until_ns=ts_now + 1, limit=MAX_ROWS)
 
-      # ── 3. scope: this lineage + its descendants inside the window only ────
-      session = {}
-      for x in lineage:
-          session[ikey(x.get("actor_pid", ""), x.get("actor_start", ""))] = True
+      # ── 3. scope: this lineage + its descendants inside the window only ─────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
       for i in range(4):
           added = False
           for e in rows:
-              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
-              pk = ikey(e.get("parent_pid", ""), e.get("parent_start", ""))
-              if pk in session and ak not in session:
-                  session[ak] = True
+              ak = e.get("session_id", "")
+              pk = e.get("parent_session", "")
+              if pk in scope and ak not in scope:
+                  scope[ak] = True
                   added = True
           if not added:
               break
-      caller_key = ikey(inst.get("actor_pid", ""), inst.get("actor_start", ""))
-      session[caller_key] = True
+      caller_key = inst["id"]
+      scope[caller_key] = True
 
       # ── 4. REQUIRED anchor stage ───────────────────────────────────────────
       anchor      = None
@@ -280,14 +274,14 @@ script: |
       anchor_key  = ""
       if trig_hit != "":
           # trigger itself carries the injection — taken from meta, never re-queried
-          anchor      = trig_event(inst, lineage, cmd, ts_now)
+          anchor      = trig_event(inst, cmd, ts_now)
           anchor_ts   = ts_now
           anchor_char = trig_hit
           anchor_key  = caller_key
       else:
           for e in rows:
-              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
-              if ak not in session:
+              ak = e.get("session_id", "")
+              if ak not in scope:
                   continue
               m = find_injection(e.get("cmdline", ""))
               if m != "":
@@ -300,30 +294,30 @@ script: |
       if anchor == None:
           return "allow"          # no discriminating anchor — not this CVE
 
-      anchor_shell = is_shell_c(anchor.get("actor_path", ""),
+      anchor_shell = is_shell_c(anchor.get("program", ""),
                                 anchor.get("cmdline", ""))
 
       # ── 5. optional confirmation stage, ordered after the anchor ───────────
       stage2 = None
       if anchor_key != caller_key and (trig_shell or trig_tool):
           if ts_now >= anchor_ts and (ts_now - anchor_ts) <= WINDOW_NS:
-              stage2 = trig_event(inst, lineage, cmd, ts_now)
+              stage2 = trig_event(inst, cmd, ts_now)
       if stage2 == None:
           for e in reversed(rows):
-              ak = ikey(e.get("actor_pid", ""), e.get("actor_start", ""))
-              if ak not in session or ak == anchor_key:
+              ak = e.get("session_id", "")
+              if ak not in scope or ak == anchor_key:
                   continue
               t = to_int(e.get("ts", "0"))
               if t < anchor_ts or (t - anchor_ts) > WINDOW_NS:
                   continue
-              p = e.get("actor_path", "")
+              p = e.get("program", "")
               if is_shell_c(p, e.get("cmdline", "")) or is_payload_tool(p):
                   stage2 = e
                   break
 
       confirmed = stage2 != None or anchor_shell
 
-      # ── 6. suppress duplicate verdicts for the same anchor instance ────────
+      # ── 6. suppress duplicate verdicts for the same anchor session ─────────
       dedupe = anchor_key + "|" + anchor_char
       if confirmed:
           dedupe = dedupe + "|confirmed"
@@ -333,13 +327,13 @@ script: |
       if dedupe in seen:
           return "allow"
 
-      # ── 7. kill chain built from instance-resolved event rows ──────────────
+      # ── 7. kill chain built from session-keyed event rows ──────────────────
       lin = []
-      for x in lineage:
-          lin.append(base(x.get("actor_path", "")))
+      for x in lineage_:
+          lin.append(base(x.get("path", "")))
       lineage_str = " -> ".join(lin)
 
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain = new_chain(lineage_[-1]["id"])
       desc = ("llama-index CLI '--files' value carries shell metacharacter '" +
               anchor_char + "': " + trunc(anchor.get("cmdline", ""), 260))
       if anchor_shell:
@@ -349,14 +343,14 @@ script: |
       if stage2 != None:
           chain.append(step(ev_edge(stage2), stage_id="Command Execution",
                             stage_desc="process spawned in the same session after the injected argument: " +
-                                       base(stage2.get("actor_path", "")) + " — " +
+                                       base(stage2.get("program", "")) + " — " +
                                        trunc(stage2.get("cmdline", ""), 200)))
 
       verdict = "SUSPECTED"
       if confirmed:
           verdict = "CONFIRMED"
-      attrib = "instance-resolved"
-      if len(lineage) < 2:
+      attrib = "session-resolved"
+      if len(lineage_) < 2:
           attrib = "degraded"
       reason = ("LLama-Index CLI --files OS command injection " + verdict +
                 " — metacharacter '" + anchor_char + "' inside the --files value; session " +

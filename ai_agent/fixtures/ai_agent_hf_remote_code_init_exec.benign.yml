@@ -1,0 +1,24 @@
+rule: ai_agent_hf_remote_code_init_exec.yml
+subjects:
+  python:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: python
+    program: /bin/bash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: python}
+  - {kind: file_read, subject: python, path: /Users/dev/.cache/huggingface/hub/models--bert-base-uncased/snapshots/abc123/config.json}
+  - {kind: file_read, subject: python, path: /Users/dev/proj/data/train.json}
+  - {kind: spawn, subject: shell, cmdline: "bash -c 'ls -la /Users/dev/proj/out'"}
+expect:
+  action: allow

@@ -1,0 +1,16 @@
+rule: ai_agent_rule_of_two.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: file_read, subject: claude, path: /Users/dev/proj/src/main.go}
+  - {kind: file_write, subject: claude, path: /Users/dev/proj/src/main.go}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "https://mcp.fs.example", tool: list_dir, call_id: c1, args: '{"path": "/Users/dev/proj/src"}'}
+expect:
+  action: allow

@@ -7,21 +7,21 @@ description: |
   LangChain JiraAPIWrapper component (fixed in v0.0.225). The wrapper passes unsanitised
   input into a Python exec()/os.system() path, so successful exploitation surfaces on the
   endpoint as: a Python (LangChain) host process talking to a JIRA REST endpoint, and then
-  that same process instance spawning an interpreter with an INLINE command string
+  that same session spawning an interpreter with an INLINE command string
   (sh -c / python -c / node -e / powershell -Command) whose payload carries egress, recon,
   obfuscation or persistence indicators.
 
-  The rule is instance-resolved. It anchors on meta["caller_pid"], resolves the exact
-  process instance with proc_instance(), reconstructs the true spawn chain with
-  proc_lineage(), and only correlates the JIRA REST call with the interpreter spawn when
-  BOTH were performed by instances belonging to that one lineage (matched on the
-  (pid, start) pair, never on a bare pid). Cross-session attribution is therefore
-  impossible: a JIRA call made by an unrelated python process in another session has a
-  different instance key and is never stitched into this chain.
+  The rule is session-based. It anchors on the triggering session (the spawned
+  interpreter), reconstructs the true spawn chain with lineage(), and only correlates
+  the JIRA REST call with the interpreter spawn when BOTH were performed by sessions
+  belonging to that one lineage tree (session ids, never bare pids or paths).
+  Cross-tree attribution is therefore impossible: a JIRA call made by an unrelated
+  python process in another tree has a different session id and is never stitched
+  into this chain.
 
   On http_request events the rule is silent (returns allow, no event) and simply records
-  JIRA REST activity keyed by instance in its private rule store; the store is pruned on
-  every write and is only ever read back for the same instance keys.
+  JIRA REST activity keyed by session id in its private rule store; the store is pruned
+  on every write and is only ever read back for the same session ids.
 author: Egemen
 date: "2026-06-12"
 references:
@@ -58,6 +58,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -138,6 +141,16 @@ script: |
           return s[:n] + "..."
       return s
 
+  def exec_cmd():
+      # execute_process content is {"command": ..., "path": ...}; take the command.
+      c = meta.get("content", "")
+      m = re.find(r'"command"\s*:\s*"(?:[^"\\]|\\.)*"', c)
+      if m == None:
+          return c
+      v = m[m.find(":") + 1:].strip()
+      v = v[1:len(v) - 1]
+      return v.replace('\\"', '"').replace("\\\\", "\\")
+
   def is_jira_endpoint(host, path, url):
       h = host.lower()
       p = path.lower()
@@ -153,11 +166,19 @@ script: |
               return True
       return False
 
+  def session_cmdline(x):
+      # A session dict carries no command line; its SPAWNED row does.
+      for r in events(kind="SPAWNED", session=x["id"], limit=2):
+          c = r.get("cmdline", "")
+          if c != "":
+              return c
+      return ""
+
   def is_python_host(x):
-      p = x.get("actor_path", "")
-      c = x.get("cmdline", "")
+      p = x.get("path", "")
       if matches_any(PY_HOST, p):
           return True
+      c = session_cmdline(x)
       if re.find(r"(?i)langchain", c) != None:
           return True
       if re.find(r"(?i)jira", c) != None and re.find(r"(?i)python", c) != None:
@@ -165,17 +186,21 @@ script: |
       return False
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "risk_context": "",
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
-  # ── http_request path: silently record JIRA REST activity per instance ────────
+  # ── http_request path: silently record JIRA REST activity per session ─────────
   def track_jira():
       host = meta.get("host", "")
       path = meta.get("path", "")
@@ -183,24 +208,20 @@ script: |
       if not is_jira_endpoint(host, path, url):
           return "allow"
 
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
       now  = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, now)
+      inst = session()
       if inst == None:
           return "allow"
-      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      lin = lineage()
       if not lin:
           return "allow"
 
       rec = {
-          "ts":          str(now),
-          "host":        host,
-          "path":        path,
-          "actor_pid":   inst.get("actor_pid", "0"),
-          "actor_start": inst.get("actor_start", "0"),
-          "actor_path":  inst.get("actor_path", ""),
+          "ts":      str(now),
+          "host":    host,
+          "path":    path,
+          "session": inst["id"],
+          "program": inst.get("path", ""),
       }
 
       calls = store_get(STORE_KEY)
@@ -211,28 +232,25 @@ script: |
           v = calls[k]
           if type(v) == "dict" and now - int(v.get("ts", "0")) <= PRUNE_NS:
               fresh[k] = v
-      # Key by EVERY instance in this lineage so the later exec trigger can bind to
-      # the same session even if its own lineage resolves to a shorter chain.
+      # Key by EVERY session in this lineage so the later exec trigger can bind to
+      # the same tree even if its own lineage resolves to a shorter chain.
       for x in lin:
-          fresh[x.get("actor_pid", "0") + ":" + x.get("actor_start", "0")] = rec
+          fresh[x["id"]] = rec
       if len(fresh) > MAX_TRACKED:
           fresh = {}
           for x in lin:
-              fresh[x.get("actor_pid", "0") + ":" + x.get("actor_start", "0")] = rec
+              fresh[x["id"]] = rec
       if store_usage()["free"] > 65536:
           store_set(STORE_KEY, fresh)
       return "allow"
 
   # ── execute_process path: confirm the injection chain ─────────────────────────
   def detect(cmd):
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
       now  = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, now)
+      inst = session()
       if inst == None:
           return "allow"                      # degraded attribution - never guess
-      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      lin = lineage()
       if len(lin) < 2:
           return "allow"                      # no ancestry -> cannot bind to a host process
 
@@ -244,22 +262,20 @@ script: |
       if host_proc == None:
           return "allow"                      # not a LangChain/Python process tree
 
-      # Session = this exact lineage (instance-keyed) + children of those instances.
-      session = {}
+      # Tree = this exact lineage + sessions spawned by any of them in the window.
+      scope = {}
       for x in lin:
-          session[x.get("actor_pid", "0")] = x.get("actor_start", "0")
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - PRUNE_NS, until_ns=now, limit=2000):
-          pp = e.get("parent_pid", "")
-          if pp in session and e.get("parent_start", "") == session[pp]:
-              session[e.get("actor_pid", "0")] = e.get("actor_start", "0")
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=now - PRUNE_NS, until_ns=now, limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
 
-      # Anchor stage: JIRA REST call by an instance of THIS session, before the spawn.
+      # Anchor stage: JIRA REST call by a session of THIS tree, before the spawn.
       since  = now - WINDOW_NS
       anchor = None
-      for pid in session:
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              actor_start=int(session[pid]),
-                              since_ns=since, until_ns=now, limit=100)
+      for sid in scope:
+          rows = events(kind="HTTP_REQUEST", session=sid,
+                        since_ns=since, until_ns=now, limit=100)
           for r in rows:
               if is_jira_endpoint(r.get("host", ""), r.get("path", ""), ""):
                   if anchor == None or int(r.get("ts", "0")) > int(anchor.get("ts", "0")):
@@ -269,8 +285,8 @@ script: |
       if anchor == None:
           calls = store_get(STORE_KEY)
           if calls != None:
-              for pid in session:
-                  v = calls.get(pid + ":" + session[pid])
+              for sid in scope:
+                  v = calls.get(sid)
                   if v == None:
                       continue
                   vts = int(v.get("ts", "0"))
@@ -282,7 +298,7 @@ script: |
           return "allow"                      # required anchor absent -> not this threat
 
       root  = lin[len(lin) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
 
       if anchor != None:
           a_ts   = int(anchor.get("ts", "0"))
@@ -296,7 +312,7 @@ script: |
           a_host = stored.get("host", "?")
           a_path = stored.get("path", "")
           e0 = {
-              "from":     "process://" + stored.get("actor_path", ""),
+              "from":     stored.get("session", ""),
               "to":       "https://" + a_host,
               "kind":     "HTTP_REQUEST",
               "ts":       stored.get("ts", "0"),
@@ -311,13 +327,13 @@ script: |
       if a_ts <= 0 or a_ts > now or now - a_ts > WINDOW_NS:
           return "allow"                      # ordering / window not satisfied
 
-      pp = inst.get("parent_path", "")
+      pp = inst.get("parent", "")
       if pp == "":
-          pp = host_proc.get("actor_path", "")
+          pp = host_proc["id"]
       trig = {
-          "from":     "process://" + pp,
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     pp,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(now),
           "first_ts": str(now),
           "last_ts":  str(now),
@@ -330,7 +346,7 @@ script: |
 
       names = []
       for x in lin:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+          names.append(x.get("path", "?").split("/")[-1])
       gap = (now - a_ts) // 1000000000
       note = ""
       if matches_any(CHAIN_META, cmd):
@@ -350,9 +366,7 @@ script: |
           return track_jira()
       if ct != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
-      if cmd == "":
-          cmd = meta.get("command", "")
+      cmd = exec_cmd()
       if cmd == "":
           return "allow"
       if not matches_any(SHELL_TOKENS, cmd):

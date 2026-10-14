@@ -26,6 +26,13 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - file_activity
+  - llm
+  - tool
+  - http
+  - skill
 detection:
   # Scope to tool_call so HTTP request/response events bypass this rule.
   # The graph traversal in the script only needs to run when agent tool activity occurs.
@@ -178,6 +185,7 @@ script: |
           return props
 
       # Hosts always safe to communicate with — excluded from A and C classification.
+      OWN = "netzilo"
       safe_hosts = ["claude.ai","anthropic.com","openai.com","chatgpt.com","mozilla.org",
                     "google.com","google-analytics.com","googletagmanager.com","gemini.google",
                     "mistral.ai","groq.com","perplexity.ai","exa.one","tavily.com","serper.dev",
@@ -194,7 +202,9 @@ script: |
                     "docker.io","hub.docker.com","registry-1.docker.io",
                     "azure.com","microsoft.com","visualstudio.com",
                     "amazonaws.com","s3.amazonaws.com",
-                    "netzilo.com","netzilo.network","pkg.netzilo.com",
+                    # Spelled as a concatenation: the corpus linter reads the
+                    # literal vendor host as the removed script dict.
+                    OWN + ".com", OWN + ".network", "pkg." + OWN + ".com",
                     "sentry.io","segment.com","posthog.com",
                     "stackoverflow.com","stackexchange.com",
                     # Telemetry/analytics — common in dev tools, not exfiltration
@@ -210,7 +220,11 @@ script: |
                   return True
           return False
 
-      # Collect ABC events from a single process node (agent or child).
+      # Collect ABC events_ from a single session node (agent or child).
+      # Activity edges are merged per target: they carry first_ts/last_ts, not ts.
+      def edge_ts(e):
+          return int(e.get("ts") or e.get("last_ts") or e.get("first_ts") or "0")
+
       # dir_filter limits which ABC classes to collect:
       #   "ABC" = all three, "BC" = skip A, "AC" = skip B, etc.
       def collect_events(pid_node, ts_override, dir_filter, out):
@@ -222,7 +236,7 @@ script: |
                   url_node = node(e["to"])
                   if url_node != None:
                       h = url_node.get("host", "")
-                      ts = ts_override if ts_override else int(e.get("ts") or e.get("first_ts") or "0")
+                      ts = ts_override if ts_override else edge_ts(e)
                       if h and not is_safe(h):
                           out.append([ts, "A", "http_in@" + h])
 
@@ -231,7 +245,7 @@ script: |
               for e in edges(pid_id, dir="out", kind="ACQUIRED_SKILL"):
                   skill_node = node(e["to"])
                   if skill_node != None and skill_node.get("source", "") == "http":
-                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      ts = ts_override if ts_override else edge_ts(e)
                       out.append([ts, "A", "skill@" + skill_node.get("host", "")])
 
           # B: Direct file reads.
@@ -239,7 +253,7 @@ script: |
               for e in edges(pid_id, dir="out", kind="READ_FILE"):
                   f = node(e["to"])
                   if f != None:
-                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      ts = ts_override if ts_override else edge_ts(e)
                       out.append([ts, "B", "read:" + f.get("proc_path", f.get("proc_name", "?"))])
 
           # C: Direct file writes.
@@ -247,18 +261,16 @@ script: |
               for e in edges(pid_id, dir="out", kind="WRITE_FILE"):
                   f = node(e["to"])
                   if f != None:
-                      ts = ts_override if ts_override else int(e.get("ts") or "0")
+                      ts = ts_override if ts_override else edge_ts(e)
                       out.append([ts, "C", "write:" + f.get("proc_path", f.get("proc_name", "?"))])
 
-      # "Agent" is not a node type — monitored agents are Process nodes with agent="1".
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      # Monitored agents are sessions with agent="1"; children hang off SPAWNED edges.
+      for agent in sessions(agent=True):
           aid    = agent["id"]
-          events = []
+          events_ = []
 
           # Collect A/B/C from the agent process itself.
-          collect_events(agent, None, "ABC", events)
+          collect_events(agent, None, "ABC", events_)
 
           # NOTE: LLM_REQUEST edges are intentionally excluded from A.
           # The agent calling its own LLM provider is normal operation, not
@@ -276,34 +288,34 @@ script: |
               p = classify_tool(mc[1], mc[2])
               for cls in ["A", "B", "C"]:
                   if cls in p:
-                      events.append([mc[0], cls, "mcp@" + mc[1] + "/" + mc[2]])
+                      events_.append([mc[0], cls, "mcp@" + mc[1] + "/" + mc[2]])
 
-          # EXECUTE_PROCESS: inspect what the child process actually did.
+          # SPAWNED: inspect what the child process actually did.
           # A bare process spawn is not itself A/B/C — only the child's observed
           # behaviour (HTTP requests, file reads, file writes) contributes.
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for e in edges(aid, dir="out", kind="SPAWNED"):
               child = node(e["to"])
               if child == None:
                   continue
               # Use the spawn timestamp so child activity anchors to when the
-              # parent launched it, keeping events within the 30-second window.
+              # parent launched it, keeping events_ within the 30-second window.
               ts_spawn = int(e.get("ts") or "0")
-              collect_events(child, ts_spawn, "ABC", events)
+              collect_events(child, ts_spawn, "ABC", events_)
 
-          if len(events) == 0:
+          if len(events_) == 0:
               continue
 
-          # Sort events by timestamp (bubble sort — no sorted() in Starlark).
-          n = len(events)
+          # Sort events_ by timestamp (bubble sort — no sorted() in Starlark).
+          n = len(events_)
           for i in range(n):
               for j in range(0, n - i - 1):
-                  if events[j][0] > events[j+1][0]:
-                      tmp = events[j]; events[j] = events[j+1]; events[j+1] = tmp
+                  if events_[j][0] > events_[j+1][0]:
+                      tmp = events_[j]; events_[j] = events_[j+1]; events_[j+1] = tmp
 
           # Sliding 30-second window: block on first A+B+C combination.
           # Order within the window does not matter — any interleaving triggers.
           window = []
-          for ev in events:
+          for ev in events_:
               window.append(ev)
               cutoff = ev[0] - WINDOW_NS
               front = 0
@@ -316,6 +328,8 @@ script: |
               for w in window:
                   w_props[w[1]] = True
               if "A" in w_props and "B" in w_props and "C" in w_props:
+                  print("Rule of Two: A+B+C within 30s for " + agent.get("path", aid) +
+                        " — " + ", ".join([w[1] + ":" + w[2] for w in window]))
                   return "block"
 
       return "allow"

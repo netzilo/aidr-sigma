@@ -17,8 +17,8 @@ description: |
   telemetry is the outbound http_request. This rule therefore does not fire on "a large
   request" - it parses the data URI out of the body, counts the comma-separated base64
   frames, verifies the segments are real encoded frames (average segment size), and only
-  then reports. It is anchored on caller_pid so the payload is attributed to the exact
-  process instance and its own session lineage, never across sessions.
+  then reports. It is anchored on the triggering session so the payload is attributed
+  to the exact acting instance and its own lineage, never across sessions.
 author: Egemen
 date: "2026-02-19"
 references:
@@ -42,6 +42,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_video_data_uri:
     event_type: http_request
@@ -100,16 +103,25 @@ script: |
           return "unknown"
       return p.split("/")[-1]
 
+  def url_root(u, host):
+      p = u.find("://")
+      if p < 0:
+          return "https://" + host
+      return u[:p].lower() + "://" + host
+
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "count":    "1",
-          "method":   e.get("method", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   # ---- relevance gate: pure string checks on meta only ----------------------------
@@ -145,57 +157,51 @@ script: |
       path   = meta.get("path", "")
       method = meta.get("method", "")
       ev_ts  = int(meta.get("event_ts", "0"))
-      cp     = int(meta.get("caller_pid", "0"))
 
-      # ---- instance resolution: caller_pid -> proc_instance -> proc_lineage --------
-      inst    = None
-      lineage = []
-      if cp != 0:
-          inst = proc_instance(cp, ev_ts)
+      # ---- attribution: the triggering session and its lineage -------------------
+      inst     = session()
+      lineage_ = []
       if inst != None:
-          lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+          lineage_ = lineage(inst["id"])
 
-      actor_path = meta.get("agent_name", "")
+      actor_path = meta.get("program", "") or meta.get("agent_name", "")
       if inst != None:
-          actor_path = inst.get("actor_path", actor_path)
-      root_path = actor_path
-      if lineage:
-          root_path = lineage[len(lineage) - 1].get("actor_path", actor_path)
+          actor_path = inst.get("path", actor_path)
 
       attribution = "resolved"
-      if inst == None or not lineage:
+      if inst == None or not lineage_:
           attribution = "degraded"
 
       names = base_name(actor_path)
-      if lineage:
+      if lineage_:
           parts = []
-          for x in lineage:
-              parts.append(base_name(x.get("actor_path", "")))
+          for x in lineage_:
+              parts.append(base_name(x.get("path", "")))
           names = " -> ".join(parts)
 
-      # ---- session scoping: lineage pids + children they spawned in-window --------
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "0")
-      if cp != 0:
-          session[str(cp)] = "0"
+      # ---- session scoping: lineage sessions + children they spawned in-window ----
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      if inst != None:
+          scope[inst["id"]] = True
 
       since = 0
       if ev_ts > WINDOW_NS:
           since = ev_ts - WINDOW_NS
 
-      if session:
-          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-              if e.get("parent_pid", "") in session:
-                  session[e["actor_pid"]] = e.get("actor_start", "0")
+      if scope:
+          for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+              if e.get("parent_session", "") in scope:
+                  scope[e["session_id"]] = True
 
       # ---- optional prior stage: earlier requests to the same inference host ------
-      # scoped by actor_pid + window, so nothing is attributed across sessions.
+      # scoped by session + window, so nothing is attributed across sessions.
       prior = None
       prior_n = 0
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=since, until_ns=ev_ts, limit=100):
+      for sid in scope:
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=since, until_ns=ev_ts, limit=100):
               if host != "" and e.get("host", "") != host:
                   continue
               if int(e.get("ts", "0")) >= ev_ts:
@@ -204,20 +210,33 @@ script: |
               if prior == None:
                   prior = e
 
-      # ---- kill chain --------------------------------------------------------------
-      chain = new_chain("process://" + root_path)
+      reason = ("vLLM multimodal frame flood: " + str(frames) + " base64 " + mt +
+                " frames (" + str(blen) + " bytes) sent to " + host + path +
+                " by " + names + " [attribution: " + attribution + "]")
+      print(reason)
+
+      if inst == None:
+          # no session to hang a chain on - the finding itself still stands
+          return {"action": "report", "reason": reason}
+
+      # ---- kill chain, rooted at the session owner -------------------------------
+      root = inst["id"]
+      if lineage_:
+          root = lineage_[-1]["id"]
+      chain = new_chain(root)
 
       if prior != None:
           chain.append(step(ev_edge(prior),
               stage_id="Repeated Inference Load",
               stage_desc="same session already sent " + str(prior_n) +
                          " request(s) to inference host " + host +
-                         " within the last 5 minutes (pid " + prior.get("actor_pid", "?") + ")"))
+                         " within the last 5 minutes (" +
+                         base_name(prior.get("program", "?")) + ")"))
 
       # TRIGGER STAGE comes from meta, never from a log lookup (async ingest race).
       trig = {
-          "from":     "process://" + actor_path,
-          "to":       "https://" + host,
+          "from":     inst["id"],
+          "to":       url_root(meta.get("url", ""), host),
           "kind":     "HTTP_REQUEST",
           "ts":       str(ev_ts),
           "first_ts": str(ev_ts),
@@ -231,11 +250,6 @@ script: |
                      " comma-separated base64 frames in a " + mt + " data URI (" +
                      str(blen) + " payload bytes, ~" + str(avg) + " bytes/frame) - " +
                      "exceeds the num_frames ceiling VideoMediaIO.load_base64() does not enforce"))
-
-      reason = ("vLLM multimodal frame flood: " + str(frames) + " base64 " + mt +
-                " frames (" + str(blen) + " bytes) sent to " + host + path +
-                " by " + names + " [attribution: " + attribution + "]")
-      print(reason)
 
       return {
           "action": "report",

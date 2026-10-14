@@ -1,0 +1,24 @@
+rule: ai_agent_vllm_audio_upload_memory_exhaustion.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  # Three uploads above the 25 MB clip limit inside 60s: each is read into memory before being rejected.
+  - {kind: http_request, subject: agent, url: "https://vllm.internal.example/v1/audio/transcriptions", method: POST, request_id: r1, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "31457280"}, body: 'name="file"; filename="big1.wav" RIFF....'}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal.example/v1/audio/transcriptions", method: POST, request_id: r2, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "31457280"}, body: 'name="file"; filename="big2.wav" RIFF....'}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal.example/v1/audio/transcriptions", method: POST, request_id: r3, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "31457280"}, body: 'name="file"; filename="big3.wav" RIFF....'}
+triggers: [1, 2, 3]
+expect:
+  action: report
+  reason_contains: "uploads above the 25 MB audio clip limit"
+  output_contains: ["read-before-validate"]
+  chain_min: 2

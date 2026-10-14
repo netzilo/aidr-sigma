@@ -9,11 +9,11 @@ description: |
   instance metadata services, loopback, RFC1918/link-local ranges, cluster-internal
   names, or DNS-rebinding wildcard domains.
 
-  The rule is instance-resolved. It anchors on meta caller_pid, resolves the exact
-  process instance with proc_instance(), walks the real spawn chain with proc_lineage(),
-  and correlates ONLY within that one session (lineage plus children spawned by lineage
-  pids inside the window). It never attributes across sessions and never walks
-  path-keyed Process nodes, so two identical attacks produce two identical kill chains.
+  The rule is session-resolved. It anchors on the triggering session (session()), walks
+  the real spawn chain with lineage(), and correlates ONLY within that one run (lineage
+  plus sessions spawned by lineage members inside the window). It never attributes across
+  runs and never walks path-keyed program nodes, so two identical attacks produce two
+  identical kill chains.
 
   Legitimate IMDS traffic is extremely common (aws/gcloud SDKs, kubelet, cloud-init) and
   legitimate RFC1918 traffic is extremely common (internal APIs, dev servers), so the
@@ -30,7 +30,7 @@ description: |
          session-scoped stage is additionally required.
 
   Tool-surface events never fire on their own: they only record the poisoned payload
-  into the rule's private store, so the rule stays invisible until instance-resolved
+  into the rule's private store, so the rule stays invisible until session-resolved
   evidence exists. Enforcement is report-only at this maturity stage.
 author: Selhan
 date: "2026-03-14"
@@ -66,6 +66,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - http
 detection:
   sel_trigger:
     event_type:
@@ -80,7 +84,7 @@ script: |
   # Tunables. Detection scope only: this rule contains no trust or allow list.
   WINDOW_NS   = 300000000000   # 5 min: poisoned payload -> SSRF attempt
   MAX_TRACK   = 48             # capped poison markers held in the rule store
-  MAX_PIDS    = 16             # bound on per-pid HTTP_REQUEST queries
+  MAX_PIDS    = 16             # bound on per-session HTTP_REQUEST queries
   CONTENT_CAP = 20000
 
   FETCHER_RE = r"(?i)\b(?:curl|wget|httpie|nc|ncat|socat|python[23]?|node|deno|php|ruby|perl|powershell|pwsh)\b"
@@ -181,31 +185,42 @@ script: |
       return parts[len(parts) - 1]
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
-  def synth_edge(kind, from_path, to_id, ts):
+  def synth_edge(kind, from_id, to_id, ts):
       return {
-          "from":     "process://" + from_path,
+          "from":     from_id,
           "to":       to_id,
           "kind":     kind,
+          "dir":      "out",
           "ts":       str(ts),
           "first_ts": str(ts),
           "last_ts":  str(ts),
       }
 
-  # Store: poisoned tool payload markers, keyed by session root instance.
-  def poison_key(root_pid, root_start):
-      return "poison:" + str(root_pid) + ":" + str(root_start)
+  def url_target(url, host):
+      # URL nodes are keyed scheme://host.
+      if url.lower().startswith("http://"):
+          return "http://" + host
+      return "https://" + host
 
-  def record_poison(root_pid, root_start, ts, surface, target, tool):
-      k = poison_key(root_pid, root_start)
+  # Store: poisoned tool payload markers, keyed by the lineage root session.
+  def poison_key(root_id):
+      return "poison:" + root_id
+
+  def record_poison(root_id, ts, surface, target, tool):
+      k = poison_key(root_id)
       cur = store_get(k)
       if cur == None:
           cur = []
@@ -228,10 +243,14 @@ script: |
           store_reset()
           store_set(k, fresh)
 
-  def lookup_poison(root_pid, root_start, now_ts, target_hint):
-      cur = store_get(poison_key(root_pid, root_start))
-      if cur == None:
-          return None
+  def lookup_poison(lineage_ids, now_ts, target_hint):
+      # The poisoned tool call may have been recorded under any session on this
+      # request's own lineage (the agent session is an ancestor of its fetchers).
+      cur = []
+      for sid in lineage_ids:
+          got = store_get(poison_key(sid))
+          if got != None:
+              cur = cur + got
       best = None
       for m in cur:
           mts = int(m.get("ts", "0"))
@@ -267,42 +286,42 @@ script: |
           return is_restricted_target(cmd)
       return False
 
-  # Session resolution: caller_pid -> instance -> lineage -> sibling pids.
+  # Session resolution: triggering session -> lineage -> sessions it spawned.
   def resolve_session(now_ts):
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return None
-      inst = proc_instance(cp, now_ts)
+      inst = session(cp)
       if inst == None:
           return None
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return None
-      pids = {}
-      for x in lineage:
-          pids[x["actor_pid"]] = x.get("actor_start", "0")
-      root = lineage[len(lineage) - 1]
-      # One bounded pass to pull in siblings spawned by this session, inside the window.
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now_ts - WINDOW_NS, limit=3000):
-          if e.get("parent_pid", "") in pids:
-              pids[e["actor_pid"]] = e.get("actor_start", "0")
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      root = lineage_[len(lineage_) - 1]
+      # One bounded pass to pull in sessions spawned by this lineage, inside the window.
+      for e in events(kind="SPAWNED", since_ns=now_ts - WINDOW_NS, limit=3000):
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
       return {
           "inst":    inst,
-          "lineage": lineage,
-          "pids":    pids,
+          "lineage": [x["id"] for x in lineage_],
+          "scope":   scope,
           "root":    root,
-          "names":   " -> ".join([basename(x.get("actor_path", "?")) for x in lineage]),
+          "names":   " -> ".join([basename(x.get("path", "?")) for x in lineage_]),
       }
 
-  # Corroborating stage: a prior restricted HTTP_REQUEST by this same session.
+  # Corroborating stage: a prior restricted HTTP_REQUEST by this same run.
   def prior_restricted_http(sess, now_ts):
       n = 0
-      for pid in sess["pids"]:
+      for sid in sess["scope"]:
           if n >= MAX_PIDS:
               break
           n += 1
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=now_ts - WINDOW_NS, until_ns=now_ts, limit=60):
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=now_ts - WINDOW_NS, until_ns=now_ts, limit=60):
               probe = e.get("host", "") + e.get("path", "")
               if is_restricted_target(probe):
                   return e
@@ -321,9 +340,8 @@ script: |
           # Degraded attribution: never guess an owner, never attribute cross-session.
           return "allow"
 
-      ct         = meta.get("context_type", "")
-      root_pid   = sess["root"]["actor_pid"]
-      root_start = sess["root"].get("actor_start", "0")
+      ct      = meta.get("context_type", "")
+      root_id = sess["root"]["id"]
 
       # ---- Tool surface: record provenance only. Never fires on its own. ----
       if ct in ("tool_input", "tool_description", "gateway_description"):
@@ -339,7 +357,7 @@ script: |
                   hit = pv
           if hit == "":
               return "allow"
-          record_poison(root_pid, root_start, now_ts, ct, hit,
+          record_poison(root_id, now_ts, ct, hit,
                         meta.get("tool_name", ""))
           return "allow"
 
@@ -349,16 +367,18 @@ script: |
           host     = meta.get("host", "")
           path     = meta.get("path", "")
           probe    = url + " " + host + " " + path
-          actor    = sess["inst"].get("actor_path", "")
-          trig_to  = "url://" + host
+          trig_kind = "HTTP_REQUEST"
+          trig_from = sess["inst"]["id"]
+          trig_to  = url_target(url, host)
           trig_txt = "request to restricted endpoint: " + short(host + path, 200)
       else:
           cmd      = short(meta.get("content", ""), CONTENT_CAP)
           probe    = cmd
           host     = ""
           url      = ""
-          actor    = sess["inst"].get("actor_path", "")
-          trig_to  = "process://" + actor
+          trig_kind = "SPAWNED"
+          trig_from = sess["inst"].get("parent", "")
+          trig_to  = sess["inst"]["id"]
           trig_txt = "fetcher spawned against restricted endpoint: " + short(cmd, 200)
 
       if not is_restricted_target(probe):
@@ -368,7 +388,7 @@ script: |
       anchor      = ""
       anchor_desc = ""
       anchor_ts   = 0
-      poison      = lookup_poison(root_pid, root_start, now_ts, probe)
+      poison      = lookup_poison(sess["lineage"], now_ts, probe)
 
       if poison != None:
           anchor      = "A1-poisoned-tool-payload"
@@ -402,14 +422,18 @@ script: |
       if anchor_ts > 0 and (now_ts - anchor_ts) > WINDOW_NS:
           return "allow"
 
-      # ---- Kill chain, rooted at this session's owning instance. ----
-      chain = new_chain("process://" + sess["root"].get("actor_path", ""))
+      # ---- Kill chain, rooted at this run's root session. ----
+      chain = new_chain(root_id)
 
       if anchor_ts == 0:
           anchor_ts = now_ts
+      tool = meta.get("tool_name", "")
+      if poison != None and poison.get("tool", "") != "":
+          tool = poison.get("tool", "")
+      if tool == "":
+          tool = "unknown"
       chain.append(step(
-          synth_edge("TOOL_CALL", sess["root"].get("actor_path", ""),
-                     "tool://" + meta.get("tool_name", "unknown"), anchor_ts),
+          synth_edge("TOOL_CALL", root_id, "tool://" + tool, anchor_ts),
           stage_id="Tool Poisoning",
           stage_desc=anchor_desc,
       ))
@@ -424,8 +448,10 @@ script: |
                              short(prior2.get("host", "?") + prior2.get("path", ""), 160),
               ))
 
+      trig = synth_edge(trig_kind, trig_from, trig_to, now_ts)
+      trig["callid"] = meta.get("callid", "")
       chain.append(step(
-          synth_edge("HTTP_REQUEST", actor, trig_to, now_ts),
+          trig,
           stage_id="SSRF Request",
           stage_desc=trig_txt + " via " + sess["names"],
       ))

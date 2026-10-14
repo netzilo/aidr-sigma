@@ -22,6 +22,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - http
 detection:
   selection_aws_metadata:
     event_type: http_request

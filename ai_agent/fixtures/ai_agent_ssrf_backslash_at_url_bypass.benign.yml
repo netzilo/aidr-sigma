@@ -1,0 +1,22 @@
+rule: ai_agent_ssrf_backslash_at_url_bypass.yml
+subjects:
+  agent:
+    session: pid/300:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/301:1
+    parent: agent
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: spawn, subject: python, cmdline: "python3.11 scripts/sync.py"}
+  - {kind: http_request, subject: python, url: "https://api.example.com/v1/sync", method: POST, request_id: r1, content_type: application/json, body: '{"mirror":"https://user:p%5Cssw@registry.example.com/repo"}'}
+expect:
+  action: allow

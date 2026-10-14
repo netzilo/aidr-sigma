@@ -1,0 +1,15 @@
+rule: ai_agent_vllm_guided_schema_dos.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3
+    name: agent-runner
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "http://vllm.internal:8000/v1/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "llama-3", "prompt": "extract", "guided_json": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}, "max_tokens": 64}'}
+expect:
+  action: allow

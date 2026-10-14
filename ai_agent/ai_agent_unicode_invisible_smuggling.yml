@@ -62,6 +62,12 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - http
+  - connect
+  - skill
 detection:
   sel_llm_traffic:
     event_type:
@@ -141,7 +147,7 @@ script: |
            "flagbase": 0, "run": 0, "run_syms": 0}
       run = 0
       run_set = {}
-      for c in s.elem_ords():
+      for c in s.codepoint_ords():             # codepoints, not UTF-8 bytes
           if c == 127988:                        # U+1F3F4 waving black flag
               r["flagbase"] = r["flagbase"] + 1
           if is_invisible(c):
@@ -225,15 +231,17 @@ script: |
       return 0
 
   def owning_agent():
-      # Prefer the agent whose executable path matches meta[agent_name];
-      # fall back to any monitored agent that has LLM_REQUEST edges.
-      want = meta.get("agent_name", "")
+      # The agent session in the triggering session's lineage (the LLM call is
+      # attributed to that tree); fall back to any monitored agent that has
+      # LLM_REQUEST edges when the trigger carries no session.
+      lin = lineage()
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      if lin:
+          return lin[0]
       fallback = None
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
-          if want != "" and p.get("path", "") == want:
-              return p
+      for p in sessions(agent=True):
           if fallback == None and edges(p["id"], dir="out", kind="LLM_REQUEST"):
               fallback = p
       return fallback
@@ -381,7 +389,7 @@ script: |
       if egress_edge != None:
           chain.append(step(egress_edge, stage_id="Possible Egress",
                             stage_desc="outbound channel in same window: " + egress_desc))
-      if len(chain) == 0:
+      if not chain:
           return {"action": "report", "reason": reason}
       return {"action": "report", "reason": reason, "chain": chain}
 

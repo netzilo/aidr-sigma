@@ -1,0 +1,15 @@
+rule: ai_agent_unicode_tag_hidden_instruction_chain.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: file_write, subject: claude, path: /Users/dev/proj/src/main.go}
+  - {kind: tool_call, subject: claude, server: github, server_url: "https://mcp.github.com", tool: create_issue, call_id: c1, args: '{"title": "status", "body": "all green"}'}
+expect:
+  action: allow

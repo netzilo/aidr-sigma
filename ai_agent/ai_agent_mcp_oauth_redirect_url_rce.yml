@@ -12,7 +12,7 @@ description: |
 
     1. HTTP_REQUEST  - the monitored agent (or one of its direct children, e.g.
        an MCP client helper) fetched a remote host.
-    2. EXECUTE_PROCESS - the agent then spawned a process whose command line
+    2. SPAWNED - the agent then spawned a process whose command line
        carries a URL / OAuth redirect marker together with shell injection
        syntax (metacharacter + downloader/interpreter, $(), backticks,
        percent-encoded CRLF, a raw newline, or eval/IEX), AND the command line
@@ -25,6 +25,9 @@ description: |
   fetched (stage 1) or the spawned binary made its own outbound request
   (stage 3). That correlation is what separates the exploit from a developer
   typing an OAuth curl one-liner.
+
+  Attribution: the agent is the lineage() root of the triggering session; only
+  when no lineage is known does the rule fall back to every agent session.
 author: Tanya
 date: "2026-03-14"
 references:
@@ -55,6 +58,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -78,7 +84,7 @@ script: |
   # ── MCP streamableHttp OAuth redirect-URL command injection ────────────────
   # Sequence detected (graph, not payload):
   #   HTTP_REQUEST (agent -> MCP/OAuth host)
-  #     -> EXECUTE_PROCESS (spawn carrying that host + shell injection syntax)
+  #     -> SPAWNED (spawn carrying that host + shell injection syntax)
   #        -> HTTP_REQUEST (optional second stage by the spawned binary)
 
   WINDOW_NS    = 900000000000   # 15 min  fetch <-> spawn correlation window
@@ -210,17 +216,23 @@ script: |
           ets = "0"
       event_ts = int(ets)
 
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      # the agent owning the triggering spawn; fall back to every agent session
+      agents = []
+      lin = lineage()
+      if lin:
+          agents = [lin[len(lin) - 1]]
+      else:
+          agents = sessions(agent=True)
+
+      for agent in agents:
           aid   = agent["id"]
           chain = new_chain(aid)
 
           # ── stage 2: the spawn carrying the unsanitised redirect URL ───────
           cands = []
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for e in edges(aid, dir="out", kind="SPAWNED"):
               cands.append(e)
-              for e2 in edges(e["to"], dir="out", kind="EXECUTE_PROCESS"):
+              for e2 in edges(e["to"], dir="out", kind="SPAWNED"):
                   cands.append(e2)
 
           spawn_edge  = None
@@ -245,7 +257,7 @@ script: |
 
           # ── stage 1: the streamableHttp / OAuth fetch that supplied the URL ─
           sources = [aid]
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for e in edges(aid, dir="out", kind="SPAWNED"):
               sources.append(e["to"])
 
           http_edge = None

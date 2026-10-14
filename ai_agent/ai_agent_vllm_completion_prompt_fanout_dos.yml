@@ -33,6 +33,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
 
   # ── Where: an actual completions submission, not arbitrary traffic ──────────

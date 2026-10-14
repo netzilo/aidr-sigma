@@ -33,6 +33,8 @@ references:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_event:
     event_type: http_request

@@ -37,6 +37,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - http
 detection:
 
   # ── Scope: only requests leaving the agent toward a model-serving endpoint ──

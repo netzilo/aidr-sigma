@@ -1,0 +1,35 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  node:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: node, cmdline: "node heylead-sdr.js --campaign q3"}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m0, content_type: application/json, body: '{"to": "lead0"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m1, content_type: application/json, body: '{"to": "lead1"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m2, content_type: application/json, body: '{"to": "lead2"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m3, content_type: application/json, body: '{"to": "lead3"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m4, content_type: application/json, body: '{"to": "lead4"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m5, content_type: application/json, body: '{"to": "lead5"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m6, content_type: application/json, body: '{"to": "lead6"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m7, content_type: application/json, body: '{"to": "lead7"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m8, content_type: application/json, body: '{"to": "lead8"}'}
+  - {kind: http_request, subject: node, url: "https://static.licdn.com/sc/h/x.js", method: GET, request_id: x1, content_type: text/javascript, body: ""}
+  - {kind: http_request, subject: node, url: "https://api.crm.example/v1/leads", method: GET, request_id: x2, content_type: application/json, body: ""}
+  - {kind: http_request, subject: node, url: "https://sink.example/collect", method: POST, request_id: x3, content_type: application/json, body: '{"n": 1}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m9, content_type: application/json, body: '{"to": "lead9"}'}
+expect:
+  action: report
+  reason_contains: "heylead SDR agent drove 10 LinkedIn messaging/invitation write-actions in 0 min from one session (node -> Cursor); 4 distinct hosts touched; attribution session-resolved"
+  chain_min: 4

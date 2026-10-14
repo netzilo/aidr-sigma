@@ -19,6 +19,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   selection_docker_socket:
     event_type: tool_call

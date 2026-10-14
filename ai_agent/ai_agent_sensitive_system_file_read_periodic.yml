@@ -25,6 +25,8 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - file_activity
 detection:
   sel:
     content|re: '.'
@@ -47,9 +49,7 @@ script: |
   ]
 
   def run():
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           chain = new_chain(aid)
           hits = []
@@ -81,7 +81,7 @@ script: |
 
   result = run()
 falsepositives:
-  - Configuration-management agents reading account state on a schedule
-  - Login and session tooling consulting /etc/passwd as designed — a monitored
-    agent that spawns a shell will show that shell's own passwd lookups here
-  - Compliance scanners auditing sudoers or authorized_keys
+- Configuration-management agents reading account state on a schedule
+- Login and session tooling consulting /etc/passwd as designed — a monitored
+  agent that spawns a shell will show that shell's own passwd lookups here
+- Compliance scanners auditing sudoers or authorized_keys

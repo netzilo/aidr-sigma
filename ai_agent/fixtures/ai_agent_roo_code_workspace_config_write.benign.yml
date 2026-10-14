@@ -1,0 +1,31 @@
+rule: ai_agent_roo_code_workspace_config_write.yml
+subjects:
+  roo:
+    session: pid/100:1
+    program: /Applications/Visual Studio Code.app/Contents/MacOS/Electron
+    name: Code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: roo
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  node:
+    session: pid/102:1
+    parent: shell
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: roo}
+  - {kind: spawn, subject: shell, cmdline: "zsh -c 'node build.js'"}
+  - {kind: file_write, subject: shell, path: /Users/dev/proj/src/index.js}
+  - {kind: spawn, subject: node, cmdline: "node build.js"}
+expect:
+  action: allow

@@ -49,6 +49,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -152,7 +154,7 @@ script: |
           return False
       return re.find(GIT_RE, name_blob(nd)) != None
 
-  # ── EXECUTE_PROCESS subtree under a goose process, bounded depth / size ─────
+  # ── SPAWNED subtree under a goose process, bounded depth / size ─────
   def descend(root_id):
       out      = []
       frontier = [root_id]
@@ -160,7 +162,7 @@ script: |
       for d in range(MAX_DEPTH):
           nxt = []
           for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              for e in edges(pid, dir="out", kind="SPAWNED"):
                   ch = node(e["to"])
                   if ch == None:
                       continue
@@ -188,7 +190,7 @@ script: |
   def review_context(g):
       if re.find(REVIEW_RE, g.get("cmdline", "")) != None:
           return True
-      for e in edges(g["id"], dir="in", kind="EXECUTE_PROCESS"):
+      for e in edges(g["id"], dir="in", kind="SPAWNED"):
           if re.find(REVIEW_RE, e.get("cmdline", "")) != None:
               return True
       return False
@@ -268,7 +270,7 @@ script: |
       ev_ts = num(meta.get("event_ts", "0"))
 
       goose_procs = []
-      for p in graph(type="Process"):
+      for p in sessions():
           if re.find(GOOSE_RE, name_blob(p)) != None:
               goose_procs.append(p)
       if not goose_procs:

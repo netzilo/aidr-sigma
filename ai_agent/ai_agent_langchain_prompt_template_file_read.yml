@@ -35,6 +35,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
 detection:
 
   # ── Scope: only payloads that can carry template construction or rendered output ──

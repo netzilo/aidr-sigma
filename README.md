@@ -121,7 +121,7 @@ Fields available in detection conditions:
 | `replacemodel` | Swap model name or relay to different base URL |
 | `redirect` | HTTP redirect response |
 | `inject` | Add headers to outgoing request (tenant restriction) |
-| `scan` | Delegate to ML scanner or AI analysis prompt |
+| `scan` | Delegate to the ML classifier or to an AI analysis prompt |
 
 ---
 
@@ -129,13 +129,20 @@ Fields available in detection conditions:
 
 For threats that span multiple events (exfiltration chains, session rate anomalies, capability hijacking), rules use `action: execute` with an embedded [Starlark](https://github.com/google/starlark-go) script.
 
-The Sigma `detection:` section is a **cheap pre-filter** that decides whether to invoke the script. The script is the authoritative detector — it queries the live behaviour graph and returns `"block"`, `"report"`, `"redact"`, or `"allow"`.
+The Sigma `detection:` section is a **cheap pre-filter** that decides whether to invoke the script. The script is the authoritative detector — it reads what the triggering **session** has already done and returns `"block"`, `"report"`, `"redact"`, or `"allow"`.
+
+Every event is attributed to a session: the acting instance (a process on an endpoint, an agent framework's session, an MCP session, a conversation at the AI Gateway), with its parent session, program, device and the user or agent identity it acts for. A rule anchors on `session()` — the session that produced the event — and reads its history.
 
 ```yaml
 title: Exfiltration Chain Detection
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - skill
+  - file_activity
+  - http
 detection:
   sel:
     event_type: tool_call
@@ -144,31 +151,46 @@ detection:
 action: execute
 on_error: allow
 script: |
-  # Check if agent fetched external content, read files, then sent data out
+  # Did this session fetch external instructions, read files, then send data out?
   def run():
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          skills = edges(a["id"], dir="out", kind="ACQUIRED_SKILL")
-          reads  = edges(a["id"], dir="out", kind="READ_FILE")
-          http   = edges(a["id"], dir="out", kind="HTTP_REQUEST")
-          if skills and reads and http:
-              return "block"
+      inst = session()                 # the session that produced this event
+      if inst == None:
+          return "allow"
+      sid    = inst["id"]
+      skills = edges(sid, dir="out", kind="ACQUIRED_SKILL")
+      reads  = edges(sid, dir="out", kind="READ_FILE")
+      http   = edges(sid, dir="out", kind="HTTP_REQUEST")
+      if skills and reads and http:
+          chain = new_chain()
+          chain.append(step(skills[0], stage_id="Skill Loaded", stage_desc="external instructions"))
+          chain.append(step(http[0], stage_id="HTTP Exfil", stage_desc="data sent out"))
+          return {"action": "block", "reason": "skill → file read → HTTP", "chain": chain}
       return "allow"
   result = run()
 ```
 
-### Graph builtins
-
-Scripts have access to the live behaviour graph via three builtins:
+### Session and graph builtins
 
 | Builtin | Description |
 |---|---|
-| `graph(type="")` | All nodes, optionally filtered by type (`"Process"`, `"URL"`, `"LLM"`, …) |
+| `session(id=None)` | A session dict, or the triggering session with no argument |
+| `lineage(session=None)` | `[self, parent, …, root]` |
+| `children(session)` | Sessions a session spawned |
+| `sessions(owner=, program=, agent=, active=, …)` | Sessions by filter; `sessions(agent=True)` lists agent sessions |
+| `events(kind=, session=, since_ns=, until_ns=, …)` | Rows of the observation log, newest first |
+| `fs_activity(session, op, pattern)` | Files a session read/wrote/…, with per-file timestamps |
+| `graph(type="")` | All nodes, optionally filtered by type (`"Session"`, `"Program"`, `"URL"`, `"LLM"`, …) |
 | `node(id)` | Single node dict by ID, or `None` |
 | `edges(id, dir, kind)` | Edges touching a node; `dir`: `"in"/"out"/"both"`, `kind`: edge type |
+| `new_chain(root=None)`, `step(edge, stage_id, stage_desc)` | Kill chain returned with a verdict |
 
-Edge kinds: `TOOL_CALL`, `TOOL_RESULT`, `LLM_REQUEST`, `LLM_RESPONSE`, `HTTP_REQUEST`, `READ_FILE`, `WRITE_FILE`, `EXECUTE_PROCESS`, `ACQUIRED_SKILL`, `CONNECTS`.
+Edge kinds: `SPAWNED`, `TOOL_CALL`, `TOOL_RESULT`, `LLM_REQUEST`, `LLM_RESPONSE`, `HTTP_REQUEST`, `HTTP_RESPONSE`, `READ_FILE`, `WRITE_FILE`, `CREATE_FILE`, `DELETE_FILE`, `RENAME_FILE`, `ACQUIRED_SKILL`, `CONNECTS`, plus the identity edges `RUNS`, `ON_BEHALF_OF`, `INSTANCE_OF`, `ON_DEVICE`.
+
+### `requires:` — where a rule can run
+
+Rules run on the Netzilo client (which sees processes, files, connections, LLM, tool and HTTP traffic) and on the Netzilo AI Gateway (LLM, tool, HTTP and skill events only). `requires:` lists the capabilities a rule depends on — `session`, `process_exec`, `file_activity`, `llm`, `tool`, `http`, `connect`, `skill` — and a host that lacks one does not load the rule.
+
+The complete authoring guide — sessions, the observation log, kill chains, evaluation order, replay and fixtures — is [Agent.md](Agent.md).
 
 ### Periodic rules
 
@@ -178,21 +200,19 @@ Rules with `category: periodic` run a Starlark script every 30 seconds regardles
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - file_activity
 detection:
   sel:
     content|re: '.'
   condition: sel
 action: execute
 script: |
-  # Walk WRITE_FILE edges looking for writes to sensitive paths
+  # Look for writes under /etc/ by any agent session
   def run():
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
-              continue
-          for e in edges(a["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs and search_in(fs["id"] + "$WRITE", "/etc/"):
-                  return "block"
+      for a in sessions(agent=True, active=True):
+          if fs_activity(a["id"], "WRITE", "/etc/"):
+              return "report"
       return "allow"
   result = run()
 ```
@@ -201,7 +221,7 @@ script: |
 
 ## Rule Pairs — Real-time + Periodic Companions
 
-Some rules come in pairs: a **real-time rule** that fires on tool calls and a **companion periodic rule** that checks the EDR behaviour graph every 30 seconds. The companion covers file writes and reads that occur at the syscall level and are not visible through the hook or MITM proxy.
+Some rules come in pairs: a **real-time rule** that fires on tool calls and a **companion periodic rule** that checks the observation log every 30 seconds. The companion covers file writes and reads that occur at the syscall level and are not visible through the hook or MITM proxy.
 
 Companion rules share the same `id` prefix with a `-p` suffix and declare each other in a `related:` block:
 
@@ -291,13 +311,17 @@ producer for a context, move it from `REPLAY_ONLY_CATEGORIES` into
 
 | Check | Why it is fatal |
 |---|---|
-| `replay-only-category` / `replay-only-event-type` | `file_read`/`file_write`/… have no live client producer — `staticscanner/edr.go` deliberately excludes file I/O from rule evaluation. Use `category: periodic` + graph traversal instead. |
+| `replay-only-category` / `replay-only-event-type` | `file_read`/`file_write`/… have no live client producer — the endpoint deliberately excludes file I/O from rule evaluation. Use `category: periodic` + `fs_activity()` instead. |
 | `phantom-event-type` | e.g. `event_type: tool_description` — `contextToEventType()` collapses that context to `tool_call`, so the selection can never match. |
-| `script-only-field` | `port`, `protocol`, `caller_pid`, `callid` exist in a script's `meta` but `BuildLogEntry()` never copies them into the LogEntry. |
+| `script-only-field` | `port`, `protocol`, `callid`, `server_url` exist in a script's `meta` but the engine never copies them into the LogEntry. |
 | `session-field` | Netzilo has no `session.*` injection at all. |
 | `re2-unsupported` | Lookahead, lookbehind, backreferences and `\uXXXX` are rejected by Go's regexp; `findRegex()` then returns nil and the leaf silently never matches. Use `\x{XXXX}`. |
 | `yaml-control-bytes` | A raw control byte fails the **whole** file in `gopkg.in/yaml.v3` (PyYAML accepts it, so this cannot be inferred from a load failure). |
 | `starlark-generator-expression` | `any(x for y in z)` is a parse error — Starlark has list comprehensions only. The script fails to parse and the rule falls through to `on_error`. |
+| `removed-builtin` / `removed-meta-key` / `removed-row-key` / `removed-edge-kind` / `removed-node-id` / `removed-node-type` / `removed-fts-label` | The script uses the process-keyed engine's API (`proc_instance`, `proc_lineage`, `query_events`, the `netzilo` dict, `caller_pid`, `actor_*` row keys, `EXECUTE_PROCESS`, `process://`, `graph(type="Process")`, `$WRITE`). It fails at that line and takes `on_error`. See the migration table in [Agent.md](Agent.md#migrating-from-the-process-keyed-engine). |
+| `shadows-builtin` | `lineage = lineage(...)` makes the name a local for the whole function and the call fails. |
+| `chain-root-not-session` / `chain-len` | `new_chain()` takes a session id; a chain has no `len()`. |
+| `unknown-capability` / `invalid-requires` | `requires:` must be a list of known capabilities. |
 | `starlark-underscore-numeral` | `300_000_000_000` parses as an int followed by an identifier. Note that some examples in `Agent.md` use this form and are therefore wrong. |
 | `condition-unknown-selection` | `parsePrimary()` substitutes a never-matching condition, silently disabling that branch. |
 | `unknown-modifier` | `buildLeaf()` degrades an unknown modifier to `contains`, changing the rule's meaning without complaint. |
@@ -307,6 +331,9 @@ producer for a context, move it from `REPLAY_ONLY_CATEGORIES` into
 `case-sensitive-regex`, since `|re:` is case-sensitive in Netzilo while
 `|contains:` folds both sides. Some patterns (base64 alphabets, AWS key prefixes,
 codepoint classes) are intentionally case-exact.
+`missing-requires` and `requires-incomplete` flag a rule whose contexts or script
+imply a capability its `requires:` does not declare — on a host without it the
+rule would run against an empty graph and always answer `allow`.
 
 ### Deeper verification
 

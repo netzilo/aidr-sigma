@@ -29,10 +29,9 @@ description: |
   or three or more distinct browser targets attached. Enumeration alone, a
   bare /json/version probe, or a single attach is not reported.
 
-  Attribution is instance-resolved: the rule anchors on meta.caller_pid,
-  resolves the exact process instance with proc_instance(), walks the real
-  spawn chain with proc_lineage(), and only considers HTTP_REQUEST rows whose
-  actor_pid belongs to that lineage or to children spawned by it. No
+  Attribution is session-scoped: the rule anchors on the triggering session,
+  walks its real spawn chain with lineage(), and only considers HTTP_REQUEST
+  rows whose session belongs to that lineage or to sessions spawned by it. No
   cross-session stitching and no path-keyed graph node walk. The triggering
   request is taken from meta (never re-queried) because the event log is
   populated asynchronously.
@@ -70,6 +69,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_cdp_http_surface:
     event_type: http_request
@@ -129,19 +131,19 @@ script: |
       return q
 
   def ev_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "https://" + e.get("host", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tgt,
-          "kind":     "HTTP_REQUEST",
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "method":   e.get("method", ""),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def run():
       # ── 1. relevance gate: pure string checks on meta, no traversal ─────────
       if meta.get("context_type", "") != "http_request":
@@ -151,53 +153,55 @@ script: |
       if trig_cls != "enum" and trig_cls != "attach" and trig_cls != "mutate":
           return "allow"          # /json/version probes alone are not worth traversal
 
-      # ── 2. anchor on the exact triggering instance ──────────────────────────
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
+      # ── 2. anchor on the triggering session ─────────────────────────────────
       ts_now = int(meta.get("event_ts", "0"))
       if ts_now == 0:
           return "allow"
-      inst = proc_instance(cp, ts_now)
+      inst = session()
       if inst == None:
-          return "allow"          # degraded attribution — re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+          return "allow"          # degraded attribution — re-fires when the session lands
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
       lo = ts_now - WINDOW_NS
 
-      # ── 3. scope to ONE session: lineage + processes it spawned ─────────────
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "0")
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=lo, until_ns=ts_now, limit=4000)
+      # ── 3. scope to ONE session tree: lineage + sessions it spawned ─────────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      execs = events(kind="SPAWNED", since_ns=lo, until_ns=ts_now, limit=4000)
       for depth in range(3):
           for e in execs:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp in session and ap != "" and ap not in session:
-                  session[ap] = e.get("actor_start", "0")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp in scope and ap != "" and ap not in scope:
+                  scope[ap] = True
 
-      # ── 4. collect this session's CDP HTTP surface hits, scoped by actor ────
+      # ── 4. collect this tree's CDP HTTP surface hits, scoped by session ─────
       evs = []
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=lo, until_ns=ts_now, limit=300):
+      for sid in scope:
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=lo, until_ns=ts_now, limit=300):
               if cdp_class(e.get("path", "")) != "":
                   evs.append(e)
 
       # the triggering request comes from meta, never from a log lookup
+      host = meta.get("host", "")
+      url  = meta.get("url", "")
+      scheme = "http"
+      i = url.find("://")
+      if i > 0:
+          scheme = url[:i].lower()
       trig = {
-          "ts":          str(ts_now),
-          "kind":        "HTTP_REQUEST",
-          "actor_pid":   str(cp),
-          "actor_start": inst.get("actor_start", "0"),
-          "actor_path":  inst.get("actor_path", ""),
-          "host":        meta.get("host", ""),
-          "path":        trig_path,
-          "method":      meta.get("method", ""),
-          "target_id":   "",
+          "ts":         str(ts_now),
+          "kind":       "HTTP_REQUEST",
+          "session_id": inst["id"],
+          "program":    inst.get("path", ""),
+          "host":       host,
+          "path":       trig_path,
+          "method":     meta.get("method", ""),
+          "target_id":  scheme + "://" + host.lower(),
       }
       evs.append(trig)
 
@@ -255,9 +259,9 @@ script: |
       if not esc:
           return "allow"
 
-      # ── 7. one report per session anchor ────────────────────────────────────
-      root = lineage[len(lineage) - 1]
-      skey = root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+      # ── 7. one report per session anchor ─────────────────────────────────────
+      root = lineage_[len(lineage_) - 1]
+      skey = root.get("id", "0")
       seen = store_get("reported")
       if seen == None:
           seen = {}
@@ -271,8 +275,8 @@ script: |
       if store_usage()["free"] > 8192:
           store_set("reported", fresh)
 
-      # ── 8. kill chain built from instance-resolved event rows ───────────────
-      chain = new_chain("process://" + root.get("actor_path", inst.get("actor_path", "")))
+      # ── 8. kill chain built from session-scoped event rows ──────────────────
+      chain = new_chain(root["id"])
       chain.append(step(ev_edge(enum_ev),
                         stage_id="Session Discovery",
                         stage_desc="CDP target enumeration " + strip_query(enum_ev.get("path", "")) +
@@ -294,8 +298,8 @@ script: |
                                        " on " + trig.get("host", "?")))
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
 
       reason = ("CDP browser bridge session takeover pattern: enumerate -> attach" +
                 " (" + ", ".join(esc) + ") across " + str(len(targets)) +

@@ -51,6 +51,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
 
   # ── scope: only real process launches ───────────────────────────────────────

@@ -12,15 +12,15 @@ description: |
   subprocess_create and edge kinds ACQUIRED_DEPENDENCY / STDIO_COMMUNICATION are
   all unknown to the schema). This rule therefore deliberately does NOT attempt
   to detect "a PyPI package was installed" or "a compromised package exists".
-  It detects the only stage that is actually observable: EXECUTE_PROCESS.
+  It detects the only stage that is actually observable: SPAWNED (process execution).
 
   To avoid firing on "any benign MCP server invocation" (the triage objection),
   the rule requires ALL of the following, in order:
-    1. ANCHOR - the triggering process instance must resolve, via
-       proc_instance() -> proc_lineage(), to an ancestor whose executable path
-       or command line identifies the kairos-core-mcp package (site-packages
-       path, console-script, or `python -m kairos_core_mcp`). Merely running the
-       server, serving stdio, or spawning ordinary children produces nothing.
+    1. ANCHOR - the triggering session's lineage must contain an ancestor
+       session whose program path or spawn command line identifies the
+       kairos-core-mcp package (site-packages path, console-script, or
+       `python -m kairos_core_mcp`). Merely running the server, serving stdio,
+       or spawning ordinary children produces nothing.
     2. DISCRIMINATOR - the child process spawned under that anchor must match a
        high-specificity execution primitive: network egress binaries
        (curl/wget/nc/socat/scp), reverse-shell primitives (mkfifo), inline code
@@ -29,10 +29,9 @@ description: |
        eval $(...)), persistence (crontab, launchctl load) or keychain reads.
        A stdio MCP server performing its documented function spawns none of
        these.
-    3. SCOPE - corroborating activity is gathered ONLY from the process subtree
-       rooted at that exact (pid, start) anchor instance, inside the rule's own
-       10-minute window. No cross-session attribution, no path-keyed graph walk,
-       no `for agent in graph(type="Process")`.
+    3. SCOPE - corroborating activity is gathered ONLY from the session subtree
+       rooted at that exact anchor session, inside the rule's own 10-minute
+       window. No cross-session attribution, no program-keyed graph walk.
 
   The verdict is report-only. The rule is evidence for an investigation into a
   specific package instance, not an assertion that kairos-core-mcp is malicious.
@@ -67,6 +66,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -151,15 +152,30 @@ script: |
       return s
 
   def ev_edge(e):
-      ts = e.get("ts", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("parent_path", "?"),
-          "to":       "process://" + e.get("actor_path", "?"),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       ts,
-          "first_ts": ts,
-          "last_ts":  ts,
-          "cmdline":  e.get("cmdline", ""),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def sess_edge(x, ts):
+      # parent session -> this session, stamped with the session's start
+      return {
+          "from":     x.get("parent", "") or x.get("id", ""),
+          "to":       x.get("id", ""),
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       str(ts),
+          "first_ts": str(ts),
+          "last_ts":  str(ts),
       }
 
   # ── Relevance gate - pure string checks on meta only ──────────────────────
@@ -172,13 +188,7 @@ script: |
 
   # ── Log-backed helper (bounded: lineage is short) ─────────────────────────
   def inst_cmdline(x):
-      c = x.get("cmdline", "")
-      if c != "":
-          return c
-      rows = query_events(kind="EXECUTE_PROCESS",
-                          actor_pid=int(x.get("actor_pid", "0")),
-                          actor_start=int(x.get("actor_start", "0")),
-                          limit=2)
+      rows = events(kind="SPAWNED", session=x.get("id", ""), limit=2)
       if rows:
           return rows[0].get("cmdline", "")
       return ""
@@ -189,41 +199,40 @@ script: |
 
       cmd_raw = meta.get("content", "")
       label   = match_tier(norm(cmd_raw), TIER_A)
+      ev_ts   = int(meta.get("event_ts", "0"))
 
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"                      # periodic run or unresolved PID
-      ev_ts = int(meta.get("event_ts", "0"))
-
-      inst = proc_instance(cp, ev_ts)
+      inst = session()
       if inst == None:
           return "allow"                      # degraded - never guess attribution
 
-      lineage = proc_lineage(int(inst.get("actor_pid", "0")),
-                             int(inst.get("actor_start", "0")))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # ANCHOR: is any ancestor (or the caller itself) the kairos-core-mcp server?
+      # ANCHOR: is any ancestor (or the triggering session itself) the kairos-core-mcp server?
       anchor = None
-      for x in lineage:
-          if has_marker(x.get("actor_path", "").lower()):
+      anchor_cmd = ""
+      for x in lineage_:
+          if has_marker(x.get("path", "").lower()):
               anchor = x
               break
-          if has_marker(norm(inst_cmdline(x))):
+          c = inst_cmdline(x)
+          if has_marker(norm(c)):
               anchor = x
+              anchor_cmd = c
               break
       if anchor == None:
           return "allow"                      # not a kairos-core-mcp descendant
 
-      anchor_key = anchor.get("actor_pid", "") + ":" + anchor.get("actor_start", "")
-      anchor_ts  = int(anchor.get("ts", "0"))
-      anchor_cmd = inst_cmdline(anchor)
+      anchor_id = anchor.get("id", "")
+      anchor_ts = int(anchor.get("first_seen", "0"))
       if anchor_cmd == "":
-          anchor_cmd = anchor.get("actor_path", "?")
+          anchor_cmd = inst_cmdline(anchor)
+      if anchor_cmd == "":
+          anchor_cmd = anchor.get("path", "?")
 
-      # Dedupe: one report per (anchor instance, primitive) per window.
-      dkey = anchor_key + "|" + label
+      # Dedupe: one report per (anchor session, primitive) per window.
+      dkey = anchor_id + "|" + label
       seen = store_get("reported")
       if seen == None:
           seen = {}
@@ -231,31 +240,29 @@ script: |
       if prev > 0 and ev_ts > 0 and (ev_ts - prev) < WINDOW_NS:
           return "allow"
 
-      # SCOPE: the process subtree rooted at this exact anchor instance,
+      # SCOPE: the session subtree rooted at this exact anchor session,
       # inside this rule's own window. Never cross-session.
       since = ev_ts - WINDOW_NS
       if since < 0:
           since = 0
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                          until_ns=ev_ts, limit=MAX_ROWS)
+      rows = events(kind="SPAWNED", since_ns=since, until_ns=ev_ts, limit=MAX_ROWS)
 
       sess = {}
-      sess[anchor_key] = True
+      sess[anchor_id] = True
       for i in range(5):
           for e in rows:
-              pk = e.get("parent_pid", "") + ":" + e.get("parent_start", "")
-              if pk in sess:
-                  sess[e.get("actor_pid", "") + ":" + e.get("actor_start", "")] = True
+              if e.get("parent_session", "") in sess:
+                  sess[e.get("session_id", "")] = True
 
-      trig_key = inst.get("actor_pid", "") + ":" + inst.get("actor_start", "")
+      trig_id = inst.get("id", "")
       prior = []
       for e in rows:
-          k = e.get("actor_pid", "") + ":" + e.get("actor_start", "")
-          if k not in sess or k == anchor_key or k == trig_key:
+          k = e.get("session_id", "")
+          if k not in sess or k == anchor_id or k == trig_id:
               continue
           if anchor_ts > 0 and int(e.get("ts", "0")) < anchor_ts:
               continue                        # ordering: after the package started
-          ec  = norm(e.get("cmdline", "") + " " + e.get("actor_path", ""))
+          ec  = norm(e.get("cmdline", "") + " " + e.get("program", ""))
           lab = match_tier(ec, TIER_A)
           if lab == "":
               lab = match_tier(ec, TIER_B)
@@ -265,12 +272,11 @@ script: |
           if len(prior) >= MAX_PRIOR:
               break
 
-      # ── Kill chain, built from event-log rows (instance-accurate) ─────────
-      chain = new_chain("process://" + anchor.get("actor_path", "?"))
-      chain.append(step(ev_edge(anchor),
+      # ── Kill chain, built from event-log rows (session-accurate) ──────────
+      chain = new_chain(lineage_[-1]["id"])
+      chain.append(step(sess_edge(anchor, anchor_ts),
                         stage_id="Supply Chain Package",
-                        stage_desc="kairos-core-mcp MCP server instance (pid " +
-                                   anchor.get("actor_pid", "?") + "): " +
+                        stage_desc="kairos-core-mcp MCP server session (" + anchor_id + "): " +
                                    trunc(anchor_cmd, 200)))
 
       for i in range(len(prior) - 1, -1, -1):
@@ -283,9 +289,10 @@ script: |
 
       # Trigger stage comes from meta - never re-queried (async ingest race).
       tedge = {
-          "from":     "process://" + anchor.get("actor_path", "?"),
-          "to":       "process://" + inst.get("actor_path", "?"),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", "") or anchor_id,
+          "to":       trig_id,
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(ev_ts),
           "first_ts": str(ev_ts),
           "last_ts":  str(ev_ts),
@@ -313,8 +320,8 @@ script: |
               store_reset()
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
 
       reason = ("kairos-core-mcp (PyPI MCP server) subtree executed " + label +
                 " - lineage: " + " -> ".join(names) +

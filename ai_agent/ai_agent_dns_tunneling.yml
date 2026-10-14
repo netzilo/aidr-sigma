@@ -22,6 +22,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Match dig/nslookup TXT queries regardless of argument order: `dig TXT name`,
   # `dig name TXT`, and `dig +short name TXT` are all common forms. A

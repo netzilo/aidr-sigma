@@ -1,0 +1,24 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 -m fastmcp.client.auth.oauth --server https://mcp.example"}
+  - {kind: http_request, subject: python, url: "https://auth.example/oauth/authorize?client_id=mcp&redirect_uri=http%3A%2F%2Flocalhost%3A8080%2Foauth%2Fcallback", method: GET, request_id: r1, content_type: text/html, body: ""}
+  - {kind: http_request, subject: python, url: "http://localhost:8080/oauth/callback?code=abc&state=%3Cscript%3Ealert(document.cookie)%3C/script%3E", method: GET, request_id: r2, content_type: text/html, body: ""}
+expect:
+  action: report
+  reason_contains: "FastMCP OAuth callback reflected-XSS candidate: %3Cscript in localhost:8080/oauth/callback"
+  chain_min: 2

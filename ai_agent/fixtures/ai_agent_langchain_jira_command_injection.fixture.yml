@@ -1,0 +1,24 @@
+subjects:
+  python:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: spawn, subject: python, cmdline: "python3 langchain_jira_agent.py"}
+  - {kind: http_request, subject: python, url: "https://acme.atlassian.net/rest/api/3/issue/PROJ-7", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: http_response, subject: python, url: "https://acme.atlassian.net/rest/api/3/issue/PROJ-7", request_id: r1, status: 200, content_type: application/json, body: '{"fields": {"summary": "x"}}'}
+  - {kind: spawn, subject: sh, cmdline: "sh -c \"curl http://169.254.169.254/latest/meta-data/ > /tmp/md\""}
+expect:
+  action: report
+  reason_contains: "JiraAPIWrapper"
+  chain_min: 2

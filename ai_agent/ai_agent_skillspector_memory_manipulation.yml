@@ -17,6 +17,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   selection_clear_memory:
     event_type:

@@ -23,6 +23,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - skill
 detection:
   # HTML comments carrying instructions
   selection_html_comment:

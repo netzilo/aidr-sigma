@@ -32,8 +32,8 @@ description: |
       handed to the first-seen sink; or the agents-u-cash package identifier
       confirmed present in indexed agent traffic.
 
-  Attribution is anchored on caller_pid -> proc_instance -> proc_lineage, so the
-  verdict is deterministic and instance-exact. Reporting only, with a one-hour
+  Attribution is anchored on the triggering session and its lineage, so the
+  verdict is deterministic and session-exact. Reporting only, with a one-hour
   per-domain suppression, because a legitimate first contact with a hosted x402
   facilitator shares stages A and B.
 author: Evgen
@@ -73,6 +73,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -155,30 +158,18 @@ script: |
       ev_ts    = int(meta.get("event_ts", "0"))
       sink_reg = reg_domain(sink)
 
-      # ── 2. attribution: anchor on the exact triggering instance ───────────
-      cp = int(meta.get("caller_pid", "0"))
-      lineage = []
-      if cp != 0:
-          inst = proc_instance(cp, ev_ts)
+      # ── 2. attribution: the triggering session and its lineage ────────────
+      lineage_ = []
+      if meta.get("session", "") != "":
+          inst = session()
           if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]),
-                                     int(inst["actor_start"]))
-      lin_paths = {}
-      for x in lineage:
-          ap = x.get("actor_path", "")
-          if ap != "":
-              lin_paths[ap] = True
+              lineage_ = lineage(inst["id"])
 
-      procs = []
-      for p in graph(type="Process"):
-          pp = p.get("path", "")
-          if pp != "" and pp in lin_paths:
-              procs.append(p)
+      # the acting sessions whose HTTP_REQUEST edges are traversed
+      procs = lineage_
       if not procs:
-          # degraded attribution - fall back to monitored agent processes only
-          for p in graph(type="Process"):
-              if p.get("agent", "0") == "1":
-                  procs.append(p)
+          # degraded attribution - fall back to monitored agent sessions only
+          procs = sessions(agent=True)
       if not procs:
           return "allow"
 
@@ -314,10 +305,10 @@ script: |
                                    meta.get("path", "") + ")"))
 
       lin = "unresolved"
-      if lineage:
+      if lineage_:
           names = []
-          for x in lineage:
-              names.append(x.get("actor_path", "?").split("/")[-1])
+          for x in lineage_:
+              names.append(x.get("path", "?").split("/")[-1])
           lin = " -> ".join(names)
       print("x402 settlement diverted: sink=" + sink + " via " + lin +
             " | " + "; ".join(corro))

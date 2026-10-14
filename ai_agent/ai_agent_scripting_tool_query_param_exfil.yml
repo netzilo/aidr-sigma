@@ -36,6 +36,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
 
   # (1) Scripting-tool substitution: an interpreter one-liner, or an HTTP client import

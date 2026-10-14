@@ -1,0 +1,21 @@
+rule: ai_agent_transformers_url_username_injection.yml
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: shell
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: python, cmdline: "python3.11 pipeline.py"}
+  - {kind: http_request, subject: python, url: "https://cdn.example.com/assets/x.png", method: GET, request_id: r1}
+expect:
+  action: allow

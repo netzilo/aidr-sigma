@@ -5,7 +5,7 @@ description: >
   Detects sessions with an unusually high number of tool calls (20+), which may
   indicate automated probing or scripted attack sequences.
   Adapted from AgentShield: original used session.tool_count field; this version
-  queries the behavior graph TOOL_CALL edge count directly.
+  counts the TOOL_CALL rows of the agent session (and the sessions it spawned).
 references:
   - https://attack.mitre.org/techniques/T1046/
   - https://arxiv.org/abs/2403.04783
@@ -20,6 +20,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Scope to tool_call — velocity is measured in tool calls, not HTTP events.
   sel_trigger:
@@ -36,14 +38,32 @@ on_timeout: allow
 on_error: allow
 script: |
   THRESHOLD = 20
+  MAX_ROWS  = 1000
+
+  def agent_root():
+      # the triggering session's topmost ancestor (the agent), or None when unknown
+      s = session()
+      if s == None:
+          return None
+      for i in range(16):
+          p = s.get("parent", "")
+          if p == "":
+              break
+          ps = session(p)
+          if ps == None:
+              break
+          s = ps
+      return s
 
   def run():
-      aid = meta.get("agent_name", "")
-      if aid == "":
+      if meta.get("context_type", "") != "tool_input":
+          return "allow"
+      root = agent_root()
+      if root == None:
           return "allow"
 
-      tool_calls = edges(aid, dir="out", kind="TOOL_CALL")
-      count = len(tool_calls)
+      # every tool call made by the agent session - one row per call
+      count = len(events(kind="TOOL_CALL", session=root["id"], limit=MAX_ROWS))
 
       if count >= THRESHOLD:
           print("Session velocity anomaly: " + str(count) + " tool calls (threshold=" + str(THRESHOLD) + ")")

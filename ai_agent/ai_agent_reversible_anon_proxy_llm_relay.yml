@@ -68,6 +68,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - skill
 detection:
   sel_exec:
     event_type: execute_process
@@ -174,7 +178,7 @@ script: |
       return t
 
   def synth(src, dst, ts, cmdline):
-      return {"from": src, "to": dst, "kind": "EXECUTE_PROCESS",
+      return {"from": src, "to": dst, "kind": "SPAWNED",
               "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts),
               "cmdline": cmdline}
 
@@ -232,9 +236,7 @@ script: |
 
       # 2. Kill-chain root: the monitored agent owning this exec, if resolvable.
       root = ""
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           if apath != "" and p.get("path", "") == apath:
               root = p["id"]
               break
@@ -247,7 +249,7 @@ script: |
       relay_url  = None
       relay_proc = None
       endpoints  = []
-      for p in graph(type="Process"):
+      for p in sessions():
           for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
               if not is_inference_endpoint(u):

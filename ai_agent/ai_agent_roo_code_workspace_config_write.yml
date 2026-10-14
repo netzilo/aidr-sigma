@@ -16,12 +16,11 @@ description: |
   WRITE_FILE rows whose path contains ".code-workspace", performed by a process
   instance belonging to the SAME session as the triggering process.
 
-  Attribution is instance-exact: the rule anchors on meta["caller_pid"],
-  resolves it with proc_instance(), walks proc_lineage() to the owning session
-  root, expands the session with EXECUTE_PROCESS rows whose parent is a session
-  instance, and only then queries WRITE_FILE rows scoped to those
-  (actor_pid, actor_start) pairs. No path-keyed graph walk, no cross-session
-  attribution.
+  Attribution is session-exact: the rule anchors on the triggering session (the
+  spawned process), walks lineage() to the owning session root, expands the
+  scope with SPAWNED rows whose parent is a session in that tree, and only then
+  queries WRITE_FILE rows scoped to those sessions. No path-keyed graph walk,
+  no cross-session attribution.
 author: Selhan
 date: "2026-03-05"
 modified: "2026-03-05"
@@ -54,6 +53,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -117,9 +119,10 @@ script: |
           t = e.get("target_id", "")
       ts = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     e.get("session_id", ""),
           "to":       t,
           "kind":     e.get("kind", ""),
+          "dir":      "out",
           "ts":       ts,
           "first_ts": ts,
           "last_ts":  ts,
@@ -132,48 +135,46 @@ script: |
           return "allow"
 
       trig_ts = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trig_ts == 0:
+      if trig_ts == 0:
           return "allow"
 
-      # Anchor on the exact triggering instance — never a path-keyed node walk.
-      inst = proc_instance(cp, trig_ts)
+      # Anchor on the triggering session — never a path-keyed node walk.
+      inst = session()
       if inst == None:
           return "allow"      # degraded attribution; re-fires when the row lands
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       since = 0
       if trig_ts > WINDOW_NS:
           since = trig_ts - WINDOW_NS
 
-      # ── Session scope: lineage instances + their descendants only ─────────
-      session = {}
-      order   = []
-      for x in lineage:
-          if x["actor_pid"] not in session:
-              session[x["actor_pid"]] = x["actor_start"]
-              order.append(x["actor_pid"])
+      # ── Session scope: lineage sessions + their descendants only ──────────
+      scope = {}
+      order = []
+      for x in lineage_:
+          if x["id"] not in scope:
+              scope[x["id"]] = True
+              order.append(x["id"])
 
-      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=MAX_SPAWNS)
+      spawns = events(kind="SPAWNED", since_ns=since, limit=MAX_SPAWNS)
       for i in range(2):
           for e in spawns:
-              if e["parent_pid"] in session and e["actor_pid"] not in session:
-                  session[e["actor_pid"]] = e["actor_start"]
-                  order.append(e["actor_pid"])
+              if e["parent_session"] in scope and e["session_id"] not in scope:
+                  scope[e["session_id"]] = True
+                  order.append(e["session_id"])
       if len(order) > MAX_PIDS:
           order = order[:MAX_PIDS]
 
-      # ── Required anchor: *.code-workspace write by a session instance ─────
+      # ── Required anchor: *.code-workspace write by a session in scope ─────
       anchor      = None
       anchor_path = ""
       extras      = []
-      for pid in order:
-          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid]),
-                              since_ns=since, limit=MAX_WRITES)
+      for sid in order:
+          rows = events(kind="WRITE_FILE", session=sid,
+                        since_ns=since, limit=MAX_WRITES)
           for r in rows:
               p  = r.get("path", "")
               if p == "":
@@ -207,7 +208,7 @@ script: |
       # Optional corroboration: inline interpreter execution in this session.
       inline = None
       for e in spawns:
-          if e["actor_pid"] not in session:
+          if e["session_id"] not in scope:
               continue
           c = e.get("cmdline", "").lower()
           if c == "":
@@ -220,7 +221,7 @@ script: |
               break
 
       # ── Per-instance dedupe so one write reports once, not once per spawn ─
-      key  = anchor.get("actor_pid", "") + ":" + anchor.get("actor_start", "") + ":" + anchor_path
+      key  = anchor.get("session_id", "") + ":" + anchor_path
       seen = store_get("reported")
       if seen == None:
           seen = {}
@@ -232,19 +233,19 @@ script: |
           seen[key] = str(trig_ts)
           store_set("reported", seen)
 
-      # ── Kill chain, rooted at the session owner ──────────────────────────
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # ── Kill chain, rooted at the session owner ───────────────────────────
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       lin_s = " -> ".join(names)
 
       chain.append(step(ev_edge(anchor, anchor_path),
                         stage_id="Workspace Config Write",
                         stage_desc="wrote workspace configuration " + anchor_path +
                                    " (tasks/settings auto-run on reopen) via " +
-                                   short(anchor.get("actor_path", ""))))
+                                   short(anchor.get("program", ""))))
 
       for x in extras:
           chain.append(step(ev_edge(x[2], x[3]), stage_id=x[0], stage_desc=x[1]))
@@ -257,9 +258,10 @@ script: |
 
       # Triggering spawn is taken from meta (never re-queried — it races ingest).
       trig_edge = {
-          "from":     "process://" + inst.get("parent_path", root.get("actor_path", "")),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", ""),
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(trig_ts),
           "first_ts": str(trig_ts),
           "last_ts":  str(trig_ts),
@@ -273,7 +275,7 @@ script: |
           conf = "corroborated"
 
       print("workspace-config write [" + conf + "] path=" + anchor_path +
-            " writer=" + short(anchor.get("actor_path", "")) +
+            " writer=" + short(anchor.get("program", "")) +
             " session=" + lin_s)
 
       return {

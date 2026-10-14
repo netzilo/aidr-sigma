@@ -1,0 +1,24 @@
+rule: ai_agent_heylead_linkedin_sdr_mass_outreach.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  node:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: node, cmdline: "node heylead-sdr.js --campaign q3"}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m0, content_type: application/json, body: '{"to": "lead0"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m1, content_type: application/json, body: '{"to": "lead1"}'}
+  - {kind: http_request, subject: node, url: "https://www.linkedin.com/voyager/api/messaging/conversations", method: POST, request_id: m2, content_type: application/json, body: '{"to": "lead2"}'}
+expect:
+  action: allow

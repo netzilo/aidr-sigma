@@ -6,6 +6,10 @@ description: |
   executes a process — the behavior graph equivalent of SkillSpector TT5 (external input
   to exec sink). This pattern is consistent with download-and-execute attacks where content
   fetched from a remote URL is run as code.
+
+  Scope is the triggering session's tree: the spawned process, its lineage()
+  up to the agent ancestor, and the sessions that tree spawned. The external
+  fetch must precede the triggering spawn.
 author: Netzilo (SkillSpector TT5)
 date: "2026-06-03"
 tags:
@@ -20,6 +24,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_trigger:
     event_type: execute_process
@@ -29,34 +36,79 @@ action: execute
 on_error: allow
 on_timeout: allow
 script: |
+  # External (non-allowlisted) HTTP fetch -> process execution by the same session tree.
   SAFE_HOSTS = [
       "github.com", "gitlab.com", "pypi.org", "npmjs.com", "raw.githubusercontent.com",
       "api.anthropic.com", "api.openai.com", "127.0.0.1", "localhost",
   ]
+  MAX_SESSIONS = 32
+
+  def safe_host(h):
+      for s in SAFE_HOSTS:
+          if h == s or h.endswith("." + s):
+              return True
+      return False
+
+  def http_edge(e):
+      t = e.get("ts", "0")
+      return {"from": e.get("session_id", ""), "to": e.get("target_id", ""),
+              "kind": "HTTP_REQUEST", "dir": "out",
+              "ts": t, "first_ts": t, "last_ts": t, "method": e.get("method", "")}
 
   def run():
-      for proc in graph(type="Process"):
-          if proc.get("agent", "0") != "1":
-              continue
-          pid = proc["id"]
-          # Check if there was a recent HTTP_REQUEST to fetch external content
-          http_in = edges(pid, dir="out", kind="HTTP_REQUEST")
-          external_fetch = False
-          for e in http_in:
-              url_node = node(e.get("to", ""))
-              if not url_node:
+      if meta.get("context_type", "") != "execute_process":
+          return "allow"
+      now = int(meta.get("event_ts", "0"))
+      inst = session()
+      if inst == None:
+          return "allow"
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = lineage_[len(lineage_) - 1]
+
+      scope = {}
+      order = []
+      for x in lineage_:
+          scope[x["id"]] = True
+          order.append(x["id"])
+      for e in events(kind="SPAWNED", until_ns=now, limit=2000):
+          pp = e.get("parent_session", "")
+          sid = e.get("session_id", "")
+          if pp in scope and sid != "" and sid not in scope and len(order) < MAX_SESSIONS:
+              scope[sid] = True
+              order.append(sid)
+
+      # stage 1: an external fetch by the tree, before the spawn
+      fetch = None
+      for sid in order:
+          for e in events(kind="HTTP_REQUEST", session=sid, until_ns=now, limit=200):
+              host = e.get("host", "").lower()
+              if host == "" or safe_host(host):
                   continue
-              host = url_node.get("host", url_node.get("id", ""))
-              if not any([host == s or host.endswith('.' + s) for s in SAFE_HOSTS]):
-                  external_fetch = True
-                  break
-          if not external_fetch:
-              continue
-          # Check if there is a subsequent EXECUTE_PROCESS edge
-          exec_edges = edges(pid, dir="out", kind="EXECUTE_PROCESS")
-          if exec_edges:
-              return "report"
-      return "allow"
+              fetch = e
+              break
+          if fetch != None:
+              break
+      if fetch == None:
+          return "allow"
+
+      # stage 2: the triggering spawn (from meta, never re-queried)
+      cmd = meta.get("content", "")
+      spawn_edge = {"from": inst.get("parent", ""), "to": inst["id"],
+                    "kind": "SPAWNED", "dir": "out",
+                    "ts": str(now), "first_ts": str(now), "last_ts": str(now),
+                    "cmdline": cmd[:300]}
+      chain = new_chain(root["id"])
+      chain.append(step(http_edge(fetch), stage_id="External Input",
+                        stage_desc="fetched " + fetch.get("host", "") + fetch.get("path", "")))
+      chain.append(step(spawn_edge, stage_id="Process Execution",
+                        stage_desc="spawned after external fetch: " + cmd[:200]))
+      reason = ("Agent session fetched " + fetch.get("host", "") +
+                " and then executed: " + cmd[:160])
+      print(reason)
+      return {"action": "report", "reason": reason, "chain": chain}
+
   result = run()
 falsepositives:
   - Legitimate update scripts that download a new version and restart a service

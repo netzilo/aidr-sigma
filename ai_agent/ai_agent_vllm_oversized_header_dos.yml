@@ -63,6 +63,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -177,24 +180,24 @@ script: |
           f = node(evs[0]["from"])
           if f != None:
               return f["id"]
-      for p in graph(type="Process"):
+      for p in sessions():
           if p.get("agent", "0") == "1":
               return p["id"]
       return meta.get("agent_name", "agent")
 
   def actor_desc():
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return ""
-      inst = proc_instance(cp, int(meta.get("event_ts", "0")))
+      inst = session(cp)
       if inst == None:
           return ""
-      lin = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      lin = lineage(inst["id"])
       if not lin:
           return ""
       parts = []
       for x in lin:
-          parts.append(x.get("actor_path", "?").split("/")[-1])
+          parts.append(x.get("path", "?").split("/")[-1])
       return " -> ".join(parts)
 
   def run():

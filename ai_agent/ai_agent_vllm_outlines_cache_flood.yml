@@ -13,21 +13,21 @@ description: |
   replay-only, so the volumetric signal is synthesised inside the script from
   two live sources:
 
-    1. Per-host distinct-schema cardinality over a sliding 10 minute window.
-       Each guided-decoding request body is fingerprinted (FNV-1a over the
-       extracted guided_json / json_schema / guided_grammar / guided_regex /
-       guided_choice fragment) and the fingerprint set is kept in this rule's
-       private store. Normal structured-output clients reuse a handful of
-       schemas; a cache-flood attacker by definition never repeats one.
-       That cardinality IS the volumetric semantic the raw HTTP_REQUEST edge
-       lacks.
-    2. Graph corroboration once the cardinality anchor trips: the HTTP_REQUEST
-       edge to the target host is pulled from the behaviour graph for
-       attribution, and WRITE_FILE edges are walked with fs_activity() to
-       resolve grammar/FSM cache paths (outlines / grammar cache / fsm cache)
-       written inside the same window. The cumulative WRITE_FILE edge count is
-       diffed against the previously stored value so monotonic, unbounded cache
-       growth is reported as a delta rather than an absolute.
+    1. Per-host distinct-schema cardinality over a sliding 10 minute window,
+       derived on every call from the in-window HTTP_REQUEST rows to that host
+       and their indexed bodies: each guided-decoding body is fingerprinted
+       (FNV-1a over the extracted guided_json / json_schema / guided_grammar /
+       guided_regex / guided_choice fragment) and the distinct fingerprints are
+       counted. The store keeps only a per-host "last reported" marker. Normal
+       structured-output clients reuse a handful of schemas; a cache-flood
+       attacker by definition never repeats one. That cardinality IS the
+       volumetric semantic the raw HTTP_REQUEST edge lacks.
+    2. Graph corroboration once the cardinality anchor trips: the kill chain is
+       rooted at the triggering session's agent ancestor with its HTTP_REQUEST
+       edge to the target host, and WRITE_FILE edges are walked with
+       fs_activity() to resolve grammar/FSM cache paths (outlines / grammar
+       cache / fsm cache) written inside the same window, reported with the
+       number of in-window writes.
 
   When the vLLM server is remote the write stage is absent; the rule still
   reports on the schema-cardinality anchor alone and says so in the reason.
@@ -62,6 +62,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - file_activity
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -83,19 +86,23 @@ script: |
   REPORT_COOLDOWN = 900000000000   # 15 minutes, per host
   DISTINCT_MIN    = 25             # unique schemas per window
   DISTINCT_MIN_OL = 12             # lower floor once outlines backend is named
-  MAX_FPS         = 400            # fingerprints tracked per host
-  MAX_HOSTS       = 8
+  MAX_HOSTS       = 8              # per-host report markers kept in the store
+  MAX_ROWS        = 1000
   FP_INPUT_MAX    = 2000
   MAX_WRITE_STEPS = 4
+  MAX_SESSIONS    = 200
 
   STRUCT_MARKERS = ["guided_json", "guided_grammar", "guided_regex",
                     "guided_choice", "guided_decoding_backend", "json_schema"]
 
-  SCHEMA_PATTERNS = [r'"guided_json"[\s\S]{0,2000}',
-                     r'"json_schema"[\s\S]{0,2000}',
-                     r'"guided_grammar"[\s\S]{0,1500}',
+  SCHEMA_PATTERNS = [r'"guided_json"[\s\S]{0,1000}',
+                     r'"json_schema"[\s\S]{0,1000}',
+                     r'"guided_grammar"[\s\S]{0,1000}',
                      r'"guided_regex"[\s\S]{0,1000}',
                      r'"guided_choice"[\s\S]{0,1000}']
+
+  # FTS query that selects the indexed guided-decoding request bodies
+  FTS_Q = '"guided_json" OR "json_schema" OR "guided_grammar" OR "guided_regex" OR "guided_choice"'
 
   # fs_activity path filter: every whitespace token must appear in the path
   CACHE_PATTERNS = ["outlines", "cache outlines", "grammar cache", "cache fsm"]
@@ -124,7 +131,13 @@ script: |
               return fnv(m)
       return None
 
-  # ── store housekeeping ─────────────────────────────────────────────────────
+  def url_root(u, host):
+      p = u.find("://")
+      if p < 0:
+          return "https://" + host
+      return u[:p].lower() + "://" + host
+
+  # ── store housekeeping: one small "reported" marker per host ────────────────
   def make_room(key):
       keys = store_keys()
       if key in keys:
@@ -148,9 +161,31 @@ script: |
           store_set(key, st)
 
   # ── graph corroboration (only reached after the cardinality anchor) ─────────
+  def http_edge(sid, url_id, now):
+      for e in edges(sid, dir="out", kind="HTTP_REQUEST"):
+          if e.get("to", "") == url_id:
+              return e
+      return {"from": sid, "to": url_id, "kind": "HTTP_REQUEST", "dir": "out",
+              "ts": str(now), "first_ts": str(now), "last_ts": str(now), "count": "1"}
+
+  def agent_root():
+      # the triggering session's topmost ancestor (the agent), or None when unknown
+      s = session()
+      if s == None:
+          return None
+      for i in range(16):
+          p = s.get("parent", "")
+          if p == "":
+              break
+          ps = session(p)
+          if ps == None:
+              break
+          s = ps
+      return s
+
   def http_evidence(host):
       best = None
-      for p in graph(type="Process"):
+      for p in sessions(limit=MAX_SESSIONS):
           for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
               u = node(e["to"])
               if u == None or u.get("host", "") != host:
@@ -163,33 +198,22 @@ script: |
 
   def cache_writes(now):
       hits = []
-      for p in graph(type="Process"):
+      for p in sessions(limit=MAX_SESSIONS):
           for e in edges(p["id"], dir="out", kind="WRITE_FILE"):
-              fs = node(e["to"])
-              if fs == None:
-                  continue
               for pat in CACHE_PATTERNS:
-                  ents = fs_activity(fs["id"], "WRITE", pat)
+                  ents = fs_activity(session=p["id"], op="WRITE", pattern=pat)
                   if not ents:
                       continue
                   recent = None
-                  for en in ents[:5]:
+                  n = 0
+                  for en in ents:
                       if now - int(en["ts"]) <= WINDOW_NS:
-                          recent = en
-                          break
+                          n = n + 1
+                          if recent == None:
+                              recent = en
                   if recent == None:
                       continue
-                  cnt = int(e.get("count", "0"))
-                  wkey = "w:" + fs["id"]
-                  prev = store_get(wkey)
-                  delta = cnt
-                  if prev != None:
-                      delta = cnt - int(prev)
-                  if store_usage()["free"] > 8192:
-                      store_set(wkey, cnt)
-                  if delta <= 0:
-                      delta = cnt
-                  hits.append([e, recent, delta])
+                  hits.append([e, recent, n])
                   break
               if len(hits) >= MAX_WRITE_STEPS:
                   break
@@ -216,26 +240,36 @@ script: |
       if store_usage()["free"] < 65536:
           store_reset()
 
-      # 3. sliding-window distinct-schema cardinality per destination host
+      # 3. sliding-window distinct-schema cardinality per destination host,
+      #    derived from the in-window HTTP_REQUEST rows and their indexed bodies
+      url_id = url_root(meta.get("url", ""), host)
+      by_label = {}
+      for r in events(kind="HTTP_REQUEST", target=url_id,
+                      since_ns=now - WINDOW_NS, until_ns=now, limit=MAX_ROWS):
+          cid = r.get("content_id", "")
+          if cid != "":
+              by_label[cid] = r
+      fps = {fp: True}                       # the trigger itself (its index may race)
+      ol  = names_outlines(body)
+      for h in search(FTS_Q, MAX_ROWS):
+          if h.get("source", "") not in by_label:
+              continue
+          text = h.get("text", "")
+          f = schema_fp(text)
+          if f != None:
+              fps[f] = True
+          if names_outlines(text):
+              ol = True
+
       key = "h:" + host
       make_room(key)
       old = store_get(key) or {}
-      fps = {}
-      for k, v in old.get("fps", {}).items():
-          if now - int(v) <= WINDOW_NS:
-              fps[k] = int(v)
-      if len(fps) < MAX_FPS:
-          fps[fp] = now
-      ol = 0
-      if int(old.get("outlines", 0)) == 1 or names_outlines(body):
-          ol = 1
       rep = int(old.get("reported", 0))
-      st = {"fps": fps, "outlines": ol, "reported": rep, "last": now}
-      save(key, st)
+      save(key, {"reported": rep, "last": now})
 
       distinct = len(fps)
       limit = DISTINCT_MIN
-      if ol == 1:
+      if ol:
           limit = DISTINCT_MIN_OL
       if distinct < limit:
           return "allow"
@@ -243,45 +277,43 @@ script: |
           return "allow"   # already reported this host in this window
 
       # 4. anchor tripped - now (and only now) touch the graph
-      ev     = http_evidence(host)
-      writes = cache_writes(now)
-
+      inst = session()
       root = ""
-      if ev != None:
-          root = ev[0]
-      if root == "":
-          ap = meta.get("agent_name", "")
-          if ap == "":
-              root = "process://unknown"
-          else:
-              root = "process://" + ap
-
-      chain = new_chain(root)
-      if ev != None:
-          chain.append(step(ev[1], stage_id="Schema Flood",
-                            stage_desc="guided-decoding requests to " + host +
-                                       " carrying " + str(distinct) +
-                                       " unique schemas within 10m"))
-      growth = 0
-      for w in writes:
-          chain.append(step(w[0], stage_id="Grammar Cache Growth",
-                            stage_desc="grammar/FSM cache write: " + w[1]["path"] +
-                                       " (+" + str(w[2]) + " writes)",
-                            activity=w[1]))
-          growth += 1
+      ev   = None
+      if inst != None:
+          root = agent_root()["id"]
+          ev   = [inst["id"], http_edge(inst["id"], url_id, now)]
+      else:
+          ev = http_evidence(host)
+          if ev != None:
+              root = ev[0]
+      writes = cache_writes(now)
 
       reason = ("vLLM/outlines grammar-cache flood: " + str(distinct) +
                 " unique guided-decoding schemas sent to " + host + " in 10m")
-      if ol == 1:
+      if ol:
           reason = reason + " (outlines backend named in request)"
-      if growth > 0:
-          reason = reason + "; " + str(growth) + " grammar-cache path(s) growing on disk"
+      if len(writes) > 0:
+          reason = reason + "; " + str(len(writes)) + " grammar-cache path(s) growing on disk"
       else:
           reason = reason + "; no local cache writes observed (inference host likely remote)"
 
-      st = {"fps": fps, "outlines": ol, "reported": now, "last": now}
-      save(key, st)
+      save(key, {"reported": now, "last": now})
       print(reason)
+
+      if root == "":
+          return {"action": "report", "reason": reason}
+
+      chain = new_chain(root)
+      chain.append(step(ev[1], stage_id="Schema Flood",
+                        stage_desc="guided-decoding requests to " + host +
+                                   " carrying " + str(distinct) +
+                                   " unique schemas within 10m"))
+      for w in writes:
+          chain.append(step(w[0], stage_id="Grammar Cache Growth",
+                            stage_desc="grammar/FSM cache write: " + w[1]["path"] +
+                                       " (" + str(w[2]) + " writes in window)",
+                            activity=w[1]))
       return {"action": "report", "reason": reason, "chain": chain}
 
   result = run()

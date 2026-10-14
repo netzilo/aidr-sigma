@@ -1,0 +1,20 @@
+rule: ai_agent_multistep_indirect_injection_chain.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://docs.example/intro", method: GET, request_id: r1, content_type: text/html, body: ""}
+  - {kind: http_response, subject: agent, url: "https://docs.example/intro", request_id: r1, status: 200, content_type: text/html, body: "<p>Getting started with the SDK. Install the package and configure your client.</p>"}
+  - {kind: http_request, subject: agent, url: "https://cdn.example/sdk/README.md", method: GET, request_id: r2, content_type: text/plain, body: ""}
+  - {kind: http_response, subject: agent, url: "https://cdn.example/sdk/README.md", request_id: r2, status: 200, content_type: text/plain, body: "SDK README: usage examples, configuration flags and release notes."}
+  - {kind: http_request, subject: agent, url: "https://api.example/v1/openapi.json", method: GET, request_id: r3, content_type: application/json, body: ""}
+  - {kind: http_response, subject: agent, url: "https://api.example/v1/openapi.json", request_id: r3, status: 200, content_type: application/json, body: '{"openapi": "3.0.0", "paths": {}}'}
+trigger: 5
+expect:
+  action: allow

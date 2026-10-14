@@ -1,0 +1,16 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3
+    name: agent-runner
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "http://vllm.internal:8000/v1/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "llama-3", "prompt": "extract", "guided_json": "give me json please", "max_tokens": 64}'}
+expect:
+  action: report
+  reason_contains: "invalid guided schema (schema passed as non-JSON string literal)"
+  chain_min: 1

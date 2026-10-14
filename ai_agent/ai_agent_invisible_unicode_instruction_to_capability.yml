@@ -53,6 +53,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
+  - http
+  - connect
 detection:
   sel_trigger:
     event_type:
@@ -132,9 +137,7 @@ script: |
       want = meta.get("agent_name", "")
       exact = []
       any_agent = []
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           any_agent.append(p)
           if want != "" and p.get("path", "") == want:
               exact.append(p)
@@ -160,7 +163,7 @@ script: |
           if k >= 3:
               break
       k = 0
-      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for e in edges(aid, dir="out", kind="SPAWNED"):
           if int(e.get("ts", "0")) < since_ns:
               continue
           nm = e.get("cmdline", "")
@@ -248,7 +251,7 @@ script: |
           if chain == None:
               chain = ch
       if chain == None:
-          chain = new_chain("process://" + akey)
+          chain = new_chain(akey)
 
       reported[dkey] = str(now)
       save_map("reported", reported, now)

@@ -1,0 +1,13 @@
+rule: ai_agent_unicode_tag_injection.yml
+subjects:
+  claude:
+    session: agent/claude/s-1400
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: slack, server_url: "https://mcp.slack.example", tool: send_message, call_id: c1, args: "{\"channel\":\"general\",\"text\":\"Scotland \U0001F3F4\U000E0067\U000E0062\U000E0073\U000E0063\U000E0074\U000E007F wins\"}"}
+expect:
+  action: allow

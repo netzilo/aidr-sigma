@@ -1,0 +1,14 @@
+rule: ai_agent_vllm_unbounded_fanout_dos.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal/v1/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "llama", "prompt": "hello", "n": 4, "best_of": 8}'}
+expect:
+  action: allow

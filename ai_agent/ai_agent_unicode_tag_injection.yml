@@ -58,6 +58,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - http
+  - connect
+  - skill
 detection:
   sel_trigger:
     event_type: tool_call
@@ -122,18 +127,21 @@ script: |
       return False
 
   def find_agents():
-      an = meta.get("agent_name", "")
-      exact = []
-      monitored = []
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
-          monitored.append(p)
-          if an != "" and p.get("path", "") == an:
-              exact.append(p)
-      if exact:
-          return exact
-      return monitored
+      # The agent session that made the tool call: the agent ancestor of the
+      # triggering session (the session itself when it is the agent), found by
+      # walking parent links, which hook and gateway sessions carry too. Only
+      # when the call is unattributed fall back to every active agent session.
+      inst = session()
+      if inst == None:
+          return sessions(agent=True, active=True)
+      x = inst
+      for _ in range(64):
+          if x == None:
+              break
+          if x.get("agent", "0") == "1":
+              return [x]
+          x = session(x.get("parent", "")) if x.get("parent", "") != "" else None
+      return [inst]
 
   def collect_evidence(aid, ev_ts, tname):
       ev = {"ingress": None, "ingress_desc": "",

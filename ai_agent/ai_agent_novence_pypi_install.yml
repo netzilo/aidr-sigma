@@ -22,7 +22,7 @@ description: |
   word-bounded token 'novence' on the same command line. 'pip install -r
   requirements.txt' does not name the package on the command line and does not
   match. If a confirmed IOC (version, hash, C2 host) is published later, replace
-  this rule with a behavioural chain rule anchored on caller_pid.
+  this rule with a behavioural chain rule anchored on the triggering session.
 author: Egemen
 date: "2026-06-11"
 references:
@@ -35,6 +35,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_pkg_install_novence:
     event_type: execute_process

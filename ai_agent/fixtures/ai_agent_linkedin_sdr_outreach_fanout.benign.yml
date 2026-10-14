@@ -1,0 +1,18 @@
+rule: ai_agent_linkedin_sdr_outreach_fanout.yml
+subjects:
+  heylead:
+    session: pid/100:1
+    program: /usr/local/bin/heylead-mcp
+    agent: true
+    actors: [{id: u1, name: SDR Bot, email: sdr@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: heylead}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/search/dash/clusters?q=all&keywords=cto", method: GET, request_id: e1}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/identity/profiles/jane-doe", method: GET, request_id: e2}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1000/events", method: POST, request_id: o0, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1001/events", method: POST, request_id: o1, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+  - {kind: http_request, subject: heylead, url: "https://www.linkedin.com/voyager/api/messaging/conversations/1002/events", method: POST, request_id: o2, content_type: application/json, body: "{\"eventCreate\":{\"value\":{\"message\":\"Hi, quick question\"}}}"}
+expect:
+  action: allow

@@ -6,7 +6,8 @@ description: >
   before data exfiltration tools (curl, wget, nc), suggesting a staged attack
   where the agent first probes with benign calls then chains into exfiltration.
   Adapted from AgentShield: original used session.recent_tools field; this version
-  traverses the behavior graph TOOL_CALL edges to check accumulated tool history.
+  traverses the TOOL_CALL edges of the triggering session's lineage to check
+  accumulated tool history.
 references:
   - https://attack.mitre.org/techniques/T1041/
   - https://arxiv.org/abs/2403.04783
@@ -24,6 +25,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Scope to tool_call — the graph query only needs to run when tool activity occurs,
   # not on every HTTP request/response.
@@ -58,23 +61,25 @@ script: |
       if not tool_matches(current_tool, EXFIL_TOOLS):
           return "allow"
 
-      aid = meta.get("agent_name", "")
-      if aid == "":
+      lin = lineage()
+      if not lin:
           return "allow"
 
-      # Walk all prior TOOL_CALL edges from this agent.
-      # If any recon tool was called before the current exfil call, block.
-      for e in edges(aid, dir="out", kind="TOOL_CALL"):
-          t = node(e["to"])
-          if t == None:
-              continue
-          prior_tool = t.get("name", "")
-          if tool_matches(prior_tool, RECON_TOOLS):
-              print(
-                  "Recon-then-exfil chain: prior recon=" + prior_tool +
-                  " current exfil=" + current_tool
-              )
-              return "block"
+      # Walk all prior TOOL_CALL edges from the triggering session and its
+      # ancestors (the agent session). If any recon tool was called before the
+      # current exfil call, block.
+      for x in lin:
+          for e in edges(x["id"], dir="out", kind="TOOL_CALL"):
+              t = node(e["to"])
+              if t == None:
+                  continue
+              prior_tool = t.get("name", "")
+              if tool_matches(prior_tool, RECON_TOOLS):
+                  print(
+                      "Recon-then-exfil chain: prior recon=" + prior_tool +
+                      " current exfil=" + current_tool
+                  )
+                  return "block"
 
       return "allow"
 

@@ -1,0 +1,22 @@
+rule: ai_agent_vllm_artifact_pin_decay.yml
+subjects:
+  bash:
+    session: pid/99:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops, email: ops@example.com, groups: [ml]}]
+    device: gpu-1
+    source: probe
+  vllm:
+    session: pid/100:1
+    parent: bash
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: vllm, cmdline: "python3.11 -m vllm.entrypoints.openai.api_server --model acme/llm --revision 3f2a9c1d4e5b6a7f8091a2b3c4d5e6f708192a3b"}
+  - {kind: http_request, subject: vllm, url: "https://huggingface.co/acme/llm/resolve/3f2a9c1d4e5b6a7f8091a2b3c4d5e6f708192a3b/config.json", method: GET, request_id: r1}
+  - {kind: http_request, subject: vllm, url: "https://huggingface.co/acme/llm/resolve/main/README.md", method: GET, request_id: r2}
+expect:
+  action: allow

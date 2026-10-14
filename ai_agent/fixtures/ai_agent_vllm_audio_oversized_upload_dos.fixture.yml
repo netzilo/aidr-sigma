@@ -1,0 +1,27 @@
+rule: ai_agent_vllm_audio_oversized_upload_dos.yml
+subjects:
+  client:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: client}
+  # Four 9 MiB multipart uploads to the same audio route inside two minutes: the flood branch.
+  - {kind: http_request, subject: client, url: "http://vllm.internal/v1/audio/transcriptions", method: POST, request_id: r1, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "9437184"}, body: 'name="file"; filename="clip1.wav" RIFF....'}
+  - {kind: http_request, subject: client, url: "http://vllm.internal/v1/audio/transcriptions", method: POST, request_id: r2, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "9437184"}, body: 'name="file"; filename="clip2.wav" RIFF....'}
+  - {kind: http_request, subject: client, url: "http://vllm.internal/v1/audio/transcriptions", method: POST, request_id: r3, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "9437184"}, body: 'name="file"; filename="clip3.wav" RIFF....'}
+  - {kind: http_request, subject: client, url: "http://vllm.internal/v1/audio/transcriptions", method: POST, request_id: r4, content_type: multipart/form-data,
+     headers: {Content-Type: "multipart/form-data; boundary=x", Content-Length: "9437184"}, body: 'name="file"; filename="clip4.wav" RIFF....'}
+triggers: [1, 2, 3, 4]
+expect:
+  action: report
+  reason_contains: "large audio uploads"
+  output_contains: ["4 large audio uploads"]
+  chain_min: 2

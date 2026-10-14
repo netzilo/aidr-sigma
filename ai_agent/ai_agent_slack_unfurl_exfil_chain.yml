@@ -54,6 +54,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http_send:
     event_type: http_request
@@ -201,30 +204,24 @@ script: |
           out.append([m, False])
       return out
 
-  # ── actor scoping: caller instance lineage -> graph nodes ──────────────────
+  # ── actor scoping: the triggering session's tree ───────────────────────────
   def collect_actor_nodes():
-      pids = {}
-      paths = {}
-      cp = tsint(meta.get("caller_pid", "0"))
-      if cp > 0:
-          inst = proc_instance(cp, tsint(meta.get("event_ts", "0")))
-          if inst != None:
-              lin = proc_lineage(tsint(inst.get("actor_pid", "0")),
-                                 tsint(inst.get("actor_start", "0")))
-              for x in lin:
-                  pids[str(x.get("actor_pid", ""))] = True
-                  paths[x.get("actor_path", "")] = True
-      out = []
-      for p in graph(type="Process"):
-          if p.get("pid", "") in pids or p.get("path", "") in paths:
-              out.append(p)
+      # The sender's lineage plus the sessions those spawned (MCP servers and
+      # helper tools fetching on the agent's behalf are child sessions).
+      out  = []
+      seen = {}
+      for x in lineage():
+          if x["id"] not in seen:
+              seen[x["id"]] = True
+              out.append(x)
+      for x in list(out):
+          for c in children(x["id"]):
+              if c["id"] not in seen:
+                  seen[c["id"]] = True
+                  out.append(c)
       if len(out) == 0:
-          for p in graph(type="Process"):
-              if p.get("agent", "0") == "1":
-                  out.append(p)
-      # MCP tools fetch on the agent's behalf — that is how untrusted data arrives.
-      for t in graph(type="Tool"):
-          out.append(t)
+          for p in sessions(agent=True):
+              out.append(p)
       return out
 
   def collect_fetches(owners, event_ts):
@@ -234,7 +231,8 @@ script: |
               u = node(e["to"])
               if u == None:
                   continue
-              if u.get("is_ztna_host", "1") != "0":
+              # is_ztna_host is set asynchronously by the enricher; missing = public.
+              if u.get("is_ztna_host", "0") == "1":
                   continue
               h = u.get("host", "").lower()
               if h == "" or is_slack_host(h):
@@ -341,7 +339,7 @@ script: |
       owner = anchor["owner"]
       root  = owner.get("id", "")
       if root == "":
-          root = "process://" + meta.get("agent_name", "unknown")
+          root = meta.get("session", "")
       chain = new_chain(root)
 
       chain.append(step(anchor["edge"],
@@ -349,8 +347,11 @@ script: |
                         stage_desc="agent/tool fetched external public content from " +
                                    anchor["host"] + " (candidate injection source)"))
 
+      sender = meta.get("session", "")
+      if sender == "":
+          sender = root
       trigger_edge = {
-          "from": root,
+          "from": sender,
           "to": "https://" + host,
           "kind": "HTTP_REQUEST",
           "method": meta.get("method", "POST"),

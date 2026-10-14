@@ -1,0 +1,32 @@
+rule: ai_agent_actions_registry_user_scoped_api_execution.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  node:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  node2:
+    session: pid/102:1
+    parent: cursor
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: node, cmdline: "node node_modules/@vendoai/actions/bin/extract --spec https://api.example/openapi.json"}
+  - {kind: http_request, subject: node, url: "https://api.example/openapi.json", method: GET, request_id: s1, content_type: application/json, body: ""}
+  - {kind: http_request, subject: node, url: "https://api.example/v1/users", method: POST, request_id: r0, content_type: application/json, body: ""}
+  - {kind: http_request, subject: node, url: "https://api.example/v1/orders", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: spawn, subject: node2, cmdline: "node actions-registry register --from openapi.json"}
+expect:
+  action: allow

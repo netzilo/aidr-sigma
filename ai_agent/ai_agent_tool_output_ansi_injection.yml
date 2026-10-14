@@ -25,6 +25,8 @@ tags:
 logsource:
   product: ai_agent
   category: tool_output
+requires:
+  - tool
 detection:
   # The literal ESC byte, written in Go RE2 codepoint syntax. Two things must NOT
   # be done here: a raw 0x1B byte in the YAML ("control characters are not

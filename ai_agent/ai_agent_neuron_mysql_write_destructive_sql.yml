@@ -35,6 +35,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   sel_event:
     event_type: tool_call

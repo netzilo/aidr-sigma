@@ -1,0 +1,17 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal/v1/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "llama", "prompt": "hello", "n": 2}'}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal/v1/completions", method: POST, request_id: r2, content_type: application/json, body: '{"model": "llama", "prompt": "hello", "n": 5000}'}
+expect:
+  action: report
+  reason_contains: "Unbounded vLLM fan-out: n=5000 sent to vllm.internal/v1/completions by python3.11"
+  output_contains: ["vLLM fan-out DoS attempt: n=5000 -> vllm.internal/v1/completions via python3.11 (session prior requests: 1)"]
+  chain_min: 2

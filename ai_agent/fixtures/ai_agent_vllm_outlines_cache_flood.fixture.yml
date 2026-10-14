@@ -1,0 +1,46 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  vllm:
+    session: pid/200:1
+    program: /opt/venv/bin/vllm
+    actors: [{id: svc, name: vllm, kind: agent}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 flood.py"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g0, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f0\": {\"type\": \"string\", \"maxLength\": 1}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g1, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f1\": {\"type\": \"string\", \"maxLength\": 2}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g2, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f2\": {\"type\": \"string\", \"maxLength\": 3}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g3, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f3\": {\"type\": \"string\", \"maxLength\": 4}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g4, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f4\": {\"type\": \"string\", \"maxLength\": 5}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g5, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f5\": {\"type\": \"string\", \"maxLength\": 6}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g6, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f6\": {\"type\": \"string\", \"maxLength\": 7}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g7, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f7\": {\"type\": \"string\", \"maxLength\": 8}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g8, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f8\": {\"type\": \"string\", \"maxLength\": 9}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g9, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f9\": {\"type\": \"string\", \"maxLength\": 10}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g10, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f10\": {\"type\": \"string\", \"maxLength\": 11}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g11, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f11\": {\"type\": \"string\", \"maxLength\": 12}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g12, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f12\": {\"type\": \"string\", \"maxLength\": 13}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g13, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f13\": {\"type\": \"string\", \"maxLength\": 14}}}}"}
+  - {kind: file_write, subject: vllm, path: /root/.cache/outlines/fsm-0.pkl}
+  - {kind: file_write, subject: vllm, path: /root/.cache/outlines/fsm-1.pkl}
+  - {kind: file_write, subject: vllm, path: /root/.cache/outlines/fsm-2.pkl}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g14, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f14\": {\"type\": \"string\", \"maxLength\": 15}}}}"}
+expect:
+  action: report
+  reason_contains: "vLLM/outlines grammar-cache flood: 15 unique guided-decoding schemas sent to vllm.internal in 10m (outlines backend named in request); 1 grammar-cache path(s) growing on disk"
+  chain_min: 2

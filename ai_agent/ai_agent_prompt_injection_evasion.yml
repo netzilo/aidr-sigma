@@ -30,6 +30,9 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - llm
+  - tool
 detection:
   # LLM chat-format role delimiters injected into tool content or user messages.
   # These tokens exist only inside model tokenizers — no legitimate app payload contains them.

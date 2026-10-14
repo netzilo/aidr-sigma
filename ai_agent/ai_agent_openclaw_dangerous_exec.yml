@@ -28,6 +28,8 @@ logsource:
   product: ai_agent
   category: agent_events
   source: openclaw
+requires:
+  - tool
 detection:
   selection_curl_bash:
     server: openclaw

@@ -1,0 +1,30 @@
+rule: ai_agent_agents_u_cash_payment_key_abuse.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/bin/python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  pay:
+    session: pid/101:1
+    parent: agent
+    program: /usr/local/bin/agents-u-cash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  pay2:
+    session: pid/102:1
+    parent: agent
+    program: /usr/local/bin/agents-u-cash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: spawn, subject: pay, cmdline: "agents-u-cash pay --keyfile /Users/dev/.agents-u-cash/key.json --amount 1"}
+  - {kind: http_request, subject: pay, url: "https://facilitator.example.com/x402/settle", method: POST, request_id: r1, content_type: application/json, body: "{\"amount\": \"1\"}"}
+  - {kind: spawn, subject: pay2, cmdline: "agents-u-cash status --keyfile /Users/dev/.agents-u-cash/key.json"}
+expect:
+  action: allow

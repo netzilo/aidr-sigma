@@ -24,6 +24,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   selection_aws_assume_role:
     event_type: tool_call

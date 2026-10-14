@@ -25,6 +25,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Write/Edit tool targeting known IDE config paths
   sel_path_vscode:

@@ -1,0 +1,17 @@
+rule: ai_agent_session_velocity_anomaly.yml
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c0, args: '{"path": "/p/0"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c1, args: '{"path": "/p/1"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c2, args: '{"path": "/p/2"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c3, args: '{"path": "/p/3"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c4, args: '{"path": "/p/4"}'}
+expect:
+  action: allow

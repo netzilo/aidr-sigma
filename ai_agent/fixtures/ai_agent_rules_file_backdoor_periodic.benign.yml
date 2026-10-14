@@ -1,0 +1,15 @@
+rule: ai_agent_rules_file_backdoor_periodic.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_write, subject: cursor, path: /Users/dev/proj/src/main.go}
+  - {kind: file_read, subject: cursor, path: /Users/dev/proj/CLAUDE.md}
+expect:
+  action: allow

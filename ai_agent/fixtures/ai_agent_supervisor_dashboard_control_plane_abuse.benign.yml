@@ -1,0 +1,16 @@
+rule: ai_agent_supervisor_dashboard_control_plane_abuse.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: http_request, subject: cursor, url: "http://dash.internal:8787/api/sessions", method: GET, request_id: d0, content_type: application/json, body: ""}
+  - {kind: http_request, subject: cursor, url: "http://dash.internal:8787/api/sessions", method: GET, request_id: d1, content_type: application/json, body: ""}
+  - {kind: http_request, subject: cursor, url: "http://dash.internal:8787/api/sessions", method: GET, request_id: d2, content_type: application/json, body: ""}
+expect:
+  action: allow

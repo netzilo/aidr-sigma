@@ -1,0 +1,17 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: file_read, subject: agent, path: /etc/passwd}
+  - {kind: http_request, subject: agent, url: "https://letta.example/v1/agents/a1/messages", method: POST, request_id: r1, content_type: application/json, body: '{"messages":[{"role":"user","content":[{"type":"image","source":{"type":"url","image_url":"file:///etc/passwd"}}]}]}'}
+expect:
+  action: report
+  reason_contains: "references sensitive path /etc/passwd; 1 matching local file read(s) by the same session"
+  output_contains: ["Letta ImageContent file:// LFI attempt — 1 local file URL(s) embedded in image content sent to letta.example/v1/agents/a1/messages (file:///etc/passwd) via python3.11"]
+  chain_min: 2

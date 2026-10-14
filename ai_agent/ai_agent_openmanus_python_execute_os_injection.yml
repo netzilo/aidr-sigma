@@ -33,6 +33,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
 
   sel_event_exec:

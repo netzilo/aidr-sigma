@@ -40,6 +40,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
 
   sel_scope:

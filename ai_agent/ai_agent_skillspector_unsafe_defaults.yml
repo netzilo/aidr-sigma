@@ -18,6 +18,11 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - llm
+  - tool
+  - skill
 detection:
   selection_tls_disabled:
     event_type:

@@ -3,7 +3,7 @@ id: 7b3d9c14-2f6a-4d58-9c21-8ae5f0b47d63
 status: experimental
 level: medium
 description: |
-  Instance-resolved detection of an AI agent driving the heylead MCP-native LinkedIn SDR
+  Session-resolved detection of an AI agent driving the heylead MCP-native LinkedIn SDR
   tool (or any agent-spawned LinkedIn automation) at machine cadence, without a human in
   the loop.
 
@@ -28,11 +28,10 @@ description: |
                        heylead/LinkedIn ACQUIRED_SKILL edge loaded inside the same window
                        (read from the graph, never used as a trigger).
 
-  Attribution is instance-exact: anchored on meta["caller_pid"], resolved via
-  proc_instance() -> proc_lineage(), expanded to siblings only through EXECUTE_PROCESS rows
-  whose parent is already in this session, and every query_events() call is scoped by
-  actor_pid + actor_start + the window. No cross-session attribution is possible; no
-  path-keyed graph walk picks an owner. The triggering call is taken from meta, never
+  Attribution is session-exact: anchored on the triggering session (session() ->
+  lineage()), expanded only through SPAWNED rows whose parent session is already in scope,
+  and every events() call is scoped by session + the window. No cross-session attribution
+  is possible; no path-keyed graph walk picks an owner. The triggering call is taken from meta, never
   re-queried, so the async ingest race cannot drop it.
 
   Verdict is report, not block: sanctioned SDR campaigns are behaviourally identical to
@@ -63,6 +62,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - skill
 detection:
   sel_http_linkedin:
     event_type: http_request
@@ -131,14 +134,23 @@ script: |
       return b - a
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  # Merged edges (ACQUIRED_SKILL) carry first_ts/last_ts, never ts.
+  def edge_ts(e):
+      return int(e.get("last_ts", e.get("first_ts", e.get("ts", "0"))))
 
   # ── relevance gate: pure string checks on meta, no graph, no log ───────────
   def is_relevant_event():
@@ -150,13 +162,10 @@ script: |
           return has_word(meta.get("content", ""), HEYLEAD)
       return False
 
-  def find_skill_edge(paths, lo, hi):
-      for p in paths:
-          n = node("process://" + p)
-          if n == None:
-              continue
-          for e in edges(n["id"], dir="out", kind="ACQUIRED_SKILL"):
-              ts = int(e.get("ts", "0"))
+  def find_skill_edge(sids, lo, hi):
+      for sid in sids:
+          for e in edges(sid, dir="out", kind="ACQUIRED_SKILL"):
+              ts = edge_ts(e)
               if ts < lo or ts > hi:
                   continue
               s = node(e["to"])
@@ -171,72 +180,63 @@ script: |
       if not is_relevant_event():
           return "allow"
 
-      cp  = int(meta.get("caller_pid", "0"))
+      cp  = meta.get("session", "")
       now = int(meta.get("event_ts", "0"))
-      if cp == 0 or now == 0:
+      if cp == "" or now == 0:
           return "allow"
 
-      inst = proc_instance(cp, now)
+      inst = session(cp)
       if inst == None:
-          return "allow"            # degraded -- re-fires when the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"            # degraded -- re-fires once the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       lo = now - WINDOW_NS
 
       # ── session scope: lineage + descendants spawned inside the window ─────
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x["actor_start"]
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=lo, until_ns=now, limit=5000)
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      execs = events(kind="SPAWNED", since_ns=lo, until_ns=now, limit=5000)
       for depth in range(3):
           for e in execs:
-              if e["parent_pid"] in session and e["actor_pid"] not in session:
-                  session[e["actor_pid"]] = e["actor_start"]
-
-      paths = {}
-      for x in lineage:
-          paths[x["actor_path"]] = True
-      for e in execs:
-          if e["actor_pid"] in session:
-              paths[e.get("actor_path", "")] = True
+              if e.get("parent_session", "") in scope and e.get("session_id", "") not in scope:
+                  scope[e.get("session_id", "")] = True
 
       # ── autonomy gate: agent-driven, or the heylead driver itself ──────────
-      agent_path = ""
-      for x in lineage:
-          n = node("process://" + x["actor_path"])
-          if n != None and n.get("agent", "0") == "1":
-              agent_path = x["actor_path"]
+      agent_sess = None
+      for x in lineage_:
+          if x.get("agent", "0") == "1":
+              agent_sess = x
               break
 
       driver = None
       for e in execs:
-          if e["actor_pid"] not in session:
+          if e.get("session_id", "") not in scope:
               continue
-          if has_word(e.get("cmdline", "") + " " + e.get("actor_path", ""), HEYLEAD):
+          if has_word(e.get("cmdline", "") + " " + e.get("program", ""), HEYLEAD):
               driver = e
               break
 
       lineage_driver = False
-      for x in lineage:
-          if has_word(x["actor_path"], HEYLEAD):
+      for x in lineage_:
+          if has_word(x.get("path", ""), HEYLEAD):
               lineage_driver = True
 
-      if agent_path == "" and driver == None and not lineage_driver:
+      if agent_sess == None and driver == None and not lineage_driver:
           return "allow"            # human-driven browser session, not agent automation
 
-      # ── session-scoped, instance-exact LinkedIn activity in the window ─────
+      # ── session-scoped LinkedIn activity in the window ──────────────────────
       muts    = []
       scrapes = []
       n_pid   = 0
-      for pid in sorted(session.keys()):
+      for sid in sorted(scope.keys()):
           n_pid += 1
           if n_pid > MAX_PIDS:
               break
-          evs = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                             actor_start=int(session[pid]),
-                             since_ns=lo, until_ns=now, limit=500)
+          evs = events(kind="HTTP_REQUEST", session=sid,
+                       since_ns=lo, until_ns=now, limit=500)
           for e in evs:
               h = e.get("host", "")
               if not (is_linkedin(h) or has_token(h, HEYLEAD)):
@@ -257,7 +257,8 @@ script: |
               trig = {
                   "ts":         str(now),
                   "kind":       "HTTP_REQUEST",
-                  "actor_path": inst.get("actor_path", ""),
+                  "session_id": inst["id"],
+                  "program":    inst.get("path", ""),
                   "target_id":  "https://" + meta.get("host", ""),
                   "host":       meta.get("host", ""),
                   "path":       tp,
@@ -285,8 +286,8 @@ script: |
       last  = muts[order[-1][1]]
 
       # ── per-session suppression so one burst is not reported repeatedly ────
-      root = lineage[-1]
-      key  = root["actor_pid"] + ":" + root["actor_start"]
+      root = lineage_[-1]
+      key  = root["id"]
       seen = store_get("reported")
       if seen == None:
           seen = {}
@@ -302,15 +303,15 @@ script: |
           store_set("reported", fresh)
 
       # ── kill chain ─────────────────────────────────────────────────────────
-      root_path = agent_path if agent_path != "" else root["actor_path"]
-      chain = new_chain("process://" + root_path)
+      chain_root = agent_sess["id"] if agent_sess != None else root["id"]
+      chain = new_chain(chain_root)
 
       if driver != None:
           chain.append(step(ev_edge(driver), stage_id="Automation Driver",
                             stage_desc="heylead SDR driver spawned in this session: " +
-                                       driver.get("cmdline", driver.get("actor_path", ""))))
+                                       driver.get("cmdline", driver.get("program", ""))))
 
-      skill_edge = find_skill_edge(paths, lo, now)
+      skill_edge = find_skill_edge(sorted(scope.keys()), lo, now)
       if skill_edge != None:
           s = node(skill_edge["to"])
           shost = s.get("host", "?") if s != None else "?"
@@ -336,8 +337,8 @@ script: |
                                        trig["host"] + trig["path"]))
 
       names = []
-      for x in lineage:
-          names.append(x["actor_path"].split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lin_s = " -> ".join(names)
 
       reason = ("Autonomous LinkedIn SDR burst: " + str(len(muts)) +

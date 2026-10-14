@@ -33,6 +33,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   sel_prompt_pressure:
     event_type: llm_request

@@ -10,12 +10,11 @@ description: |
   base64-decoded exec, inline interpreter with child_process/socket, reverse shell,
   crontab/launchctl persistence, shell-profile append, credential/env exfiltration).
 
-  The rule is instance-resolved: it anchors on meta.caller_pid for the process that
-  actually executed the payload, resolves that exact (pid, start) instance with
-  proc_instance(), walks its true spawn chain with proc_lineage(), and only then
-  looks for the package-manager install ancestor. Every supporting query_events()
-  lookup is scoped to a pid+start pair taken from that one lineage, so attribution
-  never crosses sessions or process instances. The triggering exec itself is read
+  The rule is session-resolved: it anchors on the triggering session (session()) of
+  the process that actually executed the payload, walks its true spawn chain with
+  lineage(), and only then looks for the package-manager install ancestor. Every
+  supporting events() lookup is scoped to a session taken from that one lineage, so
+  attribution never crosses sessions or process instances. The triggering exec itself is read
   from meta (never re-queried), because the just-fired event races async ingest.
 author: Selhan
 date: "2026-06-12"
@@ -51,6 +50,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_exec:
     event_type: execute_process
@@ -122,35 +124,47 @@ script: |
       parts = p.split("/")
       return parts[len(parts) - 1]
 
-  def ev_exec_edge(e):
+  def ev_exec_edge(x):
+      # A lineage session as its SPAWNED edge: spawner (parent) -> the session.
+      t = x.get("ts", "0")
       return {
-          "from":     "process://" + e.get("parent_path", ""),
-          "to":       "process://" + e.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  e.get("cmdline", ""),
+          "from":     x.get("parent", ""),
+          "to":       x["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+          "cmdline":  x.get("cmdline", ""),
       }
 
   def ev_file_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = e.get("path", "")
+      t = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tgt,
+          "from":     e.get("session_id", ""),
+          "to":       e.get("target_id", ""),
           "kind":     e.get("kind", "READ_FILE"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  def with_spawn(x):
+      # Session dicts carry no command line; the session's own SPAWNED row does.
+      d = dict(x)
+      rows = events(kind="SPAWNED", session=x["id"], limit=1)
+      if rows:
+          d["cmdline"] = rows[0].get("cmdline", "")
+          d["ts"] = rows[0].get("ts", "0")
+      else:
+          d["cmdline"] = ""
+          d["ts"] = x.get("first_seen", "0")
+      return d
 
   def agent_paths():
       out = {}
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in programs(agent=True):
           pa = p.get("path", "")
           if pa != "":
               out[pa] = p.get("name", "")
@@ -167,24 +181,24 @@ script: |
       if hit == "":
           return "allow"
 
-      # -- 2. anchor on the exact triggering instance -------------------------
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      # -- 2. anchor on the triggering session --------------------------------
+      cp = meta.get("session", "")
+      if cp == "":
           return "allow"
       event_ts = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, event_ts)
+      inst = session(cp)
       if inst == None:
-          return "allow"                    # degraded - re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if lineage == None or len(lineage) < 2:
+          return "allow"                    # degraded - re-fires once the session is known
+      lineage_ = lineage(inst["id"])
+      if lineage_ == None or len(lineage_) < 2:
           return "allow"                    # no ancestry -> cannot prove install origin
 
       # -- 3. REQUIRED stage: package-manager install ancestor, ordered+windowed
       npm_row = None
       npm_idx = -1
-      for i in range(1, len(lineage)):
-          x = lineage[i]
-          if not is_pkg_install(x.get("cmdline", ""), x.get("actor_path", "")):
+      for i in range(1, len(lineage_)):
+          x = with_spawn(lineage_[i])
+          if not is_pkg_install(x.get("cmdline", ""), x.get("path", "")):
               continue
           xts = int(x.get("ts", "0"))
           if xts > 0 and event_ts > 0:
@@ -201,10 +215,10 @@ script: |
       # -- 4. corroborating: auto-approving agent/editor above the install ----
       apaths = agent_paths()
       agent_row = None
-      for i in range(npm_idx, len(lineage)):
-          x = lineage[i]
-          pth = x.get("actor_path", "")
-          if pth in apaths:
+      for i in range(npm_idx, len(lineage_)):
+          x = lineage_[i]
+          pth = x.get("path", "")
+          if x.get("agent", "0") == "1" or pth in apaths:
               agent_row = x
               break
           low = pth.lower()
@@ -215,13 +229,10 @@ script: |
           if agent_row != None:
               break
 
-      # -- 5. corroborating: manifest read by THIS install instance -----------
+      # -- 5. corroborating: manifest read by THIS install session ------------
       manifest = None
-      npm_pid = int(npm_row.get("actor_pid", "0"))
-      npm_start = int(npm_row.get("actor_start", "0"))
-      if npm_pid > 0:
-          for e in query_events(kind="READ_FILE", actor_pid=npm_pid,
-                                actor_start=npm_start, limit=400):
+      if npm_row["id"] != "":
+          for e in events(kind="READ_FILE", session=npm_row["id"], limit=400):
               fp = e.get("path", "")
               if fp == "":
                   fp = e.get("target_id", "")
@@ -229,10 +240,9 @@ script: |
                   manifest = e
                   break
 
-      # -- 6. corroborating: credential read by THIS payload instance ---------
+      # -- 6. corroborating: credential read by THIS payload session ----------
       cred = None
-      for e in query_events(kind="READ_FILE", actor_pid=int(inst["actor_pid"]),
-                            actor_start=int(inst["actor_start"]), limit=300):
+      for e in events(kind="READ_FILE", session=inst["id"], limit=300):
           fp = e.get("path", "")
           if fp == "":
               fp = e.get("target_id", "")
@@ -241,22 +251,24 @@ script: |
               break
 
       # -- 7. kill chain, rooted at the session owner -------------------------
-      root = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      root = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
       stages = []
 
       if agent_row != None:
-          chain.append(step(ev_exec_edge(agent_row),
+          chain.append(step(ev_exec_edge(with_spawn(agent_row)),
                             stage_id="Agent Session",
                             stage_desc="auto-approving agent/editor host in lineage: " +
-                                       agent_row.get("actor_path", "?")))
-          stages.append("agent:" + base(agent_row.get("actor_path", "?")))
+                                       agent_row.get("path", "?")))
+          stages.append("agent:" + base(agent_row.get("path", "?")))
 
+      ncmd = npm_row.get("cmdline", "")
+      if ncmd == "":
+          ncmd = npm_row.get("path", "?")
       chain.append(step(ev_exec_edge(npm_row),
                         stage_id="Auto-Approved Install",
-                        stage_desc="package install executed: " +
-                                   short(npm_row.get("cmdline", npm_row.get("actor_path", "?")), 160)))
-      stages.append("install:" + base(npm_row.get("actor_path", "?")))
+                        stage_desc="package install executed: " + short(ncmd, 160)))
+      stages.append("install:" + base(npm_row.get("path", "?")))
 
       if manifest != None:
           mp = manifest.get("path", "")
@@ -264,13 +276,16 @@ script: |
               mp = manifest.get("target_id", "package.json")
           chain.append(step(ev_file_edge(manifest),
                             stage_id="Manifest Read",
-                            stage_desc="install read repository manifest: " + mp))
+                            stage_desc="install read repository manifest: " + mp,
+                            activity={"path": mp, "ts": manifest.get("ts", "0")}))
           stages.append("manifest")
 
       trig = {
-          "from":     "process://" + inst.get("parent_path", npm_row.get("actor_path", "")),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", ""),
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "callid":   meta.get("callid", ""),
           "ts":       str(event_ts),
           "first_ts": str(event_ts),
           "last_ts":  str(event_ts),
@@ -279,7 +294,7 @@ script: |
       chain.append(step(trig,
                         stage_id="Postinstall Execution",
                         stage_desc="lifecycle script spawned payload: " + short(cmd, 200)))
-      stages.append("payload:" + base(inst.get("actor_path", "?")))
+      stages.append("payload:" + base(inst.get("path", "?")))
 
       if cred != None:
           cpth = cred.get("path", "")
@@ -287,10 +302,11 @@ script: |
               cpth = cred.get("target_id", "?")
           chain.append(step(ev_file_edge(cred),
                             stage_id="Credential Access",
-                            stage_desc="payload read sensitive file: " + cpth))
+                            stage_desc="payload read sensitive file: " + cpth,
+                            activity={"path": cpth, "ts": cred.get("ts", "0")}))
           stages.append("creds")
 
-      names = " -> ".join([base(x.get("actor_path", "?")) for x in lineage])
+      names = " -> ".join([base(x.get("path", "?")) for x in lineage_])
       degraded = ""
       if agent_row == None:
           degraded = " (agent ancestor unresolved - verify whether an interactive shell drove the install)"

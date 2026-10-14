@@ -10,15 +10,13 @@ description: |
   When vLLM unpickles the weights, the payload runs inside the inference process
   and typically spawns a shell, a downloader, or an inline interpreter one-liner.
 
-  The rule is instance-resolved: it anchors on meta.caller_pid, resolves the exact
-  process instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), and requires a vLLM/torch model-loading ancestor inside that one
-  lineage before it will report. Corroborating stages (pickle-format checkpoint
-  read, remote weight fetch, payload egress) are queried from the event log scoped
-  to (actor_pid, actor_start) pairs belonging to that same session only, inside a
-  5-minute window ending at the triggering exec. No cross-session attribution is
-  possible: every query is bound to an instance key derived from the caller's own
-  lineage.
+  Attribution is session-keyed: the rule anchors on the triggering spawn's session,
+  walks lineage() up the real spawn chain, and requires a vLLM/torch model-loading
+  ancestor session inside that one lineage before it will report. Corroborating
+  stages (pickle-format checkpoint read, remote weight fetch, payload egress) are
+  queried from the event log scoped to the session ids of that lineage and the
+  sessions they spawned, inside a 5-minute window ending at the triggering exec.
+  No cross-session attribution is possible.
 author: Tanya
 date: "2026-06-01"
 references:
@@ -47,6 +45,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -172,34 +175,47 @@ script: |
           return False
       return matches_any(VLLM_HINTS, txt)
 
-  # ── Kill-chain edge builders (synthesised from instance-resolved event rows) ──
-  def exec_edge(e):
-      frm = e.get("parent_path", "")
+  # The command line a session was started with: its SPAWNED row, else the
+  # Program node's recorded cmdline, else "".
+  def sess_cmd(x):
+      rows = events(kind="SPAWNED", session=x["id"], limit=1)
+      if rows and rows[0].get("cmdline", "") != "":
+          return rows[0]["cmdline"]
+      pn = node(x.get("program", ""))
+      if pn != None:
+          return pn.get("cmdline", "")
+      return ""
+
+  # ── Kill-chain edge builders (synthesised from session-resolved rows) ────────
+  def spawn_edge(x, cmdline):
+      frm = x.get("parent", "")
       if frm == "":
-          frm = e.get("actor_path", "")
+          frm = x["id"]
+      t = x.get("first_seen", "0")
       return {
-          "from": "process://" + frm,
-          "to":   "process://" + e.get("actor_path", ""),
-          "kind": "EXECUTE_PROCESS",
-          "ts":   e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
-          "cmdline":  trunc(e.get("cmdline", ""), 200),
+          "from": frm,
+          "to":   x["id"],
+          "kind": "SPAWNED",
+          "ts":   t,
+          "first_ts": t,
+          "last_ts":  t,
+          "cmdline":  trunc(cmdline, 200),
       }
 
   def ev_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = e.get("path", e.get("host", ""))
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from": "process://" + e.get("actor_path", ""),
-          "to":   tgt,
-          "kind": e.get("kind", ""),
-          "ts":   e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ── Main ─────────────────────────────────────────────────────────────────────
   def run():
       # 1. Relevance gate — pure string work on meta only.
@@ -210,26 +226,30 @@ script: |
           return "allow"
 
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if cp == 0 or now == 0:
+      cp  = meta.get("session", "")
+      if cp == "" or now == 0:
           return "allow"
 
-      # 2. Anchor on the exact triggering instance.
-      inst = proc_instance(cp, now)
+      # 2. Anchor on the triggering session (the spawned payload process).
+      inst = session(cp)
       if inst == None:
           return "allow"            # degraded — never guess attribution
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # 3. REQUIRED anchor stage: a vLLM/torch weight-loading ancestor in THIS lineage.
+      # 3. REQUIRED anchor stage: a vLLM/torch weight-loading ANCESTOR session in
+      #    THIS lineage (the payload process itself is never the loader).
       anchor   = None
       anchor_i = -1
-      for i in range(len(lineage)):
-          x = lineage[i]
-          if is_model_loader(x.get("actor_path", ""), x.get("cmdline", "")):
+      anchor_cmd = ""
+      for i in range(1, len(lineage_)):
+          x = lineage_[i]
+          c = sess_cmd(x)
+          if is_model_loader(x.get("path", ""), c):
               anchor   = x
               anchor_i = i
+              anchor_cmd = c
               break
       if anchor == None:
           return "allow"            # not a model-load lineage — nothing to say
@@ -237,49 +257,48 @@ script: |
       start = now - WINDOW_NS
 
       # 4. Session scope = the loader and everything below it in this lineage,
-      #    plus descendants spawned inside the window. Instance-keyed (pid,start),
-      #    so PID reuse and other sessions cannot bleed in.
-      session = []
-      known   = {}
+      #    plus descendants spawned inside the window. Session-keyed, so other
+      #    sessions cannot bleed in.
+      scope = []
+      known = {}
       for i in range(anchor_i + 1):
-          x = lineage[i]
-          k = x.get("actor_pid", "") + ":" + x.get("actor_start", "0")
-          if k not in known:
-              known[k] = True
-              session.append([x.get("actor_pid", ""), x.get("actor_start", "0"), x.get("actor_path", "")])
+          sid = lineage_[i]["id"]
+          if sid not in known:
+              known[sid] = True
+              scope.append(sid)
 
-      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=start, until_ns=now, limit=2000)
+      spawn_rows = events(kind="SPAWNED", since_ns=start, until_ns=now, limit=2000)
       for _gen in range(3):
           added = False
           for e in spawn_rows:
-              pk = e.get("parent_pid", "") + ":" + e.get("parent_start", "0")
-              ck = e.get("actor_pid", "") + ":" + e.get("actor_start", "0")
-              if pk in known and ck not in known and len(session) < MAX_PIDS:
+              pk = e.get("parent_session", "")
+              ck = e.get("session_id", "")
+              if pk in known and ck not in known and len(scope) < MAX_PIDS:
                   known[ck] = True
-                  session.append([e.get("actor_pid", ""), e.get("actor_start", "0"), e.get("actor_path", "")])
+                  scope.append(ck)
                   added = True
           if not added:
               break
 
-      # 5. Build the chain, rooted at the owning process of this session.
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # 5. Build the chain, rooted at the root session of this lineage.
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
       stages = []
 
-      chain.append(step(exec_edge(anchor),
+      chain.append(step(spawn_edge(anchor, anchor_cmd),
                         stage_id="Model Load",
-                        stage_desc="vLLM/torch weight loader: " + base(anchor.get("actor_path", "")) +
-                                   " | " + trunc(anchor.get("cmdline", ""), 160)))
+                        stage_desc="vLLM/torch weight loader: " + base(anchor.get("path", "")) +
+                                   " | " + trunc(anchor_cmd, 160)))
       stages.append("model-loader")
 
       # Trigger stage comes from meta — the just-fired exec races async ingest.
-      child = inst.get("actor_path", "")
-      if is_model_loader(inst.get("actor_path", ""), inst.get("cmdline", "")):
-          child = first_token(cmd)      # caller IS the loader; child is in meta
+      trig_from = inst.get("parent", "")
+      if trig_from == "":
+          trig_from = anchor["id"]
       trig = {
-          "from": "process://" + anchor.get("actor_path", ""),
-          "to":   "process://" + child,
-          "kind": "EXECUTE_PROCESS",
+          "from": trig_from,
+          "to":   inst["id"],
+          "kind": "SPAWNED",
           "ts":   str(now),
           "first_ts": str(now),
           "last_ts":  str(now),
@@ -290,14 +309,12 @@ script: |
                         stage_desc="model-load lineage spawned code-execution payload: " + trunc(cmd, 200)))
       stages.append("pickle-payload-exec")
 
-      # 6. Corroborating stages — scoped by instance key, windowed, bounded.
+      # 6. Corroborating stages — scoped by session id, windowed, bounded.
       got_ckpt = False
-      for s in session:
+      for sid in scope:
           if got_ckpt:
               break
-          if s[0] == "":
-              continue
-          rows = query_events(kind="READ_FILE", actor_pid=int(s[0]), actor_start=int(s[1]),
+          rows = events(kind="READ_FILE", session=sid,
                               since_ns=start, until_ns=now, limit=300)
           for e in rows:
               p = e.get("path", "")
@@ -310,12 +327,10 @@ script: |
                   break
 
       got_fetch = False
-      for s in session:
+      for sid in scope:
           if got_fetch:
               break
-          if s[0] == "":
-              continue
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(s[0]), actor_start=int(s[1]),
+          rows = events(kind="HTTP_REQUEST", session=sid,
                               since_ns=start, until_ns=now, limit=200)
           for e in rows:
               hp = e.get("host", "") + e.get("path", "")
@@ -328,23 +343,26 @@ script: |
                   got_fetch = True
                   break
 
-      for e in query_events(kind="CONNECTS", actor_pid=int(inst["actor_pid"]),
-                            actor_start=int(inst["actor_start"]),
+      for e in events(kind="CONNECTS", session=inst["id"],
                             since_ns=start, until_ns=now, limit=50):
           h = e.get("host", "")
-          if h != "" and e.get("is_ztna_host", "0") != "1":
-              chain.append(step(ev_edge(e),
-                                stage_id="Payload Egress",
-                                stage_desc="payload process connected to " + h + ":" + e.get("port", "")))
-              stages.append("payload-egress")
-              break
+          if h == "":
+              continue
+          hn = node(e.get("target_id", ""))
+          if hn != None and hn.get("is_ztna_host", "0") == "1":
+              continue              # private/ZTNA peer — not payload egress
+          chain.append(step(ev_edge(e),
+                            stage_id="Payload Egress",
+                            stage_desc="payload process connected to " + h + ":" + e.get("port", "")))
+          stages.append("payload-egress")
+          break
 
       # 7. Verdict — report only; this rule never blocks inference workloads.
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(base(x.get("path", "")))
       attribution = "resolved"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           attribution = "degraded"
 
       reason = ("Possible malicious model-weight deserialization (vLLM torch.load " +

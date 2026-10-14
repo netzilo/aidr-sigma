@@ -6,11 +6,11 @@ related:
 status: experimental
 description: |
   Periodic companion to ai_agent_rules_file_backdoor. The trigger rule sees the
-  agent's own Write/Edit tool call; this one sees WRITE_FILE and CREATE_FILE edges
-  in the AIDR behaviour graph, which is the only way a write performed by a
-  subprocess the agent spawned (a script it generated, `sed -i`, a package
-  postinstall hook) becomes visible — staticscanner/edr.go routes file events to
-  AIDR ingest only, never to rule evaluation.
+  agent's own Write/Edit tool call; this one sees the WRITE_FILE and CREATE_FILE
+  activity of every agent session and of the sessions it spawned, which is the
+  only way a write performed by a subprocess the agent spawned (a script it
+  generated, `sed -i`, a package postinstall hook) becomes visible — file events
+  go to AIDR ingest only, never to rule evaluation.
 
   Verdict is `report`: the write has already happened by the time a periodic scan
   observes it, so blocking has no preventive value here. The trigger rule is the
@@ -31,6 +31,9 @@ tags:
 logsource:
   product: ai_agent
   category: periodic
+requires:
+  - file_activity
+  - process_exec
 detection:
   sel:
     content|re: '.'
@@ -39,50 +42,49 @@ action: execute
 on_error: allow
 on_timeout: allow
 script: |
-  # FTS5 phrase patterns. The unicode61 tokeniser splits on '/', '.' and '_', so
-  # "CLAUDE.md" tokenises to ["claude","md"] and must be queried as the adjacent
-  # phrase '"claude md"' — a bare token would miss it. The outer double quotes are
-  # FTS5 syntax, not Starlark delimiters.
+  # fs_activity() path filters: every whitespace-separated token must appear in
+  # the path (case-insensitive), so one file-name token is the precise form.
   INSTRUCTION_PATTERNS = [
-      '"cursorrules"',
-      '"windsurfrules"',
-      '"claude md"',
-      '"agents md"',
-      '"copilot instructions md"',
-      '"cursor rules"',
+      ".cursorrules",
+      ".windsurfrules",
+      "claude.md",
+      "agents.md",
+      "copilot-instructions.md",
+      ".cursor/rules",
   ]
 
-  def scan_op(fs_id, op, chain, stages):
+  def scan_op(sess_id, op, stages):
       """Record any instruction-file path touched by this op."""
       for pat in INSTRUCTION_PATTERNS:
-          entries = fs_activity(fs_id, op, pat)
+          entries = fs_activity(session=sess_id, op=op, pattern=pat)
           for entry in entries:
               stages.append(op + " " + entry["path"])
               return entry      # first hit per pattern is enough evidence
       return None
 
   def run():
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           chain = new_chain(aid)
           stages = []
 
-          for kind in ["WRITE_FILE", "CREATE_FILE"]:
-              op = "WRITE"
-              if kind == "CREATE_FILE":
-                  op = "CREATE"
-              for e in edges(aid, dir="out", kind=kind):
-                  fs = node(e["to"])
-                  if fs == None:
-                      continue
-                  entry = scan_op(fs["id"], op, chain, stages)
-                  if entry != None:
-                      chain.append(step(e,
-                          stage_id="Persistence",
-                          stage_desc="agent instruction file modified: " + entry["path"],
-                          activity=entry))
+          # the agent session itself and every session it spawned
+          scope = [aid]
+          for c in children(aid):
+              scope.append(c["id"])
+
+          for sid in scope:
+              for kind in ["WRITE_FILE", "CREATE_FILE"]:
+                  op = "WRITE"
+                  if kind == "CREATE_FILE":
+                      op = "CREATE"
+                  for e in edges(sid, dir="out", kind=kind):
+                      entry = scan_op(sid, op, stages)
+                      if entry != None:
+                          chain.append(step(e,
+                              stage_id="Persistence",
+                              stage_desc="agent instruction file modified: " + entry["path"],
+                              activity=entry))
 
           if len(stages) > 0:
               print("Instruction file(s) modified at EDR level: " + ", ".join(stages))

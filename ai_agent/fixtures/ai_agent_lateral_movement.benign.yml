@@ -1,0 +1,22 @@
+rule: ai_agent_lateral_movement.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  ssh:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/bin/ssh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_read, subject: cursor, path: /Users/dev/proj/deploy/README.md}
+  - {kind: spawn, subject: ssh, cmdline: "ssh deploy@staging.internal systemctl status app"}
+expect:
+  action: allow

@@ -1,0 +1,25 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    name: pip
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: pip, cmdline: "python3 -m pip install book-recommendations"}
+  - {kind: http_request, subject: pip, url: "https://pypi.org/simple/book-recommendations/", method: GET, request_id: r1, content_type: text/html, body: ""}
+  - {kind: http_request, subject: pip, url: "https://files.pythonhosted.org/packages/ab/cd/book_recommendations-0.1.0-py3-none-any.whl", method: GET, request_id: r2, content_type: application/octet-stream, body: ""}
+expect:
+  action: report
+  reason_contains: "fetched the known-malicious PyPI distribution 'book-recommendations' from files.pythonhosted.org"
+  chain_min: 1

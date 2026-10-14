@@ -41,6 +41,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
 
   # ── Target scoping: the write must land on an executable, configuration,

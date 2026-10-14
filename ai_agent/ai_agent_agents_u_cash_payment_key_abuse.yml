@@ -8,15 +8,15 @@ description: |
   private keys / scoped subagent credentials, or redirects HTTP-402 settlement to
   an attacker-controlled endpoint.
 
-  Fully instance-resolved. The rule anchors on meta["caller_pid"], resolves the
-  exact process instance with proc_instance(), walks proc_lineage() to the session
-  root, expands the session with EXECUTE_PROCESS rows from the event log, and then
-  requires an ORDERED, WINDOWED sequence performed by instances of that ONE session:
+  Fully session-scoped. The rule anchors on the triggering session, walks its
+  lineage to the root, expands the scope with SPAWNED rows from the event log,
+  and then requires an ORDERED, WINDOWED sequence performed by sessions of that
+  ONE scope:
 
-    Stage 0 (REQUIRED anchor) - a session instance handled agents-u-cash / x402
+    Stage 0 (REQUIRED anchor) - a session in scope handled agents-u-cash / x402
       payment tooling together with wallet key material, dumped a wallet key file
       with a shell utility, or installed agents-u-cash from a non-default index.
-    Stage 1 (REQUIRED egress) - a session instance made an HTTP request or opened a
+    Stage 1 (REQUIRED egress) - a session in scope made an HTTP request or opened a
       connection AFTER the anchor and within the rule window. When the triggering
       event is a connect, that stage comes from meta - never re-queried from the
       log, which races async ingest.
@@ -62,6 +62,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - connect
 detection:
   sel_session_events:
     event_type:
@@ -73,8 +77,8 @@ on_timeout: allow
 on_error: allow
 script: |
   # agents-u-cash (HTTP-402 crypto payment client) abuse.
-  # Instance-resolved: caller_pid -> proc_instance -> proc_lineage -> query_events.
-  # Every stage is scoped to ONE session. No cross-session attribution.
+  # Session-scoped: session() -> lineage() -> events(). Every stage is scoped to
+  # ONE session scope. No cross-session attribution.
 
   WINDOW_NS = 300000000000          # 5 minutes: anchor and egress must cluster
   MAX_EXEC  = 4000
@@ -181,7 +185,7 @@ script: |
       store_set("last_anchor_ts", str(ts))
 
   # Relevance gate: string checks on meta only, plus one O(1) store read for the
-  # very high-volume connects trigger. No graph, no query_events, no fs_activity.
+  # very high-volume connects trigger. No graph, no events(), no fs_activity.
   def is_relevant_event():
       ct = meta.get("context_type", "")
       if ct == "execute_process":
@@ -208,38 +212,41 @@ script: |
           return True
       return False
 
-  def session_map(lineage, execs):
+  def session_map(lineage_, execs):
       pids = {}
-      for x in lineage:
-          k = x.get("actor_pid", "")
+      for x in lineage_:
+          k = x.get("id", "")
           if k != "":
-              pids[k] = x.get("actor_start", "")
+              pids[k] = True
       for i in range(3):
           for e in execs:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
               if pp != "" and ap != "" and pp in pids and ap not in pids:
-                  pids[ap] = e.get("actor_start", "")
+                  pids[ap] = True
       return pids
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def run():
       if not is_relevant_event():
           return "allow"
 
       ct         = meta.get("context_type", "")
       trigger_ts = int(meta.get("event_ts", "0"))
-      cp         = int(meta.get("caller_pid", "0"))
-      if cp == 0 or trigger_ts == 0:
+      if meta.get("session", "") == "" or trigger_ts == 0:
           return "allow"
 
       # Record the anchor hint immediately so a later connect is not gated off
@@ -248,16 +255,16 @@ script: |
           if anchor_kind(meta.get("content", "")) != "":
               remember_anchor(trigger_ts)
 
-      inst = proc_instance(cp, trigger_ts)
+      inst = session()
       if inst == None:
-          return "allow"                 # degraded - re-fires when the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"                 # degraded - re-fires when the session lands
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       since = trigger_ts - WINDOW_NS
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=MAX_EXEC)
-      pids  = session_map(lineage, execs)
+      execs = events(kind="SPAWNED", since_ns=since, limit=MAX_EXEC)
+      pids  = session_map(lineage_, execs)
 
       # Stage 0 - REQUIRED anchor, session-scoped, earliest in window.
       anchor_ev    = None
@@ -266,7 +273,7 @@ script: |
       install_seen = False
       dump_seen    = False
       for e in execs:
-          if e.get("actor_pid", "") not in pids:
+          if e.get("session_id", "") not in pids:
               continue
           k = anchor_kind(e.get("cmdline", ""))
           if k == "":
@@ -290,11 +297,13 @@ script: |
               anchor_kd = k
               anchor_ts = trigger_ts
               anchor_ev = {
-                  "actor_path": inst.get("actor_path", ""),
-                  "target_id":  "process://" + inst.get("actor_path", ""),
-                  "kind":       "EXECUTE_PROCESS",
-                  "ts":         str(trigger_ts),
-                  "cmdline":    meta.get("content", ""),
+                  "session_id":     inst["id"],
+                  "parent_session": inst.get("parent", ""),
+                  "program":        inst.get("path", ""),
+                  "target_id":      inst["id"],
+                  "kind":           "SPAWNED",
+                  "ts":             str(trigger_ts),
+                  "cmdline":        meta.get("content", ""),
               }
               if k == "supply-chain-install":
                   install_seen = True
@@ -306,8 +315,8 @@ script: |
       remember_anchor(anchor_ts)
 
       # Stage 1 - REQUIRED egress by a session instance, AFTER the anchor.
-      https = query_events(kind="HTTP_REQUEST", since_ns=anchor_ts, limit=MAX_NET)
-      conns = query_events(kind="CONNECTS",     since_ns=anchor_ts, limit=MAX_NET)
+      https = events(kind="HTTP_REQUEST", since_ns=anchor_ts, limit=MAX_NET)
+      conns = events(kind="CONNECTS",     since_ns=anchor_ts, limit=MAX_NET)
 
       first_eg  = None
       key_ev    = None
@@ -316,7 +325,7 @@ script: |
       pay_hosts = {}
 
       for e in https:
-          if e.get("actor_pid", "") not in pids:
+          if e.get("session_id", "") not in pids:
               continue
           ts = int(e.get("ts", "0"))
           if ts < anchor_ts or ts > trigger_ts:
@@ -330,11 +339,11 @@ script: |
           if key_ev == None:
               if any_match(KEY_IN_URL, p) or any_match(KEY_IN_URL, h):
                   key_ev = e
-          if util_ev == None and basename(e.get("actor_path", "")) in NET_UTILS:
+          if util_ev == None and basename(e.get("program", "")) in NET_UTILS:
               util_ev = e
 
       for e in conns:
-          if e.get("actor_pid", "") not in pids:
+          if e.get("session_id", "") not in pids:
               continue
           ts = int(e.get("ts", "0"))
           if ts < anchor_ts or ts > trigger_ts:
@@ -343,7 +352,7 @@ script: |
               first_eg = e
           if rpc_ev == None and e.get("port", "") in RPC_PORTS:
               rpc_ev = e
-          if util_ev == None and basename(e.get("actor_path", "")) in NET_UTILS:
+          if util_ev == None and basename(e.get("program", "")) in NET_UTILS:
               util_ev = e
 
       # The triggering connect is the caller's own action - take it from meta,
@@ -351,7 +360,8 @@ script: |
       trig_conn = None
       if ct == "connects":
           trig_conn = {
-              "actor_path": inst.get("actor_path", ""),
+              "session_id": inst["id"],
+              "program":    inst.get("path", ""),
               "target_id":  "host://" + meta.get("protocol", "tcp") + ":" + meta.get("host", "") + ":" + meta.get("port", ""),
               "kind":       "CONNECTS",
               "ts":         str(trigger_ts),
@@ -362,7 +372,7 @@ script: |
               first_eg = trig_conn
           if rpc_ev == None and meta.get("port", "") in RPC_PORTS:
               rpc_ev = trig_conn
-          if util_ev == None and basename(inst.get("actor_path", "")) in NET_UTILS:
+          if util_ev == None and basename(inst.get("path", "")) in NET_UTILS:
               util_ev = trig_conn
 
       if first_eg == None:
@@ -377,18 +387,18 @@ script: |
       if len(pay_hosts) > 1:
           corro.append(str(len(pay_hosts)) + " distinct HTTP-402 payment endpoints in window")
       if util_ev != None:
-          corro.append("raw network utility performed egress: " + basename(util_ev.get("actor_path", "")))
+          corro.append("raw network utility performed egress: " + basename(util_ev.get("program", "")))
       if rpc_ev != None:
           corro.append("chain-RPC port egress: " + rpc_ev.get("host", "") + ":" + rpc_ev.get("port", ""))
       if not corro:
           return "allow"
 
       names = []
-      for x in lineage:
-          names.append(basename(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(basename(x.get("path", "")))
       lin = " -> ".join(names)
 
-      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain = new_chain(lineage_[len(lineage_) - 1]["id"])
       chain.append(step(ev_edge(anchor_ev),
                         stage_id="Payment Key Handling",
                         stage_desc=anchor_kd + ": " + trim(anchor_ev.get("cmdline", ""), 200)))
@@ -413,7 +423,7 @@ script: |
       if util_ev != None and util_ev != first_eg and util_ev != key_ev:
           chain.append(step(ev_edge(util_ev),
                             stage_id="Utility Egress",
-                            stage_desc="raw utility egress by " + basename(util_ev.get("actor_path", ""))))
+                            stage_desc="raw utility egress by " + basename(util_ev.get("program", ""))))
 
       print("agents-u-cash abuse | lineage: " + lin + " | anchor: " + anchor_kd +
             " | " + "; ".join(corro))

@@ -63,6 +63,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - skill
 detection:
   sel_tool_call:
     event_type: tool_call
@@ -177,11 +180,25 @@ script: |
 
   # ── graph helpers ───────────────────────────────────────────────────────────
   def find_agent():
+      # the agent that owns the triggering session: walk parents to the root
+      # (session() only, so the rule stays loadable on hosts without processes)
+      cur = session()
+      if cur != None:
+          root = cur
+          for i in range(16):
+              pid = root.get("parent", "")
+              if pid == "":
+                  break
+              nxt = session(pid)
+              if nxt == None:
+                  break
+              root = nxt
+          if root.get("agent", "") == "1":
+              return root
+          return cur
       want = meta.get("agent_name", "")
       fallback = None
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           if fallback == None:
               fallback = p
           if want != "" and p.get("path", "") == want:

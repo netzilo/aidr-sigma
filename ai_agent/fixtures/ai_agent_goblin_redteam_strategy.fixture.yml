@@ -1,0 +1,25 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  runner:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: llm_request, subject: cursor, provider: openai, model: gpt-4o, request_id: q1, body: "turn 1"}
+  - {kind: llm_request, subject: cursor, provider: openai, model: gpt-4o, request_id: q2, body: "turn 2"}
+  - {kind: llm_request, subject: cursor, provider: openai, model: gpt-4o, request_id: q3, body: "turn 3"}
+  - {kind: spawn, subject: runner, cmdline: "npx promptfoo redteam run --strategy goblin --config redteam.yaml"}
+expect:
+  action: report
+  reason_contains: "corroborated: multi-turn-llm=3"
+  chain_min: 2

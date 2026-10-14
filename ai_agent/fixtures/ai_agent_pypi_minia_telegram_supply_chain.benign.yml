@@ -1,0 +1,21 @@
+rule: ai_agent_pypi_minia_telegram_supply_chain.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/102:1
+    parent: cursor
+    program: /usr/bin/pip
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: pip, cmdline: "pip uninstall -y minia-telegram"}
+expect:
+  action: allow

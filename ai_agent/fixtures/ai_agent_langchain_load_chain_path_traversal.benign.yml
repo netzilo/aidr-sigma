@@ -1,0 +1,21 @@
+rule: ai_agent_langchain_load_chain_path_traversal.yml
+subjects:
+  zsh:
+    session: pid/700:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  curl:
+    session: pid/701:1
+    parent: zsh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: zsh}
+  - {kind: spawn, subject: curl, cmdline: "curl -sO https://cdn.example.com/assets/../img/logo.png"}
+  - {kind: http_request, subject: curl, url: "https://cdn.example.com/assets/../img/logo.png", method: GET, request_id: r1}
+expect:
+  action: allow

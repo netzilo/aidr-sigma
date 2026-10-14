@@ -40,6 +40,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   # ── endpoint scoping: only POSTs to a vLLM inference endpoint ───────────────
   sel_endpoint_path:

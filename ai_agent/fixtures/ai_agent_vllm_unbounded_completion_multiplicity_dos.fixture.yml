@@ -1,0 +1,15 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://vllm.internal/v1/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "llama", "prompt": "hello", "n": 500}'}
+expect:
+  action: report
+  reason_contains: "vLLM-style unbounded completion multiplicity (n/best_of=500) sent to vllm.internal/v1/completions - unbounded multiplicity n=500"
+  chain_min: 1

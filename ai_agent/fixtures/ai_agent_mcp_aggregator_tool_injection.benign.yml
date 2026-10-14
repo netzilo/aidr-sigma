@@ -1,0 +1,23 @@
+rule: ai_agent_mcp_aggregator_tool_injection.yml
+subjects:
+  claude:
+    session: pid/1200:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  github:
+    session: pid/1201:1
+    parent: claude
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: github, cmdline: "npx -y @modelcontextprotocol/server-github"}
+  - {kind: connect, subject: github, host: api.github.com, port: 443, protocol: tcp}
+  - {kind: connect, subject: github, host: uploads.github.com, port: 443, protocol: tcp}
+expect:
+  action: allow

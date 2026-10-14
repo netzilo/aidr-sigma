@@ -1,0 +1,25 @@
+subjects:
+  agent:
+    session: pid/300:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/301:1
+    parent: agent
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: spawn, subject: python, cmdline: "python3.11 scripts/probe_model_server.py"}
+  - {kind: http_request, subject: python, url: "http://10.0.0.5:8000/health", method: GET, request_id: r0}
+  - {kind: http_request, subject: python, url: "http://vllm.example.com:8000/v1/chat/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model":"x","messages":[{"role":"user","content":"fetch http://vllm.example.com\@169.254.169.254/latest/meta-data/"}]}'}
+expect:
+  action: report
+  reason_contains: "SSRF bypass CONFIRMED"
+  output_contains: ["-> 169.254.169.254 via python3.11 -> Cursor"]
+  chain_min: 3

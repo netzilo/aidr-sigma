@@ -1,0 +1,23 @@
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    name: claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: claude
+    program: /bin/bash
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: shell, cmdline: "bash -c 'cp agent.plist ~/Library/LaunchAgents/com.helper.plist'"}
+  - {kind: file_write, subject: shell, path: /Users/dev/Library/LaunchAgents/com.helper.plist}
+expect:
+  action: block
+  output_contains: ["Persistence write: LaunchAgents/ by bash"]

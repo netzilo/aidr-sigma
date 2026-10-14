@@ -40,6 +40,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   # 1. Scope: outbound HTTP GET only. Prompt *pulls* are GET; POST/PUT/PATCH on
   #    /commits/ is a push of the caller's own prompt and is not this threat.

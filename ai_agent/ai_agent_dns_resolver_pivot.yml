@@ -30,6 +30,8 @@ tags:
 logsource:
   product: ai_agent
   category: connects
+requires:
+  - connect
 detection:
   # Broad pre-filter: the script is the detector. connects events carry no
   # content, so match on the always-present event_type rather than content|re.
@@ -88,28 +90,35 @@ script: |
 
       proto = meta.get("protocol", "")
       agent = meta.get("agent_name", "")
+      ets   = meta.get("event_ts", "0")
 
-      # Attribute the connection to a process instance and build a kill chain from
-      # the CONNECTS edge the reporting path has already written for this event.
-      pid = int(meta.get("caller_pid", "0"))
+      # Attribute the connection to the triggering session and build a kill chain
+      # from its CONNECTS edge. The chain is rooted at that session, not at an
+      # agent ancestor, so the rule stays loadable on hosts without process
+      # telemetry (the gateway's hosted browsers connect too).
+      inst  = session()
       chain = None
-      if pid > 0:
-          inst = proc_instance(pid)
-          if inst != None:
-              for p in graph(type="Process"):
-                  if p.get("agent", "0") != "1":
-                      continue
-                  c = new_chain(p["id"])
-                  for e in edges(p["id"], dir="out", kind="CONNECTS"):
-                      target = node(e["to"])
-                      if target != None and target.get("host", "") == host:
-                          c.append(step(e, stage_id="C2 Channel",
-                                        stage_desc="DNS/53 to non-approved resolver " +
-                                                   host + " (" + proto + ")"))
-                          chain = c
-                          break
-                  if chain != None:
-                      break
+      if inst != None:
+          desc = "DNS/53 to non-approved resolver " + host + " (" + proto + ")"
+          c = new_chain(inst["id"])
+          for e in edges(inst["id"], dir="out", kind="CONNECTS"):
+              target = node(e["to"])
+              if target != None and target.get("host", "") == host:
+                  c.append(step(e, stage_id="C2 Channel", stage_desc=desc))
+                  chain = c
+                  break
+          if chain == None:
+              # The edge for this very event may not be visible yet: take it
+              # from meta, never re-queried.
+              c.append(step({"from": inst["id"],
+                             "to": "host://" + proto + ":" + host + ":53",
+                             "kind": "CONNECTS", "ts": ets,
+                             "first_ts": ets, "last_ts": ets,
+                             "host": host, "port": "53", "protocol": proto},
+                            stage_id="C2 Channel", stage_desc=desc))
+              chain = c
+          if inst.get("path", "") != "":
+              agent = inst.get("path", "")
 
       print("DNS port 53 to non-approved resolver " + host +
             " proto=" + proto + " agent=" + agent)
@@ -124,8 +133,8 @@ script: |
 
   result = run()
 falsepositives:
-  - An endpoint whose DHCP-assigned resolver is a public IP not in PUBLIC_RESOLVERS
-  - VPN or split-horizon DNS pointing at a corporate resolver on a public address
-  - Container runtimes with a resolver outside the RFC1918 and link-local ranges
-  - Applications bundling their own stub resolver aimed at a specific upstream
+- An endpoint whose DHCP-assigned resolver is a public IP not in PUBLIC_RESOLVERS
+- VPN or split-horizon DNS pointing at a corporate resolver on a public address
+- Container runtimes with a resolver outside the RFC1918 and link-local ranges
+- Applications bundling their own stub resolver aimed at a specific upstream
 level: medium

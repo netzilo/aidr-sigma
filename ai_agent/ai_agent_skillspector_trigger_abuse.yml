@@ -19,6 +19,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - skill
 detection:
   # TR1: Overly broad trigger — matches everything
   selection_wildcard_trigger:

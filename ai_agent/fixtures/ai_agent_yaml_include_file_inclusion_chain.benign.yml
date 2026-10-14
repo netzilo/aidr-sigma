@@ -1,0 +1,17 @@
+rule: ai_agent_yaml_include_file_inclusion_chain.yml
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: tool_call, subject: agent, server: local, tool: load_config, call_id: c1, args: '{"path":"app.yml","yaml":"sensors: !include sensors.yaml\n"}'}
+  - {kind: file_read, subject: agent, path: /home/dev/app/sensors.yaml}
+trigger: 1
+expect:
+  action: allow

@@ -9,7 +9,7 @@ description: |
 
   The rule does NOT fire on the YAML payload alone. It parses the include target
   out of the YAML text that reached the agent, and then requires the behaviour
-  graph to confirm that the agent process (or a descendant it spawned) actually
+  graph to confirm that the agent session (or a descendant it spawned) actually
   performed a READ_FILE of that same target - or, when the target is encoded or
   unresolvable, of a credential/secret path - inside a 5 minute window around the
   triggering event. That path-to-path match is the causal link between the
@@ -50,6 +50,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_include_directive:
     event_type:
@@ -196,12 +200,14 @@ script: |
 
   # ── graph helpers ────────────────────────────────────────────────────────────
   def agent_roots():
+      # the tree of the triggering session: its lineage root (the agent)
+      lin = lineage()
+      if lin:
+          return [lin[len(lin) - 1]]
       want = meta.get("agent_name", "")
       exact = []
       allp  = []
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           allp.append(p)
           if want != "" and p.get("path", "") == want:
               exact.append(p)
@@ -215,7 +221,7 @@ script: |
       for d in range(MAX_DEPTH):
           nxt = []
           for pid in frontier:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              for e in edges(pid, dir="out", kind="SPAWNED"):
                   c = e["to"]
                   if c not in seen:
                       seen[c] = True
@@ -245,7 +251,7 @@ script: |
 
   def find_exec(pids, lo, hi):
       for pid in pids:
-          for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+          for e in edges(pid, dir="out", kind="SPAWNED"):
               ts = int(e.get("ts", "0"))
               if ts < lo or ts > hi:
                   continue
@@ -253,7 +259,7 @@ script: |
               if cl == "":
                   p = node(e["to"])
                   if p != None:
-                      cl = p.get("cmdline", "") or p.get("path", "")
+                      cl = p.get("path", "")
               for pat in EXEC_HINT:
                   if re.find(pat, cl) != None:
                       return e

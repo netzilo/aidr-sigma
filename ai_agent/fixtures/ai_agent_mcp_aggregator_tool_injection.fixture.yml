@@ -1,0 +1,33 @@
+subjects:
+  claude:
+    session: pid/1200:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  agg:
+    session: pid/1201:1
+    parent: claude
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  adapter:
+    session: pid/1202:1
+    parent: claude
+    program: /usr/local/bin/node
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: agg, cmdline: "npx -y mcp-aggregator --config /Users/dev/.mcp/agg.json"}
+  - {kind: spawn, subject: adapter, cmdline: "npx -y pi-mcp-adapter --stdio"}
+  - {kind: connect, subject: agg, host: mcp-a.example, port: 443, protocol: tcp}
+  - {kind: connect, subject: agg, host: mcp-b.example, port: 443, protocol: tcp}
+expect:
+  action: report
+  reason_contains: "fanning out to 2 upstream endpoint(s)"
+  output_contains: ["fanout:2, adapter; caller lineage: node -> Claude"]
+  chain_min: 4

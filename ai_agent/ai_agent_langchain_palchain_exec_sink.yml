@@ -9,7 +9,8 @@ description: |
   and then handed to Python's exec().
 
   The rule does not look for a payload string. It correlates two graph facts on the
-  SAME interpreter process, in order, inside a 5 minute window:
+  SAME interpreter session (an ancestor of the spawned command), in order, inside a
+  5 minute window:
 
     Stage 1 (required anchor) - the interpreter made an LLM_REQUEST (the PAL
              "write me a program" reasoning step). A build script or a test runner
@@ -55,6 +56,12 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - llm
+  - http
+  - connect
 detection:
   sel_exec:
     event_type: execute_process
@@ -65,7 +72,6 @@ on_error: allow
 script: |
   # ── Tunables (no underscore digit separators - Starlark would mis-parse them) ──
   CHAIN_WINDOW_NS = 300000000000   # 5 min: LLM program generation -> exec() sink
-  LOOK_BACK_NS    = 120000000000   # 2 min: only report a *fresh* sink, never replay
 
   # exec() sink signature: LLM-generated program text reaching the operating system.
   # Case folding is applied only to binary names, never to flag letters.
@@ -95,6 +101,14 @@ script: |
           return 0
       return int(v)
 
+  def edge_ts(e):
+      ts = as_ns(e.get("ts", ""))
+      if ts == 0:
+          ts = as_ns(e.get("last_ts", ""))
+      if ts == 0:
+          ts = as_ns(e.get("first_ts", ""))
+      return ts
+
   def sink_match(s):
       if s == "":
           return None
@@ -109,8 +123,8 @@ script: |
           return False
       return sink_match(meta.get("content", "")) != None
 
-  # A process that can host a PAL chain: a Python-family interpreter or an ASGI/
-  # notebook host, or anything whose command line names langchain/PALChain.
+  # A session that can host a PAL chain: a Python-family interpreter or an ASGI/
+  # notebook host, or anything whose spawn command line names langchain/PALChain.
   def is_llm_host(p):
       n = p.get("name", "")
       if re.find(r"(?i:^python[0-9._]*$)", n) != None:
@@ -119,7 +133,8 @@ script: |
           return True
       if re.find(r"(?i:/(python[0-9._]*|pypy[0-9._]*)$)", p.get("path", "")) != None:
           return True
-      if re.find(r"(?i:\b(langchain|langserve|pal_chain|palchain)\b)", p.get("cmdline", "")) != None:
+      rows = events(kind="SPAWNED", session=p.get("id", ""), limit=1)
+      if rows and re.find(r"(?i:\b(langchain|langserve|pal_chain|palchain)\b)", rows[0].get("cmdline", "")) != None:
           return True
       return False
 
@@ -139,40 +154,31 @@ script: |
       return best
 
   # Optional escalation: exec'd code talking to a public (non-ZTNA) endpoint.
-  def egress_step(pid, since_ts):
-      for e in edges(pid, dir="out", kind="CONNECTS"):
+  def egress_step(sid, since_ts):
+      for e in edges(sid, dir="out", kind="CONNECTS"):
           h = node(e["to"])
           if h == None or h.get("is_ztna_host", "0") == "1":
               continue
-          ts = as_ns(e.get("last_ts", ""))
-          if ts == 0:
-              ts = as_ns(e.get("first_ts", ""))
-          if ts < since_ts:
+          if edge_ts(e) < since_ts:
               continue
           return step(e, stage_id="Egress",
                       stage_desc="exec'd code connected out to " + h.get("host", "?") + ":" + h.get("port", "?"))
-      for e in edges(pid, dir="out", kind="HTTP_REQUEST"):
+      for e in edges(sid, dir="out", kind="HTTP_REQUEST"):
           u = node(e["to"])
           if u == None or u.get("is_ztna_host", "0") == "1":
               continue
-          ts = as_ns(e.get("last_ts", ""))
-          if ts == 0:
-              ts = as_ns(e.get("first_ts", ""))
-          if ts < since_ts:
+          if edge_ts(e) < since_ts:
               continue
           return step(e, stage_id="Egress",
                       stage_desc="exec'd code sent HTTP to " + u.get("host", "?"))
       return None
 
-  # Optional escalation: credential material touched. Path-targeted, process-scoped -
+  # Optional escalation: credential material touched. Path-targeted, session-scoped -
   # never a broad READ_FILE scan.
-  def cred_step(pid, since_ts):
-      for e in edges(pid, dir="out", kind="READ_FILE"):
-          fs = node(e["to"])
-          if fs == None:
-              continue
+  def cred_step(sid, since_ts):
+      for e in edges(sid, dir="out", kind="READ_FILE"):
           for pat in CRED:
-              for a in fs_activity(fs["id"], "READ", pat):
+              for a in fs_activity(session=sid, op="READ", pattern=pat):
                   if as_ns(a.get("ts", "")) >= since_ts:
                       return step(e, stage_id="Credential Access",
                                   stage_desc="exec'd code read " + a.get("path", "?"),
@@ -180,10 +186,11 @@ script: |
       return None
 
   # Optional escalation: the spawned command spawned more processes.
-  def spawn_step(pid, since_ts):
-      for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
-          ts = as_ns(e.get("ts", ""))
-          if ts < since_ts:
+  def spawn_step(sid, since_ts, skip_id):
+      for e in edges(sid, dir="out", kind="SPAWNED"):
+          if e.get("to", "") == skip_id:
+              continue
+          if as_ns(e.get("ts", "")) < since_ts:
               continue
           c = node(e["to"])
           nm = "?"
@@ -193,145 +200,99 @@ script: |
                       stage_desc="exec'd code spawned " + nm + ": " + e.get("cmdline", "")[:160])
       return None
 
-  # Fallback attribution only: the triggering pid must be this interpreter or its
-  # direct child, otherwise we do not claim the spawn belongs to it.
-  def caller_belongs(hostproc, cpid):
-      if cpid == "" or cpid == "0":
-          return False
-      hpid = hostproc.get("pid", "")
-      if hpid != "" and hpid == cpid:
-          return True
-      for p in graph(type="Process"):
-          if p.get("pid", "") == cpid and p.get("parent_pid", "") == hpid and hpid != "":
-              return True
-      return False
-
   def run():
       if not is_relevant_event():
           return "allow"
 
       event_ts = as_ns(meta.get("event_ts", ""))
-      cpid     = meta.get("caller_pid", "0")
+      sink_cmd = meta.get("content", "")
 
-      candidates = []
-      for p in graph(type="Process"):
-          if is_llm_host(p):
-              candidates.append(p["id"])
-      if not candidates:
-          return "allow"
+      inst = session()
+      if inst == None:
+          return "allow"              # degraded - never guess attribution
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) < 2:
+          return "allow"              # the sink is a spawn; its interpreter is an ancestor
 
-      for hid in sorted(candidates):
-          h = node(hid)
-          if h == None:
+      # ── Stage 1: the nearest interpreter ancestor that asked an LLM for code ──
+      host   = None
+      anchor = None
+      hidx   = 0
+      for i in range(1, len(lineage_)):
+          x = lineage_[i]
+          if not is_llm_host(x):
               continue
-          chain = new_chain(hid)
+          a = llm_anchor(x["id"], event_ts)
+          if a != None:
+              host   = x
+              anchor = a
+              hidx   = i
+              break
+      if host == None:
+          return "allow"              # no LLM in the loop -> not a PAL chain, no verdict
 
-          # ── Stage 2: a FRESH exec()-style spawn by this interpreter ───────────
-          sink_edge = None
-          sink_ts   = 0
-          sink_cmd  = ""
-          for e in edges(hid, dir="out", kind="EXECUTE_PROCESS"):
-              cmd = e.get("cmdline", "")
-              if cmd == "":
-                  c = node(e["to"])
-                  if c != None:
-                      cmd = c.get("cmdline", "")
-                      if cmd == "":
-                          cmd = c.get("path", "")
-              if sink_match(cmd) == None:
-                  continue
-              ts = as_ns(e.get("ts", ""))
-              if ts <= 0:
-                  continue
-              if event_ts > 0 and event_ts - ts > LOOK_BACK_NS:
-                  continue      # stale chain - already reported on an earlier event
-              if ts > sink_ts:
-                  sink_edge = e
-                  sink_ts   = ts
-                  sink_cmd  = cmd
+      hid   = host["id"]
+      child = lineage_[hidx - 1]      # the interpreter's direct child on the path to the sink
+      chain = new_chain(lineage_[-1]["id"])
 
-          synthetic = False
-          child_id  = ""
-          if sink_edge == None:
-              # Graph ingest is asynchronous: the spawn that triggered this run may
-              # not be an edge yet. Take the trigger from meta, but only if the pid
-              # actually belongs to this interpreter.
-              if not caller_belongs(h, cpid):
-                  continue
-              sink_ts   = event_ts
-              sink_cmd  = meta.get("content", "")
-              sink_edge = {"kind": "EXECUTE_PROCESS", "from": hid,
-                           "to": "process://pid:" + cpid, "ts": str(event_ts),
-                           "first_ts": str(event_ts), "last_ts": str(event_ts),
-                           "cmdline": sink_cmd}
-              synthetic = True
-          else:
-              child_id = sink_edge.get("to", "")
+      # ── Stage 2: the exec()-style spawn, taken from meta (never re-queried) ──
+      sink_edge = {"kind": "SPAWNED", "dir": "out", "from": hid, "to": child["id"],
+                   "ts": str(event_ts), "first_ts": str(event_ts), "last_ts": str(event_ts),
+                   "cmdline": sink_cmd}
 
-          # ── Stage 1: required anchor - the LLM that produced the program ──────
-          upper = sink_ts
-          if upper <= 0:
-              upper = event_ts
-          anchor = llm_anchor(hid, upper)
-          if anchor == None:
-              continue      # no LLM in the loop -> not a PAL chain, no verdict
+      l = node(anchor["to"])
+      who = "an LLM"
+      if l != None:
+          who = l.get("provider", "?") + "/" + l.get("model", "?")
+      chain.append(step(anchor, stage_id="LLM Program Generation",
+                        stage_desc="interpreter requested program text from " + who))
+      chain.append(step(sink_edge, stage_id="exec() Sink",
+                        stage_desc=host.get("name", "?") + " spawned OS command from generated code: " + sink_cmd[:200]))
 
-          l = node(anchor["to"])
-          who = "an LLM"
-          if l != None:
-              who = l.get("provider", "?") + "/" + l.get("model", "?")
-          chain.append(step(anchor, stage_id="LLM Program Generation",
-                            stage_desc="interpreter requested program text from " + who))
-          chain.append(step(sink_edge, stage_id="exec() Sink",
-                            stage_desc=h.get("name", "?") + " spawned OS command from generated code: " + sink_cmd[:200]))
+      stages = ["llm_program_generation", "exec_sink"]
+      since  = event_ts - CHAIN_WINDOW_NS
+      if since < 0:
+          since = 0
 
-          stages = ["llm_program_generation", "exec_sink"]
-          since  = sink_ts - CHAIN_WINDOW_NS
-          if since < 0:
-              since = 0
+      scopes = [inst["id"]]
+      if child["id"] not in scopes:
+          scopes.append(child["id"])
+      scopes.append(hid)
 
-          scopes = []
-          if child_id != "" and not child_id.startswith("process://pid:"):
-              scopes.append(child_id)
-          scopes.append(hid)
-
-          st = None
-          for sc in scopes:
-              st = egress_step(sc, since)
-              if st != None:
-                  break
+      st = None
+      for sc in scopes:
+          st = egress_step(sc, since)
           if st != None:
-              chain.append(st)
-              stages.append("egress")
+              break
+      if st != None:
+          chain.append(st)
+          stages.append("egress")
 
-          st = None
-          for sc in scopes:
-              st = cred_step(sc, since)
-              if st != None:
-                  break
+      st = None
+      for sc in scopes:
+          st = cred_step(sc, since)
           if st != None:
-              chain.append(st)
-              stages.append("credential_access")
+              break
+      if st != None:
+          chain.append(st)
+          stages.append("credential_access")
 
-          if child_id != "" and not child_id.startswith("process://pid:"):
-              st = spawn_step(child_id, since)
-              if st != None:
-                  chain.append(st)
-                  stages.append("nested_execution")
+      st = spawn_step(child["id"], since, inst["id"])
+      if st == None and child["id"] != inst["id"]:
+          st = spawn_step(inst["id"], since, "")
+      if st != None:
+          chain.append(st)
+          stages.append("nested_execution")
 
-          reason = ("LangChain PAL-style exec() sink: LLM-generated code reached the OS from " +
-                    h.get("path", h.get("name", "?")) + " -- " + sink_cmd[:160])
-          if len(stages) > 2:
-              reason = reason + " | follow-on: " + ", ".join(stages[2:])
-          if synthetic:
-              reason = reason + " | attribution: degraded (pending graph ingest, pid " + cpid + ")"
+      reason = ("LangChain PAL-style exec() sink: LLM-generated code reached the OS from " +
+                host.get("path", host.get("name", "?")) + " -- " + sink_cmd[:160])
+      if len(stages) > 2:
+          reason = reason + " | follow-on: " + ", ".join(stages[2:])
 
-          print("PALChain exec sink | interpreter=" + h.get("path", "?") +
-                " | llm=" + who + " | cmd=" + sink_cmd[:200] +
-                " | stages=" + ",".join(stages))
+      print("PALChain exec sink | interpreter=" + host.get("path", "?") +
+            " | llm=" + who + " | cmd=" + sink_cmd[:200] +
+            " | stages=" + ",".join(stages))
 
-          return {"action": "report", "reason": reason, "chain": chain}
-
-      return "allow"
+      return {"action": "report", "reason": reason, "chain": chain}
 
   result = run()

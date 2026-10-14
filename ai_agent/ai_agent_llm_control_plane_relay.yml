@@ -22,7 +22,7 @@ description: |
   API_INTERCEPT edge, so this rule CANNOT confirm that 'zwischen' was installed,
   that an import-time hook was registered, or that any specific package is
   responsible. It detects the effect (a second control plane for the agent's
-  model traffic) from HTTP_REQUEST edges plus the instance-resolved event log,
+  model traffic) from HTTP_REQUEST edges plus the session-keyed event log,
   attributes it to one monitored agent, and reports for human triage. It is
   deliberately action: report because a sanctioned enterprise LLM gateway is
   network-indistinguishable from an unsanctioned relay.
@@ -60,6 +60,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_vendor_control_plane:
     event_type: http_request
@@ -117,8 +119,14 @@ script: |
 
       # ---- 2. Cheap fast path: remember which endpoints served this vendor
       #         control plane. One store read on the overwhelmingly common
-      #         single-endpoint case, then out - no traversal at all.
+      #         single-endpoint case; when the store knows fewer than two
+      #         endpoints, one session-scoped event-log read (the triggering
+      #         session's own HTTP_REQUEST rows) before giving up.
       fam_hosts = {}
+      tsid = meta.get("session", "")
+      since = 0
+      if now > WINDOW_NS:
+          since = now - WINDOW_NS
       if now > 0:
           book  = store_get("fam_hosts") or {}
           known = book.get(tfam, {})
@@ -139,18 +147,19 @@ script: |
               store_set("fam_hosts", book)
           for h in fresh:
               fam_hosts[h] = True
+          if len(fam_hosts) < 2 and tsid != "":
+              for ev in events(kind="HTTP_REQUEST", session=tsid, since_ns=since, limit=1000):
+                  if ev.get("host", "") != "" and fam(ev.get("path", "")) == tfam:
+                      fam_hosts[ev["host"]] = True
           if len(fam_hosts) < 2:
               return "allow"
       elif thost != "":
           fam_hosts[thost] = True
 
-      # ---- 3. Corroborate from the instance-resolved event log (exact paths)
+      # ---- 3. Corroborate from the session-keyed event log (exact paths)
       #         and measure how wide the relay surface is.
-      since = 0
-      if now > WINDOW_NS:
-          since = now - WINDOW_NS
       gen_hosts = {}
-      for ev in query_events(kind="HTTP_REQUEST", since_ns=since, limit=2000):
+      for ev in events(kind="HTTP_REQUEST", since_ns=since, limit=2000):
           h = ev.get("host", "")
           if h == "":
               continue
@@ -172,9 +181,7 @@ script: |
 
       # ---- 5. Attribute the duplicated surface to ONE monitored agent via its
       #         own HTTP_REQUEST edges. No cross-agent stitching.
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           aid = agent["id"]
           hit = {}
           for e in edges(aid, dir="out", kind="HTTP_REQUEST"):

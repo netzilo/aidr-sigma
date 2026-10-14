@@ -19,6 +19,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # NOTE: 'export PATH=' is common in legitimate operations. This selection
   # requires a suspicious temporary directory to reduce false positives.

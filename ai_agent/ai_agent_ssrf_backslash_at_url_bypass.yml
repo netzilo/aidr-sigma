@@ -14,12 +14,11 @@ description: |
   a backslash precedes '@', so a URL that the validator reads as pointing at an
   approved host is actually dialled against an internal resource.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"], resolves the exact
-  process instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), and correlates only within that one session (lineage plus processes
-  spawned by lineage members inside the window) using query_events(). The triggering
-  request itself is taken from meta, never re-queried from the asynchronous event log.
-  Verdict is report only - this is telemetry for investigation, not enforcement.
+  The rule is session-scoped: it anchors on the triggering session, walks its
+  lineage, and correlates only within that session tree (the lineage plus sessions
+  spawned by lineage members inside the window) using the event log. The triggering
+  request itself is taken from meta. Verdict is report only - this is telemetry for
+  investigation, not enforcement.
 author: Egemen
 date: "2026-06-12"
 references:
@@ -49,6 +48,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -203,18 +205,25 @@ script: |
       return ""
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+          "method":   e.get("method", ""),
+          "path":     e.get("path", ""),
       }
 
-  def trig_edge(actor_path, target, ets):
+  def trig_edge(sid, target, ets):
       return {
-          "from":     "process://" + actor_path,
+          "from":     sid,
           "to":       target,
           "kind":     "HTTP_REQUEST",
           "method":   meta.get("method", ""),
@@ -222,6 +231,13 @@ script: |
           "first_ts": str(ets),
           "last_ts":  str(ets),
       }
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
 
   def run():
       # ── 1. relevance gate: pure string work on meta only ───────────────────────
@@ -251,65 +267,55 @@ script: |
           return "allow"          # malformed authority, no internal destination
 
       ets     = int(meta.get("event_ts", "0"))
-      cp      = int(meta.get("caller_pid", "0"))
       dest    = meta.get("host", "")
       dpath   = meta.get("path", "")
       snippet = payload[:SNIPPET]
+      scheme  = "https"
+      k = url.find("://")
+      if k > 0:
+          scheme = url[:k].lower()
 
-      # ── 3. anchor on the exact triggering instance ─────────────────────────────
-      inst = None
-      if cp > 0:
-          inst = proc_instance(cp, ets)
-
+      # ── 3. anchor on the triggering session ────────────────────────────────────
+      inst = session()
       if inst == None:
-          # degraded attribution - report, never guess a lineage.
-          root  = meta.get("agent_name", "")
-          chain = new_chain("process://" + root)
-          chain.append(step(trig_edge(root, "https://" + dest, ets),
-                            stage_id="SSRF Payload",
-                            stage_desc="backslash-@ authority confusion submitted to " +
-                                       dest + dpath + " : " + snippet))
-          chain.append(step(trig_edge(root, "http://" + target, ets),
-                            stage_id="Internal Target",
-                            stage_desc="effective host past the validator is internal: " + target))
+          # degraded attribution - report, never guess a lineage (and no chain:
+          # there is no session to root it at).
           print("SSRF backslash-@ payload -> " + target + " (attribution degraded)")
           return {
               "action": "report",
               "reason": "SSRF bypass payload (backslash before @) targeting internal host " +
                         target + " submitted to " + dest + dpath + " [attribution degraded]",
-              "chain":  chain,
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
-          lineage = [inst]
-      actor_path = inst.get("actor_path", "")
-      root_path  = lineage[len(lineage) - 1].get("actor_path", actor_path)
-      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
+          lineage_ = [inst]
+      root  = chain_root(lineage_)
+      names = " -> ".join([x.get("path", "?").split("/")[-1] for x in lineage_])
 
-      # ── 4. session scope: lineage + children spawned by lineage in-window ──────
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = True
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS,
-                            until_ns=ets, limit=2000):
-          if e.get("parent_pid", "") in session:
-              session[e["actor_pid"]] = True
+      # ── 4. scope: lineage + sessions spawned by the lineage in-window ──────────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=ets - WINDOW_NS,
+                      until_ns=ets, limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e["session_id"]] = True
 
-      chain = new_chain("process://" + root_path)
-      chain.append(step(trig_edge(actor_path, "https://" + dest, ets),
+      chain = new_chain(root["id"])
+      chain.append(step(trig_edge(inst["id"], scheme + "://" + dest, ets),
                         stage_id="SSRF Payload",
                         stage_desc="backslash-@ authority confusion submitted to " +
                                    dest + dpath + " by " + names + " : " + snippet))
-      chain.append(step(trig_edge(actor_path, "http://" + target, ets),
+      chain.append(step(trig_edge(inst["id"], "http://" + target, ets),
                         stage_id="Internal Target",
                         stage_desc="effective host past the validator is internal: " + target))
 
-      # ── 5. optional corroboration, strictly inside this session/window ─────────
+      # ── 5. optional corroboration, strictly inside this scope/window ───────────
       reach = None
-      for pid in session:
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
+      for sid in scope:
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
               h = e.get("host", "")
               if h == "" or h == dest:
                   continue

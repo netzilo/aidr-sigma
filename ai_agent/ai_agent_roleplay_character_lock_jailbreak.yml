@@ -47,6 +47,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   sel_tool_response:
     event_type: tool_response
@@ -173,13 +177,42 @@ script: |
               return t
       return None
 
+  def result_edge_for(tool_node, aid):
+      # the TOOL_RESULT edge (tool -> session) that delivered the output to aid
+      if tool_node == None or aid == "":
+          return None
+      for e in edges(tool_node["id"], dir="out", kind="TOOL_RESULT"):
+          if e.get("to", "") == aid:
+              return e
+      return None
+
+  def agent_root():
+      # the triggering session's topmost ancestor (the agent), or None when unknown
+      s = session()
+      if s == None:
+          return None
+      for i in range(16):
+          p = s.get("parent", "")
+          if p == "":
+              break
+          ps = session(p)
+          if ps == None:
+              break
+          s = ps
+      return s
+
   def find_agent(tool_node):
+      # 1. the triggering session's agent ancestor (session-exact attribution)
+      root = agent_root()
+      if root != None:
+          return [root["id"], result_edge_for(tool_node, root["id"])]
+      # 2. degraded: whichever session the tool delivered results to
       fallback = ""
       fb_edge  = None
       if tool_node != None:
           for e in edges(tool_node["id"], dir="out", kind="TOOL_RESULT"):
               p = node(e["to"])
-              if p == None or p.get("_type", "") != "Process":
+              if p == None or p.get("_type", "") != "Session":
                   continue
               if p.get("agent", "0") == "1":
                   return [p["id"], e]
@@ -190,12 +223,11 @@ script: |
           return [fallback, fb_edge]
       apath = meta.get("agent_name", "")
       if apath != "":
-          for p in graph(type="Process"):
-              if p.get("agent", "0") == "1" and p.get("path", "") == apath:
+          for p in sessions(agent=True):
+              if p.get("path", "") == apath:
                   return [p["id"], None]
-      for p in graph(type="Process"):
-          if p.get("agent", "0") == "1":
-              return [p["id"], None]
+      for p in sessions(agent=True):
+          return [p["id"], None]
       return ["", None]
 
   def call_edge_for(aid, tid):
@@ -326,10 +358,15 @@ script: |
 
       remember(seen, skey, repeat, now_ns)
 
-      anchor = aid
-      if anchor == "":
-          anchor = "process://" + meta.get("agent_name", "unknown-agent")
-      chain = new_chain(anchor)
+      reason = ("Roleplay character-lock jailbreak in tool output (" + skey + ") - " +
+                "lock=\"" + lock[0] + "\" frame=\"" + role[0] + "\" | " +
+                "; ".join(strong))
+      if llm_src != "":
+          reason = reason + " | llm doc: " + llm_src
+      print(reason)
+      if aid == "":
+          return {"action": "report", "reason": reason}   # no session to hang a chain on
+      chain = new_chain(aid)
 
       if call_edge != None:
           chain.append(step(call_edge,
@@ -356,13 +393,6 @@ script: |
           chain.append(step(llm_edge,
               stage_id="Reasoning Loop Fed",
               stage_desc="poisoned tool output enters active model loop: " + lname))
-
-      reason = ("Roleplay character-lock jailbreak in tool output (" + skey + ") - " +
-                "lock=\"" + lock[0] + "\" frame=\"" + role[0] + "\" | " +
-                "; ".join(strong))
-      if llm_src != "":
-          reason = reason + " | llm doc: " + llm_src
-      print(reason)
 
       return {
           "action": "report",

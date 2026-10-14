@@ -1,0 +1,39 @@
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: claude
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/102:1
+    parent: shell
+    program: /usr/bin/pip3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/103:1
+    parent: shell
+    program: /usr/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: shell, cmdline: "zsh -c 'pip3 install basemode && python3 -m basemode run'"}
+  - {kind: spawn, subject: pip, cmdline: "pip3 install basemode"}
+  - {kind: http_request, subject: shell, url: "https://api.openai.com/v1/chat/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model":"gpt-4o","messages":[]}'}
+  - {kind: spawn, subject: python, cmdline: "python3 -m basemode run"}
+expect:
+  action: report
+  reason_contains: "stages: acquired, invocation, inference-egress"
+  chain_min: 3

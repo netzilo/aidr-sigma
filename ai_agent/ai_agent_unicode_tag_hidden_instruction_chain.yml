@@ -48,6 +48,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
+  - skill
 detection:
   sel_trigger:
     event_type:
@@ -150,13 +155,26 @@ script: |
       store_set("taint", trim_taint(t))
 
   # ── graph helpers ─────────────────────────────────────────────────────────
+  def edge_ts(e):
+      for k in ["ts", "last_ts", "first_ts"]:
+          v = to_i(e.get(k, "0"))
+          if v > 0:
+              return v
+      return 0
+
+  # The agent acting on the hidden text: the agent ancestor of the triggering
+  # session, else the triggering session itself, else every agent (degraded).
   def agent_nodes():
+      lineage_ = lineage()
+      if lineage_ and lineage_[-1].get("agent", "0") == "1":
+          return [lineage_[-1]]
+      inst = session()
+      if inst != None:
+          return [inst]
       want  = meta.get("agent_name", "")
       exact = []
       allag = []
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           allag.append(p)
           if want != "" and (p.get("path", "") == want or p.get("id", "") == want):
               exact.append(p)
@@ -166,16 +184,16 @@ script: |
 
   def proc_scope(aid):
       ids = [aid]
-      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for c in children(aid):
           if len(ids) >= 24:
               break
-          ids.append(e["to"])
+          ids.append(c["id"])
       return ids
 
   def find_skill(aid, lo, hi):
       best = None
       for e in edges(aid, dir="out", kind="ACQUIRED_SKILL"):
-          ts = to_i(e.get("ts", "0"))
+          ts = edge_ts(e)
           if ts < lo:
               continue
           if hi > 0 and ts > hi:
@@ -215,7 +233,14 @@ script: |
           return "allow"
 
       now  = to_i(meta.get("event_ts", "0"))
-      akey = meta.get("agent_name", "")
+      # taint is keyed by the acting agent session so later events of the same
+      # session (and only that session) see it
+      akey = ""
+      agents = agent_nodes()
+      if agents:
+          akey = agents[0].get("id", "")
+      if akey == "":
+          akey = meta.get("agent_name", "")
       if akey == "":
           akey = meta.get("server_name", "unknown")
 
@@ -247,7 +272,7 @@ script: |
           hi = now + SLACK_NS
 
       # 3. behavioural confirmation via the graph
-      for a in agent_nodes():
+      for a in agents:
           aid    = a["id"]
           chain  = new_chain(aid)
           stages = []

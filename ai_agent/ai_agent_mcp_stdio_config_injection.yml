@@ -31,6 +31,8 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - tool
 detection:
   # Shell binary as the MCP command value
   sel_shell_binary:

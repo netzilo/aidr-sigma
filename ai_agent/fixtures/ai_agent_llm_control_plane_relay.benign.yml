@@ -1,0 +1,16 @@
+rule: ai_agent_llm_control_plane_relay.yml
+subjects:
+  claude:
+    session: pid/100:1
+    program: /usr/local/bin/claude
+    name: claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: mitm
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: http_request, subject: claude, url: "https://api.anthropic.com/v1/messages", method: POST, request_id: r1, content_type: application/json, body: '{"model": "claude-sonnet-4-5", "messages": []}'}
+  - {kind: http_request, subject: claude, url: "https://api.anthropic.com/v1/messages", method: POST, request_id: r2, content_type: application/json, body: '{"model": "claude-sonnet-4-5", "messages": []}'}
+expect:
+  action: allow

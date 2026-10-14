@@ -25,6 +25,8 @@ logsource:
   product: ai_agent
   # tool_response is where retrieved external content arrives (tool outputs, RAG results).
   category: agent_events
+requires:
+  - tool
 detection:
   selection_css_hiding:
     event_type: tool_response

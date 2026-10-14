@@ -55,6 +55,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -224,9 +226,7 @@ script: |
   def find_agent_node(lin_paths):
       fallback = None
       an = meta.get("agent_name", "")
-      for p in graph(type="Process"):
-          if p.get("agent", "0") != "1":
-              continue
+      for p in sessions(agent=True):
           if p.get("path", "") in lin_paths:
               return p
           if fallback == None and an != "" and p.get("path", "") == an:
@@ -260,16 +260,16 @@ script: |
       now = int(meta.get("event_ts", "0"))
 
       # ── attribution: anchor on the exact triggering instance ─────────────
-      lineage = []
-      cp = int(meta.get("caller_pid", "0"))
-      if cp > 0:
-          inst = proc_instance(cp, now)
+      lineage_ = []
+      cp = meta.get("session", "")
+      if cp != "":
+          inst = session(cp)
           if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+              lineage_ = lineage(inst["id"])
       lin_paths = {}
       lin_names = []
-      for x in lineage:
-          ap = x.get("actor_path", "")
+      for x in lineage_:
+          ap = x.get("path", "")
           lin_paths[ap] = True
           lin_names.append(base_name(ap))
 
@@ -288,7 +288,7 @@ script: |
                   if nid in visited:
                       continue
                   visited[nid] = True
-                  for e in edges(nid, dir="out", kind="EXECUTE_PROCESS"):
+                  for e in edges(nid, dir="out", kind="SPAWNED"):
                       ts = int(e.get("ts", "0"))
                       if now > 0 and ts > 0 and (now - ts) > WINDOW_NS:
                           continue
@@ -323,23 +323,23 @@ script: |
       root = "process://unknown"
       if agent != None:
           root = agent["id"]
-      elif len(lineage) > 0:
-          root = "process://" + lineage[len(lineage) - 1].get("actor_path", "")
+      elif len(lineage_) > 0:
+          root = "process://" + lineage_[len(lineage_) - 1].get("path", "")
       elif meta.get("agent_name", "") != "":
           root = "process://" + meta.get("agent_name", "")
 
       actor_path = ""
       parent_id = root
-      if len(lineage) > 0:
-          actor_path = lineage[0].get("actor_path", "")
-      if len(lineage) > 1:
-          parent_id = "process://" + lineage[1].get("actor_path", "")
+      if len(lineage_) > 0:
+          actor_path = lineage_[0].get("path", "")
+      if len(lineage_) > 1:
+          parent_id = "process://" + lineage_[1].get("path", "")
 
       chain = new_chain(root)
       anchor = {
           "from": parent_id,
           "to": "process://" + actor_path,
-          "kind": "EXECUTE_PROCESS",
+          "kind": "SPAWNED",
           "ts": str(now),
           "first_ts": str(now),
           "last_ts": str(now),
@@ -370,7 +370,7 @@ script: |
           lin = meta.get("agent_name", "unknown agent")
           stages.append("attribution:degraded")
 
-      print("allowlist bypass | " + cmd[:200] + " | lineage: " + lin)
+      print("allowlist bypass | " + cmd[:200] + " | lineage_: " + lin)
       return {
           "action": "report",
           "reason": "AI agent command allowlist bypass — " + ", ".join(stages) + " via " + lin,

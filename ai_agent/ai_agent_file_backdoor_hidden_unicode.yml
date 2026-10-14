@@ -18,10 +18,10 @@ description: |
   (llm_tool_call). Both contain the exact bytes destined for disk, before
   the write happens.
 
-  Attribution is instance-resolved: caller_pid -> proc_instance ->
-  proc_lineage. Corroborating WRITE_FILE and EXECUTE_PROCESS rows are read
-  from the event log strictly scoped to that one session and time window -
-  never across sessions.
+  Attribution is session-scoped: the triggering session and its lineage.
+  Corroborating WRITE_FILE and SPAWNED rows are read from the event log
+  strictly scoped to that lineage, the sessions it spawned and the time
+  window - never across sessions.
 author: Evgen
 date: "2026-06-12"
 references:
@@ -61,6 +61,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_write_surface:
     event_type:
@@ -81,8 +85,8 @@ script: |
   # Hidden bidi / zero-width backdoor smuggled into an agent-authored file.
   #
   # Live evidence  : tool_input / llm_tool_call args (bytes before the write)
-  # Attribution    : caller_pid -> proc_instance -> proc_lineage
-  # Corroboration  : WRITE_FILE + EXECUTE_PROCESS event-log rows, session and
+  # Attribution    : session() -> lineage()
+  # Corroboration  : WRITE_FILE + SPAWNED event-log rows, session and
   #                  window scoped only.  No cross-session attribution.
   # ----------------------------------------------------------------------
   WINDOW_NS   = 600000000000   # 10 minutes
@@ -213,15 +217,19 @@ script: |
       return False
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   def run():
       if not is_relevant_event():
           return "allow"
@@ -256,55 +264,45 @@ script: |
       if len(signals) == 0:
           return "allow"                       # benign RTL prose / real joiners
 
-      # --- instance-resolved attribution -----------------------------------
+      # --- session-resolved attribution ------------------------------------
       ets = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
       tgt = path
       if tgt == "":
           tgt = "<path not in args>"
       sig = ", ".join(signals)
 
-      if cp == 0:
-          print("hidden-unicode write, attribution unavailable: " + tgt + " [" + sig + "]")
-          return {
-              "action": "report",
-              "reason": "Hidden Unicode payload in agent file write (" + tgt +
-                        ") - " + sig + " [attribution: unavailable, no caller_pid]",
-          }
-
-      inst = proc_instance(cp, ets)
+      inst = session()
       if inst == None:
           print("hidden-unicode write, attribution degraded: " + tgt + " [" + sig + "]")
           return {
               "action": "report",
               "reason": "Hidden Unicode payload in agent file write (" + tgt +
-                        ") - " + sig + " [attribution: degraded, instance not yet logged]",
+                        ") - " + sig + " [attribution: degraded, session not yet logged]",
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if len(lineage) == 0:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if len(lineage_) == 0:
+          lineage_ = [inst]
 
-      # --- session scope: lineage + descendants inside the window ----------
+      # --- session scope: lineage_ + descendants inside the window ----------
       since = ets - WINDOW_NS
       if since < 0:
           since = 0
       sess = {}
-      for x in lineage:
-          sess[x.get("actor_pid", "")] = True
+      for x in lineage_:
+          sess[x.get("id", "")] = True
 
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=ets, limit=3000)
+      execs = events(kind="SPAWNED", since_ns=since, until_ns=ets, limit=3000)
       for _pass in range(2):
           for e in execs:
               if len(sess) >= MAX_SESSION:
                   break
-              if e.get("parent_pid", "") in sess:
-                  sess[e.get("actor_pid", "")] = True
+              if e.get("parent_session", "") in sess:
+                  sess[e.get("session_id", "")] = True
 
       # --- dedupe (per session root + path + signal shape) ------------------
-      root     = lineage[-1]
-      root_key = root.get("actor_pid", "") + ":" + root.get("actor_start", "")
-      dkey     = root_key + "|" + tgt + "|" + str(ovr) + "/" + str(emb) + "/" + str(zw)
+      root     = lineage_[-1]
+      dkey     = root.get("id", "") + "|" + tgt + "|" + str(ovr) + "/" + str(emb) + "/" + str(zw)
       seen     = store_get("reported")
       if seen == None:
           seen = {}
@@ -325,17 +323,17 @@ script: |
           n += 1
           if pid == "":
               continue
-          for e in query_events(kind="WRITE_FILE", actor_pid=int(pid),
+          for e in events(kind="WRITE_FILE", session=pid,
                                 since_ns=since, until_ns=ets, limit=200):
               p = e.get("path", "")
               if base != "" and len(base) > 2 and p.find(base) >= 0:
                   wf = e
                   break
 
-      # --- corroboration: EXECUTE_PROCESS touching the artefact -------------
+      # --- corroboration: SPAWNED touching the artefact -------------
       ex = None
       for e in execs:
-          if e.get("actor_pid", "") not in sess and e.get("parent_pid", "") not in sess:
+          if e.get("session_id", "") not in sess and e.get("parent_session", "") not in sess:
               continue
           cmd = e.get("cmdline", "")
           if cmd == "":
@@ -348,16 +346,16 @@ script: |
               break
 
       # --- kill chain -------------------------------------------------------
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "").split("/")[-1])
 
       tool = meta.get("tool_name", "")
       if tool == "":
           tool = "unnamed-tool"
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       "tool://" + meta.get("server_name", "local") + "/" + tool,
           "kind":     "TOOL_CALL",
           "ts":       str(ets),

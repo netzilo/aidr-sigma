@@ -1,0 +1,15 @@
+rule: ai_agent_shell_config_modification_periodic.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_read, subject: cursor, path: /Users/dev/.zshrc}
+  - {kind: file_write, subject: cursor, path: /Users/dev/proj/src/main.go}
+expect:
+  action: allow

@@ -1,0 +1,16 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_read, subject: cursor, path: /Users/dev/proj/main.go}
+  - {kind: file_read, subject: cursor, path: /etc/passwd}
+expect:
+  action: report
+  reason_contains: "/etc/passwd"
+  chain_min: 1

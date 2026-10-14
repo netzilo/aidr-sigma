@@ -1,0 +1,32 @@
+rule: ai_agent_vllm_outlines_cache_flood.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  vllm:
+    session: pid/200:1
+    program: /opt/venv/bin/vllm
+    actors: [{id: svc, name: vllm, kind: agent}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 flood.py"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g0, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f0\": {\"type\": \"string\", \"maxLength\": 1}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g1, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f1\": {\"type\": \"string\", \"maxLength\": 2}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g2, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f2\": {\"type\": \"string\", \"maxLength\": 3}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g3, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f3\": {\"type\": \"string\", \"maxLength\": 4}}}}"}
+  - {kind: http_request, subject: python, url: "https://vllm.internal/v1/completions", method: POST, request_id: g4, content_type: application/json, body: "{\"model\": \"llama\", \"prompt\": \"x\", \"guided_decoding_backend\": \"outlines\", \"guided_json\": {\"type\": \"object\", \"properties\": {\"f4\": {\"type\": \"string\", \"maxLength\": 5}}}}"}
+expect:
+  action: allow

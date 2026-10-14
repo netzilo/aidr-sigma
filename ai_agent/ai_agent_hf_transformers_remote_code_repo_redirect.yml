@@ -9,11 +9,10 @@ description: |
   and execute Python from a repository that is NOT the repository the model
   configuration was loaded from.
 
-  Instance-resolved: the rule anchors on meta["caller_pid"], resolves the exact
-  process instance with proc_instance(), establishes ownership with
-  proc_lineage(), expands that lineage into a single session (lineage plus the
-  processes its members spawned) and then reads prior stages from the event log
-  with query_events() scoped to those pids only. Nothing is ever attributed
+  Session-resolved: the rule anchors on the triggering session (session()),
+  establishes ownership with lineage(), expands that lineage into a single run
+  (lineage plus the sessions its members spawned) and then reads prior stages
+  from the event log with events() scoped to those sessions only. Nothing is ever attributed
   across sessions and no path-keyed graph node walk is performed.
 
   Ordered stages, all inside one 15-minute window and one session:
@@ -21,7 +20,7 @@ description: |
     2. Cross-Repo Remote Code      HTTP_REQUEST to <repoB>/resolve/.../*.py where
        Fetch  (REQUIRED anchor)    repoB is not any repo whose config.json this
                                    session loaded, and t1 >= t0
-    3. Post-Exploitation Execution EXECUTE_PROCESS by a session member running an
+    3. Post-Exploitation Execution SPAWNED by a session member running an
        (raises tier to CONFIRMED)  egress/persistence tool after t1
 
   Ordinary trust_remote_code usage fetches its *.py from the same repository as
@@ -57,6 +56,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_hub_artifact:
     event_type: http_request
@@ -102,20 +104,23 @@ script: |
   def short_names(lin):
       out = []
       for x in lin:
-          out.append(x.get("actor_path", "?").split("/")[-1])
+          out.append(x.get("path", "?").split("/")[-1])
       return " -> ".join(out)
 
   def ev_edge(e):
-      ts = e.get("ts", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       ts,
-          "first_ts": ts,
-          "last_ts":  ts,
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ── Relevance gate: pure string checks on meta, no traversal ─────────────
   def is_relevant_event():
       ct = meta.get("context_type", "")
@@ -139,38 +144,38 @@ script: |
 
       ct  = meta.get("context_type", "")
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if cp == 0 or now == 0:
+      cp  = meta.get("session", "")
+      if cp == "" or now == 0:
           return "allow"
 
-      # ── Anchor on the exact triggering instance ──────────────────────────
-      inst = proc_instance(cp, now)
+      # ── Anchor on the triggering session ─────────────────────────────────
+      inst = session(cp)
       if inst == None:
-          return "allow"                     # create row not landed yet; re-fires
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"                     # session not known yet; re-fires
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       since = now - WINDOW_NS
 
-      # ── Session scope: lineage pids + processes they spawned ─────────────
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = True
-      spawn_rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=4000)
+      # ── Session scope: lineage sessions + sessions they spawned ───────────
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      spawn_rows = events(kind="SPAWNED", since_ns=since, limit=4000)
       for i in range(4):
           for e in spawn_rows:
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = True
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
-      # ── Prior stages from the log, scoped per session pid ────────────────
+      # ── Prior stages from the log, scoped per session ─────────────────────
       cfg  = []
       code = []
-      for pid in session:
-          if pid == "" or pid == "0":
+      for sid in scope:
+          if sid == "":
               continue
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                since_ns=since, limit=200):
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=since, limit=200):
               p = e.get("path", "")
               if "/resolve/" not in p:
                   continue
@@ -186,11 +191,11 @@ script: |
           te = {
               "ts":         str(now),
               "kind":       "HTTP_REQUEST",
-              "actor_pid":  str(cp),
-              "actor_path": inst.get("actor_path", ""),
+              "session_id": inst["id"],
+              "program":    inst.get("path", ""),
               "host":       meta.get("host", ""),
               "path":       tp,
-              "target_id":  "https://" + meta.get("host", "") + tp,
+              "target_id":  "https://" + meta.get("host", ""),
           }
           if tp.lower().endswith(".py"):
               code.append(te)
@@ -247,8 +252,8 @@ script: |
       # ── Optional stage: egress/persistence spawn after the code fetch ────
       postex = None
       for e in spawn_rows:
-          if e.get("actor_pid", "") not in session:
-              if e.get("parent_pid", "") not in session:
+          if e.get("session_id", "") not in scope:
+              if e.get("parent_session", "") not in scope:
                   continue
           t = int(e.get("ts", "0"))
           if t < anchor_ts or t > now + SLACK_NS:
@@ -258,14 +263,14 @@ script: |
               break
       if ct == "execute_process" and postex == None and now >= anchor_ts:
           cmd  = meta.get("content", "")
-          head = cmd.split(" ")[0]
           postex = {
-              "ts":         str(now),
-              "kind":       "EXECUTE_PROCESS",
-              "actor_pid":  str(cp),
-              "actor_path": inst.get("actor_path", ""),
-              "cmdline":    cmd,
-              "target_id":  "process://" + head,
+              "ts":             str(now),
+              "kind":           "SPAWNED",
+              "session_id":     inst["id"],
+              "parent_session": inst.get("parent", ""),
+              "program":        inst.get("path", ""),
+              "cmdline":        cmd,
+              "target_id":      inst["id"],
           }
 
       # ── Tier ─────────────────────────────────────────────────────────────
@@ -291,9 +296,8 @@ script: |
       if store_usage()["free"] > 8192:
           store_set("reported", fresh)
 
-      # ── Kill chain, rooted at the session owner ──────────────────────────
-      root  = lineage[len(lineage) - 1].get("actor_path", "")
-      chain = new_chain("process://" + root)
+      # ── Kill chain, rooted at the session root ───────────────────────────
+      chain = new_chain(lineage_[len(lineage_) - 1]["id"])
       if cfg_first != None and not degraded:
           chain.append(step(ev_edge(cfg_first),
               stage_id="Model Config Fetch",
@@ -311,7 +315,7 @@ script: |
               stage_desc="session spawned egress/persistence tool: " +
                          postex.get("cmdline", "")[:200]))
 
-      lin    = short_names(lineage)
+      lin    = short_names(lineage_)
       reason = ("HF transformers remote-code RCE (" + tier + ") — session " + lin +
                 " fetched python module from hub repo '" + anchor_repo + "'")
       if degraded:
@@ -320,7 +324,7 @@ script: |
           reason = reason + " that does not match any config.json repo loaded by this session"
       if postex != None:
           reason = reason + "; post-exploitation spawn: " + postex.get("cmdline", "")[:160]
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           reason = reason + " [attribution: degraded lineage]"
       print(reason)
 

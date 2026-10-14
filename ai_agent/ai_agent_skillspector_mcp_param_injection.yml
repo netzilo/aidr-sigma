@@ -21,6 +21,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - skill
 detection:
   selection_param_injection:
     event_type:

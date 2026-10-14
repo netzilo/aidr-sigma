@@ -1,0 +1,24 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  ssh:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/bin/ssh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: file_read, subject: cursor, path: /Users/dev/.ssh/id_rsa}
+  - {kind: spawn, subject: ssh, cmdline: "ssh -i /Users/dev/.ssh/id_rsa deploy@10.0.0.5 cat /etc/shadow"}
+expect:
+  action: report
+  reason_contains: "cred:/Users/dev/.ssh/id_rsa"
+  output_contains: ["Lateral movement chain — remote-exec:ssh"]
+  chain_min: 2

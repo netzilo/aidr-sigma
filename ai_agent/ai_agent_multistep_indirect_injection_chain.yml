@@ -13,7 +13,7 @@ description: |
   page_load, text_extraction or execute_instruction event, and no READ_DOM /
   FOLLOWS_LINK / EXECUTES_INSTRUCTION edge. There is therefore NO telemetry that
   proves instruction-following occurred. This rule does not claim to. It reconstructs
-  the only observable half of the attack -- a contiguous, instance-scoped, cross-host
+  the only observable half of the attack -- a contiguous, session-scoped, cross-host
   page-navigation burst -- and then requires independent CONTENT corroboration from
   the full-text index that agent-addressed imperative text was actually present in the
   bodies of at least two distinct pages of that same chain. Structure alone is
@@ -22,11 +22,11 @@ description: |
   It is deliberately report-only and experimental: it produces an investigation lead
   with a reconstructed hop chain, not an enforcement verdict.
 
-  Attribution is instance-resolved. The rule anchors on meta["caller_pid"], resolves
-  the exact process instance with proc_instance(), walks the real spawn chain with
-  proc_lineage(), and queries only that session's instances via query_events(). Page
-  hops are never attributed across sessions, and the triggering fetch is taken from
-  meta (never re-looked-up) because the just-fired event races async ingest.
+  Attribution is session-based. The rule anchors on the triggering session, walks
+  the real spawn chain with lineage(), and queries only that tree's sessions via
+  events(). Page hops are never attributed across trees, and the triggering fetch
+  is taken from meta (never re-looked-up) because the just-fired event races async
+  ingest.
 author: Selhan
 date: "2026-06-11"
 references:
@@ -42,7 +42,7 @@ falsepositives:
   - Security research or red-team browsing. An agent reading blog posts, papers or
     benchmark write-ups about prompt injection will fetch pages whose bodies literally
     contain agent-addressed strings. Mitigated by requiring the marked pages to be part
-    of one contiguous cross-host navigation burst by a single process instance, and by
+    of one contiguous cross-host navigation burst by a single session tree, and by
     reporting only (no enforcement). Expect this to be the dominant true-benign hit.
   - Prompt-injection benchmark harnesses and CI evaluation suites (StepJack, AgentDojo
     and similar) that intentionally serve injected pages. Same signature by design;
@@ -59,6 +59,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -72,12 +75,12 @@ script: |
   # ---------------------------------------------------------------------------
   WINDOW_NS       = 300000000000   # 5 min  - outer chain window
   MAX_HOP_GAP_NS  = 90000000000    # 90 s   - max gap between consecutive hops
-  COOLDOWN_NS     = 900000000000   # 15 min - per-session report suppression
+  COOLDOWN_NS     = 900000000000   # 15 min - per-tree report suppression
   MIN_PAGES       = 3              # StepJack: >= 3-step decomposition
   MIN_HOSTS       = 2              # chain must cross a domain boundary
   MIN_MARKED      = 2              # instructions spread over >= 2 pages
   MIN_HITS        = 3
-  MAX_PIDS        = 24
+  MAX_SIDS        = 24
   MAX_SCAN_PAGES  = 8
   MAX_CHAIN_STEPS = 10
 
@@ -118,6 +121,10 @@ script: |
           rest = rest[:s]
       return rest
 
+  def phrase(s):
+      # search()/search_in() take raw FTS5 syntax; quote multi-word markers.
+      return '"' + s.replace('"', ' ') + '"'
+
   def sort_by_ts(evs):
       out = []
       for e in evs:
@@ -143,13 +150,18 @@ script: |
       return pages[idx:]
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     "HTTP_REQUEST",
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def short(p):
@@ -178,19 +190,26 @@ script: |
       return True
 
   # ---------------------------------------------------------------------------
-  # Session-scoped page collection (instance-resolved, one session only).
+  # Tree-scoped page collection (one session tree only).
   # ---------------------------------------------------------------------------
-  def collect_pages(session, since, now, actor_path):
+  def collect_pages(scope, since, now, inst):
       seen  = {}
       order = []
-      pids  = []
-      for pid in session:
-          pids.append(pid)
-      for i in range(len(pids)):
-          if i >= MAX_PIDS:
+      bodies = {}
+      sids  = []
+      for sid in scope:
+          sids.append(sid)
+      for i in range(len(sids)):
+          if i >= MAX_SIDS:
               break
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pids[i]),
-                                since_ns=since, until_ns=now, limit=100):
+          # The page body lives on the HTTP_RESPONSE row; the GET itself has none.
+          for e in events(kind="HTTP_RESPONSE", session=sids[i],
+                          since_ns=since, until_ns=now, limit=100):
+              cid = e.get("content_id", "")
+              if cid != "":
+                  bodies[e.get("host", "") + "|" + e.get("path", "")] = cid
+          for e in events(kind="HTTP_REQUEST", session=sids[i],
+                          since_ns=since, until_ns=now, limit=100):
               h = e.get("host", "")
               if h == "":
                   continue
@@ -209,27 +228,27 @@ script: |
       # newest event of all and races async ingest.
       thost = meta.get("host", "")
       tpath = meta.get("path", "")
+      q = tpath.find("?")
+      if q >= 0:
+          tpath = tpath[:q]
       tk    = thost + "|" + tpath
-      cid   = ""
-      old   = seen.get(tk, None)
-      if old != None:
-          cid = old.get("content_id", "")
-      else:
+      if seen.get(tk, None) == None:
           order.append(tk)
       seen[tk] = {
           "kind":       "HTTP_REQUEST",
           "ts":         str(now),
-          "actor_pid":  meta.get("caller_pid", ""),
-          "actor_path": actor_path,
+          "session_id": inst["id"],
+          "program":    inst.get("path", ""),
           "host":       thost,
           "path":       tpath,
           "target_id":  "https://" + thost,
-          "content_id": cid,
       }
 
       out = []
       for k in order:
-          out.append(seen[k])
+          e = seen[k]
+          e["body_id"] = bodies.get(k, "")
+          out.append(e)
       return sort_by_ts(out)
 
   # ---------------------------------------------------------------------------
@@ -246,12 +265,12 @@ script: |
           if i >= MAX_SCAN_PAGES:
               break
           e   = pages[i]
-          cid = e.get("content_id", "")
+          cid = e.get("body_id", "")
           h   = e.get("host", "")
           if cid == "" or h == "" or h in marked:
               continue
           for p in AGENT_ADDRESSED:
-              if search_in(cid, p):
+              if search_in(cid, phrase(p)):
                   marked[h] = True
                   hits      = hits + 1
                   tier1     = True
@@ -259,7 +278,7 @@ script: |
           if h in marked:
               continue
           for p in CHAINING:
-              if search_in(cid, p):
+              if search_in(cid, phrase(p)):
                   marked[h] = True
                   hits      = hits + 1
                   break
@@ -267,7 +286,7 @@ script: |
       # (b) index-wide fallback, intersected with THIS chain's hosts only.
       if len(marked) < MIN_MARKED:
           for p in AGENT_ADDRESSED:
-              for r in search(p, topK=10):
+              for r in search(phrase(p), topK=10):
                   h = host_of_source(r.get("source", ""))
                   if h != "" and h in page_hosts and h not in marked:
                       marked[h] = True
@@ -275,7 +294,7 @@ script: |
                       tier1     = True
       if len(marked) < MIN_MARKED:
           for p in CHAINING:
-              for r in search(p, topK=10):
+              for r in search(phrase(p), topK=10):
                   h = host_of_source(r.get("source", ""))
                   if h != "" and h in page_hosts and h not in marked:
                       marked[h] = True
@@ -306,39 +325,37 @@ script: |
           return "allow"
 
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if now == 0 or cp == 0:
+      if now == 0:
           return "allow"
 
-      # Anchor on the exact triggering instance. Degraded => allow, never guess.
-      inst = proc_instance(cp, now)
+      # Anchor on the triggering session. Unknown => allow, never guess.
+      inst = session()
       if inst == None:
           return "allow"
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage()
+      if not lineage_:
           return "allow"
-      root = lineage[len(lineage)-1]
-      skey = root.get("actor_pid", "") + ":" + root.get("actor_start", "")
+      root = lineage_[len(lineage_)-1]
+      skey = root["id"]
 
       fresh_ok, cd = cooldown_state(skey, now)
       if not fresh_ok:
           return "allow"
 
-      since   = now - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = True
+      since = now - WINDOW_NS
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
-      apath = inst.get("actor_path", "")
-      pages = trailing_run(collect_pages(session, since, now, apath))
+      pages = trailing_run(collect_pages(scope, since, now, inst))
 
-      # Only widen to sibling instances of the SAME session if the lineage alone
+      # Only widen to sessions spawned by this tree if the lineage alone
       # is not already a chain. Keeps the common case at ~3 scoped queries.
       if len(pages) < MIN_PAGES:
-          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "")] = True
-          pages = trailing_run(collect_pages(session, since, now, apath))
+          for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
+          pages = trailing_run(collect_pages(scope, since, now, inst))
 
       if len(pages) < MIN_PAGES:
           return "allow"
@@ -355,8 +372,8 @@ script: |
       if not confirmed(tier1, marked, hits):
           return "allow"
 
-      # ---- kill chain, rooted at the session owner ---------------------------
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # ---- kill chain, rooted at the tree's root session ----------------------
+      chain = new_chain(root["id"])
       n     = 0
       for e in pages:
           if n >= MAX_CHAIN_STEPS:
@@ -371,16 +388,16 @@ script: |
                             stage_desc=note))
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       hostlist = []
       for h in marked:
           if len(hostlist) < 5:
               hostlist.append(h)
 
-      attrib = "instance-resolved"
-      if len(lineage) < 2:
-          attrib = "degraded (lineage truncated)"
+      attrib = "session-resolved"
+      if len(lineage_) < 2:
+          attrib = "single session (no parent)"
 
       reason = ("Multi-step indirect prompt injection candidate: " +
                 str(len(pages)) + "-page contiguous navigation chain across " +

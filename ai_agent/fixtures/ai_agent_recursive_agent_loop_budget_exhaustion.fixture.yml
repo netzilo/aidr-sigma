@@ -1,0 +1,26 @@
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c0, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c1, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c2, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c3, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c4, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c5, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c6, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c7, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c8, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c9, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c10, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c11, args: '{"path": "/Users/dev/proj/README.md"}'}
+  - {kind: tool_call, subject: claude, server: fs, server_url: "http://localhost:3000", tool: read_file, call_id: c12, args: '{"path": "/Users/dev/proj/README.md"}'}
+expect:
+  action: report
+  reason_contains: "read_file re-invoked 13x with identical arguments"
+  chain_min: 2

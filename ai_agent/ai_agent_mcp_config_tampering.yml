@@ -13,16 +13,14 @@ description: |
   the file_write / file_modify event types, and MODIFY_FILE is not an edge kind.
   This rule therefore never uses a file event as its trigger. It triggers on live
   AI-layer and EDR events (tool_call / tool_response / execute_process) and reads
-  the WRITE_FILE rows out of the instance-resolved event log with query_events(),
-  which IS populated by AIDR ingest for every file operation. The write evidence
-  is real and live; only the trigger is borrowed from an event type that has a
-  producer.
+  the WRITE_FILE rows out of the event log with events(), which IS populated by
+  AIDR ingest for every file operation. The write evidence is real and live; only
+  the trigger is borrowed from an event type that has a producer.
 
-  Attribution is instance-exact: the rule anchors on meta["caller_pid"], resolves
-  it with proc_instance() at meta["event_ts"], walks proc_lineage() upward, and
-  expands the session only through EXECUTE_PROCESS rows whose (parent_pid,
-  parent_start) pair matches a known session instance. No cross-session
-  attribution is possible, and PID reuse cannot pull an unrelated process in.
+  Attribution is session-exact: the rule anchors on the triggering session, walks
+  lineage() upward, and expands the scope only through SPAWNED rows whose parent
+  is a session already in scope. Sessions are instances, so no cross-session
+  attribution is possible and PID reuse cannot pull an unrelated process in.
 author: Evgen
 date: "2026-03-14"
 references:
@@ -51,6 +49,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_trigger:
     event_type:
@@ -143,6 +145,42 @@ script: |
               return True
       return False
 
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
+
   # Relevance gate: pure string checks on meta only. No graph, no event log.
   def is_relevant_event():
       ct = meta.get("context_type", "")
@@ -154,6 +192,7 @@ script: |
                   return True
           return content_hint(c)
       if ct == "execute_process":
+          c = spawn_cmd(c)
           if content_hint(c):
               return True
           for pat in WRITER_RE:
@@ -164,18 +203,27 @@ script: |
       return False
 
   def ev_edge(e):
-      tid = e.get("target_id", "")
-      if tid == "":
-          tid = "filesystem://" + e.get("path", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tid,
+          "from":     frm,
+          "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
           "cmdline":  e.get("cmdline", ""),
       }
+
+  def chain_root(lin):
+      # The nearest agent ancestor, else the lineage root.
+      for x in lin:
+          if x.get("agent", "0") == "1":
+              return x
+      return lin[-1]
 
   # --------------------------------------------------------------------- main
   def run():
@@ -183,48 +231,42 @@ script: |
           return "allow"
 
       ets = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if ets == 0 or cp == 0:
+      if ets == 0:
           return "allow"
 
-      inst = proc_instance(cp, ets)
+      inst = session()
       if inst == None:
           return "allow"          # degraded attribution - never guess an owner
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       win  = ets - WINDOW_NS
-      root = lineage[-1]
+      root = chain_root(lineage_)
 
-      # Session = the caller's lineage plus descendants spawned by it, matched on
-      # the full (pid, start) instance key so PID reuse cannot leak in.
-      lineage_pids = {}
-      session      = {}
-      for x in lineage:
-          lineage_pids[x["actor_pid"]] = True
-          session[x["actor_pid"]]      = x["actor_start"]
+      # Scope = the caller's lineage plus the sessions it spawned in-window.
+      # Sessions are instances, so a reused pid can never leak in.
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
-      spawns = query_events(kind="EXECUTE_PROCESS", since_ns=win, limit=2000)
+      spawns = events(kind="SPAWNED", since_ns=win, limit=2000)
       for _ in range(3):          # transitive closure, bounded depth
           for e in spawns:
-              pp = e.get("parent_pid", "")
-              if pp in session and session[pp] == e.get("parent_start", ""):
-                  if e["actor_pid"] not in session:
-                      session[e["actor_pid"]] = e["actor_start"]
-      spawn_by_pid = {}
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
+      spawn_by_sid = {}
       for e in spawns:
-          if e["actor_pid"] in session and session[e["actor_pid"]] == e["actor_start"]:
-              spawn_by_pid[e["actor_pid"]] = e
+          if e.get("session_id", "") in scope:
+              spawn_by_sid[e["session_id"]] = e
 
       # REQUIRED ANCHOR - a WRITE_FILE row targeting an MCP config, performed by
-      # an instance of THIS session, inside the window. Scoped per (pid, start)
-      # so the query stays cheap and cannot bleed across sessions.
+      # a session of THIS scope, inside the window. Scoped per session so the
+      # query stays cheap and cannot bleed across session trees.
       hits  = []
       paths = {}
-      for pid in session:
-          rows = query_events(kind="WRITE_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid]), since_ns=win, limit=300)
+      for sid in scope:
+          rows = events(kind="WRITE_FILE", session=sid, since_ns=win, limit=300)
           for e in rows:
               p = e.get("path", "")
               if p == "" or not is_mcp_config(p):
@@ -247,16 +289,19 @@ script: |
       if bad != "":
           corr.append("weaponised server definition in payload: " + bad[:120])
 
+      # The agent/editor session writing its own config is the benign shape; a
+      # spawned utility (shell, tee, sed, python, ...) doing the write is not.
       tool_writer = None
       for e in hits:
-          if e["actor_pid"] in lineage_pids:
+          ws = session(e.get("session_id", ""))
+          if ws != None and ws.get("agent", "0") == "1":
               continue                       # agent/editor writing its own config
-          if basename(e.get("actor_path", "")) in WRITER_TOOLS:
+          if basename(e.get("program", "")) in WRITER_TOOLS:
               tool_writer = e
               break
       if tool_writer != None:
           corr.append("written by spawned utility " +
-                      basename(tool_writer.get("actor_path", "")))
+                      basename(tool_writer.get("program", "")))
 
       if len(paths) >= 2:
           corr.append(str(len(paths)) + " distinct MCP config files written")
@@ -272,7 +317,7 @@ script: |
               fresh[k] = seen[k]
       newhits = []
       for e in hits:
-          fp = e.get("actor_pid", "") + ":" + e.get("ts", "") + ":" + norm(e.get("path", ""))
+          fp = e.get("session_id", "") + ":" + e.get("ts", "") + ":" + norm(e.get("path", ""))
           if fp in fresh:
               continue
           fresh[fp] = ets
@@ -282,33 +327,34 @@ script: |
       if store_usage()["free"] > 8192:
           store_set("reported", fresh)
 
-      # Kill chain, built from real event-log rows (instance-accurate).
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # Kill chain, built from real event-log rows (session-accurate).
+      chain = new_chain(root["id"])
       shown = {}
       n     = 0
       for e in newhits:
           if n >= 5:
               break
-          apid = e["actor_pid"]
-          if apid not in lineage_pids and apid not in shown:
-              sp = spawn_by_pid.get(apid, None)
+          sid = e.get("session_id", "")
+          if sid not in shown:
+              sp = spawn_by_sid.get(sid, None)
               if sp != None:
                   chain.append(step(ev_edge(sp), stage_id="Execution Vector",
                                     stage_desc="session spawned " +
-                                               basename(sp.get("actor_path", "")) +
+                                               basename(sp.get("program", "")) +
                                                ": " + sp.get("cmdline", "")))
-              shown[apid] = True
+              shown[sid] = True
           chain.append(step(ev_edge(e), stage_id="MCP Config Tampering",
-                            stage_desc=basename(e.get("actor_path", "")) +
-                                       " (pid " + apid + ") wrote MCP config " +
-                                       e.get("path", "")))
+                            stage_desc=basename(e.get("program", "")) +
+                                       " (" + sid + ") wrote MCP config " +
+                                       e.get("path", ""),
+                            activity={"path": e.get("path", ""), "ts": e.get("ts", "0")}))
           n += 1
 
       names = []
-      for x in lineage:
-          names.append(basename(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(basename(x.get("path", "")))
       attribution = "exact"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           attribution = "degraded"
       reason = ("MCP configuration tampering - " + str(len(newhits)) +
                 " write(s) to MCP config by session " + " -> ".join(names) +

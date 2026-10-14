@@ -16,11 +16,11 @@ description: |
   and are NOT claimed by this rule. Rather than ship three selections that can never
   fire, this rule detects the one signal that is real (`tool_call`) and then adds the
   correlation the narrative was actually reaching for, using facilities that DO exist:
-    * instance-resolved session scoping (caller_pid -> proc_instance -> proc_lineage)
-      so repetition is counted per agent session, never pooled across sessions;
-    * per-rule persistent store to accumulate identical-argument fingerprints across
-      events, which is the only way to observe "budget" behaviour without a token edge;
-    * an instance-scoped state-change audit via query_events on WRITE/CREATE/DELETE/
+    * session scoping (the triggering session, its lineage and the sessions they
+      spawned) so repetition is counted per agent session, never pooled across sessions;
+    * in-window TOOL_CALL rows of that scope plus the indexed argument text, so
+      identical-argument repetition is derived from the event log on every call;
+    * a session-scoped state-change audit via events() on WRITE/CREATE/DELETE/
       RENAME_FILE, which is the closest available proxy for "no goal state change".
   Cost/token figures are deliberately absent from the verdict text — the engine does not
   expose them and the rule does not invent them. What it reports is invocation volume,
@@ -56,6 +56,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - tool
 detection:
   sel_tool_call:
     event_type: tool_call
@@ -67,15 +71,15 @@ on_error: allow
 script: |
   # ── Tunables. Every window/threshold lives in the rule, never in storage. ──────
   WINDOW_NS        = 300000000000     # 5 min  - loop observation window
-  SESSION_TTL_NS   = 3600000000000    # 1 h    - stale session state eviction
+  REPORT_TTL_NS    = 3600000000000    # 1 h    - stale per-session report markers evicted
   MEAN_GAP_NS      = 3000000000       # 3 s    - max mean gap for a "tight" loop
   REPEAT_THRESHOLD = 12               # identical (tool,args) invocations in-window
-  FLOOD_TOTAL      = 60               # total in-window calls for non-convergence
-  FLOOD_DISTINCT   = 3                # ...spread over this few argument sets
-  MAX_FPS          = 64               # fingerprints retained per session
-  MAX_SESSIONS     = 24               # sessions retained in the rule store
-  ARG_SCAN_LIMIT   = 4096             # bytes of tool args hashed
-  MAX_PIDS_AUDIT   = 12               # cap on instance-scoped mutation queries
+  FLOOD_TOTAL      = 60               # total in-window calls to the tool for non-convergence
+  FLOOD_DISTINCT   = 3                # ...where the identical set is >= 1/this of them
+  ARG_SCAN_LIMIT   = 4096             # bytes of tool args fingerprinted
+  MAX_ROWS         = 1000             # tool-call rows pulled per session
+  MAX_SIDS_AUDIT   = 12               # cap on session-scoped mutation queries
+  MAX_REPORTS      = 24               # report markers retained in the rule store
   MUTATION_KINDS   = ["WRITE_FILE", "CREATE_FILE", "DELETE_FILE", "RENAME_FILE"]
 
   # ── Pure helpers (no graph / no event-log calls) ──────────────────────────────
@@ -89,39 +93,22 @@ script: |
 
   def norm(s):
       # collapse whitespace so pretty-printed vs compact JSON hash identically
-      return re.replace(r"\s+", s, " ")
+      return re.replace(r"\s+", s, " ").strip()
 
-  def prune_fps(d, limit):
-      extra = len(d) - limit
-      if extra <= 0:
-          return d
-      for i in range(extra):
-          ok = ""
-          ot = -1
-          for k in d:
-              t = int(d[k].get("last", 0))
-              if ot < 0 or t < ot:
-                  ot = t
-                  ok = k
-          if ok == "":
-              break
-          d.pop(ok)
-      return d
+  def fts_phrase(s):
+      # one FTS5 phrase: the args' token sequence; identity is confirmed on the text
+      return '"' + s.replace('"', '""') + '"'
 
-  def exec_edge(child, parent):
+  def spawn_edge(child):
+      for e in edges(child["id"], dir="in", kind="SPAWNED"):
+          return e
+      t = child.get("first_seen", "0")
+      return {"from": child.get("parent", "") or child["id"], "to": child["id"],
+              "kind": "SPAWNED", "dir": "out", "ts": t, "first_ts": t, "last_ts": t}
+
+  def tool_edge(sid, tid, ts):
       return {
-          "from":     "process://" + parent.get("actor_path", "?"),
-          "to":       "process://" + child.get("actor_path", "?"),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       child.get("ts", child.get("actor_start", "0")),
-          "first_ts": child.get("actor_start", "0"),
-          "last_ts":  child.get("actor_start", "0"),
-          "cmdline":  child.get("cmdline", ""),
-      }
-
-  def tool_edge(actor_path, tid, ts):
-      return {
-          "from":     "process://" + actor_path,
+          "from":     sid,
           "to":       tid,
           "kind":     "TOOL_CALL",
           "ts":       str(ts),
@@ -129,22 +116,16 @@ script: |
           "last_ts":  str(ts),
       }
 
-  # ── Store maintenance ─────────────────────────────────────────────────────────
-  def prune_sessions(now):
+  # ── Store maintenance: only "last reported" markers, one per root session ────
+  def prune_reports(now):
       live = []
       for k in store_keys():
           v = store_get(k)
-          if v == None:
-              store_delete(k)
-              continue
-          last = int(v.get("last", 0))
-          if now - last > SESSION_TTL_NS:
+          if v == None or now - int(v.get("ts", 0)) > REPORT_TTL_NS:
               store_delete(k)
           else:
-              live.append([last, k])
-      extra = len(live) - MAX_SESSIONS
-      if extra <= 0:
-          return
+              live.append([int(v.get("ts", 0)), k])
+      extra = len(live) - MAX_REPORTS
       for i in range(extra):
           oldest = -1
           oi     = -1
@@ -161,19 +142,9 @@ script: |
 
   def persist(key, st, now):
       u = store_usage()
-      if u["free"] < 65536 or len(store_keys()) > MAX_SESSIONS:
-          prune_sessions(now)
+      if u["free"] < 65536 or len(store_keys()) > MAX_REPORTS:
+          prune_reports(now)
       store_set(key, st)
-
-  def tool_node_id(name, server):
-      for t in graph(type="Tool"):
-          if t.get("name", "") != name:
-              continue
-          if server == "" or t.get("server", "") == server:
-              return t["id"]
-      if server == "":
-          return "tool://" + name
-      return "tool://" + server + "/" + name
 
   def run():
       # ── 1. Relevance gate: pure string checks on meta, zero traversal ─────────
@@ -188,127 +159,129 @@ script: |
       now = int(meta.get("event_ts", "0"))
       if now == 0:
           return "allow"
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
 
-      # ── 2. Anchor on the exact triggering instance (never a node walk) ────────
-      inst = proc_instance(cp, now)
+      # ── 2. Anchor on the exact triggering session (never a node walk) ─────────
+      inst = session()
       if inst == None:
           return "allow"            # degraded attribution - never guess an owner
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
-      root = lineage[-1]
-      ses  = "s:" + str(root.get("actor_pid", "0")) + ":" + str(root.get("actor_start", "0"))
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root = lineage_[-1]
+      ses  = "s:" + root["id"]
 
-      # ── 3. Session-scoped, window-scoped identical-argument fingerprints ──────
-      st  = store_get(ses)
-      if st == None:
-          st = {"last": now, "fps": {}}
-      fps   = st.get("fps", {})
-      fresh = {}
-      for k in fps:
-          v = fps[k]
-          if now - int(v.get("last", 0)) <= WINDOW_NS:
-              fresh[k] = v
+      # ── 3. Session scope: lineage + sessions it spawned in-window ─────────────
+      since = now - WINDOW_NS
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+          if e.get("parent_session", "") in scope:
+              scope[e["session_id"]] = True
 
-      fp  = fnv1a(tool + "|" + norm(meta.get("content", "")))
-      ent = fresh.get(fp)
-      if ent == None:
-          ent = {"n": 0, "first": now, "last": now, "tool": tool, "reported": 0}
-      ent["n"]    = int(ent.get("n", 0)) + 1
-      ent["last"] = now
-      ent["tool"] = tool
-      fresh[fp]   = ent
-      fresh       = prune_fps(fresh, MAX_FPS)
-      st["fps"]   = fresh
-      st["last"]  = now
+      # ── 4. In-window invocations of this tool, derived from the event log ─────
+      server = meta.get("server_name", "")
+      tid    = "tool://" + server + "/" + tool
+      args   = norm(meta.get("content", ""))
+      fp     = fnv1a(tool + "|" + args)
 
-      n    = int(ent["n"])
-      span = now - int(ent.get("first", now))
+      by_label  = {}            # content label -> row, same tool, in-window, in-scope
+      total     = 0
+      tmin      = now
+      trig_seen = False
+      callid    = meta.get("callid", "")
+      for sid in scope:
+          for r in events(kind="TOOL_CALL", session=sid, target=tid,
+                          since_ns=since, until_ns=now, limit=MAX_ROWS):
+              total = total + 1
+              t = int(r.get("ts", "0"))
+              if t < tmin:
+                  tmin = t
+              if callid != "" and r.get("callid", "") == callid:
+                  trig_seen = True
+              cid = r.get("content_id", "")
+              if cid != "":
+                  by_label[cid] = r
+
+      # identical arguments: the indexed args text must equal this call's text
+      n     = 0
+      first = now
+      if args != "":
+          for h in search(fts_phrase(args), MAX_ROWS):
+              r = by_label.get(h.get("source", ""))
+              if r == None:
+                  continue
+              if norm(h.get("text", "")) != args:
+                  continue
+              n = n + 1
+              t = int(r.get("ts", "0"))
+              if t < first:
+                  first = t
+      if not trig_seen:
+          n     = n + 1             # the trigger itself (its row/index may still race)
+          total = total + 1
+
+      span = now - first
       gap  = span // (n - 1) if n > 1 else WINDOW_NS
-
-      total    = 0
-      distinct = 0
-      tmin     = now
-      for k in fresh:
-          total    += int(fresh[k].get("n", 0))
-          distinct += 1
-          f = int(fresh[k].get("first", now))
-          if f < tmin:
-              tmin = f
       sgap = (now - tmin) // (total - 1) if total > 1 else WINDOW_NS
 
-      reported   = int(ent.get("reported", 0))
-      flood_at   = int(st.get("flood_at", 0))
+      st       = store_get(ses) or {}
+      reported = int(st.get("reported", 0))
+      if now - int(st.get("ts", 0)) > WINDOW_NS:
+          reported = 0
+      flood_at = int(st.get("flood_at", 0))
+
       fire_rep   = gap <= MEAN_GAP_NS and n >= REPEAT_THRESHOLD and n >= reported + REPEAT_THRESHOLD
       fire_flood = (sgap <= MEAN_GAP_NS and total >= FLOOD_TOTAL and
-                    distinct <= FLOOD_DISTINCT and now - flood_at > WINDOW_NS)
+                    n * FLOOD_DISTINCT >= total and now - flood_at > WINDOW_NS)
 
       if not (fire_rep or fire_flood):
-          persist(ses, st, now)
           return "allow"            # rule stays invisible - no event, no noise
 
-      # ── 4. Session expansion + instance-scoped state-change audit ─────────────
-      since   = now - WINDOW_NS
-      session = {}
-      for x in lineage:
-          session[str(x.get("actor_pid", "0"))] = str(x.get("actor_start", "0"))
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-          if e.get("parent_pid", "") in session:
-              session[e["actor_pid"]] = e["actor_start"]
-
+      # ── 5. Session-scoped state-change audit ─────────────────────────────────
       mutations = 0
       checked   = 0
-      for pid in session:
-          if checked >= MAX_PIDS_AUDIT:
+      for sid in scope:
+          if checked >= MAX_SIDS_AUDIT:
               break
           checked += 1
           for kind in MUTATION_KINDS:
-              rows = query_events(kind=kind, actor_pid=int(pid),
-                                  actor_start=int(session[pid]),
-                                  since_ns=since, limit=20)
+              rows = events(kind=kind, session=sid, since_ns=since, limit=20)
               mutations += len(rows)
 
       # Productive work present -> require twice the evidence before reporting.
       if mutations > 0:
           if n < REPEAT_THRESHOLD * 2 and total < FLOOD_TOTAL * 2:
-              persist(ses, st, now)
               return "allow"
 
-      # ── 5. Verdict + kill chain ───────────────────────────────────────────────
-      ent["reported"] = n
-      fresh[fp]       = ent
-      st["fps"]       = fresh
+      # ── 6. Verdict + kill chain ───────────────────────────────────────────────
+      st = {"reported": n, "ts": now, "flood_at": flood_at}
       if fire_flood:
           st["flood_at"] = now
       persist(ses, st, now)
 
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lname = " -> ".join(names)
 
-      apath = inst.get("actor_path", "?")
-      tid   = tool_node_id(tool, meta.get("server_name", ""))
-      chain = new_chain("process://" + root.get("actor_path", "?"))
+      chain = new_chain(root["id"])
 
-      if len(lineage) > 1:
-          chain.append(step(exec_edge(lineage[0], lineage[1]),
+      if len(lineage_) > 1:
+          chain.append(step(spawn_edge(lineage_[0]),
                             stage_id="Session Anchor",
-                            stage_desc="loop driven by instance chain: " + lname))
-      chain.append(step(tool_edge(apath, tid, now),
+                            stage_desc="loop driven by session chain: " + lname))
+      chain.append(step(tool_edge(inst["id"], tid, now),
                         stage_id="Recursive Invocation",
                         stage_desc=tool + " re-invoked " + str(n) +
                                    "x with byte-identical arguments (fp " + fp +
                                    ", mean gap " + str(gap // 1000000) + "ms)"))
       if fire_flood:
-          chain.append(step(tool_edge(apath, tid, now),
+          chain.append(step(tool_edge(inst["id"], tid, now),
                             stage_id="Non-Convergence",
-                            stage_desc=str(total) + " in-window tool calls across only " +
-                                       str(distinct) + " distinct argument sets"))
-      chain.append(step(tool_edge(apath, tid, now),
+                            stage_desc=str(total) + " in-window calls to " + tool +
+                                       ", " + str(n) + " of them with one argument set"))
+      chain.append(step(tool_edge(inst["id"], tid, now),
                         stage_id="Budget Impact",
                         stage_desc="state-changing file events by this session in-window: " +
                                    str(mutations) + " (no token/cost telemetry exists in this engine)"))
@@ -316,9 +289,8 @@ script: |
       reason = ("Recursive agent loop - " + tool + " re-invoked " + str(n) +
                 "x with identical arguments over " + str(span // 1000000000) +
                 "s (mean gap " + str(gap // 1000000) + "ms) by " + lname +
-                "; session window: " + str(total) + " calls / " + str(distinct) +
-                " distinct argument sets; " + str(mutations) +
-                " state-changing file events")
+                "; session window: " + str(total) + " calls to the tool; " +
+                str(mutations) + " state-changing file events")
       print(reason)
       return {"action": "report", "reason": reason, "chain": chain}
 

@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Usage Honeycomb · Prototype</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark">◆</span> Netzilo <span class="brand-sub">AI Detection &amp; Response</span></div>
+    <nav class="tabs">
+      <span class="tab active">Visibility</span>
+      <span class="tab">Findings</span>
+      <span class="tab">Policies</span>
+      <span class="tab">Collectors</span>
+    </nav>
+    <div class="topbar-right">
+      <div class="seg" id="mode-seg" role="group" aria-label="Event scope">
+        <button data-mode="activity" class="on">Activity</button>
+        <button data-mode="detections">Detections</button>
+      </div>
+      <select id="range" aria-label="Time range">
+        <option>Last 24 hours</option>
+        <option>Last 7 days</option>
+        <option selected>Last 30 days</option>
+      </select>
+    </div>
+  </header>
+
+  <section class="toolbar">
+    <ol class="crumbs" id="crumbs" aria-label="Drill-down path"></ol>
+    <div class="toolbar-right">
+      <label class="ctl">Color by
+        <select id="color-by">
+          <option value="rate" selected>Detection rate</option>
+          <option value="detections">Detections</option>
+          <option value="tokens">Tokens</option>
+          <option value="events">Events</option>
+        </select>
+      </label>
+      <label class="ctl">Label
+        <select id="label-by">
+          <option value="detections">Detections</option>
+          <option value="tokens" selected>Tokens</option>
+          <option value="events">Events</option>
+          <option value="rate">Detection rate</option>
+        </select>
+      </label>
+    </div>
+  </section>
+
+  <section class="kpis" id="kpis"></section>
+
+  <main class="stage">
+    <div class="canvas-wrap" id="canvas-wrap">
+      <svg id="hive" role="img" aria-label="Honeycomb of AI usage"></svg>
+      <div class="level-pill" id="level-pill"></div>
+      <div class="legend" id="legend"></div>
+      <div class="hint" id="hint"></div>
+    </div>
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+  </main>
+
+  <div class="tooltip" id="tooltip" role="tooltip"></div>
+
+  <script src="data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

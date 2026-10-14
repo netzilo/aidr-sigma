@@ -27,6 +27,8 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - tool
 detection:
   sel_heredoc_subst:
     event_type: tool_call

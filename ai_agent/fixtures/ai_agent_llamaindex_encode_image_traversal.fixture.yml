@@ -1,0 +1,18 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/bin/python3
+    name: python3
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: tool_call, subject: agent, server: local, tool: encode_image, call_id: c1, args: '{"image_path": "../../../../etc/passwd"}'}
+  - {kind: file_read, subject: agent, path: /etc/passwd}
+trigger: 1
+expect:
+  action: report
+  reason_contains: "CONFIRMED"
+  chain_min: 2

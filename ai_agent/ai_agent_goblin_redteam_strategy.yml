@@ -56,6 +56,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - llm
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -69,7 +73,7 @@ on_error:   allow
 script: |
   # ── Goblin (promptfoo red-team strategy) behavioural detector ─────────────
   # Only execute_process is live. Everything else is reconstructed from the
-  # behaviour graph: EXECUTE_PROCESS (launch + repeat spawns), LLM_REQUEST
+  # behaviour graph: SPAWNED (launch + repeat spawns), LLM_REQUEST
   # (Hydra multi-turn delivery), HTTP_REQUEST (cloud task prompt supply).
   # Verdict is report-only and states its own confidence.
 
@@ -163,13 +167,15 @@ script: |
       return None
 
   def assess(agent):
+      # SPAWNED edges hang off the agent SESSION; the child end is a session
+      # node whose path/name describe the program (its cmdline is on the edge).
       aid    = agent["id"]
       anchor = None
       atxt   = ""
       spawns = 0
       kids   = []
 
-      for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+      for e in edges(aid, dir="out", kind="SPAWNED"):
           child = node(e["to"])
           blob  = e.get("cmdline", "")
           if child != None:
@@ -184,7 +190,7 @@ script: |
                       txt = child.get("path", "")
                   atxt = trim(txt)
           # one hop deeper: the runner usually spawns node/python carrying the args
-          for e2 in edges(e["to"], dir="out", kind="EXECUTE_PROCESS"):
+          for e2 in edges(e["to"], dir="out", kind="SPAWNED"):
               if goblin_marked(e2.get("cmdline", "")) > 0:
                   spawns += 1
                   kids.append(e2["to"])
@@ -231,12 +237,9 @@ script: |
 
       return {"aid": aid, "stages": stages, "steps": steps, "spawns": spawns}
 
-  def synth(root, cmd):
-      ts   = meta.get("event_ts", "0")
-      head = cmd.replace("\n", " ").split(" ")[0]
-      if len(head) > 120:
-          head = head[:120]
-      return {"from": root, "to": "process://" + head, "kind": "EXECUTE_PROCESS",
+  def synth(frm, to, cmd):
+      ts = meta.get("event_ts", "0")
+      return {"from": frm, "to": to, "kind": "SPAWNED", "dir": "out",
               "ts": ts, "first_ts": ts, "last_ts": ts, "cmdline": trim(cmd)}
 
   def run():
@@ -249,9 +252,7 @@ script: |
           return "allow"   # generic promptfoo / unrelated exec — not this threat
 
       best = None
-      for agent in graph(type="Process"):
-          if agent.get("agent", "0") != "1":
-              continue
+      for agent in sessions(agent=True):
           r = assess(agent)
           if r == None:
               continue
@@ -259,16 +260,18 @@ script: |
               best = r
 
       if best == None:
-          # exec row not ingested yet: only a strong identity marker may report
+          # no agent-rooted spawn found: only a strong identity marker may report,
+          # attributed to the triggering session's own lineage
           if mark < 2:
               return "allow"
-          root = meta.get("agent_name", "")
-          if root == "":
+          tsid = meta.get("session", "")
+          if tsid == "":
               return "report"
-          if not root.startswith("process://"):
-              root = "process://" + root
+          lineage_ = lineage(tsid)
+          root = lineage_[-1]["id"] if lineage_ else tsid
+          frm  = lineage_[1]["id"] if len(lineage_) > 1 else root
           chain = new_chain(root)
-          chain.append(step(synth(root, cmd), stage_id="Strategy Launch",
+          chain.append(step(synth(frm, tsid, cmd), stage_id="Strategy Launch",
                             stage_desc="goblin decision strategy invoked: " + trim(cmd)))
           return {"action": "report",
                   "reason": "promptfoo goblin red-team strategy launched — marker-only, " +
@@ -286,8 +289,8 @@ script: |
       conf = "marker-only (no multi-turn or task-fetch corroboration)"
       if len(best["stages"]) > 0:
           conf = "corroborated: " + ", ".join(best["stages"])
-      print("goblin strategy sighting — " + conf + " | caller_pid " +
-            meta.get("caller_pid", "?"))
+      print("goblin strategy sighting — " + conf + " | session " +
+            meta.get("session", ""))
 
       return {"action": "report",
               "reason": "promptfoo goblin (Hydra multi-turn) red-team strategy executing " +

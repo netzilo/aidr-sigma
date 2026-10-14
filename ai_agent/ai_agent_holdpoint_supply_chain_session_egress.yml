@@ -19,20 +19,20 @@ description: |
        the only way a "compromised holdpoint" would actually reach the host differently
        from the benign one.
 
-    B) ORDERED INSTALL -> EGRESS SEQUENCE — within ONE process session (root instance
-       resolved via caller_pid -> proc_instance -> proc_lineage), the holdpoint
-       acquisition is followed within 15 minutes by an outbound connection made by an
-       instance belonging to that same session. Cloud-metadata, link-local and RFC1918
-       destinations always qualify. Public destinations only qualify when the connecting
-       instance was spawned AFTER the acquisition (i.e. freshly installed code running)
-       or the acquisition itself was a provenance anomaly — this suppresses the package
-       manager's own index fetch and the agent's pre-existing outbound traffic.
+    B) ORDERED INSTALL -> EGRESS SEQUENCE — within ONE session tree (the lineage root
+       of the triggering session), the holdpoint acquisition is followed within
+       15 minutes by an outbound connection made by a session belonging to that same
+       tree. Cloud-metadata, link-local and RFC1918 destinations always qualify. Public
+       destinations only qualify when the connecting session started AFTER the
+       acquisition (i.e. freshly installed code running) or the acquisition itself was a
+       provenance anomaly — this suppresses the package manager's own index fetch and
+       the agent's pre-existing outbound traffic.
 
-  Attribution is strictly instance-scoped: session identity is the (pid, start_ns) pair of
-  the lineage root, and only pids in that lineage (or spawned by it) are ever correlated.
-  No cross-session stitching is possible. ACQUIRED_SKILL is used only as graph enrichment
-  (it is never a triggering edge) to note when the agent also loaded holdpoint-related
-  instruction content.
+  Attribution is strictly session-scoped: the acquisition is the SPAWNED row of the
+  installer session, and only sessions whose lineage root is the same session are ever
+  correlated. No cross-session stitching is possible. ACQUIRED_SKILL is used only as graph
+  enrichment (it is never a triggering edge) to note when the agent also loaded
+  holdpoint-related instruction content.
 author: Egemen
 date: "2026-03-01"
 references:
@@ -66,6 +66,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - connect
+  - skill
 detection:
   sel_pkg_exec:
     event_type: execute_process
@@ -95,9 +99,7 @@ script: |
                       "172.22.", "172.23.", "172.24.", "172.25.", "172.26.", "172.27.",
                       "172.28.", "172.29.", "172.30.", "172.31.", "100.64."]
 
-  WINDOW_NS        = 900000000000     # 15 min: acquisition -> egress correlation window
-  SESSION_TTL_NS   = 3600000000000    # 1 h: how long a session marker is retained
-  LOOKBACK_EXEC_NS = 5000000000       # 5 s: find the real installer child instance
+  WINDOW_NS = 900000000000     # 15 min: acquisition -> egress correlation window
 
   # ── pure helpers (no graph / no log) ────────────────────────────────────────
   def is_loopback(h):
@@ -120,216 +122,148 @@ script: |
   def names(lin):
       out = []
       for x in lin:
-          out.append(x.get("actor_path", "?").split("/")[-1])
+          out.append(x.get("path", "?").split("/")[-1])
       return " -> ".join(out)
 
-  def exec_edge(root_path, actor_path, ts):
-      return {"from": "process://" + root_path, "to": "process://" + actor_path,
-              "kind": "EXECUTE_PROCESS", "ts": str(ts),
-              "first_ts": str(ts), "last_ts": str(ts)}
+  def is_acquisition(cmd):
+      if re.find(PKG_RE, cmd) == None:
+          return False
+      if re.find(INSTALLER_RE, cmd) == None:
+          return False
+      if re.find(ACQUIRE_RE, cmd) == None and re.find(NONCANON_RE, cmd) == None:
+          return False
+      return True
 
-  def conn_edge(actor_path, host, port, proto, ts):
-      return {"from": "process://" + actor_path,
-              "to": "host://" + proto + ":" + host + ":" + port,
-              "kind": "CONNECTS", "ts": str(ts),
+  def spawn_edge(parent_id, child_id, ts):
+      return {"from": parent_id, "to": child_id, "kind": "SPAWNED", "dir": "out",
+              "ts": str(ts), "first_ts": str(ts), "last_ts": str(ts)}
+
+  def conn_edge(sess_id, host, port, proto, ts):
+      return {"from": sess_id, "to": "host://" + proto + ":" + host + ":" + port,
+              "kind": "CONNECTS", "dir": "out", "ts": str(ts),
               "first_ts": str(ts), "last_ts": str(ts), "count": "1"}
 
-  def prune(sessions, now):
-      out = {}
-      for k in sessions:
-          s = sessions[k]
-          if now - int(s.get("ts", 0)) <= SESSION_TTL_NS:
-              out[k] = s
-      if len(out) <= 64:
-          return out
-      rows = []
-      for k in out:
-          rows.append([int(out[k].get("ts", 0)), k])
-      rows = sorted(rows)
-      keep = {}
-      for i in range(len(rows) - 64, len(rows)):
-          keep[rows[i][1]] = out[rows[i][1]]
-      return keep
-
   # ── graph enrichment (only reached on a confirmed session hit) ──────────────
-  def skill_step(s0, now):
-      for a in graph(type="Process"):
-          if a.get("agent", "0") != "1":
+  def skill_step(root_id, s0, now):
+      for e in edges(root_id, dir="out", kind="ACQUIRED_SKILL"):
+          sk = node(e["to"])
+          if sk == None:
               continue
-          for e in edges(a["id"], dir="out", kind="ACQUIRED_SKILL"):
-              sk = node(e["to"])
-              if sk == None:
-                  continue
-              blob = sk.get("name", "") + " " + sk.get("host", "") + " " + sk.get("id", "")
-              if re.find(PKG_RE, blob) == None:
-                  continue
-              ts = int(e.get("ts", "0"))
-              if ts < s0 - WINDOW_NS or ts > now:
-                  continue
-              return step(e, stage_id="Instruction Source",
-                          stage_desc="agent loaded holdpoint-related instruction content from " +
-                                     sk.get("host", "?"))
+          blob = sk.get("name", "") + " " + sk.get("host", "") + " " + sk.get("id", "")
+          if re.find(PKG_RE, blob) == None:
+              continue
+          ts = int(e.get("ts", e.get("last_ts", "0")) or "0")
+          if ts < s0 - WINDOW_NS or ts > now:
+              continue
+          return step(e, stage_id="Instruction Source",
+                      stage_desc="agent loaded holdpoint-related instruction content from " +
+                                 sk.get("host", "?"))
       return None
 
   # ── path A: acquisition of the package ──────────────────────────────────────
   def on_exec():
       cmd = meta.get("content", "")
-      if re.find(PKG_RE, cmd) == None:
-          return "allow"
-      if re.find(INSTALLER_RE, cmd) == None:
-          return "allow"
-      if re.find(ACQUIRE_RE, cmd) == None and re.find(NONCANON_RE, cmd) == None:
+      if not is_acquisition(cmd):
           return "allow"
 
-      now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if cp == 0 or now == 0:
+      now  = int(meta.get("event_ts", "0"))
+      inst = session()
+      if inst == None or now == 0:
+          return "allow"                      # degraded — never attribute on missing data
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
-      inst = proc_instance(cp, now)
-      if inst == None:
-          return "allow"                      # degraded — re-fires when the create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          return "allow"
+      root = lineage_[-1]
 
-      root      = lineage[-1]
-      root_path = root.get("actor_path", "")
-      rkey      = str(root.get("actor_pid", "")) + ":" + str(root.get("actor_start", ""))
+      anomaly = re.find(NONCANON_RE, cmd)
+      if anomaly == None:
+          return "allow"          # canonical acquisition: never alerted on its own
 
-      sessions = prune(store_get("sessions") or {}, now)
-
-      # resolve the real installer instance (child of the caller) within 5s
-      installers = {str(cp): True}
-      inst_path  = inst.get("actor_path", "")
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=now - LOOKBACK_EXEC_NS, limit=200):
-          cl = e.get("cmdline", "")
-          if re.find(PKG_RE, cl) == None:
-              continue
-          if e.get("actor_pid", "") == str(cp) or e.get("parent_pid", "") == str(cp):
-              installers[e.get("actor_pid", "")] = True
-              if e.get("actor_path", "") != "":
-                  inst_path = e["actor_path"]
-
-      pids = {}
-      prev = sessions.get(rkey)
-      if prev != None:
-          for k in prev.get("pids", {}):
-              pids[k] = True
-          for k in prev.get("installers", {}):
-              installers[k] = True
-      for x in lineage:
-          pids[str(x.get("actor_pid", ""))] = True
-      for k in installers:
-          pids[k] = True
-
-      anomaly = ""
-      m = re.find(NONCANON_RE, cmd)
-      if m != None:
-          anomaly = m
-
-      sessions[rkey] = {"ts": now, "cmd": cmd[:300], "root_path": root_path,
-                        "inst_path": inst_path, "pids": pids,
-                        "installers": installers, "anomaly": anomaly}
-      if store_usage()["free"] > 16384:
-          store_set("sessions", sessions)
-
-      if anomaly == "":
-          return "allow"          # canonical acquisition: recorded silently, never alerted
-
-      chain = new_chain("process://" + root_path)
-      chain.append(step(exec_edge(root_path, inst_path, now),
+      parent_id = inst.get("parent", "") or root["id"]
+      chain = new_chain(root["id"])
+      chain.append(step(spawn_edge(parent_id, inst["id"], now),
                    stage_id="Supply Chain Acquisition",
                    stage_desc="holdpoint acquired via non-canonical channel (" + anomaly +
                               "): " + cmd[:200]))
-      print("holdpoint provenance anomaly: " + anomaly + " | " + names(lineage))
+      print("holdpoint provenance anomaly: " + anomaly + " | " + names(lineage_))
       return {"action": "report",
               "reason": "holdpoint acquired from a non-default source (" + anomaly +
-                        ") by " + names(lineage),
+                        ") by " + names(lineage_),
               "chain":  chain}
 
-  # ── path B: egress by the same session after acquisition ────────────────────
+  # ── path B: egress by the same session tree after acquisition ───────────────
+  def find_acquisition(root_id, now):
+      # newest holdpoint acquisition inside the window whose lineage root is ours
+      for e in events(kind="SPAWNED", since_ns=now - WINDOW_NS, until_ns=now, limit=500):
+          cl = e.get("cmdline", "")
+          if not is_acquisition(cl):
+              continue
+          acq_lin = lineage(e.get("session_id", ""))
+          if not acq_lin or acq_lin[-1]["id"] != root_id:
+              continue
+          return e
+      return None
+
   def on_connect():
       host = meta.get("host", "")
       if host == "" or is_loopback(host):
           return "allow"
-      sessions = store_get("sessions") or {}
-      if not sessions:
-          return "allow"          # cheap gate: no holdpoint session on this host
-
-      now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if cp == 0 or now == 0:
-          return "allow"
-      sessions = prune(sessions, now)
-      if not sessions:
-          return "allow"
-
-      inst = proc_instance(cp, now)
-      if inst == None:
+      now  = int(meta.get("event_ts", "0"))
+      inst = session()
+      if inst == None or now == 0:
           return "allow"                      # degraded — never attribute on missing data
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
+      root = lineage_[-1]
 
-      hit  = ""
-      rkey = str(lineage[-1].get("actor_pid", "")) + ":" + str(lineage[-1].get("actor_start", ""))
-      if rkey in sessions:
-          hit = rkey
-      if hit == "":
-          for k in sessions:
-              p = sessions[k].get("pids", {})
-              if str(cp) in p:
-                  hit = k
-              for x in lineage:
-                  if str(x.get("actor_pid", "")) in p:
-                      hit = k
-      if hit == "":
-          return "allow"          # connection belongs to a different session
-
-      s  = sessions[hit]
-      s0 = int(s.get("ts", 0))
+      acq = find_acquisition(root["id"], now)
+      if acq == None:
+          return "allow"          # no holdpoint acquisition in this session tree
+      s0 = int(acq.get("ts", "0"))
       if now < s0 or (now - s0) > WINDOW_NS:
           return "allow"          # ordering + window: acquisition must precede egress
 
+      acq_id  = acq.get("session_id", "")
+      acq_cmd = acq.get("cmdline", "")
+      anomaly = re.find(NONCANON_RE, acq_cmd)
+
       dclass = dest_class(host)
       if dclass == "public":
-          if str(cp) in s.get("installers", {}):
-              return "allow"      # the package manager fetching from its own index
-          fresh = int(inst.get("actor_start", "0")) > s0
-          if not fresh and s.get("anomaly", "") == "":
+          # the package manager (or its helpers) fetching from its own index
+          installers = {acq_id: True}
+          for c in children(acq_id):
+              installers[c["id"]] = True
+          if inst["id"] in installers:
+              return "allow"
+          for x in lineage_:
+              if x["id"] in installers:
+                  return "allow"
+          fresh = int(inst.get("first_seen", "0")) > s0
+          if not fresh and anomaly == None:
               return "allow"      # pre-existing process, canonical install: not evidence
 
-      p = s.get("pids", {})
-      p[str(cp)] = True
-      for x in lineage:
-          p[str(x.get("actor_pid", ""))] = True
-      s["pids"]     = p
-      sessions[hit] = s
-      if store_usage()["free"] > 16384:
-          store_set("sessions", sessions)
+      port  = meta.get("port", "")
+      proto = meta.get("protocol", "tcp")
 
-      root_path = s.get("root_path", lineage[-1].get("actor_path", ""))
-      port      = meta.get("port", "")
-      proto     = meta.get("protocol", "tcp")
-
-      chain = new_chain("process://" + root_path)
-      chain.append(step(exec_edge(root_path, s.get("inst_path", ""), s0),
+      chain = new_chain(root["id"])
+      chain.append(step(spawn_edge(acq.get("parent_session", "") or root["id"], acq_id, s0),
                    stage_id="Supply Chain Acquisition",
-                   stage_desc="holdpoint acquired in this session: " + s.get("cmd", "")[:200]))
-      sk = skill_step(s0, now)
+                   stage_desc="holdpoint acquired in this session: " + acq_cmd[:200]))
+      sk = skill_step(root["id"], s0, now)
       if sk != None:
           chain.append(sk)
-      chain.append(step(conn_edge(inst.get("actor_path", ""), host, port, proto, now),
+      chain.append(step(conn_edge(inst["id"], host, port, proto, now),
                    stage_id="Post-Install Egress",
                    stage_desc="post-acquisition connection to " + dclass + " destination " +
                               host + ":" + port))
 
       gap = (now - s0) // 1000000000
       print("holdpoint session egress: " + host + " (" + dclass + ") " + str(gap) +
-            "s after acquisition | " + names(lineage))
+            "s after acquisition | " + names(lineage_))
       return {"action": "report",
               "reason": "holdpoint acquisition followed by " + dclass + " egress to " + host +
-                        " " + str(gap) + "s later, same session (" + names(lineage) + ")",
+                        " " + str(gap) + "s later, same session (" + names(lineage_) + ")",
               "chain":  chain}
 
   def run():

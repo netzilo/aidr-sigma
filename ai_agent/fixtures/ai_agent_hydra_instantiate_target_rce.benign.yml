@@ -1,0 +1,29 @@
+rule: ai_agent_hydra_instantiate_target_rce.yml
+subjects:
+  bash:
+    session: pid/100:1
+    program: /bin/bash
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: gpu-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: bash
+    program: /usr/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: python, cmdline: "python3.11 train.py --config-name base hydra/launcher=submitit_slurm"}
+  - {kind: file_read, subject: python, path: /home/dev/proj/conf/base.yaml}
+  - {kind: spawn, subject: sh, cmdline: "/bin/sh -c sbatch /home/dev/proj/.submitit/job.sh"}
+expect:
+  action: allow

@@ -9,11 +9,11 @@ description: |
   file:///etc/passwd style reference caused the image parser to read arbitrary files
   from the server host. 0.16.7 added rejection of file:/// URLs in image content.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"] for the triggering
-  http_request, resolves the exact process instance with proc_instance(), walks the
-  spawn chain with proc_lineage(), expands to sibling/child instances spawned by that
-  same lineage, and then queries the event log for READ_FILE rows performed by those
-  instances only. Nothing outside the triggering session is ever attributed.
+  Attribution is session-keyed: the rule anchors on the triggering http_request's
+  session, walks lineage() up the spawn chain, expands to the sessions spawned by
+  that same lineage inside the window, and then queries the event log for READ_FILE
+  rows performed by those session ids only. Nothing outside the triggering session
+  tree is ever attributed.
 
   Taxonomy note: the supplied mapping carries no ATLAS technique, and the supplied
   OWASP categories (A01:2021 Broken Access Control, A03:2021 Injection) belong to the
@@ -50,6 +50,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -145,13 +149,19 @@ script: |
       return p
 
   def ev_edge(e):
-      return {"from":     "process://" + e.get("actor_path", ""),
-              "to":       e.get("target_id", ""),
-              "kind":     e.get("kind", ""),
-              "ts":       e.get("ts", "0"),
-              "first_ts": e.get("ts", "0"),
-              "last_ts":  e.get("ts", "0")}
-
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
   # ── main ─────────────────────────────────────────────────────────────────────
   def run():
       # 1. relevance gate — pure string checks on meta only
@@ -174,52 +184,52 @@ script: |
               if sens == "" and p.find(a) >= 0:
                   sens = p
 
-      # 2. anchor on the exact triggering instance
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      # 2. anchor on the triggering session
+      cp = meta.get("session", "")
+      if cp == "":
           return {"action": "report",
                   "reason": "Letta ImageContent LFI attempt to " + host + path +
-                            " (" + urls[0] + ") — no caller pid, attribution unavailable"}
+                            " (" + urls[0] + ") — no session, attribution unavailable"}
 
-      inst = proc_instance(cp, event_ts)
+      inst = session(cp)
       if inst == None:
           return {"action": "report",
                   "reason": "Letta ImageContent LFI attempt to " + host + path +
-                            " (" + urls[0] + ") — attribution degraded (instance not yet logged)"}
+                            " (" + urls[0] + ") — attribution degraded (session not yet known)"}
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
-      # 3. scope strictly to this session: lineage + instances it spawned
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "0")] = x.get("actor_start", "0")
+      # 3. scope strictly to this session tree: lineage + sessions it spawned
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
 
       win_start = event_ts - WINDOW_NS
       if win_start < 0:
           win_start = 0
 
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=win_start,
+      execs = events(kind="SPAWNED", since_ns=win_start,
                            until_ns=event_ts, limit=2000)
       for depth in range(3):
           for e in execs:
-              if e.get("parent_pid", "") in session:
-                  session[e.get("actor_pid", "0")] = e.get("actor_start", "0")
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
       names = []
-      for x in lineage:
-          names.append(basename(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(basename(x.get("path", "")))
       lin_s = " -> ".join(names)
 
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
 
       # 4. required anchor stage — taken from meta, never re-queried (race-free)
       target = "url://unknown"
       if host != "":
           target = "https://" + host
-      trig = {"from":     "process://" + inst.get("actor_path", ""),
+      trig = {"from":     inst["id"],
               "to":       target,
               "kind":     "HTTP_REQUEST",
               "method":   meta.get("method", ""),
@@ -231,11 +241,10 @@ script: |
                         stage_desc="request to " + host + path +
                                    " embeds a local filesystem URL inside image content: " + urls[0]))
 
-      # 5. optional corroboration — READ_FILE by THIS session only, path-matched
+      # 5. optional corroboration — READ_FILE by THIS session tree only, path-matched
       corroborated = 0
-      for pid in session:
-          rows = query_events(kind="READ_FILE", actor_pid=int(pid),
-                              actor_start=int(session[pid]), since_ns=win_start,
+      for sid in scope:
+          rows = events(kind="READ_FILE", session=sid, since_ns=win_start,
                               until_ns=event_ts, limit=300)
           for r in rows:
               rp = r.get("path", "")
@@ -253,7 +262,7 @@ script: |
                   continue
               chain.append(step(ev_edge(r),
                                 stage_id="Local File Read",
-                                stage_desc="session process " + basename(r.get("actor_path", "")) +
+                                stage_desc="session process " + basename(r.get("program", "")) +
                                            " read the referenced local file: " + hit))
               corroborated = corroborated + 1
               if corroborated >= 3:
@@ -268,7 +277,7 @@ script: |
           reason = reason + "; references sensitive path " + sens
       if corroborated > 0:
           reason = reason + "; " + str(corroborated) + " matching local file read(s) by the same session"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           reason = reason + " [attribution: degraded lineage]"
 
       print(reason)

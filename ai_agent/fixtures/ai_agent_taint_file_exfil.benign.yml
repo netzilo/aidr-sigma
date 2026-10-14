@@ -1,0 +1,15 @@
+rule: ai_agent_taint_file_exfil.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: file_read, subject: claude, path: /Users/dev/proj/README.md}
+  - {kind: http_request, subject: claude, url: "https://api.github.com/repos/acme/proj/pulls", method: POST, request_id: r1, content_type: application/json, body: '{"title":"docs"}'}
+  - {kind: tool_call, subject: claude, server: github, server_url: "https://mcp.github.com", tool: create_pr, call_id: c1, args: '{"title":"docs"}'}
+expect:
+  action: allow

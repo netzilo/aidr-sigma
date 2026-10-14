@@ -18,6 +18,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - skill
 detection:
   selection_always_remember:
     event_type:

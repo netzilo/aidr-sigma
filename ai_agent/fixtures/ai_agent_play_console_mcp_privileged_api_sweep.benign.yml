@@ -1,0 +1,17 @@
+rule: ai_agent_play_console_mcp_privileged_api_sweep.yml
+subjects:
+  mcp:
+    session: pid/100:1
+    program: /usr/local/bin/node
+    name: node
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: mcp}
+  - {kind: http_request, subject: mcp, url: "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/com.example.app/edits", method: POST, request_id: r1, content_type: application/json, body: "{}"}
+  - {kind: http_request, subject: mcp, url: "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/com.example.app/edits/1/bundles", method: POST, request_id: r2, content_type: application/json, body: "{}"}
+  - {kind: http_request, subject: mcp, url: "https://androidpublisher.googleapis.com/androidpublisher/v3/applications/com.example.app/edits/1:commit", method: POST, request_id: r3, content_type: application/json, body: "{}"}
+expect:
+  action: allow

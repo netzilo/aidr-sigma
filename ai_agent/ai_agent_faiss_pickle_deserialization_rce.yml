@@ -9,13 +9,11 @@ description: |
   application, and the only observable artifact is the child process that
   __reduce__ / os.system spawns.
 
-  The rule is instance-resolved: it anchors on meta["caller_pid"] of the
-  execute_process event, resolves the exact process instance with proc_instance(),
-  walks the real spawn chain with proc_lineage(), and requires a Python interpreter
+  The rule is session-resolved: it anchors on the triggering session of the
+  execute_process event, walks its real lineage, and requires a Python interpreter
   (or python-hosted app server) within 3 hops of the caller. Corroborating siblings
-  are pulled from query_events(kind="EXECUTE_PROCESS") filtered on the SAME
-  (parent_pid, parent_start) instance pair and a 5-minute window, so nothing is ever
-  attributed across sessions or across PID reuse.
+  are the SPAWNED rows whose parent is that SAME interpreter session inside a
+  5-minute window, so nothing is ever attributed across sessions.
 
   High-severity payload shapes (reverse shell, download-and-pipe, encoded exec,
   literal pickle idioms) fire on their own once a Python host is confirmed.
@@ -50,6 +48,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
 detection:
   sel_exec:
     event_type: execute_process
@@ -143,25 +143,43 @@ script: |
           return "?"
       return path.split("/")[-1]
 
+  def cmd_of(content):
+      # execute_process content is {"command": ..., "path": ...}; fall back to the raw text
+      m = re.find(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+      if m == None:
+          return content
+      inner = m[m.find(":") + 1:].strip()
+      inner = inner[1:len(inner) - 1]
+      return inner.replace('\\"', '"').replace("\\\\", "\\")
+
+  def spawn_edge(sess):
+      # the real SPAWNED edge (parent -> session), carrying ts + cmdline
+      for e in edges(sess["id"], dir="in", kind="SPAWNED"):
+          return e
+      t = sess.get("first_seen", "0")
+      return {"from": sess.get("parent", "") or sess["id"], "to": sess["id"],
+              "kind": "SPAWNED", "dir": "out", "ts": t, "first_ts": t, "last_ts": t}
+
   def ev_edge(e):
-      frm = e.get("parent_path", "")
-      if frm == "":
-          frm = "pid:" + e.get("parent_pid", "?")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + frm,
-          "to":       "process://" + e.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
-          "cmdline":  e.get("cmdline", ""),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def run():
       # ── 1. Relevance gate: pure string work on meta, no graph, no log ────────
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = cmd_of(meta.get("content", ""))
       if cmd == "":
           return "allow"
       hi  = match_any(PAYLOAD_HIGH, cmd)
@@ -169,50 +187,45 @@ script: |
       if hi == None and med == None:
           return "allow"
 
-      # ── 2. Anchor on the exact triggering instance ───────────────────────────
-      cp = to_int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
+      # ── 2. Anchor on the exact triggering session ────────────────────────────
       ev_ts = to_int(meta.get("event_ts", "0"))
-      inst  = proc_instance(cp, ev_ts)
+      inst  = session()
       if inst == None:
           return "allow"          # degraded attribution - never guess an owner
-      lineage = proc_lineage(to_int(inst.get("actor_pid", "0")),
-                             to_int(inst.get("actor_start", "0")))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # ── 3. Required anchor: a Python host within MAX_HOP of the caller ───────
       py     = None
       py_idx = -1
-      for i in range(len(lineage)):
+      for i in range(len(lineage_)):
           if i > MAX_HOP:
               break
-          if is_py_host(lineage[i].get("actor_path", "")):
-              py     = lineage[i]
+          if is_py_host(lineage_[i].get("path", "")):
+              py     = lineage_[i]
               py_idx = i
               break
       if py == None:
           return "allow"          # not a python-hosted deserialization surface
 
-      py_pid   = to_int(py.get("actor_pid", "0"))
-      py_start = to_int(py.get("actor_start", "0"))
-      py_cmd   = py.get("cmdline", "")
-      ctx_hit  = re.find(CONTEXT_MARK, py_cmd) != None
+      py_edge = spawn_edge(py)
+      py_cmd  = py_edge.get("cmdline", "")
+      ctx_hit = re.find(CONTEXT_MARK, py_cmd) != None
 
       # ── 4. Same-instance, same-window siblings (strict session scoping) ──────
       sibs = []
-      if ev_ts > 0 and py_pid > 0:
+      if ev_ts > 0:
           since = ev_ts - WINDOW_NS
-          for e in query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                                until_ns=ev_ts, limit=SIB_LIMIT):
-              if to_int(e.get("parent_pid", "0")) != py_pid:
+          for e in events(kind="SPAWNED", since_ns=since,
+                          until_ns=ev_ts, limit=SIB_LIMIT):
+              if e.get("parent_session", "") != py["id"]:
                   continue
-              if to_int(e.get("parent_start", "0")) != py_start:
-                  continue
+              if e.get("session_id", "") == inst["id"]:
+                  continue            # the trigger itself, already in hand
               c = e.get("cmdline", "")
               if c == "":
-                  c = e.get("actor_path", "")
+                  c = e.get("program", "")
               if match_any(PAYLOAD_HIGH, c) != None or match_any(PAYLOAD_MED, c) != None:
                   sibs.append(e)
               if len(sibs) >= MAX_SIBS:
@@ -223,13 +236,13 @@ script: |
           return "allow"          # medium shape, no corroboration - stay quiet
 
       # ── 6. Kill chain, rooted at the session owner ──────────────────────────
-      chain = new_chain("process://" + lineage[-1].get("actor_path", py.get("actor_path", "")))
+      chain = new_chain(lineage_[-1]["id"])
 
-      host_desc = "python host " + base(py.get("actor_path", "")) + \
-                  " (pid " + str(py_pid) + ") cmdline: " + clip(py_cmd, 200)
+      host_desc = "python host " + base(py.get("path", "")) + \
+                  " (" + py["id"] + ") cmdline: " + clip(py_cmd, 200)
       if ctx_hit:
           host_desc = host_desc + " [langchain/faiss/pickle marker present]"
-      chain.append(step(ev_edge(py),
+      chain.append(step(py_edge,
                         stage_id="Vulnerable Host",
                         stage_desc=host_desc))
 
@@ -237,16 +250,16 @@ script: |
           chain.append(step(ev_edge(e),
                             stage_id="Repeated Payload Exec",
                             stage_desc="same interpreter instance spawned: " +
-                                       clip(e.get("cmdline", e.get("actor_path", "?")), 160)))
+                                       clip(e.get("cmdline", e.get("program", "?")), 160)))
 
-      child_path = inst.get("actor_path", "")
+      # The trigger stage comes from meta, never from a log re-lookup.
+      frm = py["id"]
       if py_idx == 0:
-          toks = cmd.split(" ")
-          child_path = toks[0] if len(toks) > 0 else child_path
+          frm = py.get("parent", "") or py["id"]
       trig = {
-          "from":     "process://" + py.get("actor_path", ""),
-          "to":       "process://" + child_path,
-          "kind":     "EXECUTE_PROCESS",
+          "from":     frm,
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
           "ts":       str(ev_ts),
           "first_ts": str(ev_ts),
           "last_ts":  str(ev_ts),
@@ -259,12 +272,12 @@ script: |
                                    clip(cmd, 200)))
 
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(base(x.get("path", "")))
       lin = " <- ".join(names)
 
       reason = "Possible FAISS/pickle deserialization RCE: python host " + \
-               base(py.get("actor_path", "")) + " spawned a " + sev + \
+               base(py.get("path", "")) + " spawned a " + sev + \
                " payload process; lineage " + lin
       if ctx_hit:
           reason = reason + "; interpreter cmdline references langchain/faiss/pickle"

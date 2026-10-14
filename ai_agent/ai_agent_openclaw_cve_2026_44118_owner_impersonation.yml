@@ -24,6 +24,11 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - process_exec
+  - tool
+  - http
+  - connect
 detection:
   sel_trigger:
     event_type:
@@ -36,26 +41,40 @@ action: execute
 on_timeout: block
 on_error: allow
 script: |
+  LOOPBACK = ["127.0.0.1", "::1", "localhost", "[::1]"]
+
+  # Structural loopback test on a Host/URL node's host (may carry a port).
+  def is_loopback(h):
+      if h == "":
+          return False
+      if h in LOOPBACK:
+          return True
+      if h.startswith("127.") or h.startswith("[::1]"):
+          return True
+      if h.startswith("localhost:"):
+          return True
+      return False
+
   def run():
       content = meta.get("content", "")
-      if re.find(r'(?i)senderIsOwner\s*[:=]\s*["\']?true', content) != None:
+      if re.find(r'(?i)senderIsOwner["\']?\s*[:=]\s*["\']?true', content) != None:
           print("CVE-2026-44118: senderIsOwner=true in payload — direct flag abuse")
           return "block"
 
       if meta.get("context_type", "") == "http_request":
           host = meta.get("host", "")
-          if host in ["127.0.0.1", "::1", "localhost"]:
+          if is_loopback(host):
               print("CVE-2026-44118: HTTP request to loopback host " + host + " — owner API impersonation")
               return "block"
 
-      for agent in graph(type="Agent"):
+      for agent in sessions(agent=True):
           aid = agent["id"]
           level1 = []
-          for e in edges(aid, dir="out", kind="EXECUTE_PROCESS"):
+          for e in edges(aid, dir="out", kind="SPAWNED"):
               level1.append(e["to"])
           level2 = []
           for pid in level1:
-              for e in edges(pid, dir="out", kind="EXECUTE_PROCESS"):
+              for e in edges(pid, dir="out", kind="SPAWNED"):
                   level2.append(e["to"])
           all_actors = [aid] + level1 + level2
           for actor_id in all_actors:
@@ -63,14 +82,14 @@ script: |
                   h = node(e["to"])
                   if h == None:
                       continue
-                  if h.get("is_private", "0") == "1":
+                  if is_loopback(h.get("host", "")):
                       print("CVE-2026-44118: loopback CONNECTS from " + actor_id + " to " + h.get("host", "?"))
                       return "block"
               for e in edges(actor_id, dir="out", kind="HTTP_REQUEST"):
                   u = node(e["to"])
                   if u == None:
                       continue
-                  if u.get("is_private", "0") == "1":
+                  if is_loopback(u.get("host", "")):
                       print("CVE-2026-44118: loopback HTTP_REQUEST from " + actor_id + " to " + u.get("host", "?"))
                       return "block"
 

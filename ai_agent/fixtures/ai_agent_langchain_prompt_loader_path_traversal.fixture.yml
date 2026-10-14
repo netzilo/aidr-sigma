@@ -1,0 +1,32 @@
+subjects:
+  claude:
+    session: pid/100:1
+    program: /Applications/Claude.app/Contents/MacOS/Claude
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: claude
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  worker:
+    session: pid/102:1
+    parent: python
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: spawn, subject: python, cmdline: "python3.11 /srv/app/serve.py"}
+  - {kind: file_read, subject: python, path: /srv/app/prompts/summary_prompt.yaml}
+  - {kind: file_read, subject: python, path: /root/.config/gcloud/application_default_credentials.json}
+  - {kind: spawn, subject: worker, cmdline: "python3.11 /srv/app/worker.py"}
+expect:
+  action: report
+  reason_contains: "read /root/.config/gcloud/application_default_credentials.json outside the tree of its config /srv/app/prompts/summary_prompt.yaml"
+  chain_min: 2

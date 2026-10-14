@@ -1,0 +1,23 @@
+subjects:
+  openclaw:
+    session: pid/100:1
+    program: /opt/openclaw/bin/openclaw
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: openclaw
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: openclaw}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'cat /etc/shadow'"}
+  - {kind: file_read, subject: sh, path: /etc/shadow}
+  - {kind: tool_call, subject: openclaw, server: openclaw, server_url: "http://127.0.0.1:7000", tool: exec, call_id: c1, args: '{"cmd": "ls"}'}
+expect:
+  action: block
+  output_contains: ["CVE-2026-44113: sensitive READ — session=session://pid/101:1 path=/etc/shadow"]

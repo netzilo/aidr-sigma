@@ -60,6 +60,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -254,7 +256,9 @@ script: |
           if u.get("host", "") == host:
               url_nodes.append(u)
 
-      proc_id    = ""
+      # the acting session is the triggering one; its own HTTP_REQUEST edge to
+      # the engine host already exists when the script runs
+      proc_id    = meta.get("session", "")
       url_id     = ""
       burst_e    = None
       burst_cnt  = 0
@@ -306,11 +310,7 @@ script: |
           label = "suspect guided schema (" + "; ".join(soft) + ")"
 
       if proc_id == "":
-          an = meta.get("agent_name", "")
-          if an != "":
-              proc_id = "process://" + an
-          else:
-              proc_id = "process://unknown"
+          return "allow"                     # no session to attribute to
       if url_id == "":
           url_id = meta.get("url", host)
 

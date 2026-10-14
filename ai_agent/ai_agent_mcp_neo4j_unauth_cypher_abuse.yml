@@ -39,6 +39,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
+  - http
 detection:
 
   # ── Scope: the three contexts whose `content` carries the JSON-RPC body ──────

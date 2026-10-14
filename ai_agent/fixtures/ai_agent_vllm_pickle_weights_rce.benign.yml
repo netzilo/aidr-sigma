@@ -1,0 +1,20 @@
+rule: ai_agent_vllm_pickle_weights_rce.yml
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/bash
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+  installer:
+    session: pid/101:1
+    parent: shell
+    program: /bin/sh
+    actors: [{id: u1, name: MLOps}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: installer, cmdline: "sh -c 'curl -fsSL https://get.example.com/install.sh | bash'"}
+expect:
+  action: allow

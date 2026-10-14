@@ -1,0 +1,23 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com, groups: [eng]}]
+    device: dev-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: cursor
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'sed -i s/x/y/ .cursorrules'"}
+  - {kind: file_write, subject: sh, path: /Users/dev/proj/.cursorrules}
+expect:
+  action: report
+  reason_contains: "Agent instruction file modified outside a tool call: WRITE /Users/dev/proj/.cursorrules"
+  chain_min: 1

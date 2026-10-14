@@ -1,0 +1,13 @@
+rule: ai_agent_mcp_rug_pull.yml
+subjects:
+  claude:
+    session: agent/claude/s-1
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: github, server_url: "https://mcp.github.com", tool: create_pr, call_id: c1, args: '{"title": "fix"}'}
+expect:
+  action: allow

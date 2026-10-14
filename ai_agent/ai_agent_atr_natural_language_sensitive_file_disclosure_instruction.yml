@@ -30,7 +30,7 @@ detection:
   sel_0:
     content|re: (?i)\b(?:read|output|return|include|append|attach|disclose|reveal|print|show|leak|exfiltrat\w*)\s+(?:(?:any|all|every|the|its?|user(?:'s|s)?|their|the\s+user(?:'s|s)?)\s+(?:contents?\s+of\s+)?|the\s+contents?\s+of\s+|its?\s+contents?\s+of\s+)(?:\/etc\/(?:passwd|shadow|sudoers|hosts)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys|known_hosts)|~?\/\.aws\/credentials|~?\/\.config\/gcloud|kubeconfig|\.kube\/config|~?\/\.netrc|~?\/\.docker\/config\.json|~?\/\.npmrc|~?\/\.pypirc)
   sel_1:
-    content|re: (?i)\b(?:always|whenever|every\s+time|you\s+(?:must|should|will|shall))\b[\s\S]{0,60}\b(?:include|append|attach|disclose|output|return|read|cat|print)\b[\s\S]{0,60}(?:\/etc\/(?:passwd|shadow|sudoers)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys)|~?\/\.aws\/credentials|kubeconfig|\.env(?:\s|$|[\.,)\b])|~?\/\.netrc|~?\/\.docker\/config\.json)
+    content|re: (?i)\b(?:always|whenever|every\s+time|you\s+(?:must|should|will|shall))\b[\s\S]{0,60}\b(?:include|append|attach|disclose|output|return|read|cat|print)\b[\s\S]{0,60}(?:\/etc\/(?:passwd|shadow|sudoers)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys)|~?\/\.aws\/credentials|kubeconfig|\.env(?:\s|$|[.,)]|\b)|~?\/\.netrc|~?\/\.docker\/config\.json)
   sel_2:
     content|re: (?i)(?:contents?\s+of|copy\s+of)\s+(?:\/etc\/(?:passwd|shadow|sudoers|hosts)|~?\/\.ssh\/(?:id_[a-z0-9]+|authorized_keys|known_hosts)|~?\/\.aws\/credentials|kubeconfig|~?\/\.config\/gcloud|~?\/\.netrc|~?\/\.docker\/config\.json|~?\/\.npmrc|~?\/\.pypirc)
   condition: 1 of sel_*

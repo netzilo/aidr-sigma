@@ -17,11 +17,11 @@ description: |
   untrusted hub config that authorised it) and the execute_process event for
   the payload the imported module spawns.
 
-  Strictly instance-resolved: anchored on meta.caller_pid, resolved through
-  proc_instance -> proc_lineage, expanded only to child instances whose
-  (parent_pid, parent_start) exactly matches a member of this session, and
-  bounded to a 5-minute window ending at the triggering spawn. No attribution
-  is ever made across sessions or across recycled PIDs.
+  Strictly session-scoped: anchored on the triggering session (the spawned
+  payload), walked through lineage() to the owning session root, expanded only
+  to sessions spawned by a member of that tree, and bounded to a 5-minute
+  window ending at the triggering spawn. No attribution is ever made across
+  sessions.
 author: Selhan
 date: "2026-06-12"
 references:
@@ -52,6 +52,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_trigger:
     event_type: execute_process
@@ -72,7 +75,7 @@ script: |
   # ---- constants (this rule's own window; never persisted) -------------------
   WINDOW_NS       = 300000000000   # 5 min: repo download + init + payload spawn
   MAX_SESSION     = 16             # bound the file-read fan-out
-  READ_LIMIT      = 800            # READ_FILE is high volume - always pid-scoped
+  READ_LIMIT      = 800            # READ_FILE is high volume - always session-scoped
   EXEC_SCAN_LIMIT = 3000
   SEEN_CAP        = 200
 
@@ -106,9 +109,10 @@ script: |
   def ev_edge(e, target):
       t = e.get("ts", "0")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     e.get("session_id", ""),
           "to":       target,
           "kind":     e.get("kind", ""),
+          "dir":      "out",
           "ts":       t,
           "first_ts": t,
           "last_ts":  t,
@@ -121,57 +125,45 @@ script: |
       cmd = meta.get("content", "")
       if cmd == "" or not spawn_is_suspicious(cmd):
           return "allow"
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
       trigger_ts = int(meta.get("event_ts", "0"))
       if trigger_ts == 0:
           return "allow"
       since = trigger_ts - WINDOW_NS
 
-      # 2. ANCHOR on the exact triggering instance ------------------------------
-      inst = proc_instance(cp, trigger_ts)
+      # 2. ANCHOR on the triggering session (the spawned payload) ---------------
+      inst = session()
       if inst == None:
           return "allow"          # degraded - never attribute on missing data
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # 3. SESSION SCOPE - lineage plus instance-exact descendants only ---------
-      session = {}
-      for x in lineage:
-          st = x.get("actor_start", "")
-          if st != "":
-              session[x["actor_pid"]] = st
-      if not session:
-          return "allow"
+      # 3. SESSION SCOPE - lineage plus sessions spawned by it only --------------
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                          until_ns=trigger_ts, limit=EXEC_SCAN_LIMIT)
+      rows = events(kind="SPAWNED", since_ns=since,
+                    until_ns=trigger_ts, limit=EXEC_SCAN_LIMIT)
       for depth in range(3):
           for e in rows:
-              pp = e.get("parent_pid", "")
-              if pp == "" or pp not in session:
+              pp = e.get("parent_session", "")
+              if pp == "" or pp not in scope:
                   continue
-              # (pid, start) equality - a recycled PID from another session
-              # can never be pulled into this session set
-              if e.get("parent_start", "") != session[pp]:
+              # sessions are instances - a recycled PID is a different session
+              ap = e.get("session_id", "")
+              if ap == "":
                   continue
-              ap = e.get("actor_pid", "")
-              ast = e.get("actor_start", "")
-              if ap == "" or ast == "":
-                  continue
-              if ap not in session and len(session) < MAX_SESSION:
-                  session[ap] = ast
+              if ap not in scope and len(scope) < MAX_SESSION:
+                  scope[ap] = True
 
       # 4. REQUIRED ANCHOR STAGE - remote-code module imported in-window --------
       anchor = None
       cfg    = None
-      for pid in session:
-          reads = query_events(kind="READ_FILE",
-                               actor_pid=int(pid), actor_start=int(session[pid]),
-                               since_ns=since, until_ns=trigger_ts,
-                               limit=READ_LIMIT)
+      for sid in scope:
+          reads = events(kind="READ_FILE", session=sid,
+                         since_ns=since, until_ns=trigger_ts,
+                         limit=READ_LIMIT)
           for r in reads:
               p = r.get("path", "")
               if p == "":
@@ -191,9 +183,9 @@ script: |
       if a_ts <= 0 or a_ts > trigger_ts or a_ts < since:
           return "allow"          # ordering / window guard
 
-      # 5. one report per (session root, materialisation) -----------------------
-      root = lineage[len(lineage) - 1]
-      sig  = root.get("actor_pid", "") + ":" + root.get("actor_start", "") + ":" + str(a_ts)
+      # 5. one report per (session root, materialisation) ------------------------
+      root = lineage_[len(lineage_) - 1]
+      sig  = root.get("id", "") + ":" + str(a_ts)
       seen = store_get("seen")
       if seen == None:
           seen = {}
@@ -206,10 +198,10 @@ script: |
           store_set("seen", seen)
 
       # 6. KILL CHAIN from event rows, instance-accurate ------------------------
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "").split("/")[-1])
       lin = " -> ".join(names)
 
       apath = anchor.get("path", "")
@@ -220,16 +212,17 @@ script: |
       chain.append(step(ev_edge(anchor, apath),
                         stage_id="Remote Code Materialized",
                         stage_desc="dynamic module imported from HF remote-code cache by " +
-                                   anchor.get("actor_path", "?") + ": " + apath))
+                                   anchor.get("program", "?") + ": " + apath))
       if cfg != None and int(cfg.get("ts", "0")) > a_ts:
           chain.append(step(ev_edge(cfg, cfg.get("path", "")),
                             stage_id="Untrusted Model Config",
                             stage_desc="repo-supplied config read during model init: " + cfg.get("path", "")))
 
       trig = {
-          "from":     "process://" + lineage[0].get("actor_path", ""),
-          "to":       "process://spawned",
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", ""),
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(trigger_ts),
           "first_ts": str(trigger_ts),
           "last_ts":  str(trigger_ts),

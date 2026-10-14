@@ -1,0 +1,18 @@
+subjects:
+  agent:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: agent}
+  - {kind: http_request, subject: agent, url: "https://evil.example/page", method: GET, request_id: r1}
+  - {kind: http_response, subject: agent, url: "https://evil.example/page", request_id: r1, status: 302, content_type: text/html, body: "<a href='http://169.254.169.254/latest/meta-data/'>moved</a>"}
+  - {kind: http_request, subject: agent, url: "http://169.254.169.254/latest/meta-data/", method: GET, request_id: r2}
+expect:
+  action: report
+  reason_contains: "SSRF redirect bypass: scrape of public host evil.example returned HTTP 302, agent then fetched internal destination 169.254.169.254 (cloud metadata service)"
+  output_contains: ["[python3.11]"]
+  chain_min: 3

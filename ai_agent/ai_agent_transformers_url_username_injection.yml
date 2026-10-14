@@ -15,12 +15,12 @@ description: |
   fetches content (image / model asset) from the wrong origin: phishing content,
   malware, or an exfiltration sink.
 
-  This rule is instance-resolved. It anchors on meta["caller_pid"], resolves the
-  exact process instance with proc_instance(), walks proc_lineage() for the owning
-  session, expands that session by one bounded EXECUTE_PROCESS pass, and then
-  queries HTTP_REQUEST rows from the event log scoped strictly to that session's
-  instances. No cross-session attribution is possible: every corroborating stage
-  must have been performed by a pid/start pair inside the caller's own lineage.
+  Attribution is session-keyed. The rule anchors on the triggering session, walks
+  lineage() to the session root, expands that scope by one bounded pass over
+  SPAWNED rows, and then queries HTTP_REQUEST rows from the event log scoped
+  strictly to those session ids. No cross-session attribution is possible: every
+  corroborating stage must have been performed by a session inside the caller's
+  own lineage.
 
   The triggering request itself is taken from meta (host / url / path / event_ts),
   never re-queried from the log, because the just-fired event races async ingest.
@@ -58,6 +58,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -183,9 +186,9 @@ script: |
           return True
       return False
 
-  def ev_edge(kind, actor_path, target, ts):
+  def ev_edge(kind, from_id, target, ts):
       return {
-          "from":     "process://" + actor_path,
+          "from":     from_id,
           "to":       target,
           "kind":     kind,
           "ts":       str(ts),
@@ -212,7 +215,7 @@ script: |
           hostport = auth[at+1:]
 
       real_host = meta.get("host", "").lower()
-      if real_host == "":
+      if real_host == "" or real_host.find("@") >= 0:
           real_host = host_of(hostport)
       if real_host == "":
           return "allow"
@@ -251,74 +254,60 @@ script: |
       asset = is_asset_path(path)
       ets   = int(meta.get("event_ts", "0"))
 
-      # -- 2. ANCHOR on the exact triggering instance --------------------------
-      cp = int(meta.get("caller_pid", "0"))
+      # -- 2. ANCHOR on the triggering session ---------------------------------
+      cp = meta.get("session", "")
       inst = None
-      if cp > 0:
-          inst = proc_instance(cp, ets)
+      if cp != "":
+          inst = session(cp)
 
       if inst == None:
           # Degraded attribution: never guess a lineage. Only surface the
           # unambiguous userinfo-impersonation case, flagged as degraded.
           if not strong:
               return "allow"
-          ap = meta.get("agent_name", "")
-          if ap == "":
-              ap = "unknown"
-          chain = new_chain("process://" + ap)
-          chain.append(step(
-              ev_edge("HTTP_REQUEST", ap, scheme_of(url) + "://" + real_host, ets),
-              stage_id="URL Validation Bypass",
-              stage_desc="URL userinfo impersonates " + impersonated +
-                         " but request resolved to " + real_host + path))
           print("userinfo impersonation " + impersonated + " -> " + real_host +
-                " (attribution degraded, pid " + str(cp) + ")")
+                " (attribution degraded, session " + cp + ")")
           return {
               "action": "report",
               "reason": "URL username injection: authority claims " + impersonated +
                         ", connection went to " + real_host + " (attribution degraded)",
-              "chain":  chain,
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
 
-      caller_path = inst.get("actor_path", meta.get("agent_name", ""))
-      root_path   = lineage[len(lineage)-1].get("actor_path", caller_path)
+      caller_path = inst.get("path", "")
+      root        = lineage_[len(lineage_)-1]
 
-      # -- 3. SCOPE to this session only ---------------------------------------
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "")
+      # -- 3. SCOPE to this session tree only ----------------------------------
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
       since = 0
       if ets > WINDOW_NS:
           since = ets - WINDOW_NS
 
-      for e in query_events(kind="EXECUTE_PROCESS", since_ns=since, limit=2000):
-          if len(session) >= MAX_SESSION:
+      for e in events(kind="SPAWNED", since_ns=since, limit=2000):
+          if len(scope) >= MAX_SESSION:
               break
-          if e.get("parent_pid", "") in session:
-              session[e["actor_pid"]] = e.get("actor_start", "")
+          if e.get("parent_session", "") in scope:
+              scope[e["session_id"]] = True
 
       # Python / notebook interpreter anywhere in the caller's own lineage.
       interp = ""
-      for x in lineage:
-          nm = base(x.get("actor_path", ""))
+      for x in lineage_:
+          nm = base(x.get("path", ""))
           if re.find(PY_RE, nm) != None:
-              interp = x.get("actor_path", "")
+              interp = x.get("path", "")
               break
 
-      # -- 4. CORROBORATING PRIOR STAGES (session-scoped, windowed, ordered) ---
-      prior_brand = None   # session also contacted the impersonated origin
-      prior_same  = None   # session already pulled other paths from the real host
-      for pid in session:
-          st = 0
-          if session[pid] != "":
-              st = int(session[pid])
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              actor_start=st, since_ns=since, until_ns=ets,
+      # -- 4. CORROBORATING PRIOR STAGES (session-scoped, windowed, ordered) ----
+      prior_brand = None   # the session tree also contacted the impersonated origin
+      prior_same  = None   # the session tree already pulled other paths from the real host
+      for sid in scope:
+          rows = events(kind="HTTP_REQUEST", session=sid, since_ns=since, until_ns=ets,
                               limit=MAX_PRIOR)
           for e in rows:
               h = e.get("host", "").lower()
@@ -348,23 +337,23 @@ script: |
           return "allow"
 
       names = []
-      for x in lineage:
-          names.append(base(x.get("actor_path", "?")))
+      for x in lineage_:
+          names.append(base(x.get("path", "?")))
       lin = " -> ".join(names)
 
-      chain = new_chain("process://" + root_path)
+      chain = new_chain(root["id"])
 
       if prior_brand != None:
           chain.append(step(
-              ev_edge("HTTP_REQUEST", prior_brand.get("actor_path", caller_path),
-                      "https://" + prior_brand.get("host", ""),
+              ev_edge("HTTP_REQUEST", prior_brand.get("session_id", inst["id"]),
+                      prior_brand.get("target_id", "https://" + prior_brand.get("host", "")),
                       prior_brand.get("ts", str(ets))),
               stage_id="Impersonated Origin Contacted",
               stage_desc="same session earlier fetched the genuine origin " +
                          prior_brand.get("host", "") + prior_brand.get("path", "")))
 
       chain.append(step(
-          ev_edge("HTTP_REQUEST", caller_path,
+          ev_edge("HTTP_REQUEST", inst["id"],
                   scheme_of(url) + "://" + real_host, ets),
           stage_id="URL Validation Bypass",
           stage_desc=variant + ": authority claims " +
@@ -373,8 +362,8 @@ script: |
 
       if prior_same != None:
           chain.append(step(
-              ev_edge("HTTP_REQUEST", prior_same.get("actor_path", caller_path),
-                      "https://" + prior_same.get("host", ""),
+              ev_edge("HTTP_REQUEST", prior_same.get("session_id", inst["id"]),
+                      prior_same.get("target_id", "https://" + prior_same.get("host", "")),
                       prior_same.get("ts", str(ets))),
               stage_id="Attacker Origin Reuse",
               stage_desc="same session already retrieved " +

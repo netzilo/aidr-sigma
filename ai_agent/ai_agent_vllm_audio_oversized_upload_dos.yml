@@ -49,6 +49,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -157,7 +159,7 @@ script: |
           if primary == None or c > int(primary.get("count", "0")):
               primary = e
 
-      root = meta.get("agent_name", "")
+      root = meta.get("session", "")
       if primary != None:
           root = primary["from"]
       chain = new_chain(root)
@@ -187,7 +189,7 @@ script: |
                                            str(cnt) + ")"))
           if len(procs) > 1:
               chain.append(step(primary, stage_id="Parallel Callers",
-                                stage_desc=str(len(procs)) + " distinct processes are driving requests to " + host))
+                                stage_desc=str(len(procs)) + " distinct sessions are driving requests to " + host))
 
       print("vLLM audio DoS signal: " + why)
       return {

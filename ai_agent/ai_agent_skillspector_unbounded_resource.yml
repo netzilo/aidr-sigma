@@ -18,6 +18,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   selection_unlimited_calls:
     event_type:

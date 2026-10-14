@@ -1,0 +1,21 @@
+rule: ai_agent_devcoder_pypi_endpoint_egress.yml
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  devcoder:
+    session: pid/101:1
+    parent: shell
+    program: /usr/local/bin/dev-coder
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: devcoder, cmdline: "dev-coder --model gpt-4o"}
+  - {kind: http_request, subject: devcoder, url: "https://api.openai.com/v1/chat/completions", method: POST, request_id: r1, content_type: application/json, body: '{"model": "gpt-4o", "messages": [{"role": "user", "content": "fix the build"}]}'}
+expect:
+  action: allow

@@ -1,0 +1,15 @@
+rule: ai_agent_vllm_mediaconnector_ssrf.yml
+subjects:
+  vllm:
+    session: pid/100:1
+    program: /opt/venv/bin/vllm
+    name: vllm
+    agent: true
+    actors: [{id: svc-vllm, kind: agent, name: vllm-serving}]
+    device: gpu-node-1
+    source: probe
+observations:
+  - {kind: session_start, subject: vllm}
+  - {kind: http_request, subject: vllm, url: "http://10.0.0.7:8080/health", method: GET, request_id: r1, content_type: text/plain, body: ""}
+expect:
+  action: allow

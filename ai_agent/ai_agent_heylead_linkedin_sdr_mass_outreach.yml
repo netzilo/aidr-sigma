@@ -12,10 +12,10 @@ description: |
   It asserts only what the engine can actually prove:
 
     REQUIRED anchor  a process whose executable path or command line identifies the
-                     heylead SDR agent is running inside THIS process session
-                     (resolved via caller_pid -> proc_instance -> proc_lineage, plus
-                     children spawned by session instances).
-    Stage 2          instances belonging to that same session issued >= 10 LinkedIn
+                     heylead SDR agent is running inside THIS session scope
+                     (the triggering session, its lineage, and the sessions
+                     they spawned).
+    Stage 2          sessions in that same scope issued >= 10 LinkedIn
                      messaging / invitation WRITE actions (POST/PUT/PATCH to voyager
                      messaging, invitation, or /v2|/rest message endpoints) inside a
                      15-minute window that begins no earlier than the agent launch.
@@ -53,6 +53,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_linkedin_http:
     event_type: http_request
@@ -71,7 +74,7 @@ script: |
   COOLDOWN_NS = 1800000000000       # 30 min - one report per session per campaign
   MIN_WRITES  = 10                  # LinkedIn write-actions inside WINDOW_NS
   FANOUT_MIN  = 4                   # distinct hosts -> context stage only
-  MAX_PIDS    = 40                  # bound on session expansion
+  MAX_SIDS    = 40                  # bound on session expansion
   DUP_NS      = 2000000000          # 2 s - trigger already in the log?
 
   # Target set (narrows detection to the SDR surface). NOT a trust list: nothing
@@ -121,6 +124,15 @@ script: |
               return True
       return False
 
+  def cmd_of(content):
+      # execute_process content is {"command": ..., "path": ...}; fall back to the raw text
+      m = re.find(r'"command"\s*:\s*"((?:[^"\\]|\\.)*)"', content)
+      if m == None:
+          return content
+      inner = m[m.find(":") + 1:].strip()
+      inner = inner[1:len(inner) - 1]
+      return inner.replace('\\"', '"').replace("\\\\", "\\")
+
   def is_relevant_event():
       ct = meta.get("context_type", "")
       if ct == "http_request":
@@ -130,20 +142,35 @@ script: |
               return False
           return is_write_method(meta.get("method", "").upper())
       if ct == "execute_process":
-          return is_heylead(meta.get("content", ""))
+          return is_heylead(cmd_of(meta.get("content", "")))
       return False
 
+  def spawn_row(sess):
+      # the session's own SPAWNED row (keyed by the child), or the graph edge as a row
+      for r in events(kind="SPAWNED", session=sess["id"], limit=1):
+          return r
+      cl = ""
+      t  = sess.get("first_seen", "0")
+      for e in edges(sess["id"], dir="in", kind="SPAWNED"):
+          cl = e.get("cmdline", "")
+          t  = e.get("ts", t)
+      return {"kind": "SPAWNED", "ts": t, "session_id": sess["id"],
+              "parent_session": sess.get("parent", ""), "target_id": sess["id"],
+              "program": sess.get("path", ""), "cmdline": cl}
+
   def ev_edge(e):
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "process://" + e.get("actor_path", "")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
-          "to":       tgt,
-          "kind":     e.get("kind", "EXECUTE_PROCESS"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
 
   def run():
@@ -152,52 +179,50 @@ script: |
           return "allow"
 
       now = int(meta.get("event_ts", "0"))
-      cp  = int(meta.get("caller_pid", "0"))
-      if now == 0 or cp == 0:
+      if now == 0:
           return "allow"
 
-      # 2. anchor on the exact triggering instance
-      inst = proc_instance(cp, now)
+      # 2. anchor on the exact triggering session
+      inst = session()
       if inst == None:
           return "allow"                     # degraded - re-fires when the row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
-      # 3. scope strictly to this session: lineage + descendants of session pids
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "0")
+      # 3. scope strictly to this session: lineage + sessions it spawned
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
 
-      execs = query_events(kind="EXECUTE_PROCESS", since_ns=now - SESSION_NS, limit=5000)
+      execs = events(kind="SPAWNED", since_ns=now - SESSION_NS, limit=5000)
       for i in range(2):
           for e in execs:
-              if len(session) >= MAX_PIDS:
+              if len(scope) >= MAX_SIDS:
                   break
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp != "" and pp in session and ap not in session:
-                  session[ap] = e.get("actor_start", "0")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp != "" and pp in scope and ap not in scope:
+                  scope[ap] = True
 
       # 4. REQUIRED high-specificity anchor: heylead itself, inside this session
       anchor = None
-      for x in lineage:
-          if is_heylead(x.get("actor_path", "")) or is_heylead(x.get("cmdline", "")):
-              anchor = x
+      for x in lineage_:
+          r = spawn_row(x)
+          if is_heylead(x.get("path", "")) or is_heylead(r.get("cmdline", "")):
+              anchor = r
               break
       if anchor == None:
           for e in execs:
-              if e.get("actor_pid", "") not in session:
+              if e.get("session_id", "") not in scope:
                   continue
-              if is_heylead(e.get("actor_path", "")) or is_heylead(e.get("cmdline", "")):
+              if is_heylead(e.get("program", "")) or is_heylead(e.get("cmdline", "")):
                   if anchor == None or int(e.get("ts", "0")) < int(anchor.get("ts", "0")):
                       anchor = e
       if anchor == None:
           return "allow"                     # no SDR agent in this session - say nothing
 
       s0 = int(anchor.get("ts", "0"))
-      if s0 == 0:
-          s0 = int(anchor.get("actor_start", "0"))
 
       # 5. ordered + windowed: outreach must follow the launch and cluster near now
       since = now - WINDOW_NS
@@ -207,10 +232,11 @@ script: |
       writes = []
       hosts  = {}
       newest = None
-      for pid in session:
-          rows = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              actor_start=int(session[pid]), since_ns=since,
-                              until_ns=now, limit=500)
+      callid = meta.get("callid", "")
+      dup    = False
+      for sid in scope:
+          rows = events(kind="HTTP_REQUEST", session=sid, since_ns=since,
+                        until_ns=now, limit=500)
           for e in rows:
               h = e.get("host", "").lower()
               if h != "":
@@ -222,6 +248,8 @@ script: |
               if not is_write_path(e.get("path", "")):
                   continue
               if is_write_method(e.get("method", "").upper()):
+                  if callid != "" and e.get("callid", "") == callid:
+                      dup = True                 # the trigger is already in the log
                   writes.append(e)
 
       # 6. the TRIGGER stage comes from meta, never from a log re-lookup
@@ -231,10 +259,10 @@ script: |
           th = meta.get("host", "").lower()
           tp = meta.get("path", "")
           hosts[th] = True
-          dup = False
-          for e in writes:
-              if e.get("path", "") == tp and (now - int(e.get("ts", "0"))) < DUP_NS:
-                  dup = True
+          if not dup:
+              for e in writes:
+                  if e.get("path", "") == tp and (now - int(e.get("ts", "0"))) < DUP_NS:
+                      dup = True
           if not dup:
               total = total + 1
 
@@ -242,26 +270,26 @@ script: |
           return "allow"
 
       # 7. per-session cooldown so one campaign is one alert
-      root = lineage[-1]
-      skey = "rep:" + root.get("actor_pid", "0") + ":" + root.get("actor_start", "0")
+      root = lineage_[-1]
+      skey = "rep:" + root["id"]
       last = store_get(skey)
       if last != None and (now - int(last)) < COOLDOWN_NS:
           return "allow"
 
-      # 8. kill chain, built from instance-resolved event rows
+      # 8. kill chain, built from session-resolved event rows
       names = []
-      for x in lineage:
-          names.append(x.get("actor_path", "?").split("/")[-1])
+      for x in lineage_:
+          names.append(x.get("path", "?").split("/")[-1])
       lin_str = " -> ".join(names)
-      quality = "instance-resolved"
-      if len(lineage) < 2:
+      quality = "session-resolved"
+      if len(lineage_) < 2:
           quality = "degraded (lineage truncated)"
 
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      chain = new_chain(root["id"])
       chain.append(step(ev_edge(anchor), stage_id="SDR Agent Launch",
                         stage_desc="heylead MCP SDR agent in this session: " +
                                    first_nonempty(anchor.get("cmdline", ""),
-                                                  anchor.get("actor_path", "?"))))
+                                                  anchor.get("program", "?"))))
 
       oldest = None
       for e in writes:
@@ -276,7 +304,7 @@ script: |
       mins = (now - since) // 60000000000
       if ct == "http_request":
           tedge = {
-              "from":     "process://" + inst.get("actor_path", ""),
+              "from":     inst["id"],
               "to":       "https://" + meta.get("host", ""),
               "kind":     "HTTP_REQUEST",
               "method":   meta.get("method", ""),
@@ -289,10 +317,10 @@ script: |
                    meta.get("host", "?") + meta.get("path", ""))
       else:
           tedge = {
-              "from":     "process://" + inst.get("actor_path", ""),
-              "to":       "process://" + inst.get("actor_path", ""),
-              "kind":     "EXECUTE_PROCESS",
-              "cmdline":  meta.get("content", ""),
+              "from":     inst.get("parent", "") or inst["id"],
+              "to":       inst["id"],
+              "kind":     "SPAWNED",
+              "cmdline":  cmd_of(meta.get("content", "")),
               "ts":       str(now),
               "first_ts": str(now),
               "last_ts":  str(now),

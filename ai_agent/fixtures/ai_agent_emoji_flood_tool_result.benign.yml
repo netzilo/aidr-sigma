@@ -1,0 +1,14 @@
+rule: ai_agent_emoji_flood_tool_result.yml
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: web, server_url: "https://mcp.web.example", tool: fetch_page, call_id: c1, args: '{"url": "https://blog.example/post"}'}
+  - {kind: tool_result, subject: claude, server: web, server_url: "https://mcp.web.example", tool: fetch_page, call_id: c1, output: "Release notes 🎉: the new parser is 3x faster 🚀 and fixes the Unicode bug 🐛. Thanks to everyone who tested it."}
+expect:
+  action: allow

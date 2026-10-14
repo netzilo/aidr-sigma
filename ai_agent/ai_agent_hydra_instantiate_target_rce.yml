@@ -10,9 +10,9 @@ description: |
   event: instantiate() resolves _target_ to os.system / os.popen /
   subprocess.Popen and the interpreter spawns a child. This rule anchors on the
   triggering exec (meta, never re-queried - the just-fired event races async
-  ingest), resolves the exact caller instance with proc_instance(), walks
-  proc_lineage() to find the *Python interpreter ancestor in the same spawn
-  chain* whose own command line carries Hydra config/override control
+  ingest), takes the spawned child's session, walks its lineage to find the
+  *Python interpreter ancestor in the same spawn chain* whose own command line
+  (its SPAWNED row) carries Hydra config/override control
   (_target_=, --config-name/-cn, --config-path/-cp, --config-dir,
   hydra.searchpath, hydra.run.dir, +key=/++key= overrides), and only then
   requires either (a) a dangerous _target_ value on that ancestor's command line
@@ -26,12 +26,12 @@ description: |
   running step. Those cases produce execute_process with no preceding
   HTTP_REQUEST and are invisible to the network-anchored rule. Conversely, when
   the config *was* fetched, the network rule reports 'network then exec' with no
-  attribution of *which* process instance executed and no evidence that Hydra
+  attribution of *which* session executed and no evidence that Hydra
   target resolution was the mechanism - it cannot separate a hydra launcher
   plugin shelling out from instantiate() resolving os.system. This rule carries
   the Hydra target-control evidence in the ancestor's command line and binds it
-  to the child exec through an instance-exact lineage, so the kill chain names
-  the responsible interpreter instance. The remote-config fetch and the untrusted
+  to the child exec through the session lineage, so the kill chain names
+  the responsible interpreter session. The remote-config fetch and the untrusted
   config file read are kept as optional corroborating stages, not requirements.
 author: Haibo
 date: "2026-06-12"
@@ -63,6 +63,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
+  - http
 detection:
   sel_exec_sink:
     event_type: execute_process
@@ -73,12 +77,13 @@ on_timeout: allow
 on_error:   allow
 script: |
   # ── Hydra instantiate() _target_ hijack → process execution ───────────────
-  # Instance-resolved: caller_pid → proc_instance → proc_lineage → query_events.
+  # Session-scoped: the triggering session is the spawned child; lineage()
+  # walks to the Hydra interpreter ancestor in the same spawn chain.
   # The triggering exec is taken from meta only (async-ingest race, gotcha 1).
 
   LINEAGE_WINDOW_NS = 21600000000000   # 6h  ancestor spawn → child exec
   CONFIG_WINDOW_NS  = 3600000000000    # 1h  corroborating config-origin lookback
-  DEDUPE_NS         = 300000000000     # 5m  per-instance report suppression
+  DEDUPE_NS         = 300000000000     # 5m  per-session report suppression
 
   SINKS = [
       r"/bin/sh\b", r"/bin/bash\b", r"/bin/zsh\b", r"/bin/dash\b",
@@ -156,43 +161,53 @@ script: |
           return False
       return True
 
-  # Ancestors started before monitoring have no EXECUTE_PROCESS row; fall back
-  # to the Process node for their command line.
-  def cmdline_for(x):
-      c = x.get("cmdline", "")
-      if c != "":
-          return c
-      pid = x.get("actor_pid", "")
-      pth = x.get("actor_path", "")
-      for p in graph(type="Process"):
-          if p.get("pid", "") == pid and p.get("path", "") == pth:
-              return p.get("cmdline", "")
+  # A session's command line lives on its SPAWNED row (keyed by the child).
+  # Sessions started before monitoring have no row; fall back to the Program
+  # node, which accumulates the command lines seen for that executable.
+  def spawn_row(x):
+      rows = events(kind="SPAWNED", session=x.get("id", ""), limit=1)
+      if len(rows) > 0:
+          return rows[0]
+      return None
+
+  def cmdline_for(x, row):
+      if row != None and row.get("cmdline", "") != "":
+          return row.get("cmdline", "")
+      prog = node(x.get("program", ""))
+      if prog != None:
+          return prog.get("cmdline", "")
       return ""
 
   def ev_edge(e):
-      ts = e.get("ts", "0")
-      tgt = e.get("target_id", "")
-      if tgt == "":
-          tgt = "process://" + e.get("actor_path", "")
-      frm = e.get("parent_path", "")
-      if frm == "":
-          frm = e.get("actor_path", "")
-      return {"from": "process://" + frm, "to": tgt, "kind": e.get("kind", ""),
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  def hydra_edge(hy, row):
+      if row != None:
+          return ev_edge(row)
+      ts = hy.get("first_seen", "0")
+      return {"from": hy.get("id", ""), "to": hy.get("program", ""), "kind": "INSTANCE_OF",
               "ts": ts, "first_ts": ts, "last_ts": ts}
 
   def trigger_edge(hy, inst):
-      ts   = meta.get("event_ts", "0")
-      cmd  = meta.get("content", "")
-      hpat = hy.get("actor_path", "")
-      ipat = inst.get("actor_path", "")
-      to_p = ipat
-      if to_p == "" or to_p == hpat:
-          tok = re.find(r"/[A-Za-z0-9_./+-]*/(sh|bash|zsh|dash|python[0-9.]*|perl|ruby|node|nc|ncat|socat|curl|wget)\b", cmd)
-          if tok == None:
-              tok = re.find(r"[A-Za-z0-9_./+-]{2,}", cmd)
-          to_p = tok if tok != None else "unknown"
-      return {"from": "process://" + hpat, "to": "process://" + to_p,
-              "kind": "EXECUTE_PROCESS", "ts": ts, "first_ts": ts, "last_ts": ts,
+      ts  = meta.get("event_ts", "0")
+      cmd = meta.get("content", "")
+      frm = inst.get("parent", "")
+      if frm == "":
+          frm = hy.get("id", "")
+      return {"from": frm, "to": inst.get("id", ""),
+              "kind": "SPAWNED", "ts": ts, "first_ts": ts, "last_ts": ts,
               "cmdline": clip(cmd, 400)}
 
   def run():
@@ -203,29 +218,29 @@ script: |
       trigger_ts = int(meta.get("event_ts", "0"))
       sink       = first_match(SINKS, cmd)
 
-      # ── Anchor on the exact triggering instance ──────────────────────────
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
-      inst = proc_instance(cp, trigger_ts)
+      # ── Anchor on the triggering session (the spawned child) ─────────────
+      inst = session()
       if inst == None:
-          return "allow"          # degraded: create row not landed; next event re-fires
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"          # degraded: session row not landed; next event re-fires
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # ── REQUIRED anchor: Hydra-controlled Python interpreter in THIS chain ─
       hy     = None
+      hy_row = None
       hy_cmd = ""
-      for x in lineage:
-          c = cmdline_for(x)
+      for x in lineage_:
+          row = spawn_row(x)
+          c = cmdline_for(x, row)
           if c == "":
               continue
-          if not is_python(x.get("actor_path", ""), c):
+          if not is_python(x.get("path", ""), c):
               continue
           if first_match(HYDRA_MARKERS, c) == None:
               continue
           hy     = x
+          hy_row = row
           hy_cmd = c
           break
       if hy == None:
@@ -233,7 +248,9 @@ script: |
 
       # Ordering + staleness. Lineage already guarantees causality and single
       # session; the window only rejects stale replays.
-      hy_ts = int(hy.get("ts", "0"))
+      hy_ts = int(hy.get("first_seen", "0"))
+      if hy_row != None:
+          hy_ts = int(hy_row.get("ts", "0"))
       if trigger_ts > 0 and hy_ts > 0:
           if hy_ts > trigger_ts:
               return "allow"
@@ -246,11 +263,8 @@ script: |
       if not strong and payload == None:
           return "allow"
 
-      hy_pid   = int(hy.get("actor_pid", "0"))
-      hy_start = int(hy.get("actor_start", "0"))
-
-      # ── Per-instance dedupe ──────────────────────────────────────────────
-      key = str(hy_pid) + ":" + str(hy_start) + ":" + (sink or "") + ":" + (payload or "target")
+      # ── Per-session dedupe ───────────────────────────────────────────────
+      key = hy.get("id", "") + ":" + (sink or "") + ":" + (payload or "target")
       if trigger_ts > 0:
           seen = store_get("reported")
           if seen == None:
@@ -265,39 +279,36 @@ script: |
           if store_usage()["free"] > 8192:
               store_set("reported", fresh)
 
-      # ── Optional corroboration, scoped to the SAME instance ──────────────
+      # ── Optional corroboration, scoped to the SAME session ───────────────
       since = 0
       if trigger_ts > CONFIG_WINDOW_NS:
           since = trigger_ts - CONFIG_WINDOW_NS
       cfg_row = None
       net_row = None
-      if hy_pid > 0:
-          for r in query_events(kind="READ_FILE", actor_pid=hy_pid,
-                                actor_start=hy_start, since_ns=since,
-                                until_ns=trigger_ts, limit=400):
-              p = r.get("path", "")
-              if p == "":
-                  continue
-              ext = False
-              for e2 in CONFIG_EXT:
-                  if p.endswith(e2):
-                      ext = True
-              if not ext:
-                  continue
-              for d in UNTRUSTED_DIRS:
-                  if d in p:
-                      cfg_row = r
-              if cfg_row != None:
-                  break
-          for r in query_events(kind="HTTP_REQUEST", actor_pid=hy_pid,
-                                actor_start=hy_start, since_ns=since,
-                                until_ns=trigger_ts, limit=50):
-              net_row = r
+      for r in events(kind="READ_FILE", session=hy["id"], since_ns=since,
+                      until_ns=trigger_ts, limit=400):
+          p = r.get("path", "")
+          if p == "":
+              continue
+          ext = False
+          for e2 in CONFIG_EXT:
+              if p.endswith(e2):
+                  ext = True
+          if not ext:
+              continue
+          for d in UNTRUSTED_DIRS:
+              if d in p:
+                  cfg_row = r
+          if cfg_row != None:
               break
+      for r in events(kind="HTTP_REQUEST", session=hy["id"], since_ns=since,
+                      until_ns=trigger_ts, limit=50):
+          net_row = r
+          break
 
       # ── Kill chain ───────────────────────────────────────────────────────
-      root  = lineage[len(lineage) - 1]
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      root  = lineage_[len(lineage_) - 1]
+      chain = new_chain(root["id"])
 
       if cfg_row != None:
           chain.append(step(ev_edge(cfg_row), stage_id="Untrusted Config Source",
@@ -305,14 +316,14 @@ script: |
       if net_row != None:
           chain.append(step(ev_edge(net_row), stage_id="Remote Config Fetch",
                             stage_desc="hydra process fetched remote artifact: " + net_row.get("host", "") + net_row.get("path", "")))
-      chain.append(step(ev_edge(hy), stage_id="Hydra Target Control",
+      chain.append(step(hydra_edge(hy, hy_row), stage_id="Hydra Target Control",
                         stage_desc="hydra entrypoint with externally controllable instantiation target: " + clip(hy_cmd, 200)))
       chain.append(step(trigger_edge(hy, inst), stage_id="Code Execution",
                         stage_desc="instantiate() resolved to process execution: " + clip(cmd, 200)))
 
-      names = " -> ".join([x.get("actor_path", "?").split("/")[-1] for x in lineage])
+      names = " -> ".join([x.get("path", "?").split("/")[-1] for x in lineage_])
       why   = "dangerous _target_ override" if strong else "injected payload (" + payload + ")"
-      if len(lineage) < 2:
+      if len(lineage_) < 2:
           names = names + " (attribution: degraded)"
       print("Hydra instantiate() RCE — " + why + " | chain: " + names)
 

@@ -23,6 +23,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
 detection:
   # Adapted: original used response_text field; Netzilo LogEntry uses content for llm_response.
   selection_markdown_image_exfil:

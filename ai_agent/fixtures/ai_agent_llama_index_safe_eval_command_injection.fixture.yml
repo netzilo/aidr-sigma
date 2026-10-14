@@ -1,0 +1,37 @@
+subjects:
+  python:
+    session: pid/100:1
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  cmd1:
+    session: pid/101:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  cmd2:
+    session: pid/102:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+  cmd3:
+    session: pid/103:1
+    parent: python
+    program: /bin/sh
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: python}
+  - {kind: spawn, subject: cmd1, cmdline: "sh -c 'id; uname -a'"}
+  - {kind: spawn, subject: cmd2, cmdline: "sh -c 'cat /etc/passwd'"}
+  - {kind: spawn, subject: cmd3, cmdline: "sh -c 'whoami'"}
+expect:
+  action: report
+  reason_contains: "LLM eval escape - python3.11 spawned OS command via lineage [sh <- python3.11]; score=3"
+  chain_min: 3

@@ -1,0 +1,28 @@
+rule: ai_agent_llm_as_chatbot_modelsbyom_rce_descendant_exec.yml
+subjects:
+  bash:
+    session: pid/200:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+  app:
+    session: pid/201:1
+    parent: bash
+    program: /opt/venv/bin/python3
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+  sh:
+    session: pid/202:1
+    parent: app
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: app, cmdline: "python3 /srv/webapp/app.py"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -s https://pypi.org/simple/ | head'"}
+expect:
+  action: allow

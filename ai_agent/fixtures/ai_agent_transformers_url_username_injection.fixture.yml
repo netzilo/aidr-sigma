@@ -1,0 +1,24 @@
+subjects:
+  shell:
+    session: pid/100:1
+    program: /bin/zsh
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  python:
+    session: pid/101:1
+    parent: shell
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: shell}
+  - {kind: spawn, subject: python, cmdline: "python3.11 pipeline.py"}
+  - {kind: http_request, subject: python, url: "https://www.youtube.com/watch?v=abc", method: GET, request_id: r1}
+  - {kind: http_request, subject: python, url: "https://www.youtube.com@attacker.tld/x.png", method: GET, request_id: r2}
+expect:
+  action: report
+  reason_contains: "userinfo-impersonation"
+  output_contains: ["transformers url-validation bypass (userinfo-impersonation) host=attacker.tld"]
+  chain_min: 2

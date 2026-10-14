@@ -32,7 +32,7 @@ description: |
   and "novel" is a first_seen comparison against the anchor timestamp, both of which
   narrow rather than widen what is reported.
 
-  Attribution is anchored on meta["caller_pid"] -> proc_instance -> proc_lineage, never
+  Attribution is anchored on the triggering session -> session() -> lineage(), never
   on a path-keyed graph walk, so the same session produces the same chain every run.
   Report-only: the underlying threat class is unspecified and the chain, while specific,
   can legitimately occur during package installs and doc-driven developer workflows.
@@ -61,7 +61,7 @@ falsepositives:
   - Developer typing an unrelated `curl`/`python` in the same terminal that is an
     ancestor of the agent, within 15 minutes of the agent fetching an external doc --
     lineage cannot distinguish a human-typed command from an agent-issued one.
-  - Degraded lineage. When an ancestor shell was never ingested, proc_lineage stops
+  - Degraded lineage. When an ancestor shell was never ingested, lineage() stops
     early and a sibling's exec/egress may be attributed to this session. Window
     clustering limits but does not eliminate this; treat a short lineage in the chain
     as best-effort attribution.
@@ -70,6 +70,11 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - connect
+  - skill
 detection:
   sel_events:
     event_type:
@@ -132,35 +137,33 @@ script: |
           return meta.get("host", "") != ""
       return False
 
+  # Merged edges (ACQUIRED_SKILL) carry first_ts/last_ts, never ts.
+  def edge_ts(e):
+      return int(e.get("last_ts", e.get("first_ts", e.get("ts", "0"))))
+
   # ---- session scoping --------------------------------------------------------
-  def build_session(lineage, lo):
-      pids  = {}
-      paths = {}
-      for x in lineage:
-          pids[x.get("actor_pid", "")]   = x.get("actor_start", "")
-          paths[x.get("actor_path", "")] = True
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=lo, limit=EXEC_LIMIT)
+  def build_scope(lineage_, lo):
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      rows = events(kind="SPAWNED", since_ns=lo, limit=EXEC_LIMIT)
       # three closure passes pick up children / grandchildren of the lineage
       for i in range(3):
           for e in rows:
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp in pids and ap not in pids and len(pids) < MAX_PIDS:
-                  pids[ap] = e.get("actor_start", "")
-                  paths[e.get("actor_path", "")] = True
-      return pids, paths, rows
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp in scope and ap not in scope and len(scope) < MAX_PIDS:
+                  scope[ap] = True
+      return scope, rows
 
   # ---- stage 1: untrusted instruction ingest (REQUIRED ANCHOR) ----------------
-  def find_skill(paths, lo, hi):
+  def find_skill(scope, lo, hi):
       best_ts   = 0
       best_edge = None
       best_node = None
-      for p in graph(type="Process"):
-          pp = p.get("path", "")
-          if pp == "" or pp not in paths:
-              continue
-          for e in edges(p["id"], dir="out", kind="ACQUIRED_SKILL"):
-              ts = int(e.get("ts", "0"))
+      for sid in scope:
+          for e in edges(sid, dir="out", kind="ACQUIRED_SKILL"):
+              ts = edge_ts(e)
               if ts < lo or ts > hi:
                   continue
               s = node(e["to"])
@@ -178,16 +181,16 @@ script: |
       return (best_ts, best_edge, best_node)
 
   # ---- stage 2: capability subprocess after the anchor ------------------------
-  def find_exec(rows, pids, t0, hi, ct, inst, trigger_ts):
+  def find_exec(rows, scope, t0, hi, ct, inst, trigger_ts):
       best_ts  = 0
       best_row = None
       for e in rows:
-          if e.get("actor_pid", "") not in pids:
+          if e.get("session_id", "") not in scope:
               continue
           ts = int(e.get("ts", "0"))
           if ts < t0 or ts > hi:
               continue
-          if not is_capability_cmd(e.get("cmdline", "") + " " + e.get("actor_path", "")):
+          if not is_capability_cmd(e.get("cmdline", "") + " " + e.get("program", "")):
               continue
           if best_row == None or ts < best_ts:
               best_ts  = ts
@@ -197,13 +200,13 @@ script: |
       if ct == "execute_process":
           # trigger stage always comes from meta, never from a log re-lookup
           syn = {
-              "kind":        "EXECUTE_PROCESS",
-              "actor_pid":   meta.get("caller_pid", ""),
-              "actor_start": inst.get("actor_start", ""),
-              "actor_path":  inst.get("actor_path", ""),
-              "ts":          str(trigger_ts),
-              "target_id":   "process://" + inst.get("actor_path", ""),
-              "cmdline":     meta.get("content", ""),
+              "kind":           "SPAWNED",
+              "session_id":     inst["id"],
+              "parent_session": inst.get("parent", ""),
+              "program":        inst.get("path", ""),
+              "ts":             str(trigger_ts),
+              "target_id":      inst["id"],
+              "cmdline":        meta.get("content", ""),
           }
           return (trigger_ts, syn)
       return (0, None)
@@ -244,35 +247,34 @@ script: |
       return "novel public destination first seen after ingest: " + eh
 
   # ---- stage 3: egress after the capability subprocess ------------------------
-  def find_egress(pids, t2, hi, skill_host, t0, ct, idx):
+  def find_egress(scope, t2, hi, skill_host, t0, ct, idx):
       if ct == "connects":
-          cp  = meta.get("caller_pid", "")
+          cp  = meta.get("session", "")
           eh  = meta.get("host", "")
           ets = int(meta.get("event_ts", "0"))
-          if cp in pids and ets >= t2:
+          if cp in scope and ets >= t2:
               g = grade_host(eh, skill_host, t0, idx)
               if g != "":
                   syn = {
                       "kind":        "CONNECTS",
-                      "actor_pid":   cp,
-                      "actor_start": pids.get(cp, ""),
-                      "actor_path":  "",
+                      "session_id":  cp,
+                      "callid":      meta.get("callid", ""),
                       "ts":          str(ets),
                       "host":        eh,
                       "target_id":   "host://" + meta.get("protocol", "tcp") + ":" +
                                      eh + ":" + meta.get("port", ""),
                   }
                   return (syn, g)
-      for e in query_events(kind="HTTP_REQUEST", since_ns=t2, limit=EGRESS_LIMIT):
-          if e.get("actor_pid", "") not in pids:
+      for e in events(kind="HTTP_REQUEST", since_ns=t2, limit=EGRESS_LIMIT):
+          if e.get("session_id", "") not in scope:
               continue
           if int(e.get("ts", "0")) > hi:
               continue
           g = grade_host(e.get("host", ""), skill_host, t0, idx)
           if g != "":
               return (e, g)
-      for e in query_events(kind="CONNECTS", since_ns=t2, limit=EGRESS_LIMIT):
-          if e.get("actor_pid", "") not in pids:
+      for e in events(kind="CONNECTS", since_ns=t2, limit=EGRESS_LIMIT):
+          if e.get("session_id", "") not in scope:
               continue
           if int(e.get("ts", "0")) > hi:
               continue
@@ -283,16 +285,19 @@ script: |
 
   # ---- kill chain helpers -----------------------------------------------------
   def ev_edge(e):
-      ts = e.get("ts", "0")
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       ts,
-          "first_ts": ts,
-          "last_ts":  ts,
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ---- duplicate suppression (report noise control) ---------------------------
   def already_reported(sig, now):
       seen = store_get("seen")
@@ -320,22 +325,22 @@ script: |
       if trigger_ts == 0:
           return "allow"
 
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      cp = meta.get("session", "")
+      if cp == "":
           return "allow"
-      inst = proc_instance(cp, trigger_ts)
+      inst = session(cp)
       if inst == None:
           return "allow"                      # degraded: never guess attribution
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       lo = trigger_ts - WINDOW_NS
-      pids, paths, rows = build_session(lineage, lo)
+      scope, rows = build_scope(lineage_, lo)
 
       # Stage 1 - REQUIRED anchor. No untrusted instruction ingest in this session
       # inside the window means this is ordinary agent traffic: stay invisible.
-      sk = find_skill(paths, lo, trigger_ts)
+      sk = find_skill(scope, lo, trigger_ts)
       if sk == None:
           return "allow"
       t0         = sk[0]
@@ -344,30 +349,30 @@ script: |
       skill_host = skill_node.get("host", "")
 
       # Stage 2 - REQUIRED capability subprocess after the anchor
-      t2, exec_row = find_exec(rows, pids, t0, trigger_ts, ct, inst, trigger_ts)
+      t2, exec_row = find_exec(rows, scope, t0, trigger_ts, ct, inst, trigger_ts)
       if exec_row == None:
           return "allow"
 
       # Stage 3 - REQUIRED egress after the subprocess
       idx = build_dest_index()
-      egress_row, grade = find_egress(pids, t2, trigger_ts, skill_host, t0, ct, idx)
+      egress_row, grade = find_egress(scope, t2, trigger_ts, skill_host, t0, ct, idx)
       if egress_row == None:
           return "allow"
 
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       lineage_str = " -> ".join(names)
-      attribution = "instance-resolved"
-      if len(lineage) < 2:
+      attribution = "session-resolved"
+      if len(lineage_) < 2:
           attribution = "degraded"
 
       egress_host = egress_row.get("host", "")
-      sig = skill_host + "|" + egress_host + "|" + lineage[len(lineage) - 1].get("actor_pid", "")
+      sig = skill_host + "|" + egress_host + "|" + lineage_[len(lineage_) - 1].get("id", "")
       if already_reported(sig, trigger_ts):
           return "allow"
 
-      chain = new_chain("process://" + lineage[len(lineage) - 1].get("actor_path", ""))
+      chain = new_chain(lineage_[len(lineage_) - 1]["id"])
       chain.append(step(
           skill_edge,
           stage_id="Instruction Ingest",
@@ -379,7 +384,7 @@ script: |
           ev_edge(exec_row),
           stage_id="Capability Spawn",
           stage_desc="session spawned network-capable subprocess after ingest: " +
-                     exec_row.get("cmdline", short(exec_row.get("actor_path", ""))),
+                     exec_row.get("cmdline", short(exec_row.get("program", ""))),
       ))
       chain.append(step(
           ev_edge(egress_row),
@@ -388,7 +393,7 @@ script: |
       ))
 
       reason = ("Agentic exploit chain (" + attribution + "): instructions ingested from " +
-                skill_host + ", then " + short(exec_row.get("actor_path", "")) +
+                skill_host + ", then " + short(exec_row.get("program", "")) +
                 " spawned, then " + grade + "; session " + lineage_str +
                 "; span " + str((int(egress_row.get("ts", "0")) - t0) / 1000000000) + "s")
       print(reason)

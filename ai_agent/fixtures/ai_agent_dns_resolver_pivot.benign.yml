@@ -1,0 +1,14 @@
+rule: ai_agent_dns_resolver_pivot.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: connect, subject: cursor, host: 8.8.8.8, port: 53, protocol: udp}
+expect:
+  action: allow

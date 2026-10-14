@@ -10,16 +10,16 @@ description: |
   host / getent hosts / resolvectl / dnscat-class tooling) whose QUERY NAME carries
   encoded data (long base64/base32/hex label, >=3 stuffed labels, or a shell
   command-substitution spliced into the hostname), corroborated by credential
-  material and/or an encoding pipeline observed in the SAME process session inside
-  a 5-minute window.
+  material and/or an encoding pipeline observed in the SAME session (the resolver's
+  lineage and what it spawned) inside a 5-minute window.
 
   Answering the triage dissent explicitly:
 
   * No fabricated primitives. The engine has no dns_request event type and no
     DNS_REQUEST / EXFILTRATE_DATA / PROMPT_INJECTION edge kind, so none are used.
-    The rule runs on event_type: execute_process and traverses only EXECUTE_PROCESS
-    (graph edges out of the lineage's Process nodes, plus the instance-resolved
-    event log for the same kind).
+    The rule runs on event_type: execute_process and reads only SPAWNED rows of
+    the event log, scoped to the triggering session's lineage and the sessions
+    that lineage spawned inside the window.
   * It is not "generic process execution", and it does not overlap rule c65a9620
     (RCE via Piped Script Download). That rule keys on a download-to-interpreter
     pipe (curl|wget piped into a shell). This rule REQUIRES two things that a
@@ -32,9 +32,9 @@ description: |
     exfiltration-specific evidence the dissent asked for is supplied by the
     ordered secret-staging / encoding stages preceding the lookup, not by the
     spawn alone.
-  * It does not claim to detect the prompt injection. Agent ancestry (a lineage
-    process whose graph node carries agent="1") is used only as attribution and to
-    set the corroboration bar (1 stage when agent-attributed, 2 when lineage is
+  * It does not claim to detect the prompt injection. Agent ancestry (a session
+    in the lineage with agent="1") is used only as attribution and to set the
+    corroboration bar (1 stage when agent-attributed, 2 when the lineage is
     degraded). Because causation is inferred, the action is report, not block.
 
   A bare `dig example.com`, a resolver loop with random cache-buster labels but no
@@ -72,6 +72,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - file_activity
 detection:
   sel_dns_tooling:
     event_type: execute_process
@@ -175,44 +178,76 @@ script: |
           return s
       return s[:n] + "..."
 
+  def spawn_cmd(content):
+      # execute_process content is {"command": ..., "path": ...} (json.Marshal,
+      # so quotes, backslashes and < > & arrive escaped). Return the raw command.
+      i = content.find('"command":')
+      if i < 0:
+          return content
+      j = content.find('"', i + 10)
+      if j < 0:
+          return content
+      out = ""
+      k = j + 1
+      n = len(content)
+      for _ in range(n):
+          if k >= n:
+              break
+          c = content[k]
+          if c == '"':
+              break
+          if c == "\\" and k + 1 < n:
+              d = content[k + 1]
+              if d == "u" and k + 5 < n:
+                  out += chr(int(content[k + 2:k + 6], 16))
+                  k += 6
+                  continue
+              if d == "n":
+                  out += "\n"
+              elif d == "t":
+                  out += "\t"
+              else:
+                  out += d
+              k += 2
+              continue
+          out += c
+          k += 1
+      return out
+
   def ev_edge(row):
       t = row.get("ts", "0")
-      pp = row.get("parent_path", "")
-      ap = row.get("actor_path", "")
+      frm = row.get("session_id", "")
+      if row.get("kind", "") == "SPAWNED":
+          frm = row.get("parent_session", "")
       return {
-          "kind":     "EXECUTE_PROCESS",
-          "from":     "process://" + (pp if pp != "" else "unknown"),
-          "to":       "process://" + (ap if ap != "" else "unknown"),
+          "from":     frm,
+          "to":       row.get("target_id", ""),
+          "kind":     row.get("kind", ""),
+          "dir":      "out",
           "ts":       t,
           "first_ts": t,
           "last_ts":  t,
           "cmdline":  row.get("cmdline", ""),
-          # The engine's own trigger-injection (appendTriggerReason,
-          # scanner_filter.go) merges into whichever chain step's edge has
-          # this SAME callid, instead of appending a second, generic node --
-          # but only if the edge actually carries it. Dropping this field
-          # here (as this helper originally did) is exactly why the
-          # DNS Exfil Channel step and the auto-injected "Trigger Reason"
-          # step always rendered as two separate nodes even when they
-          # described the identical real event.
-          "callid":   row.get("callid", ""),
       }
 
-  def file_edge(row, kind):
+  def file_step(row, kind, stage_id, stage_desc):
+      # The graph holds one filesystem node per session; the exact path comes
+      # from the event row and is attached as the step's activity.
       t = row.get("ts", "0")
-      ap = row.get("actor_path", "")
-      return {
+      edge = {
           "kind":     kind,
-          "from":     "process://" + (ap if ap != "" else "unknown"),
-          "to":       row.get("path", ""),
+          "from":     row.get("session_id", ""),
+          "to":       row.get("target_id", ""),
           "ts":       t,
           "first_ts": t,
           "last_ts":  t,
       }
+      return step(edge, stage_id=stage_id, stage_desc=stage_desc,
+                  activity={"path": row.get("path", ""), "ts": t})
 
   def synth_edge(frm, to, ts, cmdline):
       return {
-          "kind":     "EXECUTE_PROCESS",
+          "kind":     "SPAWNED",
           "from":     frm,
           "to":       to,
           "ts":       str(ts),
@@ -221,11 +256,18 @@ script: |
           "cmdline":  cmdline,
       }
 
+  def is_file_target(p):
+      if p == "":
+          return False
+      if p.startswith("pipe:") or p.startswith("socket:") or p.startswith("anon_inode:"):
+          return False
+      return True
+
   def run():
       # 1 ── relevance gate: pure string checks on meta, no graph / log calls
       if meta.get("context_type", "") != "execute_process":
           return "allow"
-      cmd = meta.get("content", "")
+      cmd = spawn_cmd(meta.get("content", ""))
       if cmd == "":
           return "allow"
       res_hit = hit(RESOLVER, cmd)
@@ -238,134 +280,60 @@ script: |
       if since < 0:
           since = 0
 
-      # 2 ── instance-anchored attribution (never a path-keyed node walk)
-      cp = int(meta.get("caller_pid", "0"))
-      inst = None
-      lineage = []
-      session = {}
-      if cp > 0:
-          session[str(cp)] = True
-          inst = proc_instance(cp, trigger_ts)
-          if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-              pp = inst.get("parent_pid", "")
-              if pp != "" and pp != "0":
-                  session[pp] = True
-      for x in lineage:
-          session[str(x.get("actor_pid", ""))] = True
+      # 2 ── session-anchored attribution: the triggering session (the resolver
+      #      process) and its ancestry. An agent ancestor sets the corroboration bar.
+      inst = session()
+      lineage_ = []
+      if inst != None:
+          lineage_ = lineage(inst["id"])
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      agent_node = None
+      for x in lineage_:
+          if x.get("agent", "0") == "1":
+              agent_node = x
+              break
+      if agent_node != None:
+          root_id = agent_node["id"]
+      elif lineage_:
+          root_id = lineage_[-1]["id"]
+      elif inst != None:
+          root_id = inst["id"]
+      else:
+          return "allow"                      # no session: nothing to attribute to
 
-      # 3 ── bounded session expansion over one cached event-log query
-      rows = []
-      if session:
-          rows = query_events(kind="EXECUTE_PROCESS", since_ns=since,
-                              until_ns=trigger_ts + 1, limit=MAX_EXEC_ROWS)
-          for _ in range(2):
-              for e in rows:
-                  if str(e.get("parent_pid", "")) in session:
-                      session[str(e.get("actor_pid", ""))] = True
+      # 3 ── bounded scope expansion over one event-log query: sessions spawned
+      #      by scope members inside the window join the scope.
+      rows = events(kind="SPAWNED", since_ns=since,
+                    until_ns=trigger_ts + 1, limit=MAX_EXEC_ROWS)
+      for _ in range(2):
+          for e in rows:
+              if e.get("parent_session", "") in scope:
+                  scope[e.get("session_id", "")] = True
 
       cmds = []
       for e in rows:
           if len(cmds) >= MAX_CMDS:
               break
-          if str(e.get("actor_pid", "")) not in session and str(e.get("parent_pid", "")) not in session:
+          if e.get("session_id", "") not in scope and e.get("parent_session", "") not in scope:
               continue
           c = e.get("cmdline", "")
           if c == "":
-              c = e.get("actor_path", "")
+              c = e.get("program", "")
           if c == "":
               continue
           cmds.append({"ts": int(e.get("ts", "0")), "cmd": c, "edge": ev_edge(e),
-                       "pid": e.get("actor_pid", ""), "start": e.get("actor_start", "")})
+                       "sid": e.get("session_id", "")})
 
-      # 4 ── graph traversal: EXECUTE_PROCESS edges out of the lineage's process
-      #      nodes (covers spawns the event log has not yet materialised) and the
-      #      agent-ancestry check via the Process node's agent flag.
-      paths = {}
-      for x in lineage:
-          p = x.get("actor_path", "")
-          if p != "":
-              paths[p] = True
-      agent_node = None
-      root_id = "process://" + (lineage[-1].get("actor_path", "unknown") if lineage else "unknown")
-      for p in graph(type="Process"):
-          pth = p.get("path", "")
-          if pth == "" or pth not in paths:
-              continue
-          if agent_node == None and p.get("agent", "0") == "1":
-              agent_node = p
-          for e in edges(p["id"], dir="out", kind="EXECUTE_PROCESS"):
-              if len(cmds) >= MAX_CMDS:
-                  break
-              ts = int(e.get("ts", "0"))
-              if ts < since or ts > trigger_ts + 1:
-                  continue
-              c = e.get("cmdline", "")
-              if c == "":
-                  ch = node(e["to"])
-                  if ch != None:
-                      c = ch.get("cmdline", "")
-                      if c == "":
-                          c = ch.get("path", "")
-              if c != "":
-                  # Graph edges don't carry actor_pid/actor_start the way
-                  # query_events rows do, so file-evidence enrichment below
-                  # is skipped for entries sourced this way -- the base
-                  # EXECUTE_PROCESS step still renders correctly either way.
-                  cmds.append({"ts": ts, "cmd": c, "edge": e, "pid": "", "start": ""})
-      if agent_node != None:
-          root_id = agent_node["id"]
-
-      # cmds is populated from two independent sources -- the instance-
-      # resolved event log (query_events) and a separate graph edge walk --
-      # which commonly both surface the SAME physical exec (including the
-      # triggering call itself). Without deduping by (ts, cmd), one real
-      # invocation gets counted twice here alone, on top of the seed below;
-      # collapse exact (ts, cmd) duplicates before any counting happens.
-      seen_cmd = {}
-      deduped = []
-      for c in cmds:
-          key = str(c["ts"]) + "|" + c["cmd"]
-          if key in seen_cmd:
-              continue
-          seen_cmd[key] = True
-          deduped.append(c)
-      cmds = deduped
-
-      # 5 ── ordered stage evaluation, session- and window-scoped
-      #
-      # data_lookup_n and lookup_n are counted as the SIZE OF A SET of
-      # distinct identities, not as running increments over cmds entries.
-      # An increment-per-match approach is fragile against ANY duplicate
-      # surfacing of the same physical exec (this rule's cmds is populated
-      # from two independent sources -- query_events and a separate graph
-      # edge walk -- which routinely both surface the same instance,
-      # including the triggering call itself, whose own ts does not
-      # equal meta.event_ts and so was never recognized as a re-surfacing
-      # of the seed). Two entries describing the same real lookup
-      # necessarily carry the same extracted query-name label, so
-      # deduping by that label is correct regardless of how many times,
-      # or through which path, the underlying event was surfaced -- it
-      # measures "how many distinct data-bearing names were resolved",
-      # which is what this amplifier is actually meant to represent.
+      # 4 ── ordered stage evaluation, scope- and window-scoped. Lookups are
+      #      counted as distinct query-name labels / distinct timestamps.
       secret_ev = None
       encode_ev = None
       lookup_keys = {}
       data_labels = {}
       if name_hit != "":
           data_labels[name_hit] = True
-      # The triggering call's own instance-log/graph edge almost always
-      # appears in cmds too (query_events' until_ns includes it), just at
-      # its own real ts, not meta.event_ts -- those are two different
-      # clocks (one stamped by the probe at execve time, the other by the
-      # engine at rule-dispatch time), so they never compare equal. Reusing
-      # this REAL edge for the "DNS Exfil Channel" step (instead of
-      # fabricating one from meta) lets the engine's own trigger-matching
-      # recognize it and merge, instead of always injecting a second,
-      # generic "Trigger Reason" node alongside a richer one that isn't
-      # recognized as the trigger. It's identified as the RESOLVER-matching
-      # entry with the latest ts in-window -- the most recent resolver
-      # invocation is the one that just fired the rule.
       trigger_edge = None
       trigger_edge_ts = -1
       for c in cmds:
@@ -382,9 +350,12 @@ script: |
                   encode_ev = {"ev": c, "m": m}
           if hit(RESOLVER, s) != "":
               lookup_keys[str(c["ts"])] = True
-              if c["ts"] > trigger_edge_ts:
-                  trigger_edge_ts = c["ts"]
-                  trigger_edge = c
+              # The triggering spawn's own row is the resolver session itself;
+              # otherwise the most recent resolver invocation in the window.
+              if c["sid"] == inst["id"] or (trigger_edge == None or c["ts"] > trigger_edge_ts):
+                  if trigger_edge == None or trigger_edge["sid"] != inst["id"]:
+                      trigger_edge_ts = c["ts"]
+                      trigger_edge = c
               m = hit(DATA_NAME, s)
               if m != "":
                   data_labels[m] = True
@@ -416,114 +387,75 @@ script: |
       if strength < need:
           return "allow"
 
-      # Both narrative stages below describe a file touching disk (a
-      # credential file read; an encoded payload written for DNS-label
-      # transport) -- attach the REAL filesystem edge as evidence, scoped
-      # to the exact same process instance, not just the process spawn
-      # that's presumed to have caused it.
-      #
-      # This is a best-effort addition, not a guarantee: some binaries copy
-      # regular-file-to-regular-file via a zero-copy syscall path (sendfile,
-      # copy_file_range) that a read()/write()-hooking probe never observes,
-      # so no matching row will ever exist to find -- the base EXECUTE_PROCESS
-      # step for the stage (built from the command line itself, always
-      # present) is what carries the stage regardless of whether this
-      # secondary evidence is available. A found target that isn't a real
-      # filesystem path (a pipe or socket, e.g. a command-substitution
-      # capture) is excluded -- it was never "written to disk".
-      def is_file_target(p):
-          if p == "":
-              return False
-          if p.startswith("pipe:") or p.startswith("socket:") or p.startswith("anon_inode:"):
-              return False
-          return True
-
+      # Both narrative stages describe a file touching disk — attach the real
+      # file event of the exact same session when the probe observed one.
+      # Best effort: zero-copy syscalls never produce a row, and a pipe or
+      # socket target is not a file written to disk.
       secret_read = None
       if secret_ev != None:
-          epid = secret_ev["ev"].get("pid", "")
-          estart = secret_ev["ev"].get("start", "")
-          if epid != "" and estart != "":
-              for r in query_events(kind="READ_FILE", actor_pid=int(epid),
-                                    actor_start=int(estart), limit=20):
-                  if is_file_target(r.get("path", "")):
-                      secret_read = r
-                      break
+          for r in events(kind="READ_FILE", session=secret_ev["ev"]["sid"], limit=20):
+              if is_file_target(r.get("path", "")):
+                  secret_read = r
+                  break
       encode_write = None
       if encode_ev != None:
-          epid = encode_ev["ev"].get("pid", "")
-          estart = encode_ev["ev"].get("start", "")
-          if epid != "" and estart != "":
-              for w in query_events(kind="WRITE_FILE", actor_pid=int(epid),
-                                    actor_start=int(estart), limit=20):
-                  if is_file_target(w.get("path", "")):
-                      encode_write = w
-                      break
+          for w in events(kind="WRITE_FILE", session=encode_ev["ev"]["sid"], limit=20):
+              if is_file_target(w.get("path", "")):
+                  encode_write = w
+                  break
 
-      # 6 ── kill chain built from event rows / graph edges + the meta trigger
+      # 5 ── kill chain built from event rows + the trigger
       chain = new_chain(root_id)
       if secret_ev != None:
           chain.append(step(secret_ev["ev"]["edge"], stage_id="Secret Staging",
-                            stage_desc="session process touched credential material (" +
+                            stage_desc="session touched credential material (" +
                                        clip(secret_ev["m"], 60) + "): " +
                                        clip(secret_ev["ev"]["cmd"], 160)))
           if secret_read != None:
-              chain.append(step(file_edge(secret_read, "READ_FILE"), stage_id="Secret Staging",
-                                stage_desc="credential material read from disk: " +
-                                           clip(secret_read.get("path", ""), 160)))
+              chain.append(file_step(secret_read, "READ_FILE", "Secret Staging",
+                                     "credential material read from disk: " +
+                                     clip(secret_read.get("path", ""), 160)))
       if encode_ev != None:
           chain.append(step(encode_ev["ev"]["edge"], stage_id="Payload Encoding",
                             stage_desc="data shaped for DNS label transport (" +
                                        clip(encode_ev["m"], 40) + "): " +
                                        clip(encode_ev["ev"]["cmd"], 160)))
           if encode_write != None:
-              chain.append(step(file_edge(encode_write, "WRITE_FILE"), stage_id="Payload Encoding",
-                                stage_desc="encoded payload written to disk: " +
-                                           clip(encode_write.get("path", ""), 160)))
+              chain.append(file_step(encode_write, "WRITE_FILE", "Payload Encoding",
+                                     "encoded payload written to disk: " +
+                                     clip(encode_write.get("path", ""), 160)))
 
-      # The triggering call's own real edge (see trigger_edge above) is
-      # preferred over a fabricated one -- its "callid" (propagated by
-      # ev_edge(), now) is what the engine's own trigger-injection
-      # (appendTriggerReason, scanner_filter.go) matches on to MERGE into
-      # this exact step instead of appending a second, generic, path-less
-      # "Trigger Reason" node alongside it. synth_edge() (no callid) is only
-      # a fallback for the rare case where the triggering instance genuinely
-      # isn't in cmds yet -- that case still gets the separate node, same as
-      # before this fix.
+      # The triggering spawn's own SPAWNED row is preferred (its callid lets
+      # the engine merge the trigger into this step); a synthesised edge from
+      # the parent session is the fallback.
       shown = name_hit if name_hit != "" else sib_name
       if trigger_edge != None:
           dns_edge = trigger_edge["edge"]
           dns_cmd_display = trigger_edge["cmd"]
       else:
-          trig_actor = inst.get("actor_path", "") if inst != None else ""
-          if trig_actor == "":
-              trig_actor = "pid:" + str(cp)
-          trig_parent = inst.get("parent_path", "") if inst != None else ""
-          if trig_parent == "":
-              trig_parent = root_id
-          else:
-              trig_parent = "process://" + trig_parent
-          dns_edge = synth_edge(trig_parent, "process://" + trig_actor, trigger_ts, clip(cmd, 400))
+          parent_id = inst.get("parent", "")
+          if parent_id == "":
+              parent_id = root_id
+          dns_edge = synth_edge(parent_id, inst["id"], trigger_ts, clip(cmd, 400))
           dns_cmd_display = cmd
       chain.append(step(dns_edge, stage_id="DNS Exfil Channel",
                         stage_desc="resolver spawned with data-bearing query name (" +
                                    clip(shown, 80) + "): " + clip(dns_cmd_display, 200)))
 
-      names = "pid " + str(cp)
-      if lineage:
+      names = inst.get("name", inst["id"])
+      if lineage_:
           parts = []
-          for x in lineage:
-              parts.append(x.get("actor_path", "?").split("/")[-1])
+          for x in lineage_:
+              parts.append(x.get("path", "?").split("/")[-1])
           names = " -> ".join(parts)
       attribution = "agent=" + agent_node.get("name", "?") if agent_node != None else "attribution=degraded"
 
       # A single data-bearing lookup corroborated by staging is reported;
-      # sustained resolution (the `repetition` amplifier: >=3 data-bearing
-      # lookups, or >=8 resolver invocations, in the window) is no longer
-      # ambiguous — it is an active exfiltration channel moving data in
-      # multiple chunks, and is blocked. In both cases credential material
-      # has already been shaped for and pushed through a channel that
-      # bypasses HTTP proxy and egress inspection, so the peer's integrity
-      # is degraded, gating it out of integrity-enforced destinations.
+      # sustained resolution (>=3 data-bearing lookups, or >=8 resolver
+      # invocations, in the window) is an active exfiltration channel moving
+      # data in chunks, and is blocked. Either way credential material has
+      # been shaped for a channel that bypasses proxy and egress inspection,
+      # so the peer's integrity is degraded.
       verdict = "block" if repetition else "report"
 
       reason = ("Possible DNS-channel exfiltration: " + clip(res_hit.strip(), 24) +

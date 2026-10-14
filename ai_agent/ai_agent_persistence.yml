@@ -29,6 +29,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Cron — command-based
   sel_crontab:

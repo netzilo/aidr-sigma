@@ -1,0 +1,23 @@
+rule: ai_agent_hallucinated_package_install.yml
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  pip:
+    session: pid/102:1
+    parent: cursor
+    program: /usr/bin/pip
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: llm_request, subject: cursor, provider: openai, model: gpt-4o, request_id: q1, body: "How do I make an HTTP call in Python?"}
+  - {kind: llm_response, subject: cursor, provider: openai, model: gpt-4o, request_id: q1, body: "Run pip install requests and then use requests.get()."}
+  - {kind: spawn, subject: pip, cmdline: "pip install requests"}
+expect:
+  action: allow

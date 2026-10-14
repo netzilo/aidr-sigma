@@ -49,6 +49,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
 
   # Scope: the agent's own tool invocation, from either the hook path (tool_call) or the

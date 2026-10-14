@@ -31,6 +31,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - tool
 detection:
   # A read utility aimed at an account or auth file.
   sel_read_util_cmd:

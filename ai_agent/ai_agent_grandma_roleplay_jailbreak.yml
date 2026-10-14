@@ -44,6 +44,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
 detection:
   sel_event:
     event_type: llm_response

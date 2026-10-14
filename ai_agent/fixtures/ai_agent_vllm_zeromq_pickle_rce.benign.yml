@@ -1,0 +1,20 @@
+rule: ai_agent_vllm_zeromq_pickle_rce.yml
+subjects:
+  vllm:
+    session: pid/100:1
+    program: /usr/bin/python3.10
+    actors: [{id: svc-vllm, name: vllm-serving, kind: agent}]
+    device: gpu-1
+    source: probe
+  sh:
+    session: pid/102:1
+    parent: vllm
+    program: /bin/sh
+    actors: [{id: svc-vllm, name: vllm-serving, kind: agent}]
+    device: gpu-1
+    source: probe
+observations:
+  - {kind: spawn, subject: vllm, cmdline: "python3 -m vllm.entrypoints.openai.api_server --model meta-llama/Llama-3-8B"}
+  - {kind: spawn, subject: sh, cmdline: "sh -c \"nvidia-smi --query-gpu=memory.used --format=csv\""}
+expect:
+  action: allow

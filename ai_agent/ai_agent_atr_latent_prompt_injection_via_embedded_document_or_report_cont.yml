@@ -23,7 +23,7 @@ logsource:
   category: agent_events
 detection:
   sel_0:
-    response|re: (?:summarize|analyze|review|process|read|extract\s+(?:info|information|data|key\s+points)\s+from)\s+(?:this\s+)?(?:report|resume|CV|document|article|PDF|file|text|whois|legal\s+document)[\s\S]{20,2000}(?:ignore\s+(?:the\s+)?(?:above|previous|prior|all\s+(?:the\s+)?above)|your\s+(?:new\s+)?(?:task|instruction|goal|objective)\s+(?:is|now)\s+(?:is\s+)?to)
+    response|re: (?:summarize|analyze|review|process|read|extract\s+(?:info|information|data|key\s+points)\s+from)\s+(?:this\s+)?(?:report|resume|CV|document|article|PDF|file|text|whois|legal\s+document)[\s\S]{20,1000}(?:ignore\s+(?:the\s+)?(?:above|previous|prior|all\s+(?:the\s+)?above)|your\s+(?:new\s+)?(?:task|instruction|goal|objective)\s+(?:is|now)\s+(?:is\s+)?to)
   sel_1:
     response|re: (?:<!--\s*(?:NOTE|INSTRUCTION|SYSTEM|PROMPT|INJECT(?:ED)?|DO\s+THIS|OVERRIDE)[:\s].{5,200}-->|<!--.{0,50}(?:ignore|override|your\s+task|instead|new\s+instruction).{0,200}-->)
   sel_2:

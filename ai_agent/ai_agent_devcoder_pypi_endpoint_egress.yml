@@ -55,6 +55,10 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
+  - skill
 detection:
   sel_exec_devcoder:
     event_type: execute_process
@@ -143,12 +147,17 @@ script: |
           store_set("devcoder", m)
       return m
 
+  # Sessions running dev-coder: matched on the program path/name, or on the
+  # command line recorded on the session's Program node (python -m dev_coder).
   def devcoder_procs():
       out = []
-      for p in graph(type="Process"):
-          blob = p.get("path", "") + " " + p.get("name", "") + " " + p.get("cmdline", "")
-          if has_devcoder(blob):
-              out.append(p)
+      for p in sessions(active=True):
+          blob = p.get("path", "") + " " + p.get("name", "")
+          if not has_devcoder(blob):
+              pn = node(p.get("program", ""))
+              if pn == None or not has_devcoder(pn.get("cmdline", "")):
+                  continue
+          out.append(p)
       return out
 
   def run():

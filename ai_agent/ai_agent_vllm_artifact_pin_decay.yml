@@ -12,7 +12,8 @@ description: |
 
   Answering the triage dissent: the engine emits no model_load / weight_fetch /
   dynamic_module_import event and no LOAD_MODEL / FETCH_WEIGHTS / IMPORT_MODULE edge,
-  so this rule is built on the one live signal (file_download) plus the HTTP_REQUEST
+  so this rule is built on the live download signal (file_download from the classifier,
+  or the http_request to the registry host seen on the wire) plus the HTTP_REQUEST
   event log and URL graph. The claim that file_download is "too coarse to distinguish
   a pinned fetch from an unpinned one" is false in practice: the registry URL itself
   carries the revision segment (/<org>/<repo>/resolve/<ref>/<file>) or a ?revision=
@@ -21,12 +22,13 @@ description: |
   transition -- not the mere fact that a model was downloaded.
 
   Sequence detected:
-    1. Anchor (REQUIRED) -- an artifact fetched at an immutable commit SHA by this
-       process session (evidence the operator believes the deployment is pinned).
+    1. Anchor (REQUIRED) -- an artifact fetched at an immutable commit SHA by a
+       session in this session's lineage (evidence the operator believes the
+       deployment is pinned).
     2. Decay -- the triggering download resolves a behaviour-affecting artifact from a
        mutable ref, at or after the anchor, within 30 minutes.
     3. Graph corroboration -- the URL node for the registry host and its inbound
-       HTTP_REQUEST edge identify the fetching process for the kill chain.
+       HTTP_REQUEST edge identify the fetching session for the kill chain.
 
   Content-addressed CDN/LFS redirects (no /resolve/<ref>/ segment and no revision
   parameter) are never treated as unpinned, and documentation/tokenizer-inventory
@@ -52,7 +54,7 @@ falsepositives:
     these sessions will be reported. Treat as a policy finding, not a bug.
   - CI or benchmark jobs that, in one shell lineage, download a pinned production model
     and then separately pull a nightly/unpinned model for comparison. Mitigated by the
-    30-minute window, instance-scoped session attribution and per-artifact dedupe.
+    30-minute window, lineage-scoped session attribution and per-artifact dedupe.
   - Internal mirror or caching proxies that rewrite /resolve/<sha>/ to /resolve/main/
     on egress, making a genuinely pinned fetch look unpinned at the network layer.
   - Interactive developer sessions where an engineer manually curls an artifact from main
@@ -62,10 +64,16 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_download:
     event_type: file_download
-  condition: sel_download
+  sel_registry_http:
+    event_type: http_request
+    url.full|contains: '/resolve/'
+  condition: sel_download or sel_registry_http
 action: execute
 on_timeout: allow
 on_error: allow
@@ -198,17 +206,26 @@ script: |
       return ""
 
   def ev_edge(e):
-      tid = e.get("target_id", "")
-      if tid == "":
-          tid = "https://" + e.get("host", "")
-      ts = e.get("ts", "0")
-      return {"from": "process://" + e.get("actor_path", "unknown"),
-              "to": tid, "kind": e.get("kind", "HTTP_REQUEST"),
-              "ts": ts, "first_ts": ts, "last_ts": ts}
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
+      return {
+          "from":     frm,
+          "to":       e.get("target_id", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
 
   def run():
       # ── 1. Relevance gate: pure string work on meta only ────────────────────
-      if meta.get("context_type", "") != "file_download":
+      # file_download is the classifier's signal; an http_request to a registry
+      # host observed on the wire is the same fetch.
+      ct = meta.get("context_type", "")
+      if ct != "file_download" and ct != "http_request":
           return "allow"
 
       payload = meta.get("content", "")
@@ -241,32 +258,30 @@ script: |
       if event_ts > WINDOW_NS:
           since = event_ts - WINDOW_NS
 
-      # ── 2. Anchor on the exact triggering instance ───────────────────────────
-      lineage = []
-      session = {}
+      # ── 2. Anchor on the exact triggering session ────────────────────────────
+      lineage_ = []
+      tree = {}
       attribution = "degraded"
-      cp = int(meta.get("caller_pid", "0"))
-      if cp > 0:
-          inst = proc_instance(cp, event_ts)
-          if inst != None:
-              lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-              for x in lineage:
-                  session[x["actor_pid"]] = x["actor_start"]
-              if len(session) > 0:
-                  attribution = "instance"
+      inst = session()
+      if inst != None:
+          lineage_ = lineage(inst["id"])
+          for x in lineage_:
+              tree[x["id"]] = True
+          if len(tree) > 0:
+              attribution = "session"
 
-      # ── 3. Required anchor stage: a pinned fetch by this session ─────────────
+      # ── 3. Required anchor stage: a pinned fetch by this session tree ───────
       rows = []
-      if attribution == "instance":
-          for pid in session:
-              for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                    since_ns=since, until_ns=event_ts + SLACK_NS,
-                                    limit=300):
+      if attribution == "session":
+          for sid in tree:
+              for e in events(kind="HTTP_REQUEST", session=sid,
+                              since_ns=since, until_ns=event_ts + SLACK_NS,
+                              limit=300):
                   rows.append(e)
       else:
-          for e in query_events(kind="HTTP_REQUEST", target_sub=host,
-                                since_ns=since, until_ns=event_ts + SLACK_NS,
-                                limit=300):
+          for e in events(kind="HTTP_REQUEST", target_sub=host,
+                          since_ns=since, until_ns=event_ts + SLACK_NS,
+                          limit=300):
               rows.append(e)
 
       pin_row  = None
@@ -307,7 +322,7 @@ script: |
 
       # ── 5. Graph corroboration: URL node + inbound HTTP_REQUEST edge ─────────
       graph_edge = None
-      proc_id    = ""
+      sess_id    = ""
       for u in graph(type="URL"):
           if u.get("host", "").lower() != host.lower():
               continue
@@ -317,32 +332,43 @@ script: |
                   continue
               if graph_edge == None:
                   graph_edge = e
-                  proc_id    = src["id"]
+                  sess_id    = src["id"]
               if src.get("agent", "0") == "1":
                   graph_edge = e
-                  proc_id    = src["id"]
+                  sess_id    = src["id"]
                   break
           if graph_edge != None:
               break
 
       # ── 6. Kill chain ───────────────────────────────────────────────────────
       root = ""
-      if len(lineage) > 0:
-          root = "process://" + lineage[-1]["actor_path"]
-      elif proc_id != "":
-          root = proc_id
+      if len(lineage_) > 0:
+          root = lineage_[-1]["id"]
+      elif sess_id != "":
+          root = sess_id
       else:
-          root = "process://" + meta.get("agent_name", "unknown-agent")
-      chain = new_chain(root)
-
-      actor_path = "unknown"
-      if len(lineage) > 0:
-          actor_path = lineage[0]["actor_path"]
-      trig = {"from": "process://" + actor_path, "to": "https://" + host,
-              "kind": "HTTP_REQUEST", "ts": str(event_ts),
-              "first_ts": str(event_ts), "last_ts": str(event_ts)}
+          root = meta.get("session", "")
 
       short_sha = pin_info["ref"][:12]
+      sub = ""
+      if cur["file"].find("/") >= 0:
+          sub = " (subfolder component)"
+      reason = ("vLLM artifact pin decay: session pinned " + pin_info["repo"] +
+                "@" + short_sha + " but resolved " + cls + " '" + cur["file"] +
+                "'" + sub + " from unpinned ref '" + cur["ref"] + "' on " + host +
+                " [attribution: " + attribution + "]")
+      print(reason)
+      if root == "":
+          return {"action": "report", "reason": reason}   # no session to hang a chain on
+
+      chain = new_chain(root)
+      actor_id = root
+      if len(lineage_) > 0:
+          actor_id = lineage_[0]["id"]
+      trig = {"from": actor_id, "to": "https://" + host,
+              "kind": "HTTP_REQUEST", "dir": "out", "ts": str(event_ts),
+              "first_ts": str(event_ts), "last_ts": str(event_ts)}
+
       chain.append(step(ev_edge(pin_row), stage_id="Pin Established",
                         stage_desc="pinned artifact fetched at immutable commit " +
                                    short_sha + ": " + pin_row.get("host", "") +
@@ -354,17 +380,8 @@ script: |
       if graph_edge != None:
           chain.append(step(graph_edge, stage_id="Registry Fetch Path",
                             stage_desc="registry fetches from " + host +
-                                       " attributed to " + proc_id +
+                                       " attributed to " + sess_id +
                                        " (attribution: " + attribution + ")"))
-
-      sub = ""
-      if cur["file"].find("/") >= 0:
-          sub = " (subfolder component)"
-      reason = ("vLLM artifact pin decay: session pinned " + pin_info["repo"] +
-                "@" + short_sha + " but resolved " + cls + " '" + cur["file"] +
-                "'" + sub + " from unpinned ref '" + cur["ref"] + "' on " + host +
-                " [attribution: " + attribution + "]")
-      print(reason)
       return {"action": "report", "reason": reason, "chain": chain}
 
   result = run()

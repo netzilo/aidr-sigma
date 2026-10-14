@@ -68,6 +68,8 @@ logsource:
   product: ai_agent
   category: agent_events
 
+requires:
+  - tool
 detection:
 
   # --- stacked traversal in a path-bearing argument (3+ segments) -------------

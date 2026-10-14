@@ -10,17 +10,16 @@ description: |
   a real host materialises as the vLLM/torchrun worker process spawning a shell,
   interpreter, or network tool.
 
-  The rule is instance-resolved. It anchors on meta["caller_pid"] of the
-  execute_process event, resolves the exact process instance with proc_instance(),
-  walks the spawn chain with proc_lineage(), and REQUIRES a vLLM / distributed-worker
-  instance inside that one lineage before considering anything. All corroborating
-  stages are queried from the event log scoped by (actor_pid, actor_start) and a
-  5-minute window around the trigger, so nothing is ever attributed across sessions
-  or across recycled PIDs. The triggering exec itself is taken from meta, never
-  re-queried, because the just-fired event races asynchronous ingest.
+  The rule is session-resolved. It anchors on the triggering session of the
+  execute_process event, walks its lineage, and REQUIRES a vLLM / distributed-worker
+  session (by program path or spawn command line) inside that one lineage before
+  considering anything. All corroborating stages are queried from the event log
+  scoped by session id and a 5-minute window around the trigger, so nothing is ever
+  attributed across session trees. The triggering exec itself is taken from meta,
+  never re-queried, because the just-fired event races asynchronous ingest.
 
   Weak payload shapes (bare `python -c`, `/bin/sh`) are only reported when a second
-  instance-scoped stage corroborates them: HTTP egress by a process spawned beneath
+  session-scoped stage corroborates them: HTTP egress by a process spawned beneath
   the payload, or a second payload-shaped exec in the same subtree.
 author: Evgen
 date: "2026-06-12"
@@ -51,6 +50,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_exec:
     event_type: execute_process
@@ -97,7 +99,7 @@ script: |
       r"(?i)\bpowershell\b[^\n]{0,40}-enc",
   ]
 
-  # Weaker shapes — only reported with a second instance-scoped stage.
+  # Weaker shapes — only reported with a second session-scoped stage.
   PAYLOAD_WEAK = [
       r"(?i)\bpython[0-9.]*\s+-c\b",
       r"(?i)/bin/(?:ba|z|da|k)?sh\b",
@@ -112,22 +114,48 @@ script: |
               return True
       return False
 
-  def proc_text(e):
-      return e.get("actor_path", "") + " " + e.get("cmdline", "") + " " + e.get("parent_path", "")
+  def row_text(e):
+      return e.get("program", "") + " " + e.get("cmdline", "")
 
   def short(p):
       parts = p.split("/")
       return parts[-1]
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
           "kind":     e.get("kind", ""),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
+
+  def sess_edge(x):
+      t = x.get("first_seen", "0")
+      return {
+          "from":     x.get("parent", "") or x.get("id", ""),
+          "to":       x.get("id", ""),
+          "kind":     "SPAWNED",
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
+      }
+
+  # ── log-backed helper (bounded: lineage is short) ────────────────────────────
+  def sess_text(x):
+      # program path plus the spawn command line of that session
+      t = x.get("path", "")
+      rows = events(kind="SPAWNED", session=x.get("id", ""), limit=1)
+      if rows:
+          t = t + " " + rows[0].get("cmdline", "")
+      return t
 
   # ── relevance gate — pure string checks on meta only ─────────────────────────
   def is_relevant_event():
@@ -149,23 +177,23 @@ script: |
       cmd    = meta.get("content", "")
       strong = matches_any(PAYLOAD_STRONG, cmd)
 
-      # ── anchor on the exact triggering instance ──────────────────────────────
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          return "allow"
+      # ── anchor on the exact triggering session ───────────────────────────────
       event_ts = int(meta.get("event_ts", "0"))
-      inst = proc_instance(cp, event_ts)
+      inst = session()
       if inst == None:
-          return "allow"                      # degraded — re-fires when create row lands
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
+          return "allow"                      # degraded — re-fires when the session is known
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
           return "allow"
 
       # REQUIRED: a vLLM / distributed worker inside THIS lineage.
       anchor = None
-      for x in lineage:
-          if matches_any(VLLM_MARKERS, proc_text(x)):
+      inst_is_worker = False
+      for x in lineage_:
+          if matches_any(VLLM_MARKERS, sess_text(x)):
               anchor = x
+              if x["id"] == inst["id"]:
+                  inst_is_worker = True
               break
       if anchor == None:
           return "allow"
@@ -179,31 +207,28 @@ script: |
               since = 0
           until = event_ts
 
-      # ── instance-exact subtree rooted at the triggering caller ───────────────
+      # ── session-exact subtree rooted at the triggering session ───────────────
       desc = {}
-      desc[inst["actor_pid"]] = inst["actor_start"]
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=since, until_ns=until, limit=2000)
+      desc[inst["id"]] = True
+      rows = events(kind="SPAWNED", since_ns=since, until_ns=until, limit=2000)
       for i in range(3):
           for e in rows:
-              pp = e.get("parent_pid", "")
-              if pp in desc and desc[pp] == e.get("parent_start", ""):
-                  desc[e["actor_pid"]] = e["actor_start"]
+              if e.get("parent_session", "") in desc:
+                  desc[e["session_id"]] = True
 
-      # HTTP egress by the payload subtree. If the caller instance IS the vLLM
+      # HTTP egress by the payload subtree. If the triggering session IS the vLLM
       # worker itself, exclude it — a serving worker's own HTTP traffic is not
       # evidence of anything.
       http_scope = {}
-      for pid in desc:
-          http_scope[pid] = desc[pid]
-      if matches_any(VLLM_MARKERS, proc_text(inst)):
-          if inst["actor_pid"] in http_scope:
-              http_scope.pop(inst["actor_pid"])
+      for sid in desc:
+          if inst_is_worker and sid == inst["id"]:
+              continue
+          http_scope[sid] = True
 
       http_ev = None
-      for pid in http_scope:
-          hits = query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                              actor_start=int(http_scope[pid]),
-                              since_ns=since, until_ns=until, limit=10)
+      for sid in http_scope:
+          hits = events(kind="HTTP_REQUEST", session=sid,
+                        since_ns=since, until_ns=until, limit=10)
           if hits:
               http_ev = hits[0]
               break
@@ -211,12 +236,9 @@ script: |
       # A second, earlier payload-shaped exec inside the same subtree.
       follow = None
       for e in rows:
-          pp = e.get("parent_pid", "")
-          if pp not in desc:
+          if e.get("parent_session", "") not in desc:
               continue
-          if desc[pp] != e.get("parent_start", ""):
-              continue
-          if e.get("actor_pid", "") == inst["actor_pid"]:
+          if e.get("session_id", "") == inst["id"]:
               continue
           ts_ok = (event_ts == 0) or (int(e.get("ts", "0")) < event_ts)
           if not ts_ok:
@@ -230,21 +252,22 @@ script: |
           return "allow"
 
       # ── kill chain, rooted at the session owner ──────────────────────────────
-      chain = new_chain("process://" + lineage[-1].get("actor_path", ""))
+      chain = new_chain(lineage_[-1]["id"])
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       path_str = " <- ".join(names)
 
-      chain.append(step(ev_edge(anchor),
+      chain.append(step(sess_edge(anchor),
           stage_id="Vulnerable Worker",
           stage_desc="vLLM/distributed worker in caller lineage: " +
-                     short(anchor.get("actor_path", "")) + " pid " + anchor.get("actor_pid", "?")))
+                     short(anchor.get("path", "")) + " session " + anchor.get("id", "?")))
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
-          "to":       "process://" + inst.get("actor_path", ""),
-          "kind":     "EXECUTE_PROCESS",
+          "from":     inst.get("parent", "") or inst["id"],
+          "to":       inst["id"],
+          "kind":     "SPAWNED",
+          "dir":      "out",
           "ts":       str(event_ts),
           "first_ts": str(event_ts),
           "last_ts":  str(event_ts),
@@ -260,7 +283,7 @@ script: |
           chain.append(step(ev_edge(http_ev),
               stage_id="Payload Egress",
               stage_desc="HTTP request by payload subtree process " +
-                         short(http_ev.get("actor_path", "")) + " to " +
+                         short(http_ev.get("program", "")) + " to " +
                          http_ev.get("host", "?") + http_ev.get("path", "")))
           stages = stages + 1
       if follow != None:
@@ -271,7 +294,7 @@ script: |
           stages = stages + 1
 
       reason = ("Possible vLLM GroupCoordinator.recv_object() pickle deserialization RCE — " +
-                str(stages) + " instance-scoped stages; lineage " + path_str +
+                str(stages) + " session-scoped stages; lineage " + path_str +
                 "; spawned: " + cmd[:160])
       print(reason)
       return {"action": "report", "reason": reason, "chain": chain}

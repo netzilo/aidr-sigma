@@ -39,6 +39,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
 
   # ── Branch 1: the fsr-playbooks CLI itself ──────────────────────────────

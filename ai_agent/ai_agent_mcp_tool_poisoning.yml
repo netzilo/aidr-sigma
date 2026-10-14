@@ -36,6 +36,8 @@ tags:
 logsource:
   product: ai_agent
   category: tool_description
+requires:
+  - tool
 detection:
   # Pseudo-system framing inside a description — the tool asserting authority it
   # does not have.

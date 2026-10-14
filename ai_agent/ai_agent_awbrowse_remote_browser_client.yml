@@ -37,6 +37,9 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   # ── Acquisition: a package manager is told to fetch/install awbrowse ────────
   sel_exec_install:

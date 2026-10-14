@@ -50,6 +50,8 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - http
 detection:
   sel_audio_path:
     event_type: http_request
@@ -132,44 +134,30 @@ script: |
           n = b
       return n
 
-  # ── Graph evidence: agent process -> URL node for this host ───────────────
-  def find_evidence(host, agent_path):
+  # ── Graph evidence: the uploading session -> URL node for this host ───────
+  def find_evidence(host, sess_id):
       target = None
       for u in graph(type="URL"):
           if u.get("host", "") == host:
               target = u
               break
       if target == None:
-          return [None, None]
-      tid        = target["id"]
-      pick_proc  = None
-      pick_edge  = None
-      pick_score = -1
-      for p in graph(type="Process"):
-          for e in edges(p["id"], dir="out", kind="HTTP_REQUEST"):
-              if e.get("to", "") != tid:
-                  continue
-              score = to_int(e.get("count", "0"))
-              if p.get("agent", "0") == "1":
-                  score = score + 1000
-              if agent_path != "" and p.get("path", "") == agent_path:
-                  score = score + 1000000
-              if score > pick_score:
-                  pick_score = score
-                  pick_proc  = p
-                  pick_edge  = e
-      return [pick_proc, pick_edge]
+          return None
+      tid = target["id"]
+      if sess_id != "":
+          for e in edges(sess_id, dir="out", kind="HTTP_REQUEST"):
+              if e.get("to", "") == tid:
+                  return e
+      return None
 
   # Synthesised edge for the TRIGGERING request — taken from meta, never from a
   # lookup, because the event that just fired races the async ingest.
-  def trigger_edge(host, ts, agent_path):
-      src = agent_path
-      if src == "":
-          src = "unknown"
+  def trigger_edge(host, ts, sess_id):
       return {
-          "from":     "process://" + src,
+          "from":     sess_id,
           "to":       "https://" + host,
           "kind":     "HTTP_REQUEST",
+          "dir":      "out",
           "method":   meta.get("method", "POST"),
           "ts":       str(ts),
           "first_ts": str(ts),
@@ -191,15 +179,21 @@ script: |
       if now == 0:
           return "allow"
 
-      host  = meta.get("host", "")
-      apath = meta.get("agent_name", "")
-      ep    = endpoint_of(target_path())
-      size  = observed_size()
+      host = meta.get("host", "")
+      ep   = endpoint_of(target_path())
+      size = observed_size()
       if host == "" or ep == "":
           return "allow"
 
-      # Per-agent, per-endpoint bucket — no cross-process conflation.
-      key = "b:" + apath + "|" + host + ep
+      inst = session()
+      sess_id = ""
+      if inst != None:
+          sess_id = inst["id"]
+      if sess_id == "":
+          sess_id = meta.get("program", meta.get("agent_name", "unknown"))
+
+      # Per-session, per-endpoint bucket — no cross-session conflation.
+      key = "b:" + sess_id + "|" + host + ep
       st  = store_get(key)
       if st == None:
           st = {"ev": [], "alert": 0}
@@ -253,20 +247,22 @@ script: |
       st["alert"] = now
       save(key, st)
 
-      ev      = find_evidence(host, apath)
-      proc    = ev[0]
-      gedge   = ev[1]
-      anchor  = "process://" + (apath or "unknown")
-      if proc != None:
-          anchor = proc["id"]
-      chain = new_chain(anchor)
+      reason = ("vLLM audio upload abuse pattern on " + host + ep + ": " + why +
+                " — unbounded read-before-validate (GHSA-v82g-2437-67m2) makes" +
+                " each rejected upload a memory allocation. No memory telemetry" +
+                " exists; impact is inferred, not observed.")
+      print(reason)
+      if inst == None:
+          return {"action": "report", "reason": reason}   # no session to hang a chain on
 
+      chain = new_chain(inst["id"])
       chain.append(step(
-          trigger_edge(host, now, apath),
+          trigger_edge(host, now, inst["id"]),
           stage_id=stage_id,
           stage_desc="POST " + ep + " on " + host + " — " + why,
       ))
 
+      gedge = find_evidence(host, inst["id"])
       if gedge != None:
           u   = node(gedge["to"])
           uh  = host
@@ -282,11 +278,6 @@ script: |
                           " (URL fetch_count " + fc + ")"),
           ))
 
-      reason = ("vLLM audio upload abuse pattern on " + host + ep + ": " + why +
-                " — unbounded read-before-validate (GHSA-v82g-2437-67m2) makes" +
-                " each rejected upload a memory allocation. No memory telemetry" +
-                " exists; impact is inferred, not observed.")
-      print(reason)
       return {"action": "report", "reason": reason, "chain": chain}
 
   result = run()

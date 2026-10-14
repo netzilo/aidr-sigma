@@ -20,6 +20,10 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - llm
+  - tool
+  - skill
 detection:
   selection_self_modify_command:
     event_type: tool_call

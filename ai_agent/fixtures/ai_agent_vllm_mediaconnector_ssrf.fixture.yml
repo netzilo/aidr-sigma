@@ -1,0 +1,19 @@
+subjects:
+  vllm:
+    session: pid/100:1
+    program: /opt/venv/bin/vllm
+    name: vllm
+    agent: true
+    actors: [{id: svc-vllm, kind: agent, name: vllm-serving}]
+    device: gpu-node-1
+    source: probe
+observations:
+  - {kind: session_start, subject: vllm}
+  - {kind: http_request, subject: vllm, url: "https://cdn.example.com/uploads/img.png", method: GET, request_id: r1, content_type: image/png, body: ""}
+  - {kind: http_request, subject: vllm, url: "http://10.0.0.7:8080/health", method: GET, request_id: r2, content_type: text/plain, body: ""}
+  - {kind: http_request, subject: vllm, url: "http://10.0.0.8:8080/health", method: GET, request_id: r3, content_type: text/plain, body: ""}
+  - {kind: http_request, subject: vllm, url: "http://169.254.169.254/latest/meta-data/iam/security-credentials/", method: GET, request_id: r4, content_type: text/plain, body: ""}
+expect:
+  action: report
+  reason_contains: "score=6"
+  chain_min: 4

@@ -1,0 +1,13 @@
+rule: ai_agent_openclaw_cve_2026_44118_owner_impersonation.yml
+subjects:
+  claude:
+    session: agent/claude/s-42
+    program: claude-code
+    agent: true
+    actors: [{id: u1, name: Dev}]
+    source: hook
+observations:
+  - {kind: session_start, subject: claude}
+  - {kind: tool_call, subject: claude, server: github, server_url: "https://mcp.github.com", tool: create_issue, call_id: c1, args: '{"title": "flaky test", "body": "see CI run 42"}'}
+expect:
+  action: allow

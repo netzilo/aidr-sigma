@@ -26,6 +26,8 @@ tags:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - tool
 detection:
   # Read tool accessing /proc/*/environ (environment variables)
   selection_read_proc_environ:

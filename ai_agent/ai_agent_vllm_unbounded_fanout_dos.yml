@@ -16,10 +16,9 @@ description: |
   Only the HTTP_REQUEST layer is observable for this attack: there is no
   DENIAL_OF_SERVICE or MEMORY_EXHAUSTION edge kind, and no memory_allocation or
   process_termination event type in the engine. Detection therefore anchors on
-  the outbound request itself and resolves *who* sent it via the instance-
-  resolved event log (caller_pid -> proc_instance -> proc_lineage), so the
-  finding names an exact process instance and its session rather than a
-  path-collapsed graph node.
+  the outbound request itself and resolves *who* sent it from the triggering
+  session and its lineage(), so the finding names an exact session and its
+  session tree rather than a path-collapsed graph node.
 
   The Sigma block is only a cheap pre-filter; the Starlark script is the
   authoritative detector and returns "allow" (invisible, no event) for every
@@ -50,6 +49,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -139,16 +141,19 @@ script: |
       return [param, val, raw]
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", ""),
-          "first_ts": e.get("ts", ""),
-          "last_ts":  e.get("ts", ""),
-          "method":   e.get("method", ""),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ── Relevance gate: pure string checks on meta, no graph/log calls ────────
   def is_relevant_event():
       if meta.get("context_type", "") != "http_request":
@@ -193,79 +198,78 @@ script: |
           sev = "astronomical"
       label = param + "=" + raw
 
-      # ── Anchor on the exact triggering instance ───────────────────────────
-      cp = as_int(meta.get("caller_pid", "0"))
-      if cp == 0:
+      # ── Anchor on the triggering session ──────────────────────────────────
+      cp = meta.get("session", "")
+      if cp == "":
           return {
               "action": "report",
               "reason": "vLLM " + sev + " fan-out parameter " + label +
                         " POSTed to " + host + path +
-                        " — attribution unavailable (no caller pid on this event)",
+                        " — attribution unavailable (no session on this event)",
           }
 
-      inst = proc_instance(cp, ev_ts)
+      inst = session(cp)
       if inst == None:
           return {
               "action": "report",
               "reason": "vLLM " + sev + " fan-out parameter " + label +
-                        " POSTed to " + host + path + " by pid " + str(cp) +
-                        " — attribution degraded (process instance not yet in event log)",
+                        " POSTed to " + host + path + " by session " + cp +
+                        " — attribution degraded (session not yet known)",
           }
 
-      lineage = proc_lineage(as_int(inst.get("actor_pid", "0")),
-                             as_int(inst.get("actor_start", "0")))
-      if not lineage:
-          lineage = [inst]
-      root  = lineage[len(lineage) - 1]
+      lineage_ = lineage(inst["id"])
+      if not lineage_:
+          lineage_ = [inst]
+      root  = lineage_[len(lineage_) - 1]
       names = []
-      for x in lineage:
-          names.append(short(x.get("actor_path", "")))
+      for x in lineage_:
+          names.append(short(x.get("path", "")))
       lin_txt = " -> ".join(names)
 
-      # ── Session scope: lineage instances + their direct children only ─────
-      session = {}
-      for x in lineage:
-          session[x.get("actor_pid", "")] = x.get("actor_start", "")
-      for e in query_events(kind="EXECUTE_PROCESS",
+      # ── Session scope: lineage sessions + their direct children only ───────
+      scope = {}
+      for x in lineage_:
+          scope[x.get("id", "")] = True
+      for e in events(kind="SPAWNED",
                             since_ns=ev_ts - WINDOW_NS, until_ns=ev_ts,
                             limit=2000):
-          if e.get("parent_pid", "") in session:
-              session[e.get("actor_pid", "")] = e.get("actor_start", "")
+          if e.get("parent_session", "") in scope:
+              scope[e.get("session_id", "")] = True
 
-      # ── Prior requests to the SAME host by THIS session only ──────────────
+      # ── Prior requests to the SAME host by THIS session tree only ──────────
+      cid_self = meta.get("callid", "")
       prior = []
-      for pid in session:
+      for sid in scope:
           if len(prior) >= MAX_PRIOR:
               break
-          ipid = as_int(pid)
-          if ipid == 0:
+          if sid == "":
               continue
-          for e in query_events(kind="HTTP_REQUEST",
-                                actor_pid=ipid,
-                                actor_start=as_int(session[pid]),
+          for e in events(kind="HTTP_REQUEST", session=sid,
                                 since_ns=ev_ts - WINDOW_NS, until_ns=ev_ts,
                                 limit=25):
+              if cid_self != "" and e.get("callid", "") == cid_self:
+                  continue                    # the triggering request itself
               if host != "" and e.get("host", "") != host:
                   continue
               prior.append(e)
               if len(prior) >= MAX_PRIOR:
                   break
 
-      # ── Kill chain rooted at the session owner ────────────────────────────
-      chain = new_chain("process://" + root.get("actor_path", ""))
+      # ── Kill chain rooted at the session root ──────────────────────────────
+      chain = new_chain(root["id"])
       np = len(prior)
       for i in range(np):
           e = prior[np - 1 - i]
           chain.append(step(ev_edge(e),
                             stage_id="Repeated Inference Request",
                             stage_desc="prior request to " + host + e.get("path", "") +
-                                       " by " + short(e.get("actor_path", ""))))
+                                       " by " + short(e.get("program", ""))))
 
       scheme = "https"
       if meta.get("url", "").startswith("http://"):
           scheme = "http"
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       scheme + "://" + host,
           "kind":     "HTTP_REQUEST",
           "ts":       str(ev_ts),

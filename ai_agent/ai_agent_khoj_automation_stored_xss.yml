@@ -5,25 +5,24 @@ level: medium
 description: |
   Detects an agent-driven HTTP request that writes executable markup into the Khoj
   Automation task-instruction sink (the `q` parameter of /api/automation, unsanitised
-  before 1.15.0). The rule is instance-resolved: it anchors on meta.caller_pid, resolves
-  the exact process instance with proc_instance(), walks proc_lineage() to the session
-  root, expands the session with EXECUTE_PROCESS descendants, and correlates prior
-  HTTP_REQUEST rows from the event log scoped to that one session only.
+  before 1.15.0). The rule is session-based: it anchors on the triggering session,
+  walks lineage() to the tree root, expands the tree with SPAWNED descendants, and
+  correlates prior HTTP_REQUEST rows from the event log scoped to that one tree only.
 
   HONEST SCOPE (answers the triage dissent): our telemetry stops at the write. The
   engine has no render_content / execute_script event type and no STORED_XSS or
   SCRIPT_INJECTION edge kind, so the victim-side render, the script execution and any
   resulting session-token theft are NOT observable here. This rule therefore proves
   "a payload with executable markup was submitted into the vulnerable sink by this
-  process instance", never "the XSS fired". That unobservable success state is exactly
+  session", never "the XSS fired". That unobservable success state is exactly
   why the action is `report` and the level is `medium` rather than a block: escalation
   requires browser-side or Khoj application telemetry we do not have.
 
   Corroboration that IS available and is used: (1) prior same-host session traffic,
-  proving the submitting instance is genuinely interacting with the Khoj deployment
+  proving the submitting session is genuinely interacting with the Khoj deployment
   and not merely echoing a payload string; (2) whether any external host embedded in
   the payload (a beacon/exfil target inside fetch()/new Image().src/src=) has already
-  been contacted by the same session — a strong, allowlist-free signal.
+  been contacted by the same session tree — a strong, allowlist-free signal.
 
   Taxonomy note: no ATLAS technique describes a browser-rendered stored XSS in an AI
   application's own web UI, so no atlas. tag is asserted rather than forcing a wrong
@@ -61,6 +60,9 @@ falsepositives:
 logsource:
   product: ai_agent
   category: agent_events
+requires:
+  - process_exec
+  - http
 detection:
   sel_http:
     event_type: http_request
@@ -70,13 +72,13 @@ on_timeout: allow
 on_error:   allow
 script: |
   # ────────────────────────────────────────────────────────────────────────────
-  # Khoj Automation stored-XSS submission — instance-resolved, single-session.
+  # Khoj Automation stored-XSS submission — session-based, single tree.
   # Trigger data comes from meta (never re-queried: the just-fired event races
   # async ingest). The event log is used only for PRIOR stages and lineage.
   # ────────────────────────────────────────────────────────────────────────────
-  WINDOW_NS        = 600000000000    # 10 min — session correlation window
+  WINDOW_NS        = 600000000000    # 10 min — tree correlation window
   DEDUPE_NS        = 3600000000000   # 1 h  — suppress identical re-submissions
-  MAX_SESSION_PIDS = 40
+  MAX_SESSION_SIDS = 40
   MAX_SEEN         = 400
 
   # The vulnerable sink. Narrow by design: this rule is about one endpoint.
@@ -164,13 +166,13 @@ script: |
       return False
 
   def q_from_url(u):
-      m = re.find(r"[?&]q=[^&#]{1,4000}", u)
+      m = re.find(r"[?&]q=[^&#]{1,1000}", u)
       if m == None:
           return ""
       return m[3:]
 
   def q_from_body(b):
-      m = re.find(r'"q"\s*:\s*"[^"]{0,4000}"', b)
+      m = re.find(r'"q"\s*:\s*"[^"]{0,1000}"', b)
       if m == None:
           return ""
       i = m.find(":")
@@ -193,15 +195,19 @@ script: |
       return out
 
   def ev_edge(e):
+      t = e.get("ts", "0")
+      frm = e.get("session_id", "")
+      if e.get("kind", "") == "SPAWNED":
+          frm = e.get("parent_session", "")
       return {
-          "from":     "process://" + e.get("actor_path", ""),
+          "from":     frm,
           "to":       e.get("target_id", ""),
-          "kind":     e.get("kind", "HTTP_REQUEST"),
-          "ts":       e.get("ts", "0"),
-          "first_ts": e.get("ts", "0"),
-          "last_ts":  e.get("ts", "0"),
+          "kind":     e.get("kind", ""),
+          "dir":      "out",
+          "ts":       t,
+          "first_ts": t,
+          "last_ts":  t,
       }
-
   # ── relevance gate: pure string checks on meta, no graph / log calls ────────
   def is_relevant_event():
       if meta.get("context_type", "") != "http_request":
@@ -262,53 +268,46 @@ script: |
       if fp in fresh:
           return "allow"
 
-      # ── instance-resolved attribution ─────────────────────────────────────
-      cp = int(meta.get("caller_pid", "0"))
-      if cp == 0:
-          print("khoj-xss: payload seen but no caller_pid — attribution degraded")
-          return {
-              "action": "report",
-              "reason": "Executable markup written to Khoj automation sink " +
-                        host + path + " (" + sink + ") — attribution degraded, no caller_pid",
-          }
-
-      inst = proc_instance(cp, ets)
+      # ── session-based attribution ─────────────────────────────────────────
+      inst = session()
       if inst == None:
-          print("khoj-xss: payload seen, proc_instance unresolved for pid " + str(cp))
+          print("khoj-xss: payload seen, triggering session unknown")
           return {
               "action": "report",
               "reason": "Executable markup written to Khoj automation sink " +
-                        host + path + " (" + sink + ") by pid " + str(cp) +
-                        " — attribution degraded, process instance not yet in event log",
+                        host + path + " (" + sink + ")" +
+                        " — attribution degraded, session not yet known",
           }
 
-      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
-      if not lineage:
-          lineage = [inst]
+      lineage_ = lineage()
+      if not lineage_:
+          lineage_ = [inst]
 
-      # session = lineage + descendants spawned inside the window. One session only.
-      session = {}
-      for x in lineage:
-          session[x["actor_pid"]] = x.get("actor_start", "0")
-      rows = query_events(kind="EXECUTE_PROCESS", since_ns=ets - WINDOW_NS,
-                          until_ns=ets, limit=5000)
+      # scope = lineage + descendants spawned inside the window. One tree only.
+      scope = {}
+      for x in lineage_:
+          scope[x["id"]] = True
+      rows = events(kind="SPAWNED", since_ns=ets - WINDOW_NS,
+                    until_ns=ets, limit=5000)
       for i in range(3):
           for e in rows:
-              if len(session) >= MAX_SESSION_PIDS:
+              if len(scope) >= MAX_SESSION_SIDS:
                   break
-              pp = e.get("parent_pid", "")
-              ap = e.get("actor_pid", "")
-              if pp in session and ap != "" and ap not in session:
-                  session[ap] = e.get("actor_start", "0")
+              pp = e.get("parent_session", "")
+              ap = e.get("session_id", "")
+              if pp in scope and ap != "" and ap not in scope:
+                  scope[ap] = True
 
-      # ── prior stage 1: same-host session traffic (proves real interaction) ─
+      # ── prior stage 1: same-host tree traffic (proves real interaction) ────
+      # Rows at the trigger's own timestamp are the trigger itself, not prior.
       prior = None
-      for pid in session:
+      for sid in scope:
           if prior != None:
               break
-          for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                actor_start=int(session[pid]),
-                                since_ns=ets - WINDOW_NS, until_ns=ets, limit=50):
+          for e in events(kind="HTTP_REQUEST", session=sid,
+                          since_ns=ets - WINDOW_NS, until_ns=ets, limit=50):
+              if int(e.get("ts", "0")) >= ets:
+                  continue
               if e.get("host", "") == host:
                   prior = e
                   break
@@ -317,28 +316,29 @@ script: |
       hosts  = payload_hosts(norm)
       beacon = None
       if hosts:
-          for pid in session:
+          for sid in scope:
               if beacon != None:
                   break
-              for e in query_events(kind="HTTP_REQUEST", actor_pid=int(pid),
-                                    actor_start=int(session[pid]),
-                                    since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
+              for e in events(kind="HTTP_REQUEST", session=sid,
+                              since_ns=ets - WINDOW_NS, until_ns=ets, limit=100):
+                  if int(e.get("ts", "0")) >= ets:
+                      continue
                   if e.get("host", "").lower() in hosts:
                       beacon = e
                       break
 
-      # ── kill chain, rooted at the session owner ───────────────────────────
-      root  = lineage[len(lineage) - 1].get("actor_path", inst.get("actor_path", ""))
-      chain = new_chain("process://" + root)
+      # ── kill chain, rooted at the tree's root session ──────────────────────
+      root  = lineage_[len(lineage_) - 1]["id"]
+      chain = new_chain(root)
 
       if prior != None:
           chain.append(step(ev_edge(prior), stage_id="Session Context",
-                            stage_desc="same session already reached Khoj host " + host +
+                            stage_desc="same session tree already reached Khoj host " + host +
                                        " (" + prior.get("method", "?") + " " +
                                        prior.get("path", "?") + ")"))
 
       trig = {
-          "from":     "process://" + inst.get("actor_path", ""),
+          "from":     inst["id"],
           "to":       "https://" + host,
           "kind":     "HTTP_REQUEST",
           "method":   method,
@@ -355,17 +355,17 @@ script: |
           chain.append(step(ev_edge(beacon), stage_id="Payload Host Pre-Contacted",
                             stage_desc="external host embedded in the payload (" +
                                        beacon.get("host", "?") +
-                                       ") was already contacted by this session"))
+                                       ") was already contacted by this session tree"))
 
       names = []
-      for x in lineage:
-          parts = x.get("actor_path", "").split("/")
+      for x in lineage_:
+          parts = x.get("path", "").split("/")
           names.append(parts[len(parts) - 1])
       lin = " -> ".join(names)
 
       reason = ("Stored-XSS payload written to Khoj automation sink " + host + path +
                 " (" + sink + ") by " + lin +
-                " [pid " + str(cp) + "]; anchor=" + one_line(anchor, 100) +
+                " [session " + inst.get("key", "?") + "]; anchor=" + one_line(anchor, 100) +
                 "; js_signals=" + str(js))
       if prior != None:
           reason = reason + "; prior same-host session traffic"

@@ -1,0 +1,22 @@
+rule: ai_agent_n8n_expression_eval_rce.yml
+subjects:
+  n8n:
+    session: pid/100:1
+    program: /usr/local/lib/node_modules/n8n/bin/n8n
+    name: n8n
+    agent: true
+    actors: [{id: u1, name: Ops, email: ops@example.com}]
+    device: srv-1
+    source: probe
+  shell:
+    session: pid/101:1
+    parent: n8n
+    program: /bin/sh
+    actors: [{id: u1, name: Ops}]
+    device: srv-1
+    source: probe
+observations:
+  - {kind: session_start, subject: n8n}
+  - {kind: spawn, subject: shell, cmdline: "sh -c n8n export:workflow --all --output=/data/backup.json"}
+expect:
+  action: allow
