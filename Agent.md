@@ -566,6 +566,34 @@ tags:
   - owasp.asi07             # OWASP ASI or LLM  — REQUIRED where one applies
 ```
 
+**Standard form — every rule, no exceptions.** Tags are machine-read: the
+dashboard's **Category** column shows a guardrail's ATT&CK tactic tags and
+nothing else, and the library facets match tags character for character. So:
+
+- **At least one ATT&CK tactic**, from this list only, written exactly so:
+  `attack.reconnaissance`, `attack.resource-development`,
+  `attack.initial-access`, `attack.execution`, `attack.persistence`,
+  `attack.privilege-escalation`, `attack.defense-evasion`,
+  `attack.credential-access`, `attack.discovery`, `attack.lateral-movement`,
+  `attack.collection`, `attack.command-and-control`, `attack.exfiltration`,
+  `attack.impact`. A rule with no tactic tag shows no category. Pick the
+  tactic of the behaviour the rule detects; one or two, rarely three.
+- **Lowercase, dots, no spaces**: `attack.t1059.004`, `atlas.aml.t0051`,
+  `atlas.aml.ta0004`, `owasp.llm01` … `owasp.llm10`, `owasp.asi01` …
+  `owasp.asi10` (two digits). Never `Initial Access`, `ATLAS.AML.T0051`,
+  `owasp.LLM1`, `mitre.*` or any other prefix.
+- **In this order**, one per line in block form: tactics, ATT&CK techniques,
+  ATLAS, OWASP.
+
+```yaml
+tags:
+  - attack.credential-access
+  - attack.exfiltration
+  - attack.t1552.001
+  - atlas.aml.t0057
+  - owasp.llm02
+```
+
 **Required.** A rule that detects adversary behaviour must carry at least one
 `atlas.` identifier and at least one `owasp.` identifier.
 
@@ -669,8 +697,7 @@ The `logsource.category` value controls which traffic events the rule evaluates 
 > every file event. The AI Gateway has no file events at all.
 >
 > A rule using `category: file_write` (or `file_read`, `file_op`, …) **loads
-> without error and never matches** during live evaluation. It only fires
-> during server-side replay of stored observations.
+> without error and never matches**: no host evaluates rules in these contexts.
 >
 > **Do this instead** — a `periodic` rule that reads the log:
 >
@@ -991,7 +1018,7 @@ on_timeout: block | allow | report   # default: allow
 on_error:   block | allow | report   # default: allow
 ```
 
-A scan that cannot run — no model approved for Threat Analysis, the service unreachable, a timeout — is an **error** and takes `on_error` (`on_timeout` for a timeout). With the defaults that is a silent `allow`; set `on_error: block` or `report` where a missed scan matters.
+A scan that cannot run — no model approved for Threat Analysis, the service unreachable, a timeout — is an **error** and takes `on_error` (`on_timeout` for a timeout). With the defaults that is a silent `allow`; set `on_error: block` or `report` where a missed scan matters. On a host with no scan service at all, a `scan` rule does not fire; the host logs `no scan service configured`.
 
 ### `blockmodel`
 
@@ -1262,8 +1289,7 @@ A guardrail is saved without parsing its script, and a script that fails to **pa
 shows no error in the dashboard: it takes the `on_error` verdict, which defaults to
 `allow`. With `on_error: block` every matching call is refused with
 `execute script failed (rule <id>): <error>`, and the host logs
-`Execute script for rule <id> error: …` — run the rule's fixtures (or Replay) after every
-edit. These have all shipped in this corpus or in judge rules:
+`Execute script for rule <id> error: …` — run the rule's fixtures after every edit. These have all shipped in this corpus or in judge rules:
 
 | Python | Starlark | Symptom |
 |---|---|---|
@@ -1609,9 +1635,9 @@ This produces a chain like:
 | Key | Available in | Value |
 |---|---|---|
 | `rule_id` | all | ID of the rule being evaluated |
-| `rule_name`, `filter_name` | periodic runs | The rule's title and the filter (or `replay`) it came from |
+| `rule_name`, `filter_name` | periodic runs | The rule's title and the filter it came from |
 | `event_ts` | all | Unix nanosecond timestamp taken when the script is invoked. Use this for look-back guards: `int(meta.get("event_ts","0"))`. |
-| `context_type` | all | The specific context that fired — the **raw** context name, not the collapsed `event_type` the `detection:` section matches on. `tool_input`, `tool_output`, `tool_description`, `gateway_description`, `prompt_description`, `prompt_request`, `prompt_response`, `sampling_request`, `sampling_response`, `llm_request`, `llm_response`, `http_request`, `connects`, `execute_process`, `skill_acquired`, `external_message`, `file_upload`, `file_download`, `llm_tool_call`, `llm_tool_result`, `llm_reasoning`, `do_automation`, `periodic`. **Never** `tool_call` or `tool_response` — those are `event_type` values that six and three contexts respectively collapse onto. `file_read`/`file_write`/`file_create`/`file_delete`/`file_rename` appear only during server-side replay; no live producer emits them. |
+| `context_type` | all | The specific context that fired — the **raw** context name, not the collapsed `event_type` the `detection:` section matches on. `tool_input`, `tool_output`, `tool_description`, `gateway_description`, `prompt_description`, `prompt_request`, `prompt_response`, `sampling_request`, `sampling_response`, `llm_request`, `llm_response`, `http_request`, `connects`, `execute_process`, `skill_acquired`, `external_message`, `file_upload`, `file_download`, `llm_tool_call`, `llm_tool_result`, `llm_reasoning`, `do_automation`, `periodic`. **Never** `tool_call` or `tool_response` — those are `event_type` values that six and three contexts respectively collapse onto. Never `file_read`/`file_write`/`file_create`/`file_delete`/`file_rename`: nothing produces those contexts. |
 | `session` | event-triggered runs | The node id of the session that produced the event (`session://<kind>/<key>`). The anchor for `session()`, `lineage()`, `events(session=…)`, `fs_activity()` and `new_chain()` — all of them default to it. Empty for periodic runs. |
 | `owner` | event-triggered runs | Actor node id that owns the session: the agent identity when there is one (`agent://<id>`), else the user (`user://<id>`). Empty when unknown. |
 | `program` | event-triggered runs | The program path on an endpoint, or the client name at the AI Gateway |
@@ -2552,7 +2578,7 @@ What follows from this:
 
 - **Rule placement never creates an exemption.** Putting an `allow` rule "first" does nothing to other rules.
 - **An unexpected rule named as the blocker** is more severe than the rule you expected (or equally severe with a lower `id:`). Correct the `level:` values or narrow the conditions; there is nothing to reorder.
-- **A `report` rule that never shows a detection** may be shadowed by a more severe `block` rule matching the same events. Replay the two rules together to see it.
+- **A `report` rule that never shows a detection** may be shadowed by a more severe `block` rule matching the same events. The **AI blocked** event names the rule that decided.
 
 ### Exempting traffic from a rule
 
@@ -2574,8 +2600,8 @@ The supported ways to exempt traffic, most targeted first:
 
 Verify every exception in both of these ways before relying on it:
 
-- **Replay** the edited rule against snapshots that contain the traffic you meant to exempt (it should no longer match; events the old rule blocked come back `new_allow`) and the traffic that must still be caught (it should still match). Replay tests the rule's conditions only; it does not test which devices the filters reach.
-- **Live pilot:** deploy to a pilot group and confirm in Activity → Events that the exempted traffic has stopped producing events for that rule while the rest still does.
+- **Report mode first:** deploy the edited rule with `action: report` to a pilot group, reproduce the traffic you meant to exempt (no **AI detected** event for this rule) and the traffic that must still be caught (an **AI detected** event), then restore the rule's action.
+- **Live pilot:** confirm in Activity → Events that the exempted traffic has stopped producing events for that rule while the rest still does, on the devices and users the filters reach.
 
 ---
 
@@ -3125,9 +3151,9 @@ action: block
 
 ### `file_read`
 
-Fires when a monitored process reads a file.
+Would fire when a monitored process reads a file.
 
-**Important:** this context has no live producer (see the `file_*` warning under logsource.category); it fires only in replay. `FileSystem` nodes do **not** store the path of the file that was accessed — they only know which session did I/O. To detect specific file paths in a script, use `fs_activity(session, "READ", pattern)` (or `events(kind="READ_FILE", session=…)`). In replay, the `file_path` field is extracted from the event and works in `detection:` conditions.
+**Important:** this context has no producer (see the `file_*` warning under logsource.category): a rule with this category never fires. `FileSystem` nodes do **not** store the path of the file that was accessed — they only know which session did I/O. To detect specific file paths in a script, use `fs_activity(session, "READ", pattern)` (or `events(kind="READ_FILE", session=…)`) from a `periodic` rule or a rule on another context.
 
 **Example — Block access to credential files (detection rule):**
 ```yaml
@@ -3191,7 +3217,7 @@ script: |
 
 ### `file_write`
 
-Fires when a monitored process writes to a file. `file_path` contains the path.
+Would fire when a monitored process writes to a file (`file_path` = the path). No host produces this context; see `file_read`.
 
 **Example — Block writes to shell profile files:**
 ```yaml
@@ -3217,7 +3243,7 @@ action: block
 
 ### `file_create`
 
-Fires when a monitored process creates a new file.
+Would fire when a monitored process creates a new file. No host produces this context; see `file_read`.
 
 **Example — Report new executable files created by agents:**
 ```yaml
@@ -3238,7 +3264,7 @@ action: report
 
 ### `file_delete`
 
-Fires when a monitored process deletes a file.
+Would fire when a monitored process deletes a file. No host produces this context; see `file_read`.
 
 **Example — Block mass deletion (scripted):**
 ```yaml
@@ -3271,7 +3297,7 @@ script: |
 
 ### `file_rename`
 
-Fires when a monitored process renames or moves a file.
+Would fire when a monitored process renames or moves a file. No host produces this context; see `file_read`.
 
 **Example — Block high-volume file renames (ransomware indicator):**
 ```yaml
@@ -3655,99 +3681,6 @@ prompt: |
 on_timeout: report
 on_error:   report
 ```
-
----
-
-# Replay vs Live Evaluation — Complete Reference
-
-**Replay** runs rules against the observations hosts uploaded to management. It uses the same Sigma matcher, the same verdict order and the same script builtins as a host, fed the metadata the host would have built for each observation. Use it to test a new rule against real history before deploying it, and to investigate a past incident.
-
-## What Replay Is
-
-`POST /api/aidr/replay` with:
-
-```json
-{
-  "scope": "source:<peer id>",
-  "since": "2026-10-09T00:00:00Z",
-  "until": "2026-10-10T00:00:00Z",
-  "rules_yaml": "<one or more rules, YAML documents separated by --->",
-  "limit": 2000
-}
-```
-
-| Field | Meaning |
-|---|---|
-| `scope` | `account` (default), `source:<peer or gateway id>` (one host's uploads), `actor:<actor node id>` (one user's or agent identity's sessions, e.g. `user://<id>`), `session:<id>` (one run: the session, its lineage and all its descendants) |
-| `since`, `until` | time window |
-| `rules_yaml` | **required** — the rules to evaluate; the request body is limited to 1 MB |
-| `limit` | observations replayed, newest first (default 2,000) |
-
-Replay is for **admins and service users** only (`403` otherwise); the request times out after 90 seconds. Regular users can read their own peers' sessions and observations with `scope=source:<their peer>` but cannot replay. Management keeps uploaded observations for 7 days. Hosts upload hourly and at shutdown, so the last hour of activity may not be there yet. The dashboard's guardrail dialog runs the same replay from its **Replay** tab.
-
-The response lists every observation a rule fired on — `source`, `seq`, `ts`, `kind`, `session_id`, `target_id`, `rule_id`, `rule_name`, `verdict`, `reason`, `chain`, `output` (the script's `print()` lines), `error`, `partial` — and a `summary` with counts of `observations`, `rules`, `matched`, `blocks`, `reports`, `allows`, `errors`, `partial`, plus `failed_rules` for rules that did not parse.
-
-## Runtime Environment — What Is Available
-
-| Global | Live | Replay | Notes |
-|--------|------|--------|-------|
-| `session()` / `lineage()` / `children()` / `sessions()` / `programs()` | ✅ | ✅ | Over the account's sessions rebuilt from stored observations |
-| `events()` | ✅ | ✅ | Over the stored observations |
-| `fs_activity()` | ✅ | ⚠️ sample | Hosts upload file activity folded per (session, op) with a sample of up to 16 distinct paths; a path outside the sample is not found in replay |
-| `graph()` / `node()` / `edges()` | ✅ | ✅ | Identical API; merged edges carry the hosts' counts |
-| `search()` / `search_in()` | ✅ | ⚠️ | Bodies stay on the host — replay has no indexed content |
-| `re` module, `store_*`, integrity builtins | ✅ | ✅ | |
-| `http()` / `webhook()` | ✅ | ✅ | Real calls — a replayed webhook rule really posts |
-| `scan_prompt()` / `llm_call()` / `system_one()` | ✅ | ✅ | Real calls on the account's models, `model=` honoured — see the cost note below |
-| `meta` | ✅ full | ⚠️ | No `content` for LLM, tool, HTTP and skill observations; no `header_*` |
-| `subject` | ✅ | ✅ | From the stored subject |
-
-## `meta` Dict — Field Availability
-
-| Key | In replay |
-|-----|-----------|
-| `rule_id`, `context_type`, `event_ts` (the observation's time), `callid` | ✅ |
-| `session`, `owner`, `program`, `source`, `device`, `actor_*` | ✅ from the stored subject |
-| `agent_name` | the observation's program path |
-| `provider`, `model` (LLM), `server_name`, `tool_name` (tool), `host`, `path`, `method`, `url` (HTTP), `host`, `port`, `protocol` (connects) | ✅ |
-| `content` | ✅ for spawns (the command line) and file events (the path); **empty** for LLM, tool, HTTP and skill observations — the body never leaves the host |
-| `header_*` | ❌ headers are not stored |
-
-A verdict reached on an observation whose content stayed on the host is marked **`partial: true`** — the rule ran without the content the host had.
-
-## `action: scan` — AI Classifier Behavior
-
-| Condition | Live | Replay |
-|-----------|------|--------|
-| No `prompt` (built-in ML classifier) | Classifier service | Same — on empty content in replay the result is meaningless; treat it as partial |
-| `prompt` set (AI judge) | The model approved for Threat Analysis | Same model, real calls |
-| The scan call fails (no model approved for Threat Analysis, service unreachable, timeout) | Follows `on_error` | Same |
-| The host has no scan service at all | The `scan` rule does not fire (logged as `no scan service configured`); `scan_prompt`/`llm_call`/`system_one` are undefined and a script calling them takes `on_error` | — |
-
-**Cost warning:** replay calls the real AI judge for `action: scan` rules and for `llm_call()`, and the real System One model for `system_one()`. A broad scan rule over a large scope makes many paid calls.
-
-## `action: execute` — Starlark Scripts
-
-- Scripts run fully, with the same builtins.
-- `print()` output is returned per result in `output`.
-- The per-script timeout is **20 seconds** in replay, against 30 seconds live (25 seconds for periodic runs).
-- `on_error` is honoured: a script error with no verdict takes the rule's `on_error` verdict.
-- Periodic rules run once over the scope, after the trigger rules.
-
-## Writing Rules That Behave Consistently in Both Environments
-
-**Identical in live and replay:**
-- `detection:` conditions on metadata fields (`event_type`, `provider`, `model`, `tool`, `server`, `host`, `path`, `method`, `command`/`content` for spawns)
-- Scripts that use `session()`, `lineage()`, `children()`, `events()`, `edges()`, `node()`, `meta` subject keys and `re`
-
-**Different in replay:**
-- `content|…` conditions on LLM, tool, HTTP and skill bodies — no content, results are `partial`
-- `header_*` checks — never match
-- `fs_activity()` on a path outside the uploaded sample
-- `search()` / `search_in()`
-- `http()`, `webhook()`, `scan`, `llm_call()`, `system_one()` — real side effects and real cost
-
-**Recommendation:** use replay for behaviour (lineage, ordering, counts, identities) and fixtures for exact content and timing. If a rule fires in a fixture but not in replay, check: (1) does it depend on body content? (2) on headers? (3) on a file path outside the sample? (4) is the observation older than 7 days or newer than the last upload?
 
 ---
 
