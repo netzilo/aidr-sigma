@@ -1,0 +1,107 @@
+title: Symbolic Math RCE - sympify Eval Gadget in Spawned Process
+id: 7b1c4e2a-9d34-4f6b-a1c8-5e0f2d7b96c4
+status: experimental
+level: high
+description: |
+  Detects exploitation of CVE-2024-46946 (LangChain Experimental 0.1.17 - 0.3.0,
+  LLMSymbolicMathChain). The chain hands attacker-influenced text to
+  sympy.sympify(), which parses via eval(), so a crafted "math expression" runs
+  arbitrary Python with the privileges of the agent process.
+
+  The only signal the engine emits for this threat is execute_process. This rule
+  therefore fires on a single spawned-process command line that contains BOTH:
+    (1) an eval-bearing symbolic-math API name (sympify / parse_expr /
+        sympy_parser / LLMSymbolicMathChain / llm_symbolic_math), AND
+    (2) a Python code-execution gadget (__import__, __subclasses__, __mro__,
+        __builtins__, __globals__, os.system/popen/exec*, subprocess.Popen/run,
+        pty.spawn, commands.getoutput, builtins.eval, importlib.import_module).
+
+  Either token alone is unremarkable; a single command line carrying both is the
+  sympify sandbox-escape payload itself (e.g.
+  python -c "sympy.sympify(\"__import__('os').system('id')\")").
+
+  Report-only: this is a novel detection surface and the payload can legitimately
+  appear in patch-verification runs. Measure the FP rate before considering
+  escalation.
+author: Egemen
+date: "2026-03-01"
+references:
+  - https://nvd.nist.gov/vuln/detail/CVE-2024-46946
+  - https://attack.mitre.org/techniques/T1059/006/
+tags:
+  - attack.execution
+  - attack.t1059.006
+  - owasp.llm05
+falsepositives:
+  - Security researchers or AppSec engineers reproducing CVE-2024-46946 with a proof-of-concept one-liner on a lab host.
+  - Patch-verification and regression harnesses that pass __import__ / os.system payloads to a hardened sympify wrapper to assert the payload is rejected - the payload string is then visible in the spawned command line.
+  - CTF, training or red-team-exercise environments demonstrating sympy eval escapes.
+  - Code-search or SAST tooling invoked with the gadget string as a literal argument (grep/rg/semgrep/bandit/codeql) - suppressed by filter_readonly_inspection.
+  - Package-manager invocations that merely name sympy or langchain-experimental - suppressed by filter_pkg_mgmt (they also lack a gadget token).
+  - Rare scientific one-liners that both parse a symbolic expression and shell out in the same command line.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  sel_event:
+    event_type: execute_process
+
+  sel_symbolic_api_cmd:
+    command|re:
+      - '\bsympify\b'
+      - '\bparse_expr\b'
+      - '\bsympy_parser\b'
+      - '\bLLMSymbolicMathChain\b'
+      - '\bllm_symbolic_math\b'
+  sel_symbolic_api_content:
+    content|re:
+      - '\bsympify\b'
+      - '\bparse_expr\b'
+      - '\bsympy_parser\b'
+      - '\bLLMSymbolicMathChain\b'
+      - '\bllm_symbolic_math\b'
+
+  sel_exec_gadget_cmd:
+    command|re:
+      - '__import__\s*\('
+      - '\b__subclasses__\b'
+      - '\b__builtins__\b'
+      - '\b__globals__\b'
+      - '\b__mro__\b'
+      - '\bos\.(?:system|popen|execl|execle|execlp|execv|execve|execvp|spawnl|spawnv)\s*\('
+      - '\bsubprocess\.(?:Popen|run|call|check_call|check_output|getoutput)\s*\('
+      - '\bpty\.spawn\s*\('
+      - '\bcommands\.getoutput\s*\('
+      - '\bbuiltins\.(?:eval|exec|__import__)\b'
+      - '\bimportlib\.import_module\s*\('
+  sel_exec_gadget_content:
+    content|re:
+      - '__import__\s*\('
+      - '\b__subclasses__\b'
+      - '\b__builtins__\b'
+      - '\b__globals__\b'
+      - '\b__mro__\b'
+      - '\bos\.(?:system|popen|execl|execle|execlp|execv|execve|execvp|spawnl|spawnv)\s*\('
+      - '\bsubprocess\.(?:Popen|run|call|check_call|check_output|getoutput)\s*\('
+      - '\bpty\.spawn\s*\('
+      - '\bcommands\.getoutput\s*\('
+      - '\bbuiltins\.(?:eval|exec|__import__)\b'
+      - '\bimportlib\.import_module\s*\('
+
+  filter_readonly_inspection:
+    command|re: '(?:^|[\s"\[({,;|&])(?:sudo\s+)?(?:[\w./-]*/)?(?i:grep|egrep|fgrep|rg|ripgrep|ag|ack|semgrep|bandit|codeql|pylint|flake8|mypy|ruff|shellcheck)\b'
+
+  filter_pkg_mgmt:
+    command|re: '(?i:\b(?:pip[23]?|uv|poetry|conda|pipenv|pdm)\s+(?:install|download|show|list|index|add|sync|lock)\b)'
+
+  filter_placeholder:
+    command|re:
+      - '(?i:(?:^|\s)--(?:help|version)(?:\s|$))'
+      - '(?i:PLACEHOLDER|YOUR_PAYLOAD|YOUR_EXPRESSION|EXAMPLE_PAYLOAD|REPLACE_ME|<expression>|<payload>)'
+
+  condition: >
+    sel_event
+    and (sel_symbolic_api_cmd or sel_symbolic_api_content)
+    and (sel_exec_gadget_cmd or sel_exec_gadget_content)
+    and not (filter_readonly_inspection or filter_pkg_mgmt or filter_placeholder)
+action: report
