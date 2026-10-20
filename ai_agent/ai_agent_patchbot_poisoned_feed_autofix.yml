@@ -1,0 +1,327 @@
+title: Patchbot Poisoned Feed To Auto-Fix Patch Proposal
+id: 6f1c9d2a-4e8b-4a37-9c05-71b3ad5e6f84
+status: experimental
+level: high
+description: |
+  Detects the observable half of an agent-driven vulnerability-scanning / auto-fix
+  compromise (patchbot-class workflows): the agent ingests an external
+  advisory/vulnerability-feed document that carries instruction-bearing or
+  credential/persistence payload markers, and then - inside the same process
+  session and a 15 minute window - proposes code changes (git apply/commit/push,
+  gh|glab pr/mr create, patch -pN, or an HTTP POST to a pull-request /
+  merge-request API endpoint).
+
+  Answering the triage dissent explicitly: this engine has no MODIFIED_REPOSITORY
+  and no EXECUTED_PAYLOAD edge, and file_write has no live producer, so
+  "agent rewrote repository content" is NOT observable. This rule therefore does
+  not claim to see the repository mutation. It anchors on the only live evidence
+  of the patch-proposal step (execute_process / http_request) and requires a
+  session-scoped, time-ordered ACQUIRED_SKILL graph edge whose indexed document
+  body matches both a vulnerability-feed topic term AND an injected-directive or
+  credential/persistence payload term (via search_in on the skill source label).
+  Neither stage reports on its own: a scanner running git commit is ignored, and
+  an advisory fetch with no subsequent patch proposal is ignored. That is the
+  honest ceiling of the available telemetry, and it is why the action is report
+  and never block.
+
+  A second corroboration path is accepted in place of the document markers:
+  external feed ingestion plus download-and-execute / encoded-payload /
+  git-hooks-path / chmod +x staging commands executed by the same session inside
+  the same window - i.e. adversarial patch material being staged rather than a
+  marked document.
+author: Tanya
+date: "2026-03-14"
+modified: "2026-03-14"
+references:
+  - https://owasp.org/www-project-top-10-for-large-language-model-applications/
+  - https://atlas.mitre.org/techniques/AML.T0051.001
+  - https://attack.mitre.org/techniques/T1195/
+tags:
+  - attack.initial-access
+  - attack.execution
+  - attack.t1195
+  - attack.t1059
+  - atlas.aml.t0051.001
+  - atlas.aml.t0010
+  - owasp.llm01
+  - owasp.llm06
+falsepositives:
+  - A coding agent legitimately fetches a public security advisory (GitHub Security
+    Advisory, NVD, distro errata) whose body quotes proof-of-concept text mentioning
+    ~/.ssh/authorized_keys, .npmrc or an AWS key id, then opens a genuine remediation
+    PR. Mitigated only partly - this is the main residual FP and the reason the rule
+    reports instead of blocking.
+  - Dependency-bump or release automation that runs chmod +x on a vendored script,
+    npm publish, or base64 --decode in the same 15 minute window as git commit/push
+    while an advisory page happens to have been read.
+  - Prompt-injection hardening documentation, red-team corpora or this rule's own
+    test fixtures being read by the agent (they contain phrases such as
+    "ignore previous instructions" alongside the word "vulnerability") while the
+    agent commits unrelated work.
+  - Security engineers deliberately exercising a patch bot with a poisoned test feed.
+logsource:
+  product: ai_agent
+  category: agent_events
+detection:
+  # Cheap pre-filter only. The Starlark script is the authoritative detector and
+  # returns "allow" (silently, no event) for everything that is not a full,
+  # session-scoped, ordered chain.
+  sel_exec_git_patch:
+    event_type: execute_process
+    content|re: '(?i)\bgit\b[^\n]{0,200}\b(apply|commit|push|format-patch|cherry-pick)\b'
+  sel_exec_pr_cli:
+    event_type: execute_process
+    content|re: '(?i)\b(gh|glab|hub)\b[^\n]{0,160}\b(pr|mr|pull-request)\b[^\n]{0,160}\bcreate\b'
+  sel_exec_patch_cli:
+    event_type: execute_process
+    content|re: '(?i)\bpatch\b[^\n]{0,80}-p[0-9]'
+  sel_http_pr_api:
+    event_type: http_request
+    method: POST
+    path|re: '(?i)/(pulls|merge_requests|pullrequests)(/|\?|$)'
+  condition: 1 of sel_*
+action: execute
+on_timeout: allow
+on_error: allow
+script: |
+  # ---- tunables (this rule's own window - never persisted) --------------------
+  WINDOW_NS  = 900000000000   # 15 minutes
+  MAX_SKILLS = 12
+  MAX_EXECS  = 2000
+
+  PATCH_CMD_RE = [
+      r'(?i)\bgit\b[^\n]{0,200}\b(apply|commit|push|format-patch|cherry-pick)\b',
+      r'(?i)\b(gh|glab|hub)\b[^\n]{0,160}\b(pr|mr|pull-request)\b[^\n]{0,160}\bcreate\b',
+      r'(?i)\bpatch\b[^\n]{0,80}-p[0-9]',
+  ]
+  PR_API_RE = r'(?i)/(pulls|merge_requests|pullrequests)(/|\?|$)'
+
+  # Adversarial patch material being staged by the same session.
+  STAGING_RE = [
+      r'(?i)\b(curl|wget)\b[^\n]{0,300}\|\s*(bash|sh|zsh|python[23]?|node|ruby|perl)\b',
+      r'(?i)\bbase64\b[^\n]{0,60}-{1,2}(d|decode)\b',
+      r'(?i)\bchmod\b[^\n]{0,60}(\+x|\b777\b)',
+      r'(?i)\bgit\b[^\n]{0,80}\bconfig\b[^\n]{0,120}hooksPath\b',
+      r'(?i)\bnpm\b[^\n]{0,80}\b(publish|postinstall)\b',
+      r'(?i)\beval\b\s*[\(\$]',
+  ]
+
+  # FTS terms for the acquired document body (search_in). Quoted values are FTS5
+  # phrases; bare values are single tokens.
+  TOPIC_TERMS = ["cve", "vulnerability", "vulnerabilities", "advisory",
+                 "advisories", "remediation", "patchbot"]
+  DIRECTIVE_TERMS = ['"ignore previous instructions"',
+                     '"ignore all previous instructions"',
+                     '"ignore all instructions"',
+                     '"disregard previous instructions"',
+                     '"new instructions"',
+                     '"you are now"',
+                     '"do not tell the user"',
+                     '"do not mention"',
+                     '"without informing the user"',
+                     '"system prompt"']
+  PAYLOAD_TERMS = ["hookspath", "postinstall", "npmrc", "netrc",
+                   '"authorized keys"', '"id rsa"',
+                   '"aws secret access key"', '"aws access key id"']
+
+  def matches_any(pats, s):
+      if s == "":
+          return False
+      for p in pats:
+          if re.find(p, s) != None:
+              return True
+      return False
+
+  # ---- relevance gate: pure string checks on meta, no graph / log calls -------
+  def is_relevant_event():
+      ct = meta.get("context_type", "")
+      if ct == "execute_process":
+          return matches_any(PATCH_CMD_RE, meta.get("content", ""))
+      if ct == "http_request":
+          if meta.get("method", "").lower() != "post":
+              return False
+          return re.find(PR_API_RE, meta.get("path", "")) != None
+      return False
+
+  def doc_marker(sid):
+      topical = False
+      for t in TOPIC_TERMS:
+          if search_in(sid, t):
+              topical = True
+              break
+      if not topical:
+          return ""
+      for t in DIRECTIVE_TERMS:
+          if search_in(sid, t):
+              return "injected directive in feed document (" + t + ")"
+      for t in PAYLOAD_TERMS:
+          if search_in(sid, t):
+              return "credential/persistence token in feed document (" + t + ")"
+      return ""
+
+  def ev_edge(e):
+      return {
+          "from":     "process://" + e.get("parent_path", e.get("actor_path", "")),
+          "to":       "process://" + e.get("actor_path", ""),
+          "kind":     e.get("kind", "EXECUTE_PROCESS"),
+          "ts":       e.get("ts", "0"),
+          "first_ts": e.get("ts", "0"),
+          "last_ts":  e.get("ts", "0"),
+          "cmdline":  e.get("cmdline", ""),
+      }
+
+  def run():
+      if not is_relevant_event():
+          return "allow"
+
+      anchor_ts = int(meta.get("event_ts", "0"))
+      cp        = int(meta.get("caller_pid", "0"))
+      if anchor_ts == 0 or cp == 0:
+          return "allow"
+
+      # ---- instance-exact attribution (never a path-keyed node walk) ----------
+      inst = proc_instance(cp, anchor_ts)
+      if inst == None:
+          return "allow"                      # degraded - re-fires when logged
+      lineage = proc_lineage(int(inst["actor_pid"]), int(inst["actor_start"]))
+      if not lineage:
+          return "allow"
+
+      since        = anchor_ts - WINDOW_NS
+      session_pids = {}
+      paths        = {}
+      for x in lineage:
+          session_pids[x.get("actor_pid", "")] = True
+          pth = x.get("actor_path", "")
+          if pth != "":
+              paths[pth] = True
+      an = meta.get("agent_name", "")
+      if an != "":
+          paths[an] = True
+
+      # ---- stage 1 (REQUIRED): external feed/advisory ingested by this session
+      #      ACQUIRED_SKILL is graph-only; window-clamp it so a document read
+      #      hours ago in another session is never stitched to this patch.
+      skills     = []
+      chain_root = ""
+      for pn in graph(type="Process"):
+          pth = pn.get("path", "")
+          if pth == "" or pth not in paths:
+              continue
+          if chain_root == "" or pn.get("agent", "0") == "1":
+              chain_root = pn["id"]
+          for e in edges(pn["id"], dir="out", kind="ACQUIRED_SKILL"):
+              ts = int(e.get("ts", "0"))
+              if ts < since or ts > anchor_ts:
+                  continue
+              s = node(e["to"])
+              if s == None:
+                  continue
+              if len(skills) < MAX_SKILLS:
+                  skills.append([e, s])
+      if not skills:
+          return "allow"                      # no feed ingest -> not this threat
+      if chain_root == "":
+          chain_root = "process://" + lineage[-1].get("actor_path", "")
+
+      # ---- stage 2a: poisoned document content -------------------------------
+      feed_edge = None
+      feed_node = None
+      marker    = ""
+      for pair in skills:
+          m = doc_marker(pair[1]["id"])
+          if m != "":
+              feed_edge = pair[0]
+              feed_node = pair[1]
+              marker    = m
+              break
+
+      # ---- stage 2b: adversarial patch material staged by the same session ----
+      stage_edge = None
+      stage_desc = ""
+      execs = query_events(kind="EXECUTE_PROCESS", since_ns=since,
+                           until_ns=anchor_ts, limit=MAX_EXECS)
+      for i in range(3):                      # bounded sibling expansion
+          for e in execs:
+              if e.get("parent_pid", "") in session_pids:
+                  session_pids[e.get("actor_pid", "")] = True
+                  ap = e.get("actor_path", "")
+                  if ap != "":
+                      paths[ap] = True
+      if marker == "":
+          for e in execs:
+              if e.get("actor_pid", "") not in session_pids:
+                  continue
+              cl = e.get("cmdline", "")
+              if matches_any(STAGING_RE, cl):
+                  stage_edge = e
+                  stage_desc = cl[:180]
+                  break
+          if stage_edge == None:
+              return "allow"                  # feed read only - benign workflow
+          feed_edge = skills[0][0]
+          feed_node = skills[0][1]
+
+      # ---- verdict ------------------------------------------------------------
+      names = []
+      for x in lineage:
+          ap = x.get("actor_path", "")
+          if ap != "":
+              names.append(ap.split("/")[-1])
+      lin = " -> ".join(names)
+
+      origin = feed_node.get("host", "?")
+      if feed_node.get("is_ztna_host", "0") == "1":
+          origin = origin + " (internal/ZTNA)"
+      else:
+          origin = origin + " (public)"
+
+      chain = new_chain(chain_root)
+      chain.append(step(feed_edge, stage_id="Feed Ingest",
+                        stage_desc="vulnerability feed/advisory document ingested from " +
+                                   origin + " via source=" + feed_node.get("source", "?") +
+                                   " [" + feed_node.get("name", feed_node["id"]) + "]"))
+      if marker != "":
+          chain.append(step(feed_edge, stage_id="Poisoned Input",
+                            stage_desc=marker))
+      if stage_edge != None:
+          chain.append(step(ev_edge(stage_edge), stage_id="Payload Staging",
+                            stage_desc="session staged patch material: " + stage_desc))
+
+      ct = meta.get("context_type", "")
+      if ct == "http_request":
+          anchor_edge = {
+              "from":     "process://" + inst.get("actor_path", ""),
+              "to":       "https://" + meta.get("host", ""),
+              "kind":     "HTTP_REQUEST",
+              "method":   meta.get("method", "POST"),
+              "ts":       str(anchor_ts),
+              "first_ts": str(anchor_ts),
+              "last_ts":  str(anchor_ts),
+          }
+          anchor_txt = "POST " + meta.get("host", "") + meta.get("path", "")
+      else:
+          parent_path = inst.get("actor_path", "")
+          if len(lineage) > 1:
+              parent_path = lineage[1].get("actor_path", parent_path)
+          anchor_edge = {
+              "from":     "process://" + parent_path,
+              "to":       "process://" + inst.get("actor_path", ""),
+              "kind":     "EXECUTE_PROCESS",
+              "ts":       str(anchor_ts),
+              "first_ts": str(anchor_ts),
+              "last_ts":  str(anchor_ts),
+              "cmdline":  meta.get("content", "")[:180],
+          }
+          anchor_txt = meta.get("content", "")[:180]
+      chain.append(step(anchor_edge, stage_id="Patch Proposal",
+                        stage_desc="agent proposed code changes: " + anchor_txt))
+
+      reason = ("Agent auto-fix pipeline: external vulnerability feed ingested then " +
+                "patch/PR proposed within 15m by " + lin + " - " +
+                (marker if marker != "" else "adversarial patch material staged"))
+      print("patchbot poisoned-feed chain | feed=" + feed_node["id"] +
+            " | lineage=" + lin + " | anchor=" + anchor_txt)
+      return {"action": "report", "reason": reason, "chain": chain}
+
+  result = run()
